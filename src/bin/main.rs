@@ -1,6 +1,6 @@
-use lua_rt::{VM, Compiler, LuaValue};
-use std::rc::Rc;
+use lua_rt::{Compiler, LuaValue, VM};
 use std::io::{self, Write};
+use std::rc::Rc;
 
 fn main() {
     println!("Lua VM - Interactive REPL");
@@ -9,7 +9,10 @@ fn main() {
     let mut vm = VM::new();
 
     // Example: Set some global values
-    vm.set_global("version".to_string(), LuaValue::string(lua_rt::LuaString::new("0.1.0".to_string())));
+    vm.set_global(
+        "version".to_string(),
+        LuaValue::string(lua_rt::LuaString::new("0.1.0".to_string())),
+    );
 
     loop {
         print!("> ");
@@ -29,18 +32,16 @@ fn main() {
 
         // Try to compile and execute
         match Compiler::compile(input) {
-            Ok(chunk) => {
-                match vm.execute(Rc::new(chunk)) {
-                    Ok(result) => {
-                        if !result.is_nil() {
-                            println!("=> {:?}", result);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Runtime error: {}", e);
+            Ok(chunk) => match vm.execute(Rc::new(chunk)) {
+                Ok(result) => {
+                    if !result.is_nil() {
+                        println!("=> {:?}", result);
                     }
                 }
-            }
+                Err(e) => {
+                    eprintln!("Runtime error: {}", e);
+                }
+            },
             Err(e) => {
                 eprintln!("Compile error: {}", e);
             }
@@ -62,7 +63,7 @@ mod tests {
             local c = a + b
             return c
         "#;
-        
+
         let result = execute(code);
         assert!(result.is_ok());
         if let Ok(val) = result {
@@ -79,7 +80,7 @@ mod tests {
             end
             return false
         "#;
-        
+
         let result = execute(code);
         assert!(result.is_ok());
     }
@@ -95,7 +96,7 @@ mod tests {
             end
             return sum
         "#;
-        
+
         let result = execute(code);
         assert!(result.is_ok());
         if let Ok(val) = result {
@@ -110,7 +111,7 @@ mod tests {
             t[1] = 42
             return t[1]
         "#;
-        
+
         let result = execute(code);
         assert!(result.is_ok());
     }
@@ -121,9 +122,8 @@ mod tests {
             local s = "hello"
             return s
         "#;
-        
+
         let result = execute(code);
         assert!(result.is_ok());
     }
 }
-
