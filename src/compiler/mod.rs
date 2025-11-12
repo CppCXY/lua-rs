@@ -2,7 +2,7 @@
 // Compiles Lua source code to bytecode using emmylua_parser
 
 use emmylua_parser::{
-    LuaAstNode, LuaChunk, LuaLanguageLevel, LuaParser, LuaSyntaxKind, LuaSyntaxNode, ParserConfig
+    LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig
 };
 
 use crate::opcode::{OpCode, Instruction};
@@ -63,9 +63,8 @@ impl Compiler {
 
 /// Compile a chunk (root node)
 fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
-    // Find Block child
     if let Some(block) = chunk.get_block() {
-        compile_block(c, &block.syntax())?;
+        compile_block(c, &block)?;
     }
     
     // Emit return at the end
@@ -74,20 +73,9 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
 }
 
 /// Compile a block of statements
-fn compile_block(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<(), String> {
-    for child in node.children() {
-        let kind = child.kind().to_syntax();
-        // Only compile statement nodes
-        if matches!(kind, 
-            LuaSyntaxKind::LocalStat | LuaSyntaxKind::AssignStat | 
-            LuaSyntaxKind::CallExprStat | LuaSyntaxKind::ReturnStat | 
-            LuaSyntaxKind::IfStat | LuaSyntaxKind::WhileStat | 
-            LuaSyntaxKind::RepeatStat | LuaSyntaxKind::ForStat | 
-            LuaSyntaxKind::ForRangeStat | LuaSyntaxKind::DoStat | 
-            LuaSyntaxKind::BreakStat | LuaSyntaxKind::EmptyStat
-        ) {
-            compile_stat(c, &child)?;
-        }
+fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+    for stat in block.get_stats() {
+        compile_stat(c, &stat)?;
     }
     Ok(())
 }

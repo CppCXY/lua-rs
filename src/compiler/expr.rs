@@ -1,24 +1,32 @@
-// Expression compilation
+// Expression compilation - Using strong-typed AST nodes
 
-use crate::opcode::{OpCode, Instruction};
-use crate::value::{LuaValue, LuaString};
-use emmylua_parser::{LuaSyntaxNode, LuaSyntaxKind};
 use super::Compiler;
 use super::helpers::*;
+use crate::opcode::{Instruction, OpCode};
+use crate::value::{LuaString, LuaValue};
+use emmylua_parser::LuaIndexExpr;
+use emmylua_parser::LuaIndexKey;
+use emmylua_parser::LuaParenExpr;
+use emmylua_parser::LuaTableExpr;
+use emmylua_parser::UnaryOperator;
+use emmylua_parser::{
+    BinaryOperator, LuaAstNode, LuaBinaryExpr, LuaCallExpr, LuaExpr, LuaLiteralExpr,
+    LuaLiteralToken, LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
+};
 
 /// Compile any expression and return the register containing the result
-pub fn compile_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
-    match node.kind().to_syntax() {
-        LuaSyntaxKind::LiteralExpr => compile_literal_expr(c, node),
-        LuaSyntaxKind::NameExpr => compile_name_expr(c, node),
-        LuaSyntaxKind::BinaryExpr => compile_binary_expr(c, node),
-        LuaSyntaxKind::UnaryExpr => compile_unary_expr(c, node),
-        LuaSyntaxKind::ParenExpr => compile_paren_expr(c, node),
-        LuaSyntaxKind::CallExpr => compile_call_expr(c, node),
-        LuaSyntaxKind::IndexExpr => compile_index_expr(c, node),
-        LuaSyntaxKind::TableArrayExpr | LuaSyntaxKind::TableObjectExpr | LuaSyntaxKind::TableEmptyExpr => compile_table_expr(c, node),
-        _ => {
-            // Default: load nil
+pub fn compile_expr(c: &mut Compiler, expr: &LuaExpr) -> Result<u32, String> {
+    match expr {
+        LuaExpr::LiteralExpr(e) => compile_literal_expr(c, e),
+        LuaExpr::NameExpr(e) => compile_name_expr(c, e),
+        LuaExpr::BinaryExpr(e) => compile_binary_expr(c, e),
+        LuaExpr::UnaryExpr(e) => compile_unary_expr(c, e),
+        LuaExpr::ParenExpr(e) => compile_paren_expr(c, e),
+        LuaExpr::CallExpr(e) => compile_call_expr(c, e),
+        LuaExpr::IndexExpr(e) => compile_index_expr(c, e),
+        LuaExpr::TableExpr(e) => compile_table_expr(c, e),
+        LuaExpr::ClosureExpr(_) => {
+            // TODO: implement closure compilation
             let reg = alloc_register(c);
             emit_load_nil(c, reg);
             Ok(reg)
@@ -27,48 +35,44 @@ pub fn compile_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, Strin
 }
 
 /// Compile literal expression (number, string, true, false, nil)
-fn compile_literal_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
+fn compile_literal_expr(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<u32, String> {
     let reg = alloc_register(c);
-    
-    // Get the text of the literal
-    let text = node.text().to_string().trim().to_string();
-    
-    // Try to parse as number
-    if let Ok(num) = text.parse::<f64>() {
-        let const_idx = add_constant(c, LuaValue::number(num));
-        emit_load_constant(c, reg, const_idx);
-        return Ok(reg);
+
+    let literal_token = expr
+        .get_literal()
+        .ok_or("Literal expression missing token")?;
+    match literal_token {
+        LuaLiteralToken::Bool(b) => {
+            emit_load_bool(c, reg, b.is_true());
+        }
+        LuaLiteralToken::Nil(_) => {
+            emit_load_nil(c, reg);
+        }
+        LuaLiteralToken::Number(num) => {
+            let const_idx = add_constant(c, LuaValue::number(num.get_float_value()));
+            emit_load_constant(c, reg, const_idx);
+        }
+        LuaLiteralToken::String(s) => {
+            let lua_string = LuaString::new(s.get_value());
+            let const_idx = add_constant(c, LuaValue::string(lua_string));
+            emit_load_constant(c, reg, const_idx);
+        }
+        _ => {}
     }
-    
-    // Check for string (starts with quote)
-    if text.starts_with('"') || text.starts_with('\'') || text.starts_with('[') {
-        let s = text.trim_matches('"').trim_matches('\'').to_string();
-        let const_idx = add_constant(c, LuaValue::string(LuaString::new(s)));
-        emit_load_constant(c, reg, const_idx);
-        return Ok(reg);
-    }
-    
-    // Check for keywords
-    match text.as_str() {
-        "true" => emit_load_bool(c, reg, true),
-        "false" => emit_load_bool(c, reg, false),
-        "nil" => emit_load_nil(c, reg),
-        _ => emit_load_nil(c, reg),
-    }
-    
+
     Ok(reg)
 }
 
 /// Compile name (identifier) expression
-fn compile_name_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
+fn compile_name_expr(c: &mut Compiler, expr: &LuaNameExpr) -> Result<u32, String> {
     // Get the identifier name
-    let name = node.text().to_string();
-    
+    let name = expr.get_name_text().unwrap_or("".to_string());
+
     // Check if it's a local variable
     if let Some(local) = resolve_local(c, &name) {
         return Ok(local.register);
     }
-    
+
     // It's a global variable
     let reg = alloc_register(c);
     emit_get_global(c, &name, reg);
@@ -76,167 +80,159 @@ fn compile_name_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, Stri
 }
 
 /// Compile binary expression (a + b, a - b, etc.)
-fn compile_binary_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
-    let children: Vec<_> = node.children().collect();
-    if children.len() < 2 {
-        return Err("Binary expression requires two operands".to_string());
-    }
-    
-    // Compile left and right operands
-    let left_reg = compile_expr(c, &children[0])?;
-    let right_reg = compile_expr(c, &children[1])?;
-    let result_reg = alloc_register(c);
-    
-    // Find the operator
-    let opcode = find_binary_operator(node)?;
-    
-    emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
-    
-    Ok(result_reg)
-}
+fn compile_binary_expr(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<u32, String> {
+    // Get left and right expressions from children
+    let (left, right) = expr.get_exprs().ok_or("error")?;
+    let op = expr.get_op_token().ok_or("error")?;
+    let op_kind = op.get_op();
 
-/// Find binary operator from node text
-fn find_binary_operator(node: &LuaSyntaxNode) -> Result<OpCode, String> {
-    let text = node.text().to_string();
-    
-    if text.contains('+') {
-        Ok(OpCode::Add)
-    } else if text.contains('-') && !text.starts_with('-') {
-        Ok(OpCode::Sub)
-    } else if text.contains('*') {
-        Ok(OpCode::Mul)
-    } else if text.contains('/') && !text.contains("//") {
-        Ok(OpCode::Div)
-    } else if text.contains('%') {
-        Ok(OpCode::Mod)
-    } else if text.contains('^') {
-        Ok(OpCode::Pow)
-    } else if text.contains("==") {
-        Ok(OpCode::Eq)
-    } else if text.contains('<') && !text.contains("<=") {
-        Ok(OpCode::Lt)
-    } else if text.contains("<=") {
-        Ok(OpCode::Le)
-    } else if text.contains("..") {
-        Ok(OpCode::Concat)
-    } else {
-        Err("Unknown binary operator".to_string())
-    }
+    let left_reg = compile_expr(c, &left)?;
+    let right_reg = compile_expr(c, &right)?;
+    let result_reg = alloc_register(c);
+
+    let opcode = match op_kind {
+        BinaryOperator::OpAdd => OpCode::Add,
+        BinaryOperator::OpSub => OpCode::Sub,
+        BinaryOperator::OpMul => OpCode::Mul,
+        BinaryOperator::OpDiv => OpCode::Div,
+        BinaryOperator::OpMod => OpCode::Mod,
+        BinaryOperator::OpPow => OpCode::Pow,
+        BinaryOperator::OpConcat => OpCode::Concat,
+        BinaryOperator::OpEq => OpCode::Eq,
+        BinaryOperator::OpLt => OpCode::Lt,
+        BinaryOperator::OpLe => OpCode::Le,
+        // need support more
+        _ => return Err(format!("Unsupported binary operator in expression")),
+    };
+
+    emit(
+        c,
+        Instruction::encode_abc(opcode, result_reg, left_reg, right_reg),
+    );
+    Ok(result_reg)
 }
 
 /// Compile unary expression (-a, not a, #a)
-fn compile_unary_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
-    let children: Vec<_> = node.children().collect();
-    if children.is_empty() {
-        return Err("Unary expression requires an operand".to_string());
-    }
-    
-    let operand_reg = compile_expr(c, &children[0])?;
+fn compile_unary_expr(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<u32, String> {
+    // Get operand from children
+    let operand = expr.get_expr().ok_or("Unary expression missing operand")?;
+    let operand_reg = compile_expr(c, &operand)?;
     let result_reg = alloc_register(c);
-    
-    // Find the operator
-    let opcode = find_unary_operator(node)?;
-    
-    emit(c, Instruction::encode_abc(opcode, result_reg, operand_reg, 0));
-    
+
+    // Get operator from text
+    let op_token = expr.get_op_token().ok_or("error")?;
+    let op_kind = op_token.get_op();
+    match op_kind {
+        UnaryOperator::OpBNot => {
+            // Bitwise NOT is not supported in this example
+            return Err("Bitwise NOT operator is not supported".to_string());
+        }
+        UnaryOperator::OpUnm => {
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::Unm, result_reg, operand_reg, 0),
+            );
+        }
+        UnaryOperator::OpNot => {
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::Not, result_reg, operand_reg, 0),
+            );
+        }
+        UnaryOperator::OpLen => {
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::Len, result_reg, operand_reg, 0),
+            );
+        }
+        UnaryOperator::OpNop => {
+            // No operation, just move operand to result
+            emit_move(c, result_reg, operand_reg);
+        }
+    }
+
     Ok(result_reg)
 }
 
-/// Find unary operator from node text
-fn find_unary_operator(node: &LuaSyntaxNode) -> Result<OpCode, String> {
-    let text = node.text().to_string();
-    
-    if text.trim().starts_with('-') {
-        Ok(OpCode::Unm)
-    } else if text.contains("not") {
-        Ok(OpCode::Not)
-    } else if text.contains('#') {
-        Ok(OpCode::Len)
-    } else {
-        Err("Unknown unary operator".to_string())
-    }
-}
-
 /// Compile parenthesized expression
-fn compile_paren_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
-    // Just compile the inner expression
-    for child in node.children() {
-        let kind = child.kind().to_syntax();
-        if matches!(kind, 
-            LuaSyntaxKind::LiteralExpr | LuaSyntaxKind::NameExpr | 
-            LuaSyntaxKind::BinaryExpr | LuaSyntaxKind::UnaryExpr | 
-            LuaSyntaxKind::CallExpr | LuaSyntaxKind::IndexExpr
-        ) {
-            return compile_expr(c, &child);
-        }
-    }
-    
-    let reg = alloc_register(c);
-    emit_load_nil(c, reg);
+fn compile_paren_expr(c: &mut Compiler, expr: &LuaParenExpr) -> Result<u32, String> {
+    // Get inner expression from children
+    let inner_expr = expr.get_expr().ok_or("missing inner expr")?;
+    let reg = compile_expr(c, &inner_expr)?;
     Ok(reg)
 }
 
 /// Compile function call expression
-pub fn compile_call_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
-    let children: Vec<_> = node.children().collect();
-    if children.is_empty() {
-        return Err("Call expression requires a function".to_string());
-    }
-    
-    // Compile the function expression
-    let func_reg = compile_expr(c, &children[0])?;
-    
+pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, String> {
+    // Get prefix (function) and arguments from children
+    let prefix_expr = expr.get_prefix_expr().ok_or("missing prefix expr")?;
+    let arg_exprs = expr
+        .get_args_list()
+        .ok_or("missing args list")?
+        .get_args()
+        .collect::<Vec<_>>();
+
+    let func_reg = compile_expr(c, &prefix_expr)?;
+    let arg_count = arg_exprs.len();
+
     // Compile arguments
-    let mut arg_count = 0;
-    for i in 1..children.len() {
-        compile_expr(c, &children[i])?;
-        arg_count += 1;
+    for i in 0..arg_count {
+        compile_expr(c, &arg_exprs[i])?;
     }
-    
-    // Emit call instruction: Call(A, B, C)
-    // R(A)(R(A+1), ..., R(A+B-1))
-    // Results in R(A), ..., R(A+C-2)
-    emit(c, Instruction::encode_abc(OpCode::Call, func_reg, arg_count + 1, 2));
-    
+
+    // Emit call instruction
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::Call, func_reg, (arg_count + 1) as u32, 2),
+    );
+
     Ok(func_reg)
 }
 
-/// Compile index expression (table[key])
-fn compile_index_expr(c: &mut Compiler, node: &LuaSyntaxNode) -> Result<u32, String> {
-    let children: Vec<_> = node.children().collect();
-    if children.len() < 2 {
-        return Err("Index expression requires table and key".to_string());
+/// Compile index expression (table[key] or table.field)
+fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, String> {
+    // Get table and key expressions from children
+    let key = expr.get_index_key().ok_or("Index expression missing key")?;
+    match key {
+        LuaIndexKey::Expr(key_expr) => {}
+        LuaIndexKey::Name(lua_name_token) => todo!(),
+        LuaIndexKey::String(lua_string_token) => todo!(),
+        LuaIndexKey::Integer(lua_number_token) => todo!(),
+        LuaIndexKey::Idx(i) => {
+             
+        },
     }
-    
-    let table_reg = compile_expr(c, &children[0])?;
-    let key_reg = compile_expr(c, &children[1])?;
+
     let result_reg = alloc_register(c);
-    
-    emit(c, Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg));
-    
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
+    );
+
     Ok(result_reg)
 }
 
 /// Compile table constructor expression
-fn compile_table_expr(c: &mut Compiler, _node: &LuaSyntaxNode) -> Result<u32, String> {
+fn compile_table_expr(
+    c: &mut Compiler,
+    _expr: &LuaTableExpr,
+) -> Result<u32, String> {
     let reg = alloc_register(c);
-    
+
     // Create empty table
     emit(c, Instruction::encode_abc(OpCode::NewTable, reg, 0, 0));
-    
+
     // TODO: Compile table fields
-    // For now, just return empty table
-    
+
     Ok(reg)
 }
 
 /// Compile a variable expression for assignment
-pub fn compile_var_expr(c: &mut Compiler, node: &LuaSyntaxNode, value_reg: u32) -> Result<(), String> {
-    match node.kind().to_syntax() {
-        LuaSyntaxKind::NameExpr => {
-            // Get the identifier name
-            let name = node.text().to_string();
-            
+pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> Result<(), String> {
+    match var {
+        LuaVarExpr::NameExpr(name_expr) => {
+            let name = name_expr.get_name_text().unwrap_or("".to_string());
+
             // Check if it's a local variable
             if let Some(local) = resolve_local(c, &name) {
                 // Move to local register
@@ -247,18 +243,50 @@ pub fn compile_var_expr(c: &mut Compiler, node: &LuaSyntaxNode, value_reg: u32) 
             }
             Ok(())
         }
-        LuaSyntaxKind::IndexExpr => {
-            let children: Vec<_> = node.children().collect();
-            if children.len() < 2 {
-                return Err("Index expression requires table and key".to_string());
+        LuaVarExpr::IndexExpr(index_expr) => {
+            // Get table and key expressions from children
+            let mut exprs = Vec::new();
+            for child in index_expr.syntax().children() {
+                if let Some(expr_node) = LuaExpr::cast(child.clone()) {
+                    exprs.push(expr_node);
+                }
             }
-            
-            let table_reg = compile_expr(c, &children[0])?;
-            let key_reg = compile_expr(c, &children[1])?;
-            
-            emit(c, Instruction::encode_abc(OpCode::SetTable, table_reg, key_reg, value_reg));
+
+            if exprs.is_empty() {
+                return Err("Index expression missing table in assignment".to_string());
+            }
+
+            let table_reg = compile_expr(c, &exprs[0])?;
+
+            // Determine key
+            let text = index_expr.syntax().text().to_string();
+            let key_reg = if text.contains('.') && !text.contains('[') {
+                // table.field
+                let parts: Vec<&str> = text.split('.').collect();
+                if parts.len() >= 2 {
+                    let field_name = parts[1].trim();
+                    let const_idx =
+                        add_constant(c, LuaValue::string(LuaString::new(field_name.to_string())));
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    key_reg
+                } else {
+                    return Err("Invalid dot index in assignment".to_string());
+                }
+            } else {
+                // table[expr]
+                if exprs.len() >= 2 {
+                    compile_expr(c, &exprs[1])?
+                } else {
+                    return Err("Bracket index missing key in assignment".to_string());
+                }
+            };
+
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::SetTable, table_reg, key_reg, value_reg),
+            );
             Ok(())
         }
-        _ => Err(format!("Invalid variable expression: {:?}", node.kind()))
     }
 }
