@@ -38,6 +38,7 @@ pub fn alloc_register(c: &mut Compiler) -> u32 {
 }
 
 /// Free a register (simple implementation)
+#[allow(dead_code)]
 pub fn free_register(c: &mut Compiler) {
     if c.next_register > 0 {
         c.next_register -= 1;
@@ -101,4 +102,32 @@ pub fn emit_move(c: &mut Compiler, dest: u32, src: u32) {
     if dest != src {
         emit(c, Instruction::encode_abc(OpCode::Move, dest, src, 0));
     }
+}
+
+/// Begin a new loop (for break statement support)
+pub fn begin_loop(c: &mut Compiler) {
+    c.loop_stack.push(super::LoopInfo {
+        break_jumps: Vec::new(),
+    });
+}
+
+/// End current loop and patch all break statements
+pub fn end_loop(c: &mut Compiler) {
+    if let Some(loop_info) = c.loop_stack.pop() {
+        // Patch all break jumps to current position
+        for jump_pos in loop_info.break_jumps {
+            patch_jump(c, jump_pos);
+        }
+    }
+}
+
+/// Emit a break statement (jump to end of current loop)
+pub fn emit_break(c: &mut Compiler) -> Result<(), String> {
+    if c.loop_stack.is_empty() {
+        return Err("break statement outside loop".to_string());
+    }
+    
+    let jump_pos = emit_jump(c, OpCode::Jmp);
+    c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
+    Ok(())
 }

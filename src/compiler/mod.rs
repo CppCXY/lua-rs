@@ -21,6 +21,7 @@ pub struct Compiler {
     pub(crate) locals: Vec<Local>,
     pub(crate) scope_depth: usize,
     pub(crate) next_register: u32,
+    pub(crate) loop_stack: Vec<LoopInfo>,
 }
 
 /// Local variable info
@@ -30,6 +31,11 @@ pub(crate) struct Local {
     pub register: u32,
 }
 
+/// Loop information for break statements
+pub(crate) struct LoopInfo {
+    pub break_jumps: Vec<usize>,  // Positions of break statements to patch
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Compiler {
@@ -37,6 +43,7 @@ impl Compiler {
             locals: Vec::new(),
             scope_depth: 0,
             next_register: 0,
+            loop_stack: Vec::new(),
         }
     }
 
