@@ -1,8 +1,45 @@
 use lua_rt::{Compiler, LuaValue, VM};
 use std::io::{self, Write};
 use std::rc::Rc;
+use std::env;
+use std::fs;
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    
+    if args.len() > 1 {
+        // File mode
+        let filename = &args[1];
+        match fs::read_to_string(filename) {
+            Ok(code) => {
+                let mut vm = VM::new();
+                match Compiler::compile(&code) {
+                    Ok(chunk) => match vm.execute(Rc::new(chunk)) {
+                        Ok(result) => {
+                            if !result.is_nil() {
+                                println!("Result: {:?}", result);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Runtime error: {}", e);
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Compile error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read file '{}': {}", filename, e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    
+    // REPL mode
     println!("Lua VM - Interactive REPL");
     println!("Type Lua code and press Enter. Type 'exit' to quit.\n");
 

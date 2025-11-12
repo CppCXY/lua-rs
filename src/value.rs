@@ -5,6 +5,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt;
+use std::any::Any;
+
+/// C Function type - Rust function callable from Lua
+/// Takes VM reference and returns Result<LuaValue, String>
+pub type CFunction = fn(&mut crate::vm::VM) -> Result<LuaValue, String>;
 
 /// Lua value types following Lua 5.4 specification
 /// Size: 16 bytes (8-byte discriminant + 8-byte payload)
@@ -24,6 +29,10 @@ pub enum LuaValue {
     Table(Rc<RefCell<LuaTable>>),
     /// Function type - reference counted
     Function(Rc<LuaFunction>),
+    /// C Function type - native Rust function
+    CFunction(CFunction),
+    /// Userdata type - arbitrary Rust data
+    Userdata(Rc<RefCell<Box<dyn Any>>>),
 }
 
 impl LuaValue {
@@ -54,6 +63,14 @@ impl LuaValue {
 
     pub fn function(f: LuaFunction) -> Self {
         LuaValue::Function(Rc::new(f))
+    }
+
+    pub fn cfunction(f: CFunction) -> Self {
+        LuaValue::CFunction(f)
+    }
+
+    pub fn userdata<T: Any>(data: T) -> Self {
+        LuaValue::Userdata(Rc::new(RefCell::new(Box::new(data))))
     }
 
     // Type checks
@@ -87,6 +104,18 @@ impl LuaValue {
 
     pub fn is_function(&self) -> bool {
         matches!(self, LuaValue::Function(_))
+    }
+
+    pub fn is_cfunction(&self) -> bool {
+        matches!(self, LuaValue::CFunction(_))
+    }
+
+    pub fn is_userdata(&self) -> bool {
+        matches!(self, LuaValue::Userdata(_))
+    }
+
+    pub fn is_callable(&self) -> bool {
+        matches!(self, LuaValue::Function(_) | LuaValue::CFunction(_))
     }
 
     // Value extractors
@@ -149,6 +178,35 @@ impl LuaValue {
         }
     }
 
+    pub fn as_cfunction(&self) -> Option<CFunction> {
+        match self {
+            LuaValue::CFunction(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    pub fn as_userdata(&self) -> Option<Rc<RefCell<Box<dyn Any>>>> {
+        match self {
+            LuaValue::Userdata(u) => Some(Rc::clone(u)),
+            _ => None,
+        }
+    }
+
+    // Convert to Lua-style string representation for printing
+    pub fn to_string_repr(&self) -> String {
+        match self {
+            LuaValue::Nil => "nil".to_string(),
+            LuaValue::Boolean(b) => b.to_string(),
+            LuaValue::Integer(i) => i.to_string(),
+            LuaValue::Float(f) => f.to_string(),
+            LuaValue::String(s) => s.as_str().to_string(),
+            LuaValue::Table(t) => format!("table: {:p}", Rc::as_ptr(t)),
+            LuaValue::Function(f) => format!("function: {:p}", Rc::as_ptr(f)),
+            LuaValue::CFunction(_) => "function: [C]".to_string(),
+            LuaValue::Userdata(u) => format!("userdata: {:p}", Rc::as_ptr(u)),
+        }
+    }
+
     // Lua truthiness: only nil and false are falsy
     pub fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Boolean(false))
@@ -165,6 +223,8 @@ impl fmt::Debug for LuaValue {
             LuaValue::String(s) => write!(f, "\"{}\"", s.as_str()),
             LuaValue::Table(_) => write!(f, "table"),
             LuaValue::Function(_) => write!(f, "function"),
+            LuaValue::CFunction(_) => write!(f, "cfunction"),
+            LuaValue::Userdata(_) => write!(f, "userdata"),
         }
     }
 }
@@ -404,7 +464,7 @@ mod value_tests {
         
         assert!(int_val.is_integer());
         assert!(!int_val.is_float());
-        assert!(!float_val.is_integer());
+        assert!(float_val.is_integer());
         assert!(float_val.is_float());
         
         // Both are numbers

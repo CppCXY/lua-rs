@@ -193,12 +193,34 @@ pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, St
     let func_reg = compile_expr(c, &prefix_expr)?;
     let arg_count = arg_exprs.len();
 
-    // Compile arguments
+    // Ensure we have enough registers allocated for function + all arguments
+    // Arguments go into func_reg+1, func_reg+2, etc.
+    let needed_regs = func_reg + arg_count as u32 + 1;
+    while c.next_register < needed_regs {
+        alloc_register(c);
+    }
+
+    // Compile arguments directly into their target registers
     for i in 0..arg_count {
-        compile_expr(c, &arg_exprs[i])?;
+        let target_reg = func_reg + (i as u32) + 1;
+        
+        // Temporarily set next_register to compile into target position
+        let saved_next = c.next_register;
+        c.next_register = target_reg;
+        
+        let arg_reg = compile_expr(c, &arg_exprs[i])?;
+        
+        // Restore next_register
+        c.next_register = saved_next.max(c.next_register);
+        
+        // If expression compiled to different register, move it
+        if arg_reg != target_reg {
+            emit_move(c, target_reg, arg_reg);
+        }
     }
 
     // Emit call instruction
+    // B = number of arguments + 1 (includes the function itself)
     emit(
         c,
         Instruction::encode_abc(OpCode::Call, func_reg, (arg_count + 1) as u32, 2),

@@ -113,26 +113,31 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 
 /// Compile if statement
 fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
-    // TODO: Implement if statement compilation
-    // Structure: if <condition> then <block> [elseif <condition> then <block>]* [else <block>] end
-    // 
-    // Pseudo-implementation:
-    // 1. Compile condition expression -> cond_reg
-    // 2. Emit Test instruction: if cond_reg is false, jump to else/end
-    // 3. Compile then block
-    // 4. Emit Jump to end (skip else blocks)
-    // 5. Patch jump target from step 2
-    // 6. Repeat for each elseif clause
-    // 7. Compile else block if exists
-    // 8. Patch all end jumps
-    //
-    // Need to find correct API for:
-    // - _stat.get_condition() or similar to get condition expr
-    // - _stat.get_then_block() to get main block
-    // - _stat.get_elseif_clauses() for elseif handling
-    // - _stat.get_else_block() for else handling
+    use super::compile_block;
     
-    let _ = c; // suppress unused warning
+    // Structure: if <condition> then <block> [elseif <condition> then <block>]* [else <block>] end
+    
+    // Main if clause
+    if let Some(cond) = stat.get_condition_expr() {
+        let cond_reg = compile_expr(c, &cond)?;
+        
+        // Test condition
+        // Test instruction: if (R(A) is_truthy) != C then skip next
+        // C=0: if truthy, skip next (Jmp), so execute then block
+        //      if falsy, execute Jmp, go to else/end
+        emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
+        let else_jump = emit_jump(c, OpCode::Jmp);
+        
+        // Compile then block
+        if let Some(body) = stat.get_block() {
+            compile_block(c, &body)?;
+        }
+        
+        // TODO: For now, just patch the jump. 
+        // Full elseif/else support requires more API exploration
+        patch_jump(c, else_jump);
+    }
+    
     Ok(())
 }
 
@@ -141,22 +146,33 @@ fn compile_while_stat(
     c: &mut Compiler,
     stat: &LuaWhileStat,
 ) -> Result<(), String> {
-    // TODO: Implement while loop compilation
-    // Structure: while <condition> do <block> end
-    //
-    // Pseudo-implementation:
-    // 1. Mark loop_start position
-    // 2. Compile condition expression -> cond_reg
-    // 3. Emit Test instruction: if cond_reg is false, jump to loop_end
-    // 4. Compile body block
-    // 5. Emit Jump back to loop_start
-    // 6. Patch loop_end jump target
-    //
-    // Need to find correct API for:
-    // - _stat.get_condition() to get condition expr
-    // - _stat.get_block() to get loop body
+    use super::compile_block;
     
-    let _ = c;
+    // Structure: while <condition> do <block> end
+    // Mark loop start
+    let loop_start = c.chunk.code.len();
+    
+    // Compile condition
+    let cond = stat.get_condition_expr().ok_or("while statement missing condition")?;
+    let cond_reg = compile_expr(c, &cond)?;
+    
+    // Test condition - if false (C=0), skip next instruction
+    emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
+    // If test passes (condition is false), jump to end
+    let end_jump = emit_jump(c, OpCode::Jmp);
+    
+    // Compile body
+    if let Some(body) = stat.get_block() {
+        compile_block(c, &body)?;
+    }
+    
+    // Jump back to loop start
+    let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
+    emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, -jump_offset));
+    
+    // Patch end jump
+    patch_jump(c, end_jump);
+    
     Ok(())
 }
 

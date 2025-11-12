@@ -3,6 +3,7 @@
 
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
+use crate::builtin;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -11,19 +12,18 @@ pub struct VM {
     globals: HashMap<String, LuaValue>,
 
     // Call stack
-    frames: Vec<CallFrame>,
+    pub frames: Vec<CallFrame>,
 
     // GC root set (for future use)
     #[allow(dead_code)]
     gc_roots: Vec<LuaValue>,
 }
 
-struct CallFrame {
-    function: Rc<LuaFunction>,
-    pc: usize,                // Program counter
-    registers: Vec<LuaValue>, // Register file
-    #[allow(dead_code)]
-    base: usize, // Stack base for this frame (for future use)
+pub struct CallFrame {
+    pub function: Rc<LuaFunction>,
+    pub pc: usize,                // Program counter
+    pub registers: Vec<LuaValue>, // Register file
+    pub base: usize, // Stack base for this frame
 }
 
 impl VM {
@@ -41,8 +41,24 @@ impl VM {
     }
 
     fn register_builtins(&mut self) {
-        // print function
-        self.globals.insert("print".to_string(), LuaValue::nil());
+        // Basic library
+        self.globals.insert("print".to_string(), LuaValue::cfunction(builtin::lua_print));
+        self.globals.insert("type".to_string(), LuaValue::cfunction(builtin::lua_type));
+        self.globals.insert("assert".to_string(), LuaValue::cfunction(builtin::lua_assert));
+        self.globals.insert("tostring".to_string(), LuaValue::cfunction(builtin::lua_tostring));
+        self.globals.insert("tonumber".to_string(), LuaValue::cfunction(builtin::lua_tonumber));
+        
+        // Table library (as a table)
+        let mut table_lib = LuaTable::new();
+        table_lib.set(
+            LuaValue::string(LuaString::new("insert".to_string())),
+            LuaValue::cfunction(builtin::table_insert),
+        );
+        table_lib.set(
+            LuaValue::string(LuaString::new("remove".to_string())),
+            LuaValue::cfunction(builtin::table_remove),
+        );
+        self.globals.insert("table".to_string(), LuaValue::table(table_lib));
     }
 
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> Result<LuaValue, String> {
@@ -423,7 +439,7 @@ impl VM {
     }
 
     fn op_eq(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr);
+        let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
@@ -434,14 +450,13 @@ impl VM {
 
         let result = self.values_equal(&left, &right);
         let frame = self.current_frame_mut();
-        if (result as u32) != a {
-            frame.pc += 1;
-        }
+        // Store boolean result in register A
+        frame.registers[a] = LuaValue::boolean(result);
         Ok(())
     }
 
     fn op_lt(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr);
+        let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
@@ -453,14 +468,13 @@ impl VM {
             .as_number()
             .ok_or("Comparison on non-number")?;
 
-        if (left < right) as u32 != a {
-            frame.pc += 1;
-        }
+        // Store boolean result in register A
+        frame.registers[a] = LuaValue::boolean(left < right);
         Ok(())
     }
 
     fn op_le(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr);
+        let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
@@ -472,9 +486,8 @@ impl VM {
             .as_number()
             .ok_or("Comparison on non-number")?;
 
-        if (left <= right) as u32 != a {
-            frame.pc += 1;
-        }
+        // Store boolean result in register A
+        frame.registers[a] = LuaValue::boolean(left <= right);
         Ok(())
     }
 
@@ -520,12 +533,49 @@ impl VM {
         let frame = self.current_frame();
         let func = frame.registers[a].clone();
 
-        // Check for built-in functions
+        // Check for CFunction (native Rust function)
+        if let Some(cfunc) = func.as_cfunction() {
+            // Create a temporary call frame with arguments in registers
+            let mut arg_registers = vec![func.clone()]; // Register 0 is the function itself
+            
+            // Copy arguments to registers
+            for i in 1..b {
+                if a + i < frame.registers.len() {
+                    arg_registers.push(frame.registers[a + i].clone());
+                } else {
+                    arg_registers.push(LuaValue::nil());
+                }
+            }
+            
+            // Create temporary frame for CFunction
+            let temp_frame = CallFrame {
+                function: self.current_frame().function.clone(),
+                pc: self.current_frame().pc,
+                registers: arg_registers,
+                base: self.frames.len(),
+            };
+            
+            self.frames.push(temp_frame);
+            
+            // Call the CFunction
+            let result = cfunc(self)?;
+            
+            // Pop the temporary frame
+            self.frames.pop();
+            
+            // Store result in register a
+            let current_frame = self.current_frame_mut();
+            current_frame.registers[a] = result;
+            
+            return Ok(());
+        }
+
+        // Check for built-in functions (old system, may remove later)
         if let Some(name) = self.get_builtin_name(&func) {
             return self.call_builtin(&name, a, b);
         }
 
-        // Regular function call
+        // Regular Lua function call
         if let Some(lua_func) = func.as_function() {
             let mut new_registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
 
@@ -705,7 +755,7 @@ impl VM {
 
     // Additional comparison operators
     fn op_ne(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr);
+        let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
@@ -716,14 +766,13 @@ impl VM {
 
         let result = !self.values_equal(&left, &right);
         let frame = self.current_frame_mut();
-        if (result as u32) != a {
-            frame.pc += 1;
-        }
+        // Store boolean result in register A
+        frame.registers[a] = LuaValue::boolean(result);
         Ok(())
     }
 
     fn op_gt(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr);
+        let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
@@ -735,14 +784,13 @@ impl VM {
             .as_number()
             .ok_or("Comparison on non-number")?;
 
-        if (left > right) as u32 != a {
-            frame.pc += 1;
-        }
+        // Store boolean result in register A
+        frame.registers[a] = LuaValue::boolean(left > right);
         Ok(())
     }
 
     fn op_ge(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr);
+        let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
@@ -754,9 +802,8 @@ impl VM {
             .as_number()
             .ok_or("Comparison on non-number")?;
 
-        if (left >= right) as u32 != a {
-            frame.pc += 1;
-        }
+        // Store boolean result in register A
+        frame.registers[a] = LuaValue::boolean(left >= right);
         Ok(())
     }
 
