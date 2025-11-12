@@ -49,7 +49,13 @@ fn compile_literal_expr(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<u32, 
             emit_load_nil(c, reg);
         }
         LuaLiteralToken::Number(num) => {
-            let const_idx = add_constant(c, LuaValue::number(num.get_float_value()));
+            // Try to get the string representation and parse it
+            let num_value = if num.is_float() {
+                LuaValue::Float(num.get_float_value())
+            } else {
+                LuaValue::Integer(num.get_int_value())
+            };
+            let const_idx = add_constant(c, num_value);
             emit_load_constant(c, reg, const_idx);
         }
         LuaLiteralToken::String(s) => {
@@ -204,9 +210,11 @@ pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, St
 /// Compile index expression (table[key] or table.field)
 fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, String> {
     // Get prefix (table) expression
-    let prefix_expr = expr.get_prefix_expr().ok_or("Index expression missing table")?;
+    let prefix_expr = expr
+        .get_prefix_expr()
+        .ok_or("Index expression missing table")?;
     let table_reg = compile_expr(c, &prefix_expr)?;
-    
+
     // Get index key
     let key = expr.get_index_key().ok_or("Index expression missing key")?;
     let key_reg = match key {
@@ -254,10 +262,7 @@ fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, Stri
 }
 
 /// Compile table constructor expression
-fn compile_table_expr(
-    c: &mut Compiler,
-    _expr: &LuaTableExpr,
-) -> Result<u32, String> {
+fn compile_table_expr(c: &mut Compiler, _expr: &LuaTableExpr) -> Result<u32, String> {
     let reg = alloc_register(c);
 
     // Create empty table

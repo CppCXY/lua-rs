@@ -20,9 +20,33 @@ pub fn execute(source: &str) -> Result<LuaValue, String> {
     // Compile source to bytecode
     let chunk = Compiler::compile(source)?;
     
+    // Debug: print chunk info
+    eprintln!("=== DEBUG START ===");
+    eprintln!("Constants count: {}", chunk.constants.len());
+    for i in 0..chunk.constants.len() {
+        let c = &chunk.constants[i];
+        eprintln!("Constant[{}]: int={} float={}", i, c.is_integer(), c.is_float());
+        if let Some(n) = c.as_integer() {
+            eprintln!("  -> integer value: {}", n);
+        }
+        if let Some(f) = c.as_float() {
+            eprintln!("  -> float value: {}", f);
+        }
+    }
+    eprintln!("=== DEBUG END ===");
+    if !chunk.code.is_empty() {
+        eprintln!("DEBUG: Instructions:");
+        for (i, instr) in chunk.code.iter().enumerate() {
+            let opcode = Instruction::get_opcode(*instr);
+            eprintln!("  [{}] {:?}", i, opcode);
+        }
+    }
+    
     // Create VM and execute
     let mut vm = VM::new();
-    vm.execute(Rc::new(chunk))
+    let result = vm.execute(Rc::new(chunk))?;
+    eprintln!("DEBUG: Result = {:?}", result);
+    Ok(result)
 }
 
 /// Execute Lua code with custom VM instance

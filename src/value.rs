@@ -1,213 +1,170 @@
-// Lua value representation using NaN-boxing for compact memory layout
-// This allows storing all Lua types in a single 64-bit word
+// Lua 5.4 compatible value representation with GC support
+// This implementation separates Integer and Float types as per Lua 5.4 spec
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::fmt;
 
-// NaN-boxing constants
-// IEEE 754 double: sign(1) exponent(11) mantissa(52)
-// NaN: exponent = 0x7FF, mantissa != 0
-// We use the quiet NaN space: 0x7FF8_0000_0000_0000 - 0x7FFF_FFFF_FFFF_FFFF
-const QNAN: u64 = 0x7FF8_0000_0000_0000;
-const TAG_NIL: u64 = 0x0001;
-const TAG_FALSE: u64 = 0x0002;
-const TAG_TRUE: u64 = 0x0003;
-const TAG_STRING: u64 = 0x0004;
-const TAG_TABLE: u64 = 0x0005;
-const TAG_FUNCTION: u64 = 0x0006;
-#[allow(dead_code)]
-const TAG_USERDATA: u64 = 0x0007;
-
-// Pointer mask for extracting pointer from tagged value
-const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-
-/// Compact Lua value (8 bytes)
-/// Uses NaN-boxing to store all types in a single u64
-pub struct LuaValue(u64);
-
-// Manually implement Clone to properly handle Rc reference counts
-impl Clone for LuaValue {
-    fn clone(&self) -> Self {
-        if self.is_string() {
-            let ptr = (self.0 & POINTER_MASK) as *const LuaString;
-            unsafe {
-                Rc::increment_strong_count(ptr);
-            }
-        } else if self.is_table() {
-            let ptr = (self.0 & POINTER_MASK) as *const RefCell<LuaTable>;
-            unsafe {
-                Rc::increment_strong_count(ptr);
-            }
-        } else if self.is_function() {
-            let ptr = (self.0 & POINTER_MASK) as *const LuaFunction;
-            unsafe {
-                Rc::increment_strong_count(ptr);
-            }
-        }
-        LuaValue(self.0)
-    }
+/// Lua value types following Lua 5.4 specification
+/// Size: 16 bytes (8-byte discriminant + 8-byte payload)
+#[derive(Clone)]
+pub enum LuaValue {
+    /// Nil type
+    Nil,
+    /// Boolean type
+    Boolean(bool),
+    /// Integer type (Lua 5.4+) - 64-bit signed integer
+    Integer(i64),
+    /// Float type (Lua 5.4+) - 64-bit floating point
+    Float(f64),
+    /// String type - reference counted, potentially interned
+    String(Rc<LuaString>),
+    /// Table type - reference counted
+    Table(Rc<RefCell<LuaTable>>),
+    /// Function type - reference counted
+    Function(Rc<LuaFunction>),
 }
 
 impl LuaValue {
     // Constructors
     pub fn nil() -> Self {
-        LuaValue(QNAN | TAG_NIL)
+        LuaValue::Nil
     }
 
     pub fn boolean(b: bool) -> Self {
-        if b {
-            LuaValue(QNAN | TAG_TRUE)
-        } else {
-            LuaValue(QNAN | TAG_FALSE)
-        }
+        LuaValue::Boolean(b)
+    }
+
+    pub fn integer(i: i64) -> Self {
+        LuaValue::Integer(i)
     }
 
     pub fn number(n: f64) -> Self {
-        LuaValue(n.to_bits())
+        LuaValue::Float(n)
     }
 
     pub fn string(s: LuaString) -> Self {
-        let ptr = Rc::into_raw(Rc::new(s)) as u64;
-        LuaValue(QNAN | TAG_STRING | (ptr & POINTER_MASK))
+        LuaValue::String(Rc::new(s))
     }
 
     pub fn table(t: LuaTable) -> Self {
-        let ptr = Rc::into_raw(Rc::new(RefCell::new(t))) as u64;
-        LuaValue(QNAN | TAG_TABLE | (ptr & POINTER_MASK))
+        LuaValue::Table(Rc::new(RefCell::new(t)))
     }
 
     pub fn function(f: LuaFunction) -> Self {
-        let ptr = Rc::into_raw(Rc::new(f)) as u64;
-        LuaValue(QNAN | TAG_FUNCTION | (ptr & POINTER_MASK))
+        LuaValue::Function(Rc::new(f))
     }
 
     // Type checks
     pub fn is_nil(&self) -> bool {
-        self.0 == (QNAN | TAG_NIL)
+        matches!(self, LuaValue::Nil)
     }
 
     pub fn is_boolean(&self) -> bool {
-        (self.0 & (QNAN | 0xFFFE)) == (QNAN | TAG_FALSE)
+        matches!(self, LuaValue::Boolean(_))
+    }
+
+    pub fn is_integer(&self) -> bool {
+        self.as_integer().is_some()
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, LuaValue::Float(_))
     }
 
     pub fn is_number(&self) -> bool {
-        (self.0 & QNAN) != QNAN
+        matches!(self, LuaValue::Integer(_) | LuaValue::Float(_))
     }
 
     pub fn is_string(&self) -> bool {
-        (self.0 & (QNAN | 0x000F)) == (QNAN | TAG_STRING)
+        matches!(self, LuaValue::String(_))
     }
 
     pub fn is_table(&self) -> bool {
-        (self.0 & (QNAN | 0x000F)) == (QNAN | TAG_TABLE)
+        matches!(self, LuaValue::Table(_))
     }
 
     pub fn is_function(&self) -> bool {
-        (self.0 & (QNAN | 0x000F)) == (QNAN | TAG_FUNCTION)
+        matches!(self, LuaValue::Function(_))
     }
 
     // Value extractors
     pub fn as_boolean(&self) -> Option<bool> {
-        if self.0 == (QNAN | TAG_TRUE) {
-            Some(true)
-        } else if self.0 == (QNAN | TAG_FALSE) {
-            Some(false)
-        } else {
-            None
+        match self {
+            LuaValue::Boolean(b) => Some(*b),
+            _ => None,
         }
     }
 
-    pub fn as_number(&self) -> Option<f64> {
-        if self.is_number() {
-            Some(f64::from_bits(self.0))
-        } else {
-            None
+    /// Get as integer, with automatic conversion from float if exact
+    /// Follows Lua 5.4 conversion rules
+    pub fn as_integer(&self) -> Option<i64> {
+        match self {
+            LuaValue::Integer(i) => Some(*i),
+            LuaValue::Float(f) => {
+                // Float converts to integer if it represents an exact integer
+                if f.fract() == 0.0 && f.is_finite() {
+                    Some(*f as i64)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
+    }
+
+    /// Get as float, with automatic conversion from integer
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            LuaValue::Integer(i) => Some(*i as f64),
+            LuaValue::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Get as number (alias for as_float for backwards compatibility)
+    pub fn as_number(&self) -> Option<f64> {
+        self.as_float()
     }
 
     pub fn as_string(&self) -> Option<Rc<LuaString>> {
-        if self.is_string() {
-            let ptr = (self.0 & POINTER_MASK) as *const LuaString;
-            unsafe {
-                // Clone the Rc without consuming it
-                let rc = std::mem::ManuallyDrop::new(Rc::from_raw(ptr));
-                Some(Rc::clone(&rc))
-            }
-        } else {
-            None
+        match self {
+            LuaValue::String(s) => Some(Rc::clone(s)),
+            _ => None,
         }
     }
 
     pub fn as_table(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        if self.is_table() {
-            let ptr = (self.0 & POINTER_MASK) as *const RefCell<LuaTable>;
-            unsafe {
-                let rc = std::mem::ManuallyDrop::new(Rc::from_raw(ptr));
-                Some(Rc::clone(&rc))
-            }
-        } else {
-            None
+        match self {
+            LuaValue::Table(t) => Some(Rc::clone(t)),
+            _ => None,
         }
     }
 
     pub fn as_function(&self) -> Option<Rc<LuaFunction>> {
-        if self.is_function() {
-            let ptr = (self.0 & POINTER_MASK) as *const LuaFunction;
-            unsafe {
-                let rc = std::mem::ManuallyDrop::new(Rc::from_raw(ptr));
-                Some(Rc::clone(&rc))
-            }
-        } else {
-            None
+        match self {
+            LuaValue::Function(f) => Some(Rc::clone(f)),
+            _ => None,
         }
     }
 
     // Lua truthiness: only nil and false are falsy
     pub fn is_truthy(&self) -> bool {
-        !self.is_nil() && !(self.is_boolean() && !self.as_boolean().unwrap())
+        !matches!(self, LuaValue::Nil | LuaValue::Boolean(false))
     }
 }
 
-impl Drop for LuaValue {
-    fn drop(&mut self) {
-        // Decrement reference count for heap-allocated types
-        if self.is_string() {
-            let ptr = (self.0 & POINTER_MASK) as *const LuaString;
-            unsafe {
-                // Properly drop the Rc
-                let _ = Rc::from_raw(ptr);
-            }
-        } else if self.is_table() {
-            let ptr = (self.0 & POINTER_MASK) as *const RefCell<LuaTable>;
-            unsafe {
-                let _ = Rc::from_raw(ptr);
-            }
-        } else if self.is_function() {
-            let ptr = (self.0 & POINTER_MASK) as *const LuaFunction;
-            unsafe {
-                let _ = Rc::from_raw(ptr);
-            }
-        }
-    }
-}
-
-impl std::fmt::Debug for LuaValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_nil() {
-            write!(f, "nil")
-        } else if let Some(b) = self.as_boolean() {
-            write!(f, "{}", b)
-        } else if let Some(n) = self.as_number() {
-            write!(f, "{}", n)
-        } else if let Some(s) = self.as_string() {
-            write!(f, "\"{}\"", s.as_str())
-        } else if self.is_table() {
-            write!(f, "table")
-        } else if self.is_function() {
-            write!(f, "function")
-        } else {
-            write!(f, "unknown")
+impl fmt::Debug for LuaValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LuaValue::Nil => write!(f, "nil"),
+            LuaValue::Boolean(b) => write!(f, "{}", b),
+            LuaValue::Integer(i) => write!(f, "{}", i),
+            LuaValue::Float(n) => write!(f, "{}", n),
+            LuaValue::String(s) => write!(f, "\"{}\"", s.as_str()),
+            LuaValue::Table(_) => write!(f, "table"),
+            LuaValue::Function(_) => write!(f, "function"),
         }
     }
 }
@@ -330,5 +287,162 @@ impl Chunk {
             param_count: 0,
             max_stack_size: 0,
         }
+    }
+}
+
+/// String interning pool for short strings (Lua 5.4 optimization)
+/// Short strings (≤ LUAI_MAXSHORTLEN) are interned to save memory and speed up comparisons
+pub struct StringPool {
+    /// Maximum length for short strings (typically 40 bytes in Lua)
+    max_short_len: usize,
+    /// Interned short strings - key is the string content, value is Rc
+    pool: HashMap<String, Rc<LuaString>>,
+}
+
+impl StringPool {
+    /// Create a new string pool with default max short length
+    pub fn new() -> Self {
+        Self::with_max_len(40)
+    }
+
+    /// Create a new string pool with custom max short length
+    pub fn with_max_len(max_short_len: usize) -> Self {
+        StringPool {
+            max_short_len,
+            pool: HashMap::new(),
+        }
+    }
+
+    /// Intern a string. If it's short and already exists, return the cached version.
+    /// Otherwise create a new string.
+    pub fn intern(&mut self, s: String) -> Rc<LuaString> {
+        if s.len() <= self.max_short_len {
+            // Short string: check pool first
+            if let Some(existing) = self.pool.get(&s) {
+                return Rc::clone(existing);
+            }
+            
+            // Not in pool: create and insert
+            let lua_str = Rc::new(LuaString::new(s.clone()));
+            self.pool.insert(s, Rc::clone(&lua_str));
+            lua_str
+        } else {
+            // Long string: don't intern, create directly
+            Rc::new(LuaString::new(s))
+        }
+    }
+
+    /// Get statistics about the string pool
+    pub fn stats(&self) -> (usize, usize) {
+        let count = self.pool.len();
+        let bytes: usize = self.pool.keys().map(|s| s.len()).sum();
+        (count, bytes)
+    }
+
+    /// Clear the string pool (useful for testing or memory cleanup)
+    pub fn clear(&mut self) {
+        self.pool.clear();
+    }
+}
+
+impl Default for StringPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod string_pool_tests {
+    use super::*;
+
+    #[test]
+    fn test_short_string_interning() {
+        let mut pool = StringPool::new();
+        
+        let s1 = pool.intern("hello".to_string());
+        let s2 = pool.intern("hello".to_string());
+        
+        // Should be the same Rc instance
+        assert!(Rc::ptr_eq(&s1, &s2));
+        assert_eq!(pool.stats().0, 1); // Only 1 unique string
+    }
+
+    #[test]
+    fn test_long_string_no_interning() {
+        let mut pool = StringPool::with_max_len(10);
+        
+        let long_str = "a".repeat(50);
+        let s1 = pool.intern(long_str.clone());
+        let s2 = pool.intern(long_str);
+        
+        // Long strings are NOT interned
+        assert!(!Rc::ptr_eq(&s1, &s2));
+        assert_eq!(pool.stats().0, 0); // No strings in pool
+    }
+
+    #[test]
+    fn test_multiple_short_strings() {
+        let mut pool = StringPool::new();
+        
+        let _ = pool.intern("foo".to_string());
+        let _ = pool.intern("bar".to_string());
+        let _ = pool.intern("foo".to_string()); // Duplicate
+        let _ = pool.intern("baz".to_string());
+        
+        assert_eq!(pool.stats().0, 3); // 3 unique strings
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+
+    #[test]
+    fn test_integer_float_distinction() {
+        let int_val = LuaValue::integer(42);
+        let float_val = LuaValue::number(42.0);
+        
+        assert!(int_val.is_integer());
+        assert!(!int_val.is_float());
+        assert!(!float_val.is_integer());
+        assert!(float_val.is_float());
+        
+        // Both are numbers
+        assert!(int_val.is_number());
+        assert!(float_val.is_number());
+    }
+
+    #[test]
+    fn test_integer_float_conversion() {
+        let int_val = LuaValue::integer(42);
+        let float_val = LuaValue::number(42.5);
+        
+        // Integer can convert to float via as_float
+        assert_eq!(int_val.as_float(), Some(42.0));
+        
+        // Float with fraction cannot convert to integer
+        assert_eq!(float_val.as_integer(), None);
+        
+        // Float without fraction can convert to integer
+        let exact_float = LuaValue::number(42.0);
+        assert_eq!(exact_float.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn test_as_number_unified() {
+        let int_val = LuaValue::integer(42);
+        let float_val = LuaValue::number(3.14);
+        
+        // as_number works for both
+        assert_eq!(int_val.as_number(), Some(42.0));
+        assert_eq!(float_val.as_number(), Some(3.14));
+    }
+
+    #[test]
+    fn test_value_size() {
+        use std::mem::size_of;
+        
+        // LuaValue should be 16 bytes (enum discriminant + largest variant)
+        assert_eq!(size_of::<LuaValue>(), 16);
     }
 }

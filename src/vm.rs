@@ -1,18 +1,18 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
 
-use crate::opcode::{OpCode, Instruction};
-use crate::value::{Chunk, LuaValue, LuaTable, LuaFunction, LuaString};
+use crate::opcode::{Instruction, OpCode};
+use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct VM {
     // Global environment
     globals: HashMap<String, LuaValue>,
-    
+
     // Call stack
     frames: Vec<CallFrame>,
-    
+
     // GC root set (for future use)
     #[allow(dead_code)]
     gc_roots: Vec<LuaValue>,
@@ -20,10 +20,10 @@ pub struct VM {
 
 struct CallFrame {
     function: Rc<LuaFunction>,
-    pc: usize,              // Program counter
+    pc: usize,                // Program counter
     registers: Vec<LuaValue>, // Register file
     #[allow(dead_code)]
-    base: usize,            // Stack base for this frame (for future use)
+    base: usize, // Stack base for this frame (for future use)
 }
 
 impl VM {
@@ -33,10 +33,10 @@ impl VM {
             frames: Vec::new(),
             gc_roots: Vec::new(),
         };
-        
+
         // Register built-in functions
         vm.register_builtins();
-        
+
         vm
     }
 
@@ -79,11 +79,11 @@ impl VM {
             }
 
             let frame_idx = self.frames.len() - 1;
-            
+
             // Fetch instruction
             let pc = self.frames[frame_idx].pc;
             let chunk = &self.frames[frame_idx].function.chunk;
-            
+
             if pc >= chunk.code.len() {
                 // End of code
                 self.frames.pop();
@@ -95,7 +95,7 @@ impl VM {
 
             // Decode and execute
             let opcode = Instruction::get_opcode(instr);
-            
+
             match opcode {
                 OpCode::Move => self.op_move(instr)?,
                 OpCode::LoadK => self.op_loadk(instr)?,
@@ -196,11 +196,11 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let table = frame.registers[b].clone();
         let key = frame.registers[c].clone();
-        
+
         if let Some(tbl) = table.as_table() {
             let value = tbl.borrow().get(&key).unwrap_or(LuaValue::nil());
             frame.registers[a] = value;
@@ -214,12 +214,12 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let table = frame.registers[a].clone();
         let key = frame.registers[b].clone();
         let value = frame.registers[c].clone();
-        
+
         if let Some(tbl) = table.as_table() {
             tbl.borrow_mut().set(key, value);
             Ok(())
@@ -229,52 +229,168 @@ impl VM {
     }
 
     fn op_add(&mut self, instr: u32) -> Result<(), String> {
-        self.binary_arith(instr, |a, b| a + b)
-    }
-
-    fn op_sub(&mut self, instr: u32) -> Result<(), String> {
-        self.binary_arith(instr, |a, b| a - b)
-    }
-
-    fn op_mul(&mut self, instr: u32) -> Result<(), String> {
-        self.binary_arith(instr, |a, b| a * b)
-    }
-
-    fn op_div(&mut self, instr: u32) -> Result<(), String> {
-        self.binary_arith(instr, |a, b| a / b)
-    }
-
-    fn op_mod(&mut self, instr: u32) -> Result<(), String> {
-        self.binary_arith(instr, |a, b| a % b)
-    }
-
-    fn op_pow(&mut self, instr: u32) -> Result<(), String> {
-        self.binary_arith(instr, |a, b| a.powf(b))
-    }
-
-    fn binary_arith<F>(&mut self, instr: u32, op: F) -> Result<(), String>
-    where
-        F: Fn(f64, f64) -> f64,
-    {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
-        let left = frame.registers[b].as_number()
-            .ok_or("Arithmetic on non-number")?;
-        let right = frame.registers[c].as_number()
-            .ok_or("Arithmetic on non-number")?;
-        
-        frame.registers[a] = LuaValue::number(op(left, right));
-        Ok(())
+        let left = &frame.registers[b];
+        let right = &frame.registers[c];
+        match (left, right) {
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::number(l + r);
+                Ok(())
+            }
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::integer(i + j);
+                Ok(())
+            }
+            (left, right) if left.is_number() && right.is_number() => {
+                let l = left.as_number().unwrap();
+                let r = right.as_number().unwrap();
+                frame.registers[a] = LuaValue::number(l + r);
+                Ok(())
+            }
+            _ => Err("Addition on non-number values".to_string()),
+        }
+    }
+
+    fn op_sub(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+
+        let frame = self.current_frame_mut();
+        let left = &frame.registers[b];
+        let right = &frame.registers[c];
+        match (left, right) {
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::number(l - r);
+                Ok(())
+            }
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::integer(i - j);
+                Ok(())
+            }
+            (left, right) if left.is_number() && right.is_number() => {
+                let l = left.as_number().unwrap();
+                let r = right.as_number().unwrap();
+                frame.registers[a] = LuaValue::number(l - r);
+                Ok(())
+            }
+            _ => Err("Subtraction on non-number values".to_string()),
+        }
+    }
+
+    fn op_mul(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+
+        let frame = self.current_frame_mut();
+        let left = &frame.registers[b];
+        let right = &frame.registers[c];
+        match (left, right) {
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::number(l * r);
+                Ok(())
+            }
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::integer(i * j);
+                Ok(())
+            }
+            (left, right) if left.is_number() && right.is_number() => {
+                let l = left.as_number().unwrap();
+                let r = right.as_number().unwrap();
+                frame.registers[a] = LuaValue::number(l * r);
+                Ok(())
+            }
+            _ => Err("Multiplication on non-number values".to_string()),
+        }
+    }
+
+    fn op_div(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+
+        let frame = self.current_frame_mut();
+        let left = &frame.registers[b];
+        let right = &frame.registers[c];
+        match (left, right) {
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::number(l / r);
+                Ok(())
+            }
+            (left, right) if left.is_number() && right.is_number() => {
+                let l = left.as_number().unwrap();
+                let r = right.as_number().unwrap();
+                let value = l / r;
+                if value.fract() == 0.0 {
+                    frame.registers[a] = LuaValue::integer(value as i64);
+                } else {
+                    frame.registers[a] = LuaValue::number(value);
+                }
+                Ok(())
+            }
+            _ => Err("Division on non-number values".to_string()),
+        }
+    }
+
+    fn op_mod(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        let left = &frame.registers[b];
+        let right = &frame.registers[c];
+        match (left, right) {
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::integer(i % j);
+                Ok(())
+            }
+            (left, right) if left.is_integer() && right.is_integer() => {
+                let l = left.as_integer().unwrap();
+                let r = right.as_integer().unwrap();
+                frame.registers[a] = LuaValue::integer(l % r);
+                Ok(())
+            }
+            _ => Err("Modulo on non-number values".to_string()),
+        }
+    }
+
+    fn op_pow(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        let left = &frame.registers[b];
+        let right = &frame.registers[c];
+        match (left, right) {
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::number(l.powf(*r));
+                Ok(())
+            }
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::number((*i as f64).powf(*j as f64));
+                Ok(())
+            }
+            (left, right) if left.is_number() && right.is_number() => {
+                let l = left.as_number().unwrap();
+                let r = right.as_number().unwrap();
+                frame.registers[a] = LuaValue::number(l.powf(r));
+                Ok(())
+            }
+            _ => Err("Exponentiation on non-number values".to_string()),
+        }
     }
 
     fn op_unm(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let frame = self.current_frame_mut();
-        let value = frame.registers[b].as_number()
+        let value = frame.registers[b]
+            .as_number()
             .ok_or("Unary minus on non-number")?;
         frame.registers[a] = LuaValue::number(-value);
         Ok(())
@@ -293,7 +409,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let frame = self.current_frame_mut();
-        
+
         let len = if let Some(s) = frame.registers[b].as_string() {
             s.as_str().len() as f64
         } else if let Some(t) = frame.registers[b].as_table() {
@@ -301,7 +417,7 @@ impl VM {
         } else {
             return Err("Length of non-sequence value".to_string());
         };
-        
+
         frame.registers[a] = LuaValue::number(len);
         Ok(())
     }
@@ -310,12 +426,12 @@ impl VM {
         let a = Instruction::get_a(instr);
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let (left, right) = {
             let frame = self.current_frame();
             (frame.registers[b].clone(), frame.registers[c].clone())
         };
-        
+
         let result = self.values_equal(&left, &right);
         let frame = self.current_frame_mut();
         if (result as u32) != a {
@@ -328,13 +444,15 @@ impl VM {
         let a = Instruction::get_a(instr);
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
-        let left = frame.registers[b].as_number()
+        let left = frame.registers[b]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c].as_number()
+        let right = frame.registers[c]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        
+
         if (left < right) as u32 != a {
             frame.pc += 1;
         }
@@ -345,13 +463,15 @@ impl VM {
         let a = Instruction::get_a(instr);
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
-        let left = frame.registers[b].as_number()
+        let left = frame.registers[b]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c].as_number()
+        let right = frame.registers[c]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        
+
         if (left <= right) as u32 != a {
             frame.pc += 1;
         }
@@ -369,7 +489,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let c = Instruction::get_c(instr);
         let frame = self.current_frame_mut();
-        
+
         let is_true = frame.registers[a].is_truthy();
         if (is_true as u32) != c {
             frame.pc += 1;
@@ -382,7 +502,7 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr);
         let frame = self.current_frame_mut();
-        
+
         let is_true = frame.registers[b].is_truthy();
         if (is_true as u32) == c {
             frame.registers[a] = frame.registers[b].clone();
@@ -396,33 +516,33 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let _c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame();
         let func = frame.registers[a].clone();
-        
+
         // Check for built-in functions
         if let Some(name) = self.get_builtin_name(&func) {
             return self.call_builtin(&name, a, b);
         }
-        
+
         // Regular function call
         if let Some(lua_func) = func.as_function() {
             let mut new_registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
-            
+
             // Copy arguments
             for i in 1..b {
                 if a + i < frame.registers.len() {
                     new_registers[i - 1] = frame.registers[a + i].clone();
                 }
             }
-            
+
             let new_frame = CallFrame {
                 function: lua_func.clone(),
                 pc: 0,
                 registers: new_registers,
                 base: self.frames.len(),
             };
-            
+
             self.frames.push(new_frame);
             Ok(())
         } else {
@@ -433,15 +553,15 @@ impl VM {
     fn op_return(&mut self, instr: u32) -> Result<LuaValue, String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        
+
         let return_value = if b > 1 {
             self.current_frame().registers[a].clone()
         } else {
             LuaValue::nil()
         };
-        
+
         self.frames.pop();
-        
+
         Ok(return_value)
     }
 
@@ -449,7 +569,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let frame = self.current_frame_mut();
-        
+
         if b < frame.function.upvalues.len() {
             frame.registers[a] = frame.function.upvalues[b].clone();
         }
@@ -459,11 +579,11 @@ impl VM {
     fn op_setupval(&mut self, instr: u32) -> Result<(), String> {
         let _a = Instruction::get_a(instr) as usize;
         let _b = Instruction::get_b(instr) as usize;
-        
+
         // Note: Upvalues not fully implemented yet
         // let value = self.current_frame().registers[a].clone();
         // let frame = self.current_frame_mut();
-        
+
         // if b < frame.function.upvalues.len() {
         //     frame.function.upvalues[b] = value;
         // }
@@ -479,10 +599,10 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let mut result = String::new();
-        
+
         for i in b..=c {
             if let Some(s) = frame.registers[i].as_string() {
                 result.push_str(s.as_str());
@@ -490,7 +610,7 @@ impl VM {
                 result.push_str(&n.to_string());
             }
         }
-        
+
         frame.registers[a] = LuaValue::string(LuaString::new(result));
         Ok(())
     }
@@ -498,14 +618,14 @@ impl VM {
     fn op_getglobal(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
-        
+
         let frame = self.current_frame();
         let name_val = frame.function.chunk.constants[bx].clone();
-        
+
         if let Some(name_str) = name_val.as_string() {
             let name = name_str.as_str().to_string();
             let value = self.globals.get(&name).cloned().unwrap_or(LuaValue::nil());
-            
+
             let frame = self.current_frame_mut();
             frame.registers[a] = value;
             Ok(())
@@ -517,11 +637,11 @@ impl VM {
     fn op_setglobal(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
-        
+
         let frame = self.current_frame();
         let name_val = frame.function.chunk.constants[bx].clone();
         let value = frame.registers[a].clone();
-        
+
         if let Some(name_str) = name_val.as_string() {
             let name = name_str.as_str().to_string();
             self.globals.insert(name, value);
@@ -571,7 +691,7 @@ impl VM {
                 println!();
                 Ok(())
             }
-            _ => Err(format!("Unknown builtin: {}", name))
+            _ => Err(format!("Unknown builtin: {}", name)),
         }
     }
 
@@ -588,12 +708,12 @@ impl VM {
         let a = Instruction::get_a(instr);
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let (left, right) = {
             let frame = self.current_frame();
             (frame.registers[b].clone(), frame.registers[c].clone())
         };
-        
+
         let result = !self.values_equal(&left, &right);
         let frame = self.current_frame_mut();
         if (result as u32) != a {
@@ -606,13 +726,15 @@ impl VM {
         let a = Instruction::get_a(instr);
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
-        let left = frame.registers[b].as_number()
+        let left = frame.registers[b]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c].as_number()
+        let right = frame.registers[c]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        
+
         if (left > right) as u32 != a {
             frame.pc += 1;
         }
@@ -623,13 +745,15 @@ impl VM {
         let a = Instruction::get_a(instr);
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
-        let left = frame.registers[b].as_number()
+        let left = frame.registers[b]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c].as_number()
+        let right = frame.registers[c]
+            .as_number()
             .ok_or("Comparison on non-number")?;
-        
+
         if (left >= right) as u32 != a {
             frame.pc += 1;
         }
@@ -642,7 +766,7 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
+
         // Lua's 'and' returns first false value or last value
         let left = frame.registers[b].clone();
         frame.registers[a] = if !left.is_truthy() {
@@ -658,7 +782,7 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
+
         // Lua's 'or' returns first true value or last value
         let left = frame.registers[b].clone();
         frame.registers[a] = if left.is_truthy() {
@@ -675,10 +799,14 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
-        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        frame.registers[a] = LuaValue::number((left & right) as f64);
+
+        let left = frame.registers[b]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        let right = frame.registers[c]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        frame.registers[a] = LuaValue::integer(left & right);
         Ok(())
     }
 
@@ -687,10 +815,14 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
-        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        frame.registers[a] = LuaValue::number((left | right) as f64);
+
+        let left = frame.registers[b]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        let right = frame.registers[c]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        frame.registers[a] = LuaValue::integer(left | right);
         Ok(())
     }
 
@@ -699,10 +831,14 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
-        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        frame.registers[a] = LuaValue::number((left ^ right) as f64);
+
+        let left = frame.registers[b]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        let right = frame.registers[c]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        frame.registers[a] = LuaValue::integer(left ^ right);
         Ok(())
     }
 
@@ -711,10 +847,14 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
-        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as u32;
-        frame.registers[a] = LuaValue::number((left << right) as f64);
+
+        let left = frame.registers[b]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        let right = frame.registers[c]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")? as u32;
+        frame.registers[a] = LuaValue::integer(left << right);
         Ok(())
     }
 
@@ -723,10 +863,14 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
-        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as u32;
-        frame.registers[a] = LuaValue::number((left >> right) as f64);
+
+        let left = frame.registers[b]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        let right = frame.registers[c]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")? as u32;
+        frame.registers[a] = LuaValue::integer(left >> right);
         Ok(())
     }
 
@@ -734,9 +878,11 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let frame = self.current_frame_mut();
-        
-        let value = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
-        frame.registers[a] = LuaValue::number((!value) as f64);
+
+        let value = frame.registers[b]
+            .as_integer()
+            .ok_or("Bitwise operation requires integer")?;
+        frame.registers[a] = LuaValue::integer(!value);
         Ok(())
     }
 
@@ -746,13 +892,28 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
         let frame = self.current_frame_mut();
-        
-        let left = frame.registers[b].as_number().ok_or("Division on non-number")?;
-        let right = frame.registers[c].as_number().ok_or("Division on non-number")?;
+
+        let left = frame.registers[b]
+            .as_number()
+            .ok_or("Division on non-number")?;
+        let right = frame.registers[c]
+            .as_number()
+            .ok_or("Division on non-number")?;
         if right == 0.0 {
             return Err("Division by zero".to_string());
         }
-        frame.registers[a] = LuaValue::number((left / right).floor());
+        // Integer division returns integer if both operands can be integers
+        let result = (left / right).floor();
+        if let (Some(l), Some(r)) = (
+            frame.registers[b].as_integer(),
+            frame.registers[c].as_integer(),
+        ) {
+            if r != 0 {
+                frame.registers[a] = LuaValue::integer(l / r);
+                return Ok(());
+            }
+        }
+        frame.registers[a] = LuaValue::number(result);
         Ok(())
     }
 }
