@@ -3,7 +3,7 @@
 use super::expr::{compile_call_expr, compile_expr, compile_var_expr};
 use super::{Compiler, helpers::*};
 use crate::opcode::{Instruction, OpCode};
-use emmylua_parser::{LuaAssignStat, LuaCallExprStat, LuaLocalStat, LuaReturnStat, LuaStat};
+use emmylua_parser::{LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaForRangeStat, LuaForStat, LuaIfStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaWhileStat};
 
 /// Compile any statement
 pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
@@ -112,7 +112,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 }
 
 /// Compile if statement
-fn compile_if_stat(c: &mut Compiler, _stat: &emmylua_parser::LuaIfStat) -> Result<(), String> {
+fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
     // TODO: Implement if statement compilation
     // Structure: if <condition> then <block> [elseif <condition> then <block>]* [else <block>] end
     // 
@@ -139,7 +139,7 @@ fn compile_if_stat(c: &mut Compiler, _stat: &emmylua_parser::LuaIfStat) -> Resul
 /// Compile while loop
 fn compile_while_stat(
     c: &mut Compiler,
-    _stat: &emmylua_parser::LuaWhileStat,
+    stat: &LuaWhileStat,
 ) -> Result<(), String> {
     // TODO: Implement while loop compilation
     // Structure: while <condition> do <block> end
@@ -163,7 +163,7 @@ fn compile_while_stat(
 /// Compile repeat-until loop
 fn compile_repeat_stat(
     c: &mut Compiler,
-    _stat: &emmylua_parser::LuaRepeatStat,
+    stat: &LuaRepeatStat,
 ) -> Result<(), String> {
     // TODO: Implement repeat-until loop compilation
     // Structure: repeat <block> until <condition>
@@ -183,7 +183,7 @@ fn compile_repeat_stat(
 }
 
 /// Compile numeric for loop
-fn compile_for_stat(c: &mut Compiler, _stat: &emmylua_parser::LuaForStat) -> Result<(), String> {
+fn compile_for_stat(c: &mut Compiler, _stat: &LuaForStat) -> Result<(), String> {
     // TODO: Implement numeric for loop compilation
     // Structure: for <var> = <start>, <end> [, <step>] do <block> end
     //
@@ -210,7 +210,7 @@ fn compile_for_stat(c: &mut Compiler, _stat: &emmylua_parser::LuaForStat) -> Res
 /// Compile generic for loop
 fn compile_for_range_stat(
     c: &mut Compiler,
-    _stat: &emmylua_parser::LuaForRangeStat,
+    stat: &LuaForRangeStat,
 ) -> Result<(), String> {
     // TODO: Implement generic for-in loop compilation
     // Structure: for <var-list> in <expr-list> do <block> end
@@ -236,7 +236,7 @@ fn compile_for_range_stat(
 }
 
 /// Compile do-end block
-fn compile_do_stat(c: &mut Compiler, stat: &emmylua_parser::LuaDoStat) -> Result<(), String> {
+fn compile_do_stat(c: &mut Compiler, stat: &LuaDoStat) -> Result<(), String> {
     use super::compile_block;
 
     begin_scope(c);
