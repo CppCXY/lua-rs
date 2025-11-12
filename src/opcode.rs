@@ -33,6 +33,24 @@ pub enum OpCode {
     Eq,            // if (R(B) == R(C)) ~= A then pc++
     Lt,            // if (R(B) < R(C)) ~= A then pc++
     Le,            // if (R(B) <= R(C)) ~= A then pc++
+    Ne,            // if (R(B) != R(C)) ~= A then pc++
+    Gt,            // if (R(B) > R(C)) ~= A then pc++
+    Ge,            // if (R(B) >= R(C)) ~= A then pc++
+    
+    // Logical operations (short-circuit)
+    And,           // R(A) := R(B) and R(C)
+    Or,            // R(A) := R(B) or R(C)
+    
+    // Bitwise operations
+    BAnd,          // R(A) := R(B) & R(C)
+    BOr,           // R(A) := R(B) | R(C)
+    BXor,          // R(A) := R(B) ~ R(C)
+    Shl,           // R(A) := R(B) << R(C)
+    Shr,           // R(A) := R(B) >> R(C)
+    BNot,          // R(A) := ~R(B)
+    
+    // Integer division
+    IDiv,          // R(A) := R(B) // R(C)
     
     // Control flow
     Jmp,           // pc += sBx

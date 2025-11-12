@@ -116,6 +116,18 @@ impl VM {
                 OpCode::Eq => self.op_eq(instr)?,
                 OpCode::Lt => self.op_lt(instr)?,
                 OpCode::Le => self.op_le(instr)?,
+                OpCode::Ne => self.op_ne(instr)?,
+                OpCode::Gt => self.op_gt(instr)?,
+                OpCode::Ge => self.op_ge(instr)?,
+                OpCode::And => self.op_and(instr)?,
+                OpCode::Or => self.op_or(instr)?,
+                OpCode::BAnd => self.op_band(instr)?,
+                OpCode::BOr => self.op_bor(instr)?,
+                OpCode::BXor => self.op_bxor(instr)?,
+                OpCode::Shl => self.op_shl(instr)?,
+                OpCode::Shr => self.op_shr(instr)?,
+                OpCode::BNot => self.op_bnot(instr)?,
+                OpCode::IDiv => self.op_idiv(instr)?,
                 OpCode::Jmp => self.op_jmp(instr)?,
                 OpCode::Test => self.op_test(instr)?,
                 OpCode::TestSet => self.op_testset(instr)?,
@@ -569,5 +581,178 @@ impl VM {
 
     pub fn get_global(&self, name: &str) -> Option<LuaValue> {
         self.globals.get(name).cloned()
+    }
+
+    // Additional comparison operators
+    fn op_ne(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr);
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        
+        let (left, right) = {
+            let frame = self.current_frame();
+            (frame.registers[b].clone(), frame.registers[c].clone())
+        };
+        
+        let result = !self.values_equal(&left, &right);
+        let frame = self.current_frame_mut();
+        if (result as u32) != a {
+            frame.pc += 1;
+        }
+        Ok(())
+    }
+
+    fn op_gt(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr);
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        
+        let frame = self.current_frame_mut();
+        let left = frame.registers[b].as_number()
+            .ok_or("Comparison on non-number")?;
+        let right = frame.registers[c].as_number()
+            .ok_or("Comparison on non-number")?;
+        
+        if (left > right) as u32 != a {
+            frame.pc += 1;
+        }
+        Ok(())
+    }
+
+    fn op_ge(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr);
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        
+        let frame = self.current_frame_mut();
+        let left = frame.registers[b].as_number()
+            .ok_or("Comparison on non-number")?;
+        let right = frame.registers[c].as_number()
+            .ok_or("Comparison on non-number")?;
+        
+        if (left >= right) as u32 != a {
+            frame.pc += 1;
+        }
+        Ok(())
+    }
+
+    // Logical operators (short-circuit handled at compile time)
+    fn op_and(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        // Lua's 'and' returns first false value or last value
+        let left = frame.registers[b].clone();
+        frame.registers[a] = if !left.is_truthy() {
+            left
+        } else {
+            frame.registers[c].clone()
+        };
+        Ok(())
+    }
+
+    fn op_or(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        // Lua's 'or' returns first true value or last value
+        let left = frame.registers[b].clone();
+        frame.registers[a] = if left.is_truthy() {
+            left
+        } else {
+            frame.registers[c].clone()
+        };
+        Ok(())
+    }
+
+    // Bitwise operators
+    fn op_band(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        frame.registers[a] = LuaValue::number((left & right) as f64);
+        Ok(())
+    }
+
+    fn op_bor(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        frame.registers[a] = LuaValue::number((left | right) as f64);
+        Ok(())
+    }
+
+    fn op_bxor(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        frame.registers[a] = LuaValue::number((left ^ right) as f64);
+        Ok(())
+    }
+
+    fn op_shl(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as u32;
+        frame.registers[a] = LuaValue::number((left << right) as f64);
+        Ok(())
+    }
+
+    fn op_shr(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        let left = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        let right = frame.registers[c].as_number().ok_or("Bitwise operation on non-number")? as u32;
+        frame.registers[a] = LuaValue::number((left >> right) as f64);
+        Ok(())
+    }
+
+    fn op_bnot(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        let value = frame.registers[b].as_number().ok_or("Bitwise operation on non-number")? as i64;
+        frame.registers[a] = LuaValue::number((!value) as f64);
+        Ok(())
+    }
+
+    // Integer division
+    fn op_idiv(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+        let frame = self.current_frame_mut();
+        
+        let left = frame.registers[b].as_number().ok_or("Division on non-number")?;
+        let right = frame.registers[c].as_number().ok_or("Division on non-number")?;
+        if right == 0.0 {
+            return Err("Division by zero".to_string());
+        }
+        frame.registers[a] = LuaValue::number((left / right).floor());
+        Ok(())
     }
 }

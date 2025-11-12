@@ -101,8 +101,18 @@ fn compile_binary_expr(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<u32, St
         BinaryOperator::OpEq => OpCode::Eq,
         BinaryOperator::OpLt => OpCode::Lt,
         BinaryOperator::OpLe => OpCode::Le,
-        // need support more
-        _ => return Err(format!("Unsupported binary operator in expression")),
+        BinaryOperator::OpNe => OpCode::Ne,
+        BinaryOperator::OpGt => OpCode::Gt,
+        BinaryOperator::OpGe => OpCode::Ge,
+        BinaryOperator::OpAnd => OpCode::And,
+        BinaryOperator::OpOr => OpCode::Or,
+        BinaryOperator::OpBAnd => OpCode::BAnd,
+        BinaryOperator::OpBOr => OpCode::BOr,
+        BinaryOperator::OpBXor => OpCode::BXor,
+        BinaryOperator::OpShl => OpCode::Shl,
+        BinaryOperator::OpShr => OpCode::Shr,
+        BinaryOperator::OpIDiv => OpCode::IDiv,
+        _ => return Err(format!("Unsupported binary operator: {:?}", op_kind)),
     };
 
     emit(
@@ -124,8 +134,10 @@ fn compile_unary_expr(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<u32, Stri
     let op_kind = op_token.get_op();
     match op_kind {
         UnaryOperator::OpBNot => {
-            // Bitwise NOT is not supported in this example
-            return Err("Bitwise NOT operator is not supported".to_string());
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::BNot, result_reg, operand_reg, 0),
+            );
         }
         UnaryOperator::OpUnm => {
             emit(
@@ -191,17 +203,46 @@ pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, St
 
 /// Compile index expression (table[key] or table.field)
 fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, String> {
-    // Get table and key expressions from children
+    // Get prefix (table) expression
+    let prefix_expr = expr.get_prefix_expr().ok_or("Index expression missing table")?;
+    let table_reg = compile_expr(c, &prefix_expr)?;
+    
+    // Get index key
     let key = expr.get_index_key().ok_or("Index expression missing key")?;
-    match key {
-        LuaIndexKey::Expr(key_expr) => {}
-        LuaIndexKey::Name(lua_name_token) => todo!(),
-        LuaIndexKey::String(lua_string_token) => todo!(),
-        LuaIndexKey::Integer(lua_number_token) => todo!(),
-        LuaIndexKey::Idx(i) => {
-             
-        },
-    }
+    let key_reg = match key {
+        LuaIndexKey::Expr(key_expr) => {
+            // table[expr]
+            compile_expr(c, &key_expr)?
+        }
+        LuaIndexKey::Name(name_token) => {
+            // table.field
+            let field_name = name_token.get_name_text().to_string();
+            let const_idx = add_constant(c, LuaValue::string(LuaString::new(field_name)));
+            let key_reg = alloc_register(c);
+            emit_load_constant(c, key_reg, const_idx);
+            key_reg
+        }
+        LuaIndexKey::String(string_token) => {
+            // table["string"]
+            let string_value = string_token.get_value();
+            let const_idx = add_constant(c, LuaValue::string(LuaString::new(string_value)));
+            let key_reg = alloc_register(c);
+            emit_load_constant(c, key_reg, const_idx);
+            key_reg
+        }
+        LuaIndexKey::Integer(number_token) => {
+            // table[123]
+            let num_value = number_token.get_float_value();
+            let const_idx = add_constant(c, LuaValue::number(num_value));
+            let key_reg = alloc_register(c);
+            emit_load_constant(c, key_reg, const_idx);
+            key_reg
+        }
+        LuaIndexKey::Idx(_i) => {
+            // Fallback for other index types
+            return Err("Unsupported index key type".to_string());
+        }
+    };
 
     let result_reg = alloc_register(c);
     emit(
