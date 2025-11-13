@@ -3,13 +3,12 @@
 use super::expr::{compile_call_expr, compile_expr, compile_var_expr};
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
+use crate::compiler::expr::compile_closure_expr;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{LuaValue, LuaString};
 use std::rc::Rc;
 use emmylua_parser::{
-    LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaForRangeStat, LuaForStat, LuaFuncStat,
-    LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat,
-    LuaWhileStat,
+    LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat
 };
 
 /// Compile any statement
@@ -629,23 +628,9 @@ fn compile_function_stat(c: &mut Compiler, stat: &LuaFuncStat) -> Result<(), Str
         .ok_or("function statement missing function body")?;
 
     // Compile the closure to get function value
-    let func_reg = super::expr::compile_closure_expr(c, &closure)?;
+    let func_reg = compile_closure_expr(c, &closure)?;
     
-    // Assign the function to the name (global or table field)
-    match func_name_var_expr {
-        emmylua_parser::LuaVarExpr::NameExpr(name_expr) => {
-            let func_name = name_expr.get_name_text()
-                .ok_or("function name missing text")?;
-            
-            // Store in global
-            let name_idx = add_constant(c, LuaValue::String(Rc::new(LuaString::new(func_name))));
-            let instr = Instruction::encode_abx(OpCode::SetGlobal, func_reg, name_idx);
-            c.chunk.code.push(instr);
-        }
-        _ => {
-            return Err("Complex function names (table.field) not yet supported".to_string());
-        }
-    }
+    compile_var_expr(c, &func_name_var_expr, func_reg)?;
     
     Ok(())
 }

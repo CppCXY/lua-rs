@@ -2,6 +2,7 @@
 
 use super::Compiler;
 use super::helpers::*;
+use crate::compiler::compile_block;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{LuaString, LuaValue};
 use emmylua_parser::LuaClosureExpr;
@@ -11,8 +12,8 @@ use emmylua_parser::LuaParenExpr;
 use emmylua_parser::LuaTableExpr;
 use emmylua_parser::UnaryOperator;
 use emmylua_parser::{
-    BinaryOperator, LuaAstNode, LuaBinaryExpr, LuaCallExpr, LuaExpr, LuaLiteralExpr,
-    LuaLiteralToken, LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
+    BinaryOperator, LuaBinaryExpr, LuaCallExpr, LuaExpr, LuaLiteralExpr, LuaLiteralToken,
+    LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
 };
 
 /// Compile any expression and return the register containing the result
@@ -195,27 +196,29 @@ pub fn compile_call_expr_with_returns(
         .get_args()
         .collect::<Vec<_>>();
 
-    let func_reg = compile_expr(c, &prefix_expr)?;
+    let func_src_reg = compile_expr(c, &prefix_expr)?;
     let arg_count = arg_exprs.len();
 
-    // Ensure we have enough registers allocated for function + all arguments + returns
-    let needed_regs = func_reg + arg_count as u32 + num_returns.max(1) as u32;
-    while c.next_register < needed_regs {
+    // Allocate a new register for the call (to avoid overwriting source)
+    let func_reg = alloc_register(c);
+    
+    // Copy function to call register if different
+    if func_src_reg != func_reg {
+        emit_move(c, func_reg, func_src_reg);
+    }
+    
+    // Allocate space for arguments starting after the function register
+    let args_start = func_reg + 1;
+    
+    // Reserve registers for all arguments
+    while c.next_register < args_start + arg_count as u32 {
         alloc_register(c);
     }
 
-    // Compile arguments directly into their target registers
+    // Compile arguments into consecutive registers after function
     for i in 0..arg_count {
-        let target_reg = func_reg + (i as u32) + 1;
-
-        // Temporarily set next_register to compile into target position
-        let saved_next = c.next_register;
-        c.next_register = target_reg;
-
+        let target_reg = args_start + i as u32;
         let arg_reg = compile_expr(c, &arg_exprs[i])?;
-
-        // Restore next_register
-        c.next_register = saved_next.max(c.next_register);
 
         // If expression compiled to different register, move it
         if arg_reg != target_reg {
@@ -415,40 +418,52 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
         }
         LuaVarExpr::IndexExpr(index_expr) => {
             // Get table and key expressions from children
-            let mut exprs = Vec::new();
-            for child in index_expr.syntax().children() {
-                if let Some(expr_node) = LuaExpr::cast(child.clone()) {
-                    exprs.push(expr_node);
-                }
-            }
+            let prefix_expr = index_expr
+                .get_prefix_expr()
+                .ok_or("Index expression missing table")?;
 
-            if exprs.is_empty() {
-                return Err("Index expression missing table in assignment".to_string());
-            }
-
-            let table_reg = compile_expr(c, &exprs[0])?;
+            let table_reg = compile_expr(c, &prefix_expr)?;
 
             // Determine key
-            let text = index_expr.syntax().text().to_string();
-            let key_reg = if text.contains('.') && !text.contains('[') {
-                // table.field
-                let parts: Vec<&str> = text.split('.').collect();
-                if parts.len() >= 2 {
-                    let field_name = parts[1].trim();
-                    let const_idx =
-                        add_constant(c, LuaValue::string(LuaString::new(field_name.to_string())));
+            let index_key = index_expr
+                .get_index_key()
+                .ok_or("Index expression missing key")?;
+            let key_reg = match index_key {
+                LuaIndexKey::Expr(key_expr) => {
+                    // table[expr]
+                    compile_expr(c, &key_expr)?
+                }
+                LuaIndexKey::Name(name_token) => {
+                    // table.field
+                    let field_name = name_token.get_name_text().to_string();
+                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(field_name)));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg
-                } else {
-                    return Err("Invalid dot index in assignment".to_string());
                 }
-            } else {
-                // table[expr]
-                if exprs.len() >= 2 {
-                    compile_expr(c, &exprs[1])?
-                } else {
-                    return Err("Bracket index missing key in assignment".to_string());
+                LuaIndexKey::String(string_token) => {
+                    // table["string"]
+                    let string_value = string_token.get_value();
+                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(string_value)));
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    key_reg
+                }
+                LuaIndexKey::Integer(number_token) => {
+                    // table[123]
+                    let num_value = if number_token.is_float() {
+                        LuaValue::number(number_token.get_float_value())
+                    } else {
+                        LuaValue::integer(number_token.get_int_value())
+                    };
+
+                    let const_idx = add_constant(c, num_value);
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    key_reg
+                }
+                LuaIndexKey::Idx(_i) => {
+                    return Err("Unsupported index key type".to_string());
                 }
             };
 
@@ -462,17 +477,20 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
 }
 
 pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<u32, String> {
-    let params_list = closure.get_params_list()
+    let params_list = closure
+        .get_params_list()
         .ok_or("closure missing params list")?;
-    
+
     let params = params_list.get_params().collect::<Vec<_>>();
-    
-    let body = closure.get_block()
-        .ok_or("closure missing body")?;
+
+    let body = closure.get_block().ok_or("closure missing body")?;
 
     // Create a new compiler for the function body
     let mut func_compiler = Compiler::new();
     
+    // Save parent locals for upvalue resolution
+    let parent_locals = c.locals.clone();
+
     // Set up parameters as local variables
     for (i, param) in params.iter().enumerate() {
         // Try to get parameter name
@@ -481,7 +499,7 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
         } else {
             format!("arg{}", i)
         };
-        
+
         func_compiler.locals.push(super::Local {
             name: param_name.clone(),
             depth: 0,
@@ -489,32 +507,37 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
         });
         func_compiler.chunk.locals.push(param_name);
     }
-    
+
     func_compiler.chunk.param_count = params.len();
     func_compiler.next_register = params.len() as u32;
-    
+
     // Compile function body
-    crate::compiler::compile_block(&mut func_compiler, &body)?;
-    
+    // TODO: Capture upvalue references during compilation
+    compile_block(&mut func_compiler, &body)?;
+
     // Add implicit return if needed
-    if func_compiler.chunk.code.is_empty() 
-        || Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap()) != OpCode::Return {
+    if func_compiler.chunk.code.is_empty()
+        || Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap()) != OpCode::Return
+    {
         let ret_instr = Instruction::encode_abc(OpCode::Return, 0, 1, 0);
         func_compiler.chunk.code.push(ret_instr);
     }
-    
+
     func_compiler.chunk.max_stack_size = func_compiler.next_register as usize;
     
+    // TODO: Resolve upvalues and emit GetUpval/SetUpval instructions
+    // For now, upvalues are not fully implemented
+
     // Add the function chunk to the parent compiler
     let chunk_index = c.child_chunks.len();
     c.child_chunks.push(func_compiler.chunk);
-    
+
     // Emit Closure instruction
     let dest_reg = c.next_register;
     c.next_register += 1;
-    
+
     let closure_instr = Instruction::encode_abx(OpCode::Closure, dest_reg, chunk_index as u32);
     c.chunk.code.push(closure_instr);
-    
+
     Ok(dest_reg)
 }

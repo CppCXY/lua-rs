@@ -36,6 +36,7 @@ pub(crate) struct Upvalue {
 }
 
 /// Local variable info
+#[derive(Clone)]
 pub(crate) struct Local {
     pub name: String,
     pub depth: usize,
