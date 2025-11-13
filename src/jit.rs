@@ -126,6 +126,12 @@ impl JitCompiler {
             return Ok(func);
         }
 
+        // Pre-scan to check if this code contains loops or unsupported features
+        // If so, bail out early without attempting compilation
+        if !self.can_compile_from(chunk, start_pc)? {
+            return Err("Contains unsupported features (loops, calls, etc.)".to_string());
+        }
+
         // Create function signature
         // fn(registers: *mut LuaValue, constants: *const LuaValue) -> i32
         let pointer_type = self.module.target_config().pointer_type();
@@ -175,6 +181,8 @@ impl JitCompiler {
         block_map.insert(start_pc, entry_block);
         sealed_blocks.insert(entry_block);
 
+        let mut block_terminated = false; // Track if current block is terminated
+
         while pc < chunk.code.len() && compiled_instructions < MAX_COMPILE_SIZE {
             let instr = chunk.code[pc];
             let opcode = Instruction::get_opcode(instr);
@@ -195,7 +203,7 @@ impl JitCompiler {
                         // Return current PC
                         let return_val = func_builder.ins().iconst(types::I32, (pc + 1) as i64);
                         func_builder.ins().return_(&[return_val]);
-                        pc = chunk.code.len(); // Exit loop
+                        block_terminated = true;
                         break;
                     }
                     
@@ -246,9 +254,11 @@ impl JitCompiler {
             }
         }
 
-        // Return the next PC
-        let return_val = func_builder.ins().iconst(types::I32, pc as i64);
-        func_builder.ins().return_(&[return_val]);
+        // Return the next PC (only if block is not already terminated)
+        if !block_terminated {
+            let return_val = func_builder.ins().iconst(types::I32, pc as i64);
+            func_builder.ins().return_(&[return_val]);
+        }
 
         // Finalize function
         func_builder.finalize();
@@ -272,6 +282,49 @@ impl JitCompiler {
             .insert((chunk_id, start_pc), (func_id, jit_func));
 
         Ok(jit_func)
+    }
+
+    /// Pre-scan code to check if it can be compiled
+    /// Returns false if code contains loops, function calls, or other unsupported features
+    fn can_compile_from(&self, chunk: &Chunk, start_pc: usize) -> Result<bool, String> {
+        let mut pc = start_pc;
+        let mut scanned = 0;
+        const MAX_SCAN: usize = 200;
+
+        while pc < chunk.code.len() && scanned < MAX_SCAN {
+            let instr = chunk.code[pc];
+            let opcode = Instruction::get_opcode(instr);
+
+            match opcode {
+                // Unsupported operations
+                OpCode::Call | OpCode::Return => {
+                    return Ok(false);
+                }
+                OpCode::Jmp => {
+                    let sbx = Instruction::get_sbx(instr);
+                    let target_pc = (pc as i32 + 1 + sbx) as usize;
+                    
+                    // Backward jump = loop, cannot compile
+                    if target_pc <= start_pc {
+                        return Ok(false);
+                    }
+                }
+                // Check if operation is supported
+                OpCode::Move | OpCode::LoadK | OpCode::LoadNil | OpCode::LoadBool 
+                | OpCode::Add | OpCode::Sub | OpCode::Mul => {
+                    // Supported
+                }
+                _ => {
+                    // Unsupported operation
+                    return Ok(false);
+                }
+            }
+
+            pc += 1;
+            scanned += 1;
+        }
+
+        Ok(true)
     }
 
     /// Compile a single instruction to Cranelift IR
