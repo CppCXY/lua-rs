@@ -204,13 +204,13 @@ fn string_format(vm: &mut VM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(LuaValue::String(result)))
 }
 
-/// string.find(s, pattern [, init [, plain]]) - Find pattern (simplified)
+/// string.find(s, pattern [, init [, plain]]) - Find pattern
 fn string_find(vm: &mut VM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.find")?
         .as_string()
         .ok_or_else(|| "bad argument #1 to 'string.find' (string expected)".to_string())?;
     
-    let pattern = require_arg(vm, 1, "string.find")?
+    let pattern_str = require_arg(vm, 1, "string.find")?
         .as_string()
         .ok_or_else(|| "bad argument #2 to 'string.find' (string expected)".to_string())?;
     
@@ -222,32 +222,89 @@ fn string_find(vm: &mut VM) -> Result<MultiValue, String> {
         .map(|v| v.is_truthy())
         .unwrap_or(false);
     
-    let start_pos = if init > 0 { init - 1 } else { 0 } as usize;
+    let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
     
-    if let Some(pos) = s.as_str()[start_pos..].find(pattern.as_str()) {
-        let actual_pos = start_pos + pos;
-        Ok(MultiValue::multiple(vec![
-            LuaValue::Integer((actual_pos + 1) as i64),
-            LuaValue::Integer((actual_pos + pattern.as_str().len()) as i64),
-        ]))
+    if plain {
+        // Plain string search (no pattern matching)
+        if let Some(pos) = s.as_str()[start_pos..].find(pattern_str.as_str()) {
+            let actual_pos = start_pos + pos;
+            Ok(MultiValue::multiple(vec![
+                LuaValue::Integer((actual_pos + 1) as i64),
+                LuaValue::Integer((actual_pos + pattern_str.as_str().len()) as i64),
+            ]))
+        } else {
+            Ok(MultiValue::single(LuaValue::Nil))
+        }
     } else {
-        Ok(MultiValue::single(LuaValue::Nil))
+        // Pattern matching
+        match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
+            Ok(pattern) => {
+                if let Some((start, end, captures)) = crate::lua_pattern::find(s.as_str(), &pattern, start_pos) {
+                    let mut results = vec![
+                        LuaValue::Integer((start + 1) as i64),
+                        LuaValue::Integer(end as i64),
+                    ];
+                    // Add captures
+                    for cap in captures {
+                        results.push(LuaValue::String(vm.create_string(cap)));
+                    }
+                    Ok(MultiValue::multiple(results))
+                } else {
+                    Ok(MultiValue::single(LuaValue::Nil))
+                }
+            }
+            Err(e) => Err(format!("invalid pattern: {}", e)),
+        }
     }
 }
 
-/// string.match(s, pattern [, init]) - Match pattern (stub)
+/// string.match(s, pattern [, init]) - Match pattern
 fn string_match(vm: &mut VM) -> Result<MultiValue, String> {
-    // TODO: Implement pattern matching
-    Ok(MultiValue::single(LuaValue::Nil))
+    let s = require_arg(vm, 0, "string.match")?
+        .as_string()
+        .ok_or_else(|| "bad argument #1 to 'string.match' (string expected)".to_string())?;
+    
+    let pattern_str = require_arg(vm, 1, "string.match")?
+        .as_string()
+        .ok_or_else(|| "bad argument #2 to 'string.match' (string expected)".to_string())?;
+    
+    let init = get_arg(vm, 2)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(1);
+    
+    let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
+    let text = &s.as_str()[start_pos..];
+    
+    match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
+        Ok(pattern) => {
+            if let Some((start, end, captures)) = crate::lua_pattern::find(text, &pattern, 0) {
+                if captures.is_empty() {
+                    // No captures, return the matched portion
+                    let matched = &text[start..end];
+                    Ok(MultiValue::single(LuaValue::String(vm.create_string(matched.to_string()))))
+                } else {
+                    // Return captures
+                    let results: Vec<LuaValue> = captures
+                        .into_iter()
+                        .map(|s| LuaValue::String(vm.create_string(s)))
+                        .collect();
+                    Ok(MultiValue::multiple(results))
+                }
+            } else {
+                Ok(MultiValue::single(LuaValue::Nil))
+            }
+        }
+        Err(e) => Err(format!("invalid pattern: {}", e)),
+    }
 }
 
-/// string.gsub(s, pattern, repl [, n]) - Global substitution (simplified)
+/// string.gsub(s, pattern, repl [, n]) - Global substitution
 fn string_gsub(vm: &mut VM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.gsub")?
         .as_string()
         .ok_or_else(|| "bad argument #1 to 'string.gsub' (string expected)".to_string())?;
     
-    let pattern = require_arg(vm, 1, "string.gsub")?
+    let pattern_str = require_arg(vm, 1, "string.gsub")?
         .as_string()
         .ok_or_else(|| "bad argument #2 to 'string.gsub' (string expected)".to_string())?;
     
@@ -255,18 +312,20 @@ fn string_gsub(vm: &mut VM) -> Result<MultiValue, String> {
         .as_string()
         .ok_or_else(|| "bad argument #3 to 'string.gsub' (string expected)".to_string())?;
     
-    let n = get_arg(vm, 3)
-        .and_then(|v| v.as_integer());
+    let max = get_arg(vm, 3).and_then(|v| v.as_integer()).map(|n| n as usize);
     
-    // Simplified: just replace all occurrences
-    let result_str = s.as_str().replace(pattern.as_str(), repl.as_str());
-    let count = s.as_str().matches(pattern.as_str()).count();
-    
-    let result = vm.create_string(result_str);
-    Ok(MultiValue::multiple(vec![
-        LuaValue::String(result),
-        LuaValue::Integer(count as i64),
-    ]))
+    match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
+        Ok(pattern) => {
+            let (result_str, count) = crate::lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max);
+            
+            let result = vm.create_string(result_str);
+            Ok(MultiValue::multiple(vec![
+                LuaValue::String(result),
+                LuaValue::Integer(count as i64),
+            ]))
+        }
+        Err(e) => Err(format!("invalid pattern: {}", e)),
+    }
 }
 
 /// string.gmatch(s, pattern) - Iterator for pattern matches (stub)

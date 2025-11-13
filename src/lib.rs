@@ -8,6 +8,7 @@ pub mod vm;
 pub mod gc;
 pub mod lib_registry;
 pub mod stdlib;
+pub mod lua_pattern;
 
 pub use value::{LuaValue, LuaString, LuaTable, LuaFunction, Chunk};
 pub use opcode::{OpCode, Instruction};
