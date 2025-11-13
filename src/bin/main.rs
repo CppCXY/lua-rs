@@ -1,4 +1,4 @@
-use lua_rt::{Compiler, LuaValue, VM};
+use lua_rs::{Compiler, LuaValue, VM};
 use std::io::{self, Write};
 use std::rc::Rc;
 use std::env;
@@ -91,7 +91,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use lua_rt::execute;
+    use lua_rs::execute;
 
     #[test]
     fn test_arithmetic() {
