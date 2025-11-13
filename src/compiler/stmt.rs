@@ -2,6 +2,7 @@
 
 use super::expr::{compile_call_expr, compile_expr, compile_var_expr};
 use super::{Compiler, helpers::*};
+use crate::compiler::compile_block;
 use crate::opcode::{Instruction, OpCode};
 use emmylua_parser::{
     LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaForRangeStat, LuaForStat, LuaIfStat,
@@ -116,8 +117,6 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 
 /// Compile if statement
 fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
-    use super::compile_block;
-    
     // Structure: if <condition> then <block> [elseif <condition> then <block>]* [else <block>] end
     let mut end_jumps = Vec::new();
 
@@ -181,8 +180,6 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
 
 /// Compile while loop
 fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), String> {
-    use super::compile_block;
-    
     // Structure: while <condition> do <block> end
     
     // Begin loop
@@ -222,8 +219,6 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 
 /// Compile repeat-until loop
 fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), String> {
-    use super::compile_block;
-    
     // Structure: repeat <block> until <condition>
     
     // Begin loop
@@ -260,9 +255,7 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
 }
 
 /// Compile numeric for loop
-fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
-    use super::compile_block;
-    
+fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {    
     // Structure: for <var> = <start>, <end> [, <step>] do <block> end
     
     // Get loop variable name
@@ -359,9 +352,7 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 }
 
 /// Compile generic for loop
-fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<(), String> {
-    use super::compile_block;
-    
+fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<(), String> {    
     // Structure: for <var-list> in <expr-list> do <block> end
     // This is a simplified implementation - full iterator protocol is complex
     
@@ -429,8 +420,6 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
 
 /// Compile do-end block
 fn compile_do_stat(c: &mut Compiler, stat: &LuaDoStat) -> Result<(), String> {
-    use super::compile_block;
-
     begin_scope(c);
 
     if let Some(block) = stat.get_block() {
