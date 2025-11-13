@@ -205,22 +205,49 @@ pub fn compile_call_expr_with_returns(
         .collect::<Vec<_>>();
 
     // Handle method call (colon syntax: obj:method(args))
-    // For method calls, we need to insert 'self' as the first argument
+    // For method calls, we compile obj once, then use GetTable to get the method
     let (func_src_reg, actual_args, self_reg_opt) = if expr.is_colon_call()
         && let LuaExpr::IndexExpr(prefix_index_expr) = prefix_expr
     {
-        // For obj:method(args), prefix_index_expr is obj.method
-        // We need to evaluate obj and method separately
+        // For obj:method(args), we compile obj once
         let self_expr = prefix_index_expr.get_prefix_expr().ok_or("missing self expr")?;
+        let obj_reg = compile_expr(c, &self_expr)?;
         
-        // Compile self (obj) into a register
-        let self_reg = compile_expr(c, &self_expr)?;
+        // Get the method key
+        let key = prefix_index_expr.get_index_key().ok_or("Index expression missing key")?;
+        let key_reg = match key {
+            LuaIndexKey::Name(name_token) => {
+                let field_name = name_token.get_name_text().to_string();
+                let lua_str = intern_string(c, field_name);
+                let const_idx = add_constant(c, LuaValue::String(lua_str));
+                let key_reg = alloc_register(c);
+                emit_load_constant(c, key_reg, const_idx);
+                key_reg
+            }
+            LuaIndexKey::String(string_token) => {
+                let string_value = string_token.get_value();
+                let lua_str = intern_string(c, string_value);
+                let const_idx = add_constant(c, LuaValue::String(lua_str));
+                let key_reg = alloc_register(c);
+                emit_load_constant(c, key_reg, const_idx);
+                key_reg
+            }
+            LuaIndexKey::Expr(key_expr) => {
+                compile_expr(c, &key_expr)?
+            }
+            _ => return Err("Unsupported method key type".to_string()),
+        };
         
-        // Compile the method lookup (obj.method) into func register
-        let func_reg = compile_index_expr(c, &prefix_index_expr)?;
+        // Get the method: func = obj[key]
+        let func_reg = alloc_register(c);
+        emit(
+            c,
+            Instruction::encode_abc(OpCode::GetTable, func_reg, obj_reg, key_reg),
+        );
         
-        // Return: (function_register, args_to_add_after_self, Some(self_register))
-        (func_reg, arg_exprs, Some(self_reg))
+        // Return: (function_register, args, Some(self_register))
+        // obj_reg is reused as self parameter
+        (func_reg, arg_exprs, Some(obj_reg))
     } else {
         // Regular call: func(args)
         let func_reg = compile_expr(c, &prefix_expr)?;

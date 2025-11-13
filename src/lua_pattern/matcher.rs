@@ -1,7 +1,7 @@
 // Lua pattern matcher
 // Implements actual pattern matching logic
 
-use super::parser::{AnchorType, CharClass, Pattern, RepeatMode};
+use super::parser::{AnchorType, Pattern, RepeatMode};
 
 /// Find pattern in string, returns (start, end, captures)
 pub fn find(text: &str, pattern: &Pattern, init: usize) -> Option<(usize, usize, Vec<String>)> {
@@ -39,7 +39,7 @@ pub fn gsub(text: &str, pattern: &Pattern, replacement: &str, max: Option<usize>
             }
         }
         
-        if let Some((end_pos, captures)) = try_match(pattern, &text_chars, pos) {
+        if let Some((end_pos, _)) = try_match(pattern, &text_chars, pos) {
             // Found match
             count += 1;
             

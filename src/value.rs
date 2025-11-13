@@ -158,6 +158,15 @@ impl LuaValue {
     pub fn is_callable(&self) -> bool {
         matches!(self, LuaValue::Function(_) | LuaValue::CFunction(_))
     }
+    
+    /// Get metatable for tables and userdata
+    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
+        match self {
+            LuaValue::Userdata(ud) => ud.get_metatable(),
+            LuaValue::Table(t) => t.borrow().get_metatable().clone(),
+            _ => None,
+        }
+    }
 
     // Value extractors
     pub fn as_boolean(&self) -> Option<bool> {
@@ -689,21 +698,21 @@ impl fmt::Debug for LuaUpvalue {
 #[derive(Clone)]
 pub struct LuaUserdata {
     data: Rc<RefCell<Box<dyn Any>>>,
-    metatable: Option<Rc<RefCell<LuaTable>>>,
+    metatable: Rc<RefCell<Option<Rc<RefCell<LuaTable>>>>>,
 }
 
 impl LuaUserdata {
     pub fn new<T: Any>(data: T) -> Self {
         LuaUserdata {
             data: Rc::new(RefCell::new(Box::new(data))),
-            metatable: None,
+            metatable: Rc::new(RefCell::new(None)),
         }
     }
     
     pub fn with_metatable<T: Any>(data: T, metatable: Rc<RefCell<LuaTable>>) -> Self {
         LuaUserdata {
             data: Rc::new(RefCell::new(Box::new(data))),
-            metatable: Some(metatable),
+            metatable: Rc::new(RefCell::new(Some(metatable))),
         }
     }
     
@@ -712,11 +721,11 @@ impl LuaUserdata {
     }
     
     pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        self.metatable.clone()
+        self.metatable.borrow().clone()
     }
     
-    pub fn set_metatable(&mut self, metatable: Option<Rc<RefCell<LuaTable>>>) {
-        self.metatable = metatable;
+    pub fn set_metatable(&self, metatable: Option<Rc<RefCell<LuaTable>>>) {
+        *self.metatable.borrow_mut() = metatable;
     }
 }
 

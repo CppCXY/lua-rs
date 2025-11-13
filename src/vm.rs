@@ -744,6 +744,50 @@ impl VM {
         let frame = self.current_frame();
         let func = frame.registers[a].clone();
 
+        // Check for __call metamethod on non-functions (tables, userdata)
+        if !func.is_function() && !func.is_cfunction() {
+            // Look for __call metamethod
+            if let Some(metatable) = func.get_metatable() {
+                let call_key = self.create_string("__call".to_string());
+                if let Some(call_func) = metatable.borrow().raw_get(&LuaValue::String(call_key)) {
+                    // Replace func with the __call function
+                    // But we need to pass the original value as the first argument
+                    // This means shifting all arguments: (func, arg1, arg2) -> (call_func, func, arg1, arg2)
+                    
+                    let current_frame = self.current_frame_mut();
+                    
+                    // Shift arguments right by one position
+                    // We need to be careful about register allocation
+                    let original_func = func.clone();
+                    let call_function = call_func.clone();
+                    
+                    // Create new register layout: [call_func, original_func, arg1, arg2, ...]
+                    current_frame.registers[a] = call_function;
+                    
+                    // Shift existing arguments
+                    for i in (1..b).rev() {
+                        if a + i + 1 < current_frame.registers.len() {
+                            current_frame.registers[a + i + 1] = current_frame.registers[a + i].clone();
+                        }
+                    }
+                    
+                    // Place original func as first argument
+                    if a + 1 < current_frame.registers.len() {
+                        current_frame.registers[a + 1] = original_func;
+                    }
+                    
+                    // Adjust b to include the extra argument
+                    let new_b = b + 1;
+                    
+                    // Recreate instruction with new b
+                    let new_instr = Instruction::encode_abc(OpCode::Call, a as u32, new_b as u32, c as u32);
+                    return self.op_call(new_instr);
+                }
+            }
+            
+            return Err("Attempt to call a non-function value".to_string());
+        }
+
         // Check for CFunction (native Rust function)
         if let Some(cfunc) = func.as_cfunction() {
             // Create a temporary call frame with arguments in registers
