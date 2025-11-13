@@ -2,7 +2,7 @@
 // Executes compiled bytecode with register-based architecture
 
 use crate::gc::{GC, GcObjectType};
-use crate::jit::{HotPathTracker, JitCompiler};
+use crate::jit::JitCompiler;
 use crate::lib_registry;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue};
@@ -28,11 +28,8 @@ pub struct VM {
     // Next frame ID (for tracking frames)
     next_frame_id: usize,
 
-    // JIT compiler (optional, enabled by default)
+    // JIT compiler (optional, disabled by default for now)
     jit_compiler: Option<JitCompiler>,
-
-    // Hot path tracker for JIT compilation
-    hot_path_tracker: HotPathTracker,
 
     // JIT enabled flag
     jit_enabled: bool,
@@ -68,7 +65,6 @@ impl VM {
             open_upvalues: Vec::new(),
             next_frame_id: 0,
             jit_compiler,
-            hot_path_tracker: HotPathTracker::new(),
             jit_enabled: enable_jit,
         };
 
@@ -141,50 +137,9 @@ impl VM {
                 continue;
             }
 
-            // JIT compilation check
-            if self.jit_enabled && self.jit_compiler.is_some() {
-                // Check if this is a hot path
-                if self.hot_path_tracker.record(pc) {
-                    // Try to compile this hot path
-                    let chunk_id = chunk_ptr.as_ref() as *const Chunk as usize;
-                    
-                    // Check if already compiled or try to compile
-                    let jit_func_opt = if let Some(ref mut jit) = self.jit_compiler {
-                        if let Some(jit_func) = jit.get_compiled(chunk_id, pc) {
-                            Some(jit_func)
-                        } else {
-                            // Compile hot path
-                            match jit.compile_hot_path(&chunk_ptr, pc) {
-                                Ok(jit_func) => Some(jit_func),
-                                Err(_) => {
-                                    // Compilation failed, fall back to interpreter
-                                    self.hot_path_tracker.reset(pc);
-                                    None
-                                }
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    
-                    // Execute JIT compiled code if available
-                    if let Some(jit_func) = jit_func_opt {
-                        let frame = &mut self.frames[frame_idx];
-                        let registers_ptr = frame.registers.as_mut_ptr();
-                        let constants_ptr = chunk_ptr.constants.as_ptr();
-                        
-                        unsafe {
-                            let new_pc = jit_func(registers_ptr, constants_ptr);
-                            frame.pc = new_pc as usize;
-                            
-                            if let Some(ref mut jit) = self.jit_compiler {
-                                jit.stats.native_executions += 1;
-                            }
-                        }
-                        continue;
-                    }
-                }
-            }
+            // JIT is currently disabled due to architectural limitations
+            // The current JIT implementation cannot safely operate on LuaValue (Rust enum)
+            // TODO: Reimplement JIT with proper value representation
 
             let instr = chunk_ptr.code[pc];
             self.frames[frame_idx].pc += 1;

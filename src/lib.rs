@@ -10,6 +10,7 @@ pub mod lib_registry;
 pub mod stdlib;
 pub mod lua_pattern;
 pub mod jit;
+pub mod jit_value;
 
 pub use value::{LuaValue, LuaString, LuaTable, LuaFunction, Chunk};
 pub use opcode::{OpCode, Instruction};
@@ -17,7 +18,7 @@ pub use compiler::Compiler;
 pub use vm::VM;
 pub use gc::GC;
 pub use lib_registry::LibraryRegistry;
-pub use jit::{JitCompiler, HotPathTracker};
+pub use jit::JitCompiler;
 
 use std::rc::Rc;
 

@@ -1,5 +1,6 @@
 // JIT Compiler for Lua using Cranelift
 // This module provides Just-In-Time compilation of Lua bytecode to native machine code
+// Redesigned for efficiency: uses fixed-layout values and method-JIT approach
 
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -7,77 +8,29 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 use std::mem;
 
+use crate::jit_value::JitValue;
 use crate::opcode::{Instruction, OpCode};
-use crate::value::{Chunk, LuaValue};
+use crate::value::Chunk;
 
 /// Compiled native function signature
-/// Takes registers pointer and returns nothing (modifies registers in-place)
-pub type JitFunction = unsafe extern "C" fn(*mut LuaValue, *const LuaValue) -> i32;
+/// Takes JitValue registers array, constants array, and initial PC
+/// Returns new PC after execution (-1 if should return to interpreter)
+pub type JitFunction = unsafe extern "C" fn(*mut JitValue, *const JitValue, i32) -> i32;
 
 /// JIT compilation statistics
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct JitStats {
     pub compilations: usize,
-    pub execution_count: usize,
     pub native_executions: usize,
-}
-
-/// Hot path detection threshold
-const HOT_THRESHOLD: usize = 10;
-
-/// Tracks execution counts for hot path detection
-#[derive(Debug)]
-pub struct HotPathTracker {
-    counts: HashMap<usize, usize>, // pc -> execution count
-    failed: std::collections::HashSet<usize>, // PCs where compilation failed
-}
-
-impl HotPathTracker {
-    pub fn new() -> Self {
-        HotPathTracker {
-            counts: HashMap::new(),
-            failed: std::collections::HashSet::new(),
-        }
-    }
-
-    /// Record an execution at a given program counter
-    /// Returns true if this location just became hot (first time hitting threshold)
-    pub fn record(&mut self, pc: usize) -> bool {
-        // Don't track locations that failed compilation
-        if self.failed.contains(&pc) {
-            return false;
-        }
-        
-        let count = self.counts.entry(pc).or_insert(0);
-        *count += 1;
-        
-        // Return true only when we JUST hit the threshold
-        *count == HOT_THRESHOLD
-    }
-
-    /// Check if a location is hot
-    pub fn is_hot(&self, pc: usize) -> bool {
-        self.counts.get(&pc).map_or(false, |&c| c >= HOT_THRESHOLD)
-    }
-
-    /// Mark this location as compilation-failed (don't try again)
-    pub fn mark_failed(&mut self, pc: usize) {
-        self.failed.insert(pc);
-        self.counts.remove(&pc);
-    }
-
-    /// Reset counter for a location (old reset method, now calls mark_failed)
-    pub fn reset(&mut self, pc: usize) {
-        self.mark_failed(pc);
-    }
+    pub failed_compilations: usize,
 }
 
 /// JIT Compiler using Cranelift
 pub struct JitCompiler {
     /// Cranelift JIT module
     module: JITModule,
-    /// Compiled function cache (chunk_id + pc -> function)
-    compiled_cache: HashMap<(usize, usize), (FuncId, JitFunction)>,
+    /// Compiled function cache (chunk_ptr -> function)
+    compiled_cache: HashMap<usize, (FuncId, JitFunction)>,
     /// Statistics
     pub stats: JitStats,
 }
@@ -112,42 +65,40 @@ impl JitCompiler {
         })
     }
 
-    /// Compile a hot path starting from the given PC
-    pub fn compile_hot_path(
-        &mut self,
-        chunk: &Chunk,
-        start_pc: usize,
-    ) -> Result<JitFunction, String> {
+    /// Compile an entire chunk
+    /// This replaces hot-path compilation with full-chunk compilation
+    pub fn compile_chunk(&mut self, chunk: &Chunk) -> Result<JitFunction, String> {
         self.stats.compilations += 1;
 
         // Check cache first
         let chunk_id = chunk as *const Chunk as usize;
-        if let Some(&(_, func)) = self.compiled_cache.get(&(chunk_id, start_pc)) {
+        if let Some(&(_, func)) = self.compiled_cache.get(&chunk_id) {
             return Ok(func);
         }
 
-        // Pre-scan to check if this code contains loops or unsupported features
-        // If so, bail out early without attempting compilation
-        if !self.can_compile_from(chunk, start_pc)? {
-            return Err("Contains unsupported features (loops, calls, etc.)".to_string());
+        // Quick check: can we compile this chunk?
+        if !self.can_compile_chunk(chunk) {
+            self.stats.failed_compilations += 1;
+            return Err("Chunk contains unsupported features".to_string());
         }
 
         // Create function signature
-        // fn(registers: *mut LuaValue, constants: *const LuaValue) -> i32
+        // fn(registers: *mut JitValue, constants: *const JitValue, pc: i32) -> i32
         let pointer_type = self.module.target_config().pointer_type();
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(pointer_type)); // registers
         sig.params.push(AbiParam::new(pointer_type)); // constants
+        sig.params.push(AbiParam::new(types::I32)); // initial pc
         sig.returns.push(AbiParam::new(types::I32)); // return pc
 
         // Declare function
-        let func_name = format!("jit_func_{}_{}", chunk_id, start_pc);
+        let func_name = format!("jit_chunk_{}", chunk_id);
         let func_id = self
             .module
             .declare_function(&func_name, Linkage::Local, &sig)
             .map_err(|e| format!("Failed to declare function: {}", e))?;
 
-        // Create function builder with fresh context
+        // Create function builder
         let mut func = codegen::ir::Function::with_name_signature(
             codegen::ir::UserFuncName::user(0, func_id.as_u32()),
             sig,
@@ -160,104 +111,77 @@ impl JitCompiler {
         let entry_block = func_builder.create_block();
         func_builder.append_block_params_for_function_params(entry_block);
         func_builder.switch_to_block(entry_block);
-        func_builder.seal_block(entry_block);
 
         // Get function parameters
         let registers_ptr = func_builder.block_params(entry_block)[0];
         let constants_ptr = func_builder.block_params(entry_block)[1];
+        let _initial_pc = func_builder.block_params(entry_block)[2];
 
-        // Compile instructions
-        let mut pc = start_pc;
-        let mut compiled_instructions = 0;
-        const MAX_COMPILE_SIZE: usize = 200; // Limit compilation size
+        // Compile all instructions
+        let value_size = JitValue::SIZE as i32;
 
-        // Get pointer type for later use
-        let pointer_type = self.module.target_config().pointer_type();
-        let value_size = mem::size_of::<LuaValue>() as i32;
+        // Create blocks for each instruction (for jump targets)
+        let mut blocks: Vec<Block> = Vec::new();
+        for _ in 0..chunk.code.len() {
+            blocks.push(func_builder.create_block());
+        }
 
-        // Track blocks for control flow (for jumps)
-        let mut block_map: HashMap<usize, Block> = HashMap::new();
-        let mut sealed_blocks: std::collections::HashSet<Block> = std::collections::HashSet::new();
-        block_map.insert(start_pc, entry_block);
-        sealed_blocks.insert(entry_block);
+        // Create exit block (for return/unsupported operations)
+        let exit_block = func_builder.create_block();
+        func_builder.append_block_params_for_function_returns(exit_block);
 
-        let mut block_terminated = false; // Track if current block is terminated
-
-        while pc < chunk.code.len() && compiled_instructions < MAX_COMPILE_SIZE {
-            let instr = chunk.code[pc];
+        // Jump to initial PC
+        func_builder.seal_block(entry_block);
+        
+        for (pc, &instr) in chunk.code.iter().enumerate() {
+            func_builder.switch_to_block(blocks[pc]);
+            
             let opcode = Instruction::get_opcode(instr);
-
-            // Check if we should stop compilation
+            
             match opcode {
-                OpCode::Call | OpCode::Return => {
-                    // Stop at function calls and returns for now
-                    break;
+                OpCode::Move | OpCode::LoadK | OpCode::LoadNil | OpCode::LoadBool
+                | OpCode::Add | OpCode::Sub | OpCode::Mul => {
+                    // Compile this instruction
+                    Self::compile_instruction(
+                        &mut func_builder,
+                        instr,
+                        opcode,
+                        registers_ptr,
+                        constants_ptr,
+                        pointer_type,
+                        value_size,
+                    )?;
+                    
+                    // Jump to next instruction
+                    if pc + 1 < chunk.code.len() {
+                        func_builder.ins().jump(blocks[pc + 1], &[]);
+                    } else {
+                        // End of chunk
+                        let ret_pc = func_builder.ins().iconst(types::I32, (pc + 1) as i64);
+                        func_builder.ins().return_(&[ret_pc]);
+                    }
                 }
+                
                 OpCode::Jmp => {
-                    // Handle jump instruction
                     let sbx = Instruction::get_sbx(instr);
                     let target_pc = (pc as i32 + 1 + sbx) as usize;
                     
-                    // For backward jumps (loops), stop compilation to avoid complexity
-                    if target_pc <= start_pc {
-                        // Return current PC
-                        let return_val = func_builder.ins().iconst(types::I32, (pc + 1) as i64);
-                        func_builder.ins().return_(&[return_val]);
-                        block_terminated = true;
-                        break;
+                    if target_pc < chunk.code.len() {
+                        func_builder.ins().jump(blocks[target_pc], &[]);
+                    } else {
+                        let ret_pc = func_builder.ins().iconst(types::I32, target_pc as i64);
+                        func_builder.ins().return_(&[ret_pc]);
                     }
-                    
-                    // Create target block if it doesn't exist
-                    if !block_map.contains_key(&target_pc) {
-                        let target_block = func_builder.create_block();
-                        block_map.insert(target_pc, target_block);
-                    }
-                    
-                    let target_block = *block_map.get(&target_pc).unwrap();
-                    func_builder.ins().jump(target_block, &[]);
-                    
-                    // Seal current block
-                    let current_block = func_builder.current_block().unwrap();
-                    if !sealed_blocks.contains(&current_block) {
-                        func_builder.seal_block(current_block);
-                        sealed_blocks.insert(current_block);
-                    }
-                    
-                    // Switch to target block
-                    func_builder.switch_to_block(target_block);
-                    pc += 1;
-                    compiled_instructions += 1;
-                    continue;
                 }
-                _ => {}
+                
+                OpCode::Return | _ => {
+                    // Unsupported operation: return to interpreter
+                    let ret_pc = func_builder.ins().iconst(types::I32, pc as i64);
+                    func_builder.ins().return_(&[ret_pc]);
+                }
             }
-
-            // Compile this instruction
-            Self::compile_instruction_static(
-                &mut func_builder,
-                instr,
-                opcode,
-                registers_ptr,
-                constants_ptr,
-                pointer_type,
-                value_size,
-            )?;
-
-            pc += 1;
-            compiled_instructions += 1;
-        }
-        
-        // Seal all blocks that haven't been sealed
-        for &block in block_map.values() {
-            if !sealed_blocks.contains(&block) {
-                func_builder.seal_block(block);
-            }
-        }
-
-        // Return the next PC (only if block is not already terminated)
-        if !block_terminated {
-            let return_val = func_builder.ins().iconst(types::I32, pc as i64);
-            func_builder.ins().return_(&[return_val]);
+            
+            func_builder.seal_block(blocks[pc]);
         }
 
         // Finalize function
@@ -278,57 +202,31 @@ impl JitCompiler {
         let jit_func: JitFunction = unsafe { mem::transmute(code_ptr) };
 
         // Cache the compiled function
-        self.compiled_cache
-            .insert((chunk_id, start_pc), (func_id, jit_func));
+        self.compiled_cache.insert(chunk_id, (func_id, jit_func));
 
         Ok(jit_func)
     }
 
-    /// Pre-scan code to check if it can be compiled
-    /// Returns false if code contains loops, function calls, or other unsupported features
-    fn can_compile_from(&self, chunk: &Chunk, start_pc: usize) -> Result<bool, String> {
-        let mut pc = start_pc;
-        let mut scanned = 0;
-        const MAX_SCAN: usize = 200;
-
-        while pc < chunk.code.len() && scanned < MAX_SCAN {
-            let instr = chunk.code[pc];
+    /// Check if a chunk can be compiled
+    fn can_compile_chunk(&self, chunk: &Chunk) -> bool {
+        for &instr in &chunk.code {
             let opcode = Instruction::get_opcode(instr);
-
             match opcode {
-                // Unsupported operations
-                OpCode::Call | OpCode::Return => {
-                    return Ok(false);
-                }
-                OpCode::Jmp => {
-                    let sbx = Instruction::get_sbx(instr);
-                    let target_pc = (pc as i32 + 1 + sbx) as usize;
-                    
-                    // Backward jump = loop, cannot compile
-                    if target_pc <= start_pc {
-                        return Ok(false);
-                    }
-                }
-                // Check if operation is supported
-                OpCode::Move | OpCode::LoadK | OpCode::LoadNil | OpCode::LoadBool 
-                | OpCode::Add | OpCode::Sub | OpCode::Mul => {
+                OpCode::Move | OpCode::LoadK | OpCode::LoadNil | OpCode::LoadBool
+                | OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Jmp => {
                     // Supported
                 }
                 _ => {
-                    // Unsupported operation
-                    return Ok(false);
+                    // Unsupported
+                    return false;
                 }
             }
-
-            pc += 1;
-            scanned += 1;
         }
-
-        Ok(true)
+        true
     }
 
     /// Compile a single instruction to Cranelift IR
-    fn compile_instruction_static(
+    fn compile_instruction(
         builder: &mut FunctionBuilder,
         instr: u32,
         opcode: OpCode,
@@ -337,7 +235,6 @@ impl JitCompiler {
         pointer_type: Type,
         value_size: i32,
     ) -> Result<(), String> {
-
         match opcode {
             OpCode::Move => {
                 let a = Instruction::get_a(instr) as i32;
@@ -346,12 +243,16 @@ impl JitCompiler {
                 // Load R(B)
                 let b_offset = builder.ins().iconst(pointer_type, (b * value_size) as i64);
                 let b_addr = builder.ins().iadd(registers_ptr, b_offset);
-                let b_val = builder.ins().load(types::I64, MemFlags::new(), b_addr, 0);
+                
+                // Load both tag and data
+                let tag = builder.ins().load(types::I64, MemFlags::new(), b_addr, 0);
+                let data = builder.ins().load(types::I64, MemFlags::new(), b_addr, 8);
 
                 // Store to R(A)
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
-                builder.ins().store(MemFlags::new(), b_val, a_addr, 0);
+                builder.ins().store(MemFlags::new(), tag, a_addr, 0);
+                builder.ins().store(MemFlags::new(), data, a_addr, 8);
             }
 
             OpCode::LoadK => {
@@ -361,12 +262,14 @@ impl JitCompiler {
                 // Load K(Bx)
                 let k_offset = builder.ins().iconst(pointer_type, (bx * value_size) as i64);
                 let k_addr = builder.ins().iadd(constants_ptr, k_offset);
-                let k_val = builder.ins().load(types::I64, MemFlags::new(), k_addr, 0);
+                let tag = builder.ins().load(types::I64, MemFlags::new(), k_addr, 0);
+                let data = builder.ins().load(types::I64, MemFlags::new(), k_addr, 8);
 
                 // Store to R(A)
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
-                builder.ins().store(MemFlags::new(), k_val, a_addr, 0);
+                builder.ins().store(MemFlags::new(), tag, a_addr, 0);
+                builder.ins().store(MemFlags::new(), data, a_addr, 8);
             }
 
             OpCode::Add => {
@@ -390,15 +293,11 @@ impl JitCompiler {
                 // Add
                 let result = builder.ins().iadd(b_val, c_val);
 
-                // Store to R(A) - store discriminant and value
+                // Store result (tag = 2 for Integer in JitValue)
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
-                
-                // Store discriminant (3 for Integer variant)
-                let discriminant = builder.ins().iconst(types::I64, 3);
-                builder.ins().store(MemFlags::new(), discriminant, a_addr, 0);
-                
-                // Store value
+                let int_tag = builder.ins().iconst(types::I64, 2);
+                builder.ins().store(MemFlags::new(), int_tag, a_addr, 0);
                 builder.ins().store(MemFlags::new(), result, a_addr, 8);
             }
 
@@ -451,9 +350,11 @@ impl JitCompiler {
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
                 
-                // Nil discriminant is 0
-                let discriminant = builder.ins().iconst(types::I64, 0);
-                builder.ins().store(MemFlags::new(), discriminant, a_addr, 0);
+                // Nil tag = 0
+                let tag = builder.ins().iconst(types::I64, 0);
+                let data = builder.ins().iconst(types::I64, 0);
+                builder.ins().store(MemFlags::new(), tag, a_addr, 0);
+                builder.ins().store(MemFlags::new(), data, a_addr, 8);
             }
 
             OpCode::LoadBool => {
@@ -463,13 +364,11 @@ impl JitCompiler {
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
                 
-                // Boolean discriminant is 1
-                let discriminant = builder.ins().iconst(types::I64, 1);
-                builder.ins().store(MemFlags::new(), discriminant, a_addr, 0);
-                
-                // Store boolean value
-                let bool_val = builder.ins().iconst(types::I64, if b != 0 { 1 } else { 0 });
-                builder.ins().store(MemFlags::new(), bool_val, a_addr, 8);
+                // Boolean tag = 1
+                let tag = builder.ins().iconst(types::I64, 1);
+                let data = builder.ins().iconst(types::I64, if b != 0 { 1 } else { 0 });
+                builder.ins().store(MemFlags::new(), tag, a_addr, 0);
+                builder.ins().store(MemFlags::new(), data, a_addr, 8);
             }
 
             _ => {
@@ -483,8 +382,8 @@ impl JitCompiler {
     }
 
     /// Get a compiled function from cache
-    pub fn get_compiled(&self, chunk_id: usize, pc: usize) -> Option<JitFunction> {
-        self.compiled_cache.get(&(chunk_id, pc)).map(|&(_, f)| f)
+    pub fn get_compiled(&self, chunk_id: usize) -> Option<JitFunction> {
+        self.compiled_cache.get(&chunk_id).map(|&(_, f)| f)
     }
 
     /// Clear the compilation cache
@@ -501,19 +400,5 @@ mod tests {
     fn test_jit_creation() {
         let jit = JitCompiler::new();
         assert!(jit.is_ok());
-    }
-
-    #[test]
-    fn test_hot_path_tracker() {
-        let mut tracker = HotPathTracker::new();
-        
-        // Record below threshold
-        for _ in 0..HOT_THRESHOLD - 1 {
-            assert!(!tracker.record(0));
-        }
-        
-        // Should become hot
-        assert!(tracker.record(0));
-        assert!(tracker.is_hot(0));
     }
 }
