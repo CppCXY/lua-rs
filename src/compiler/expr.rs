@@ -182,6 +182,11 @@ fn compile_paren_expr(c: &mut Compiler, expr: &LuaParenExpr) -> Result<u32, Stri
 
 /// Compile function call expression
 pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, String> {
+    compile_call_expr_with_returns(c, expr, 1)
+}
+
+/// Compile a call expression with specified number of expected return values
+pub fn compile_call_expr_with_returns(c: &mut Compiler, expr: &LuaCallExpr, num_returns: usize) -> Result<u32, String> {
     // Get prefix (function) and arguments from children
     let prefix_expr = expr.get_prefix_expr().ok_or("missing prefix expr")?;
     let arg_exprs = expr
@@ -193,9 +198,8 @@ pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, St
     let func_reg = compile_expr(c, &prefix_expr)?;
     let arg_count = arg_exprs.len();
 
-    // Ensure we have enough registers allocated for function + all arguments
-    // Arguments go into func_reg+1, func_reg+2, etc.
-    let needed_regs = func_reg + arg_count as u32 + 1;
+    // Ensure we have enough registers allocated for function + all arguments + returns
+    let needed_regs = func_reg + arg_count as u32 + num_returns.max(1) as u32;
     while c.next_register < needed_regs {
         alloc_register(c);
     }
@@ -221,9 +225,11 @@ pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, St
 
     // Emit call instruction
     // B = number of arguments + 1 (includes the function itself)
+    // C = number of expected return values + 1 (0 means all returns, 1 means 0 returns, 2 means 1 return, etc.)
+    let c_param = if num_returns == 0 { 0 } else { (num_returns + 1) as u32 };
     emit(
         c,
-        Instruction::encode_abc(OpCode::Call, func_reg, (arg_count + 1) as u32, 2),
+        Instruction::encode_abc(OpCode::Call, func_reg, (arg_count + 1) as u32, c_param),
     );
 
     Ok(func_reg)

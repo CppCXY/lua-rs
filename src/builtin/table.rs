@@ -69,22 +69,30 @@ pub fn lua_next(vm: &mut VM) -> Result<LuaValue, String> {
     let pairs: Vec<_> = table_ref.iter_all().collect();
     
     if pairs.is_empty() {
+        // Clear return values for empty table
+        vm.return_values.clear();
         return Ok(LuaValue::Nil); // Empty table
     }
     
-    // If index is nil, return first key
+    // If index is nil, return first key-value pair
     if index_val.is_nil() {
-        // TODO: Return both key and value as multi-return
-        return Ok(pairs[0].0.clone());
+        let (key, value) = &pairs[0];
+        // Store both key and value in return_values
+        vm.return_values = vec![key.clone(), value.clone()];
+        return Ok(key.clone());
     }
     
     // Find current key position and return next
     for (i, (key, _value)) in pairs.iter().enumerate() {
         if key == index_val {
             if i + 1 < pairs.len() {
-                // TODO: Return both key and value as multi-return
-                return Ok(pairs[i + 1].0.clone());
+                let (next_key, next_value) = &pairs[i + 1];
+                // Store both key and value in return_values
+                vm.return_values = vec![next_key.clone(), next_value.clone()];
+                return Ok(next_key.clone());
             } else {
+                // No more keys - clear return values
+                vm.return_values.clear();
                 return Ok(LuaValue::Nil); // No more keys
             }
         }

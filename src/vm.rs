@@ -17,6 +17,9 @@ pub struct VM {
     // GC root set (for future use)
     #[allow(dead_code)]
     gc_roots: Vec<LuaValue>,
+    
+    // Multi-return value buffer (temporary storage for function returns)
+    pub return_values: Vec<LuaValue>,
 }
 
 pub struct CallFrame {
@@ -32,6 +35,7 @@ impl VM {
             globals: HashMap::new(),
             frames: Vec::new(),
             gc_roots: Vec::new(),
+            return_values: Vec::new(),
         };
 
         // Register built-in functions
@@ -533,7 +537,7 @@ impl VM {
     fn op_call(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        let _c = Instruction::get_c(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame();
         let func = frame.registers[a].clone();
@@ -568,9 +572,35 @@ impl VM {
             // Pop the temporary frame
             self.frames.pop();
             
-            // Store result in register a
+            // Store return values
+            // C = 0: use all return values
+            // C = 1: no return values expected
+            // C = 2: 1 return value expected (at register a)
+            // C = 3: 2 return values expected (at registers a, a+1)
+            // etc.
+            let num_expected = if c == 0 {
+                self.return_values.len()
+            } else {
+                c - 1
+            };
+            
+            // Collect all return values first
+            let mut values_to_store = vec![result];
+            for i in 1..num_expected {
+                if i < self.return_values.len() {
+                    values_to_store.push(self.return_values[i].clone());
+                } else {
+                    values_to_store.push(LuaValue::nil());
+                }
+            }
+            
+            // Store them in registers
             let current_frame = self.current_frame_mut();
-            current_frame.registers[a] = result;
+            for (i, value) in values_to_store.into_iter().enumerate() {
+                if a + i < current_frame.registers.len() {
+                    current_frame.registers[a + i] = value;
+                }
+            }
             
             return Ok(());
         }
@@ -609,15 +639,39 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
 
-        let return_value = if b > 1 {
-            self.current_frame().registers[a].clone()
+        // Collect return values
+        // B = 0: return all values from A to top
+        // B = 1: return 0 values
+        // B = 2: return 1 value (registers[a])
+        // B = 3: return 2 values (registers[a], registers[a+1])
+        // etc.
+        let num_returns = if b == 0 {
+            // Return all values from A to top of stack
+            let frame = self.current_frame();
+            frame.registers.len().saturating_sub(a)
         } else {
-            LuaValue::nil()
+            b - 1
         };
-
+        
+        let mut values = Vec::new();
+        if num_returns > 0 {
+            let frame = self.current_frame();
+            for i in 0..num_returns {
+                if a + i < frame.registers.len() {
+                    values.push(frame.registers[a + i].clone());
+                } else {
+                    values.push(LuaValue::nil());
+                }
+            }
+        }
+        
         self.frames.pop();
+        
+        // Store return values
+        self.return_values = values;
 
-        Ok(return_value)
+        // For backward compatibility, return first value or nil
+        Ok(self.return_values.get(0).cloned().unwrap_or(LuaValue::nil()))
     }
 
     fn op_getupval(&mut self, instr: u32) -> Result<(), String> {

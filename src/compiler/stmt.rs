@@ -31,14 +31,47 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
 
 /// Compile local variable declaration
 fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), String> {
+    use emmylua_parser::LuaExpr;
+    use super::expr::compile_call_expr_with_returns;
+    
     let names: Vec<_> = stat.get_local_name_list().collect();
     let exprs: Vec<_> = stat.get_value_exprs().collect();
 
     // Compile init expressions
     let mut regs = Vec::new();
-    for expr in exprs {
-        let reg = compile_expr(c, &expr)?;
-        regs.push(reg);
+    
+    if !exprs.is_empty() {
+        // Compile all expressions except the last one
+        for expr in exprs.iter().take(exprs.len().saturating_sub(1)) {
+            let reg = compile_expr(c, expr)?;
+            regs.push(reg);
+        }
+        
+        // Handle the last expression specially if we need more values
+        if let Some(last_expr) = exprs.last() {
+            let remaining_vars = names.len().saturating_sub(regs.len());
+            
+            // Check if last expression is a function call (which might return multiple values)
+            if let LuaExpr::CallExpr(call_expr) = last_expr {
+                if remaining_vars > 1 {
+                    // Compile call with multiple return values
+                    let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
+                    
+                    // The call result is in base_reg, and additional values in base_reg+1, base_reg+2, etc.
+                    for i in 0..remaining_vars {
+                        regs.push(base_reg + i as u32);
+                    }
+                } else {
+                    // Single value needed
+                    let reg = compile_expr(c, last_expr)?;
+                    regs.push(reg);
+                }
+            } else {
+                // Non-call expression
+                let reg = compile_expr(c, last_expr)?;
+                regs.push(reg);
+            }
+        }
     }
 
     // Fill missing values with nil
@@ -432,12 +465,17 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
     let arg2 = alloc_register(c);
     emit_move(c, arg2, control_var_reg);
     
-    // Call with 2 arguments, expect at least 1 return value
+    // Call with 2 arguments, expect as many return values as we have loop variables
     // OpCode::Call: A = func reg, B = num args + 1, C = num returns + 1
-    emit(c, Instruction::encode_abc(OpCode::Call, call_base, 3, 2));
+    let num_returns = var_names.len();
+    emit(c, Instruction::encode_abc(OpCode::Call, call_base, 3, (num_returns + 1) as u32));
     
-    // Result is in call_base, move to first loop variable
-    emit_move(c, var_regs[0], call_base);
+    // Move return values to loop variable registers
+    for i in 0..var_names.len() {
+        if i < var_regs.len() {
+            emit_move(c, var_regs[i], call_base + i as u32);
+        }
+    }
     
     // Update control_var for next iteration
     emit_move(c, control_var_reg, call_base);
