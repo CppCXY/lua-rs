@@ -83,10 +83,16 @@ impl LuaValue {
         LuaValue::Float(n)
     }
 
+    /// Internal use only - create string value from already-allocated LuaString
+    /// For GC-managed strings, use VM::create_string() instead
+    #[doc(hidden)]
     pub fn string(s: LuaString) -> Self {
         LuaValue::String(Rc::new(s))
     }
 
+    /// Internal use only - create table value from already-allocated LuaTable
+    /// For GC-managed tables, use VM::create_table() instead
+    #[doc(hidden)]
     pub fn table(t: LuaTable) -> Self {
         LuaValue::Table(Rc::new(RefCell::new(t)))
     }

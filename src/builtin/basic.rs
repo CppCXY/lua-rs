@@ -2,7 +2,6 @@
 
 use crate::value::{LuaValue, MultiValue};
 use crate::vm::VM;
-use crate::LuaString;
 
 /// Lua print() function - prints values to stdout
 /// 
@@ -62,7 +61,8 @@ pub fn lua_type(vm: &mut VM) -> Result<MultiValue, String> {
         LuaValue::Userdata(_) => "userdata",
     };
     
-    Ok(MultiValue::single(LuaValue::string(LuaString::new(type_name.to_string()))))
+    let result_str = vm.create_builtin_string(type_name.to_string());
+    Ok(MultiValue::single(LuaValue::String(result_str)))
 }
 
 /// Lua assert() function - raises error if condition is false
@@ -94,11 +94,13 @@ pub fn lua_tostring(vm: &mut VM) -> Result<MultiValue, String> {
     let registers = &frame.registers;
     
     if registers.len() <= 1 {
-        return Ok(MultiValue::single(LuaValue::string(LuaString::new("nil".to_string()))));
+        let nil_str = vm.create_builtin_string("nil".to_string());
+        return Ok(MultiValue::single(LuaValue::String(nil_str)));
     }
     
     let value = &registers[1];
-    Ok(MultiValue::single(LuaValue::string(LuaString::new(value.to_string_repr()))))
+    let result_str = vm.create_builtin_string(value.to_string_repr());
+    Ok(MultiValue::single(LuaValue::String(result_str)))
 }
 
 /// Lua tonumber() function - converts value to number

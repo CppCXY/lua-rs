@@ -19,11 +19,8 @@ fn main() {
                             if !result.is_nil() {
                                 println!("Result: {:?}", result);
                             }
-                            // Print VM statistics
-                            let table_count = vm.table_stats();
-                            if table_count > 0 {
-                                eprintln!("[VM] Created {} tables during execution", table_count);
-                            }
+                            // Print GC statistics
+                            eprintln!("\n{}", vm.gc_stats());
                         }
                         Err(e) => {
                             eprintln!("Runtime error: {}", e);
@@ -51,9 +48,10 @@ fn main() {
     let mut vm = VM::new();
 
     // Example: Set some global values
+    let version_str = vm.create_string("0.1.0".to_string());
     vm.set_global(
         "version".to_string(),
-        LuaValue::string(lua_rt::LuaString::new("0.1.0".to_string())),
+        LuaValue::String(version_str),
     );
 
     loop {

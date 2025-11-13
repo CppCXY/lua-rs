@@ -4,6 +4,7 @@
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue, LuaUpvalue};
 use crate::builtin;
+use crate::gc::{GC, GcObjectType};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -15,9 +16,8 @@ pub struct VM {
     // Call stack
     pub frames: Vec<CallFrame>,
 
-    // GC root set (for future use)
-    #[allow(dead_code)]
-    gc_roots: Vec<LuaValue>,
+    // Garbage collector
+    gc: GC,
     
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
@@ -27,11 +27,6 @@ pub struct VM {
     
     // Next frame ID (for tracking frames)
     next_frame_id: usize,
-    
-    // Allocated tables (for future GC tracking)
-    // We track table count, not actual references (simplified for now)
-    #[allow(dead_code)]
-    table_count: usize,
 }
 
 pub struct CallFrame {
@@ -49,11 +44,10 @@ impl VM {
         let mut vm = VM {
             globals: HashMap::new(),
             frames: Vec::new(),
-            gc_roots: Vec::new(),
+            gc: GC::new(),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
             next_frame_id: 0,
-            table_count: 0,
         };
 
         // Register built-in functions
@@ -76,19 +70,27 @@ impl VM {
         self.globals.insert("ipairs".to_string(), LuaValue::cfunction(builtin::lua_ipairs));
         
         // Table library (as a table)
-        let mut table_lib = LuaTable::new();
-        table_lib.set(
-            LuaValue::string(LuaString::new("insert".to_string())),
-            LuaValue::cfunction(builtin::table_insert),
-        );
-        table_lib.set(
-            LuaValue::string(LuaString::new("remove".to_string())),
-            LuaValue::cfunction(builtin::table_remove),
-        );
-        self.globals.insert("table".to_string(), LuaValue::table(table_lib));
+        let table_lib = self.create_table();
+        {
+            let mut tbl = table_lib.borrow_mut();
+            let insert_key = self.create_string("insert".to_string());
+            let remove_key = self.create_string("remove".to_string());
+            tbl.set(
+                LuaValue::String(insert_key),
+                LuaValue::cfunction(builtin::table_insert),
+            );
+            tbl.set(
+                LuaValue::String(remove_key),
+                LuaValue::cfunction(builtin::table_remove),
+            );
+        }
+        self.globals.insert("table".to_string(), LuaValue::Table(table_lib));
     }
 
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> Result<LuaValue, String> {
+        // Register all constants in the chunk with GC
+        self.register_chunk_constants(&chunk);
+        
         // Create main function
         let main_func = LuaFunction {
             chunk: chunk.clone(),
@@ -638,11 +640,6 @@ impl VM {
             return Ok(());
         }
 
-        // Check for built-in functions (old system, may remove later)
-        if let Some(name) = self.get_builtin_name(&func) {
-            return self.call_builtin(&name, a, b);
-        }
-
         // Regular Lua function call
         if let Some(lua_func) = func.as_function() {
             let mut new_registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
@@ -833,13 +830,10 @@ impl VM {
         }
         
         // Create new function (closure)
-        let func = LuaFunction {
-            chunk: proto,
-            upvalues,
-        };
+        let func = self.create_function(proto, upvalues);
         
         let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::Function(Rc::new(func));
+        frame.registers[a] = LuaValue::Function(func);
         
         Ok(())
     }
@@ -860,7 +854,9 @@ impl VM {
             }
         }
 
-        frame.registers[a] = LuaValue::string(LuaString::new(result));
+        let string = self.create_string(result);
+        let frame = self.current_frame_mut();
+        frame.registers[a] = LuaValue::String(string);
         Ok(())
     }
 
@@ -910,38 +906,7 @@ impl VM {
     }
 
     fn values_equal(&self, left: &LuaValue, right: &LuaValue) -> bool {
-        if left.is_nil() && right.is_nil() {
-            true
-        } else if let (Some(l), Some(r)) = (left.as_boolean(), right.as_boolean()) {
-            l == r
-        } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-            l == r
-        } else if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
-            l.as_str() == r.as_str()
-        } else {
-            false
-        }
-    }
-
-    fn get_builtin_name(&self, _func: &LuaValue) -> Option<String> {
-        // Simplified: check if it's a known builtin
-        None
-    }
-
-    fn call_builtin(&mut self, name: &str, a: usize, b: usize) -> Result<(), String> {
-        match name {
-            "print" => {
-                let frame = self.current_frame();
-                for i in 1..b {
-                    if a + i < frame.registers.len() {
-                        print!("{:?} ", frame.registers[a + i]);
-                    }
-                }
-                println!();
-                Ok(())
-            }
-            _ => Err(format!("Unknown builtin: {}", name)),
-        }
+        left == right
     }
 
     pub fn set_global(&mut self, name: String, value: LuaValue) {
@@ -1193,14 +1158,137 @@ impl VM {
         self.open_upvalues.retain(|uv| uv.is_open());
     }
     
-    /// Create a new table and track it for GC
+    /// Create a new table and register it with GC
     pub fn create_table(&mut self) -> Rc<RefCell<LuaTable>> {
-        self.table_count += 1;
-        Rc::new(RefCell::new(LuaTable::new()))
+        let table = Rc::new(RefCell::new(LuaTable::new()));
+        let ptr = Rc::as_ptr(&table) as usize;
+        self.gc.register_object(ptr, GcObjectType::Table);
+        
+        // Trigger GC if needed
+        self.maybe_collect_garbage();
+        
+        table
     }
     
-    /// Get statistics about allocated tables
-    pub fn table_stats(&self) -> usize {
-        self.table_count
+    /// Create a string and register it with GC
+    pub fn create_string(&mut self, s: String) -> Rc<LuaString> {
+        let string = Rc::new(LuaString::new(s));
+        let ptr = Rc::as_ptr(&string) as usize;
+        self.gc.register_object(ptr, GcObjectType::String);
+        
+        // Trigger GC if needed
+        self.maybe_collect_garbage();
+        
+        string
+    }
+    
+    /// Create a string for builtin function returns (lighter weight, no immediate GC check)
+    /// Returns are short-lived and will be registered when stored in registers
+    pub fn create_builtin_string(&mut self, s: String) -> Rc<LuaString> {
+        let string = Rc::new(LuaString::new(s));
+        let ptr = Rc::as_ptr(&string) as usize;
+        self.gc.register_object(ptr, GcObjectType::String);
+        string
+    }
+    
+    /// Create a function and register it with GC
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<Rc<LuaUpvalue>>) -> Rc<LuaFunction> {
+        let func = Rc::new(LuaFunction { chunk, upvalues });
+        let ptr = Rc::as_ptr(&func) as usize;
+        self.gc.register_object(ptr, GcObjectType::Function);
+        
+        // Trigger GC if needed
+        self.maybe_collect_garbage();
+        
+        func
+    }
+    
+    /// Check if GC should run and collect garbage if needed
+    fn maybe_collect_garbage(&mut self) {
+        if self.gc.should_collect() {
+            self.collect_garbage();
+        }
+    }
+    
+    /// Register all constants in a chunk with GC
+    fn register_chunk_constants(&mut self, chunk: &Chunk) {
+        for value in &chunk.constants {
+            match value {
+                LuaValue::String(s) => {
+                    let ptr = Rc::as_ptr(s) as usize;
+                    self.gc.register_object(ptr, GcObjectType::String);
+                }
+                LuaValue::Table(t) => {
+                    let ptr = Rc::as_ptr(t) as usize;
+                    self.gc.register_object(ptr, GcObjectType::Table);
+                }
+                LuaValue::Function(f) => {
+                    let ptr = Rc::as_ptr(f) as usize;
+                    self.gc.register_object(ptr, GcObjectType::Function);
+                    // Recursively register nested function chunks
+                    self.register_chunk_constants(&f.chunk);
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    /// Perform garbage collection
+    fn collect_garbage(&mut self) {
+        // Collect all roots
+        let mut roots = Vec::new();
+        
+        // Add globals as roots
+        for value in self.globals.values() {
+            roots.push(value.clone());
+        }
+        
+        // Add all frame registers as roots
+        for frame in &self.frames {
+            for value in &frame.registers {
+                roots.push(value.clone());
+            }
+        }
+        
+        // Add return values as roots
+        for value in &self.return_values {
+            roots.push(value.clone());
+        }
+        
+        // Add open upvalues as roots (only closed ones that have values)
+        for upvalue in &self.open_upvalues {
+            if let Some(value) = upvalue.get_closed_value() {
+                roots.push(value);
+            }
+        }
+        
+        // Run GC
+        self.gc.collect(&roots);
+    }
+    
+    /// Get GC statistics
+    pub fn gc_stats(&self) -> String {
+        let stats = self.gc.stats();
+        format!(
+            "GC Stats:\n\
+            - Bytes allocated: {}\n\
+            - Threshold: {}\n\
+            - Total collections: {}\n\
+            - Minor collections: {}\n\
+            - Major collections: {}\n\
+            - Objects collected: {}\n\
+            - Young generation size: {}\n\
+            - Old generation size: {}\n\
+            - Promoted objects: {}",
+            stats.bytes_allocated,
+            stats.threshold,
+            stats.collection_count,
+            stats.minor_collections,
+            stats.major_collections,
+            stats.objects_collected,
+            stats.young_gen_size,
+            stats.old_gen_size,
+            stats.promoted_objects
+        )
     }
 }
