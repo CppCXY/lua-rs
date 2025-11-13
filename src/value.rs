@@ -294,6 +294,85 @@ impl PartialEq for LuaValue {
 
 impl Eq for LuaValue {}
 
+impl PartialOrd for LuaValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for LuaValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        
+        // Define type priority: numbers < strings < others
+        fn type_priority(val: &LuaValue) -> u8 {
+            match val {
+                LuaValue::Integer(_) | LuaValue::Float(_) => 0,
+                LuaValue::String(_) => 1,
+                _ => 2,
+            }
+        }
+        
+        let self_priority = type_priority(self);
+        let other_priority = type_priority(other);
+        
+        // First compare by type priority
+        match self_priority.cmp(&other_priority) {
+            Ordering::Equal => {
+                // Same type priority, compare within type
+                match (self, other) {
+                    // Numbers: compare numerically
+                    (LuaValue::Integer(a), LuaValue::Integer(b)) => a.cmp(b),
+                    (LuaValue::Float(a), LuaValue::Float(b)) => {
+                        a.partial_cmp(b).unwrap_or(Ordering::Equal)
+                    }
+                    (LuaValue::Integer(a), LuaValue::Float(b)) => {
+                        (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+                    }
+                    (LuaValue::Float(a), LuaValue::Integer(b)) => {
+                        a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+                    }
+                    
+                    // Strings: lexicographic comparison
+                    (LuaValue::String(a), LuaValue::String(b)) => {
+                        a.as_str().cmp(b.as_str())
+                    }
+                    
+                    // Other types: compare by pointer address
+                    (LuaValue::Table(a), LuaValue::Table(b)) => {
+                        let ptr_a = Rc::as_ptr(a) as usize;
+                        let ptr_b = Rc::as_ptr(b) as usize;
+                        ptr_a.cmp(&ptr_b)
+                    }
+                    (LuaValue::Function(a), LuaValue::Function(b)) => {
+                        let ptr_a = Rc::as_ptr(a) as usize;
+                        let ptr_b = Rc::as_ptr(b) as usize;
+                        ptr_a.cmp(&ptr_b)
+                    }
+                    (LuaValue::CFunction(a), LuaValue::CFunction(b)) => {
+                        let ptr_a = *a as usize;
+                        let ptr_b = *b as usize;
+                        ptr_a.cmp(&ptr_b)
+                    }
+                    (LuaValue::Userdata(a), LuaValue::Userdata(b)) => {
+                        let ptr_a = Rc::as_ptr(a) as usize;
+                        let ptr_b = Rc::as_ptr(b) as usize;
+                        ptr_a.cmp(&ptr_b)
+                    }
+                    (LuaValue::Boolean(a), LuaValue::Boolean(b)) => {
+                        a.cmp(b)
+                    }
+                    (LuaValue::Nil, LuaValue::Nil) => Ordering::Equal,
+                    
+                    // Mixed types within same priority (shouldn't happen based on type_priority)
+                    _ => Ordering::Equal,
+                }
+            }
+            other_ordering => other_ordering,
+        }
+    }
+}
+
 /// impl hash
 impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
