@@ -12,9 +12,13 @@ use crate::jit_value::JitValue;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::Chunk;
 
-/// Compiled native function signature
-/// Takes JitValue registers array, constants array, and initial PC
-/// Returns new PC after execution (-1 if should return to interpreter)
+/// Compiled native function signature for specialized integer loops
+/// Takes: loop variable start, loop variable end, accumulator pointer
+/// Returns: final accumulator value
+pub type JitIntegerLoopFn = unsafe extern "C" fn(i64, i64, *mut i64) -> i64;
+
+/// Generic JIT function for type-specialized code paths
+/// Takes registers array and returns success flag (0 = bailout to interpreter)
 pub type JitFunction = unsafe extern "C" fn(*mut JitValue, *const JitValue, i32) -> i32;
 
 /// JIT compilation statistics
@@ -23,6 +27,7 @@ pub struct JitStats {
     pub compilations: usize,
     pub native_executions: usize,
     pub failed_compilations: usize,
+    pub specialized_loops: usize,  // 特化的循环数量
 }
 
 /// JIT Compiler using Cranelift
@@ -203,6 +208,105 @@ impl JitCompiler {
 
         // Cache the compiled function
         self.compiled_cache.insert(chunk_id, (func_id, jit_func));
+
+        Ok(jit_func)
+    }
+
+    /// Compile a specialized integer accumulation loop
+    /// This handles the common pattern: for i = start, end do sum = sum + i end
+    pub fn compile_integer_loop(&mut self, start: i64, end: i64) -> Result<JitIntegerLoopFn, String> {
+        self.stats.compilations += 1;
+        self.stats.specialized_loops += 1;
+
+        // Create function signature
+        // fn(start: i64, end: i64, accumulator: *mut i64) -> i64
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // start
+        sig.params.push(AbiParam::new(types::I64)); // end
+        sig.params.push(AbiParam::new(self.module.target_config().pointer_type())); // accumulator ptr
+        sig.returns.push(AbiParam::new(types::I64)); // result
+
+        // Declare function
+        let func_name = format!("jit_int_loop_{}_{}", start, end);
+        let func_id = self
+            .module
+            .declare_function(&func_name, Linkage::Local, &sig)
+            .map_err(|e| format!("Failed to declare function: {}", e))?;
+
+        let mut func = codegen::ir::Function::with_name_signature(
+            codegen::ir::UserFuncName::user(0, func_id.as_u32()),
+            sig,
+        );
+
+        let mut builder_context = FunctionBuilderContext::new();
+        let mut func_builder = FunctionBuilder::new(&mut func, &mut builder_context);
+
+        // Create blocks
+        let entry_block = func_builder.create_block();
+        let loop_header = func_builder.create_block();
+        let loop_body = func_builder.create_block();
+        let loop_exit = func_builder.create_block();
+
+        // Entry block
+        func_builder.append_block_params_for_function_params(entry_block);
+        func_builder.switch_to_block(entry_block);
+        
+        let param_start = func_builder.block_params(entry_block)[0];
+        let param_end = func_builder.block_params(entry_block)[1];
+        let acc_ptr = func_builder.block_params(entry_block)[2];
+        
+        // Load initial accumulator value
+        let acc_init = func_builder.ins().load(types::I64, MemFlags::new(), acc_ptr, 0);
+        
+        func_builder.ins().jump(loop_header, &[param_start, acc_init]);
+        func_builder.seal_block(entry_block);
+
+        // Loop header: i, acc
+        func_builder.switch_to_block(loop_header);
+        func_builder.append_block_params_for_function_params(loop_header);
+        let i = func_builder.block_params(loop_header)[0];
+        let acc = func_builder.block_params(loop_header)[1];
+        
+        // Check: i <= end
+        let cond = func_builder.ins().icmp(IntCC::SignedLessThanOrEqual, i, param_end);
+        func_builder.ins().brif(cond, loop_body, &[i, acc], loop_exit, &[acc]);
+        func_builder.seal_block(loop_header);
+
+        // Loop body: sum = sum + i; i = i + 1
+        func_builder.switch_to_block(loop_body);
+        let i_param = func_builder.block_params(loop_body)[0];
+        let acc_param = func_builder.block_params(loop_body)[1];
+        
+        let new_acc = func_builder.ins().iadd(acc_param, i_param);
+        let one = func_builder.ins().iconst(types::I64, 1);
+        let new_i = func_builder.ins().iadd(i_param, one);
+        
+        func_builder.ins().jump(loop_header, &[new_i, new_acc]);
+        func_builder.seal_block(loop_body);
+
+        // Exit: store result and return
+        func_builder.switch_to_block(loop_exit);
+        let final_acc = func_builder.block_params(loop_exit)[0];
+        func_builder.ins().store(MemFlags::new(), final_acc, acc_ptr, 0);
+        func_builder.ins().return_(&[final_acc]);
+        func_builder.seal_block(loop_exit);
+
+        // Finalize
+        func_builder.finalize();
+
+        // Compile to machine code
+        let mut ctx = codegen::Context::for_function(func);
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| format!("Failed to define function: {}", e))?;
+
+        self.module.clear_context(&mut ctx);
+        self.module.finalize_definitions()
+            .map_err(|e| format!("Failed to finalize: {}", e))?;
+
+        // Get function pointer
+        let code_ptr = self.module.get_finalized_function(func_id);
+        let jit_func: JitIntegerLoopFn = unsafe { mem::transmute(code_ptr) };
 
         Ok(jit_func)
     }
