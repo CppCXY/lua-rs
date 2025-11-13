@@ -2078,4 +2078,233 @@ impl VM {
             Ok(value.to_string_repr())
         }
     }
+
+    /// Generate a stack traceback string
+    pub fn generate_traceback(&self, error_msg: &str) -> String {
+        let mut trace = format!("Runtime error: {}\nStack traceback:", error_msg);
+        
+        // Iterate through call frames from top to bottom
+        for (i, frame) in self.frames.iter().rev().enumerate() {
+            let func_name = "?"; // Could extract from debug info if available
+            let pc = frame.pc.saturating_sub(1); // Adjust to show failing instruction
+            
+            trace.push_str(&format!("\n  [{}] function '{}' at PC {}", 
+                self.frames.len() - i, func_name, pc));
+        }
+        
+        trace
+    }
+
+    /// Execute a function with protected call (pcall semantics)
+    pub fn protected_call(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> (bool, Vec<LuaValue>) {
+        // Save current state
+        let initial_frame_count = self.frames.len();
+        
+        // Try to call the function
+        let result = self.call_function_internal(func, args);
+        
+        match result {
+            Ok(return_values) => {
+                // Success: return true and the return values
+                (true, return_values)
+            }
+            Err(error_msg) => {
+                // Error: clean up frames and return false with error message
+                // Restore frame count (pop any frames created during the failed call)
+                while self.frames.len() > initial_frame_count {
+                    self.frames.pop();
+                }
+                
+                // Return error without traceback for now (can add later)
+                let error_str = self.create_string(error_msg);
+                
+                (false, vec![LuaValue::String(error_str)])
+            }
+        }
+    }
+
+    /// Internal helper to call a function
+    fn call_function_internal(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> Result<Vec<LuaValue>, String> {
+        use crate::value::Chunk;
+        
+        match func {
+            LuaValue::CFunction(cfunc) => {
+                // For CFunction, create a temporary frame
+                let frame_id = self.next_frame_id;
+                self.next_frame_id += 1;
+
+                let mut registers = vec![func.clone()];
+                registers.extend(args);
+                registers.resize(16, LuaValue::Nil);
+
+                let dummy_func = Rc::new(LuaFunction {
+                    chunk: Rc::new(Chunk {
+                        code: Vec::new(),
+                        constants: Vec::new(),
+                        locals: Vec::new(),
+                        upvalue_count: 0,
+                        param_count: 0,
+                        max_stack_size: 16,
+                        child_protos: Vec::new(),
+                        upvalue_descs: Vec::new(),
+                    }),
+                    upvalues: Vec::new(),
+                });
+
+                let temp_frame = CallFrame {
+                    frame_id,
+                    function: dummy_func,
+                    pc: 0,
+                    registers,
+                    base: self.frames.len(),
+                    result_reg: 0,
+                    num_results: 0,
+                };
+
+                self.frames.push(temp_frame);
+                let result = cfunc(self)?;
+                self.frames.pop();
+
+                Ok(result.all_values())
+            }
+            LuaValue::Function(lua_func) => {
+                // For Lua function, use similar logic to call_metamethod
+                let frame_id = self.next_frame_id;
+                self.next_frame_id += 1;
+
+                let mut registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
+                for (i, arg) in args.iter().enumerate() {
+                    if i < registers.len() {
+                        registers[i] = arg.clone();
+                    }
+                }
+
+                let new_frame = CallFrame {
+                    frame_id,
+                    function: lua_func.clone(),
+                    pc: 0,
+                    registers,
+                    base: self.frames.len(),
+                    result_reg: 0,
+                    num_results: 0,
+                };
+
+                let initial_frame_count = self.frames.len();
+                self.frames.push(new_frame);
+
+                // Execute instructions until frame returns
+                let exec_result = loop {
+                    if self.frames.len() <= initial_frame_count {
+                        // Frame has been popped (function returned)
+                        break Ok(());
+                    }
+
+                    let frame_idx = self.frames.len() - 1;
+                    let pc = self.frames[frame_idx].pc;
+                    let chunk = self.frames[frame_idx].function.chunk.clone();
+
+                    if pc >= chunk.code.len() {
+                        // End of code
+                        self.frames.pop();
+                        break Ok(());
+                    }
+
+                    let instr = chunk.code[pc];
+                    self.frames[frame_idx].pc += 1;
+
+                    // Decode and execute
+                    let opcode = Instruction::get_opcode(instr);
+
+                    // Special handling for Return opcode
+                    if let OpCode::Return = opcode {
+                        match self.op_return(instr) {
+                            Ok(_val) => {
+                                // Return values are now in self.return_values
+                                break Ok(());
+                            }
+                            Err(e) => {
+                                if self.frames.len() > initial_frame_count {
+                                    self.frames.pop();
+                                }
+                                break Err(e);
+                            }
+                        }
+                    }
+
+                    // Execute the instruction
+                    let step_result = match opcode {
+                        OpCode::Move => self.op_move(instr),
+                        OpCode::LoadK => self.op_loadk(instr),
+                        OpCode::LoadBool => self.op_loadbool(instr),
+                        OpCode::LoadNil => self.op_loadnil(instr),
+                        OpCode::GetGlobal => self.op_getglobal(instr),
+                        OpCode::SetGlobal => self.op_setglobal(instr),
+                        OpCode::GetTable => self.op_gettable(instr),
+                        OpCode::SetTable => self.op_settable(instr),
+                        OpCode::NewTable => self.op_newtable(instr),
+                        OpCode::Call => self.op_call(instr),
+                        OpCode::Add => self.op_add(instr),
+                        OpCode::Sub => self.op_sub(instr),
+                        OpCode::Mul => self.op_mul(instr),
+                        OpCode::Div => self.op_div(instr),
+                        OpCode::Mod => self.op_mod(instr),
+                        OpCode::Pow => self.op_pow(instr),
+                        OpCode::Unm => self.op_unm(instr),
+                        OpCode::Not => self.op_not(instr),
+                        OpCode::Len => self.op_len(instr),
+                        OpCode::Concat => self.op_concat(instr),
+                        OpCode::Jmp => self.op_jmp(instr),
+                        OpCode::Eq => self.op_eq(instr),
+                        OpCode::Lt => self.op_lt(instr),
+                        OpCode::Le => self.op_le(instr),
+                        OpCode::Ne => self.op_ne(instr),
+                        OpCode::Gt => self.op_gt(instr),
+                        OpCode::Ge => self.op_ge(instr),
+                        OpCode::And => self.op_and(instr),
+                        OpCode::Or => self.op_or(instr),
+                        OpCode::BAnd => self.op_band(instr),
+                        OpCode::BOr => self.op_bor(instr),
+                        OpCode::BXor => self.op_bxor(instr),
+                        OpCode::Shl => self.op_shl(instr),
+                        OpCode::Shr => self.op_shr(instr),
+                        OpCode::BNot => self.op_bnot(instr),
+                        OpCode::IDiv => self.op_idiv(instr),
+                        OpCode::Test => self.op_test(instr),
+                        OpCode::TestSet => self.op_testset(instr),
+                        OpCode::Closure => self.op_closure(instr),
+                        OpCode::GetUpval => self.op_getupval(instr),
+                        OpCode::SetUpval => self.op_setupval(instr),
+                        _ => Err(format!("Unimplemented opcode: {:?}", opcode)),
+                    };
+
+                    if let Err(e) = step_result {
+                        // Pop the frame on error
+                        if self.frames.len() > initial_frame_count {
+                            self.frames.pop();
+                        }
+                        break Err(e);
+                    }
+                };
+
+                match exec_result {
+                    Ok(_) => {
+                        // Get return values
+                        let result = self.return_values.clone();
+                        self.return_values.clear();
+                        Ok(result)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Err("attempt to call a non-function value".to_string()),
+        }
+    }
 }

@@ -86,8 +86,18 @@ fn lua_error(vm: &mut VM) -> Result<MultiValue, String> {
     let message = get_arg(vm, 0)
         .map(|v| v.to_string_repr())
         .unwrap_or_else(|| "error".to_string());
+    
+    // Optional level parameter (default = 1)
+    // level 1: error at the function that called error()
+    // level 2: error at the function that called the function that called error()
+    let _level = get_arg(vm, 1)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(1);
+    
+    // Generate stack traceback
+    let traceback = vm.generate_traceback(&message);
 
-    Err(message)
+    Err(traceback)
 }
 
 /// tonumber(e [, base]) - Convert to number
@@ -294,13 +304,27 @@ fn lua_next(vm: &mut VM) -> Result<MultiValue, String> {
 
 /// pcall(f [, arg1, ...]) - Protected call
 fn lua_pcall(vm: &mut VM) -> Result<MultiValue, String> {
-    // TODO: Implement proper protected call
-    // For now, just return success = false
-    let msg = vm.create_string("pcall not yet implemented".to_string());
-    Ok(MultiValue::multiple(vec![
-        LuaValue::Boolean(false),
-        LuaValue::String(msg),
-    ]))
+    // pcall(f, arg1, arg2, ...) -> status, result or error
+    
+    // Get the function to call (argument 0)
+    let func = require_arg(vm, 0, "pcall")?;
+    
+    // Get all arguments after the function
+    let all_args = get_args(vm);
+    let args: Vec<LuaValue> = if all_args.len() > 1 {
+        all_args[1..].to_vec()
+    } else {
+        Vec::new()
+    };
+    
+    // Use protected_call from VM
+    let (success, results) = vm.protected_call(func, args);
+    
+    // Return status and results
+    let mut return_values = vec![LuaValue::Boolean(success)];
+    return_values.extend(results);
+    
+    Ok(MultiValue::multiple(return_values))
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
