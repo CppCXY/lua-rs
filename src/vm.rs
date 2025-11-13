@@ -64,6 +64,13 @@ impl VM {
         self.globals.insert("tostring".to_string(), LuaValue::cfunction(builtin::lua_tostring));
         self.globals.insert("tonumber".to_string(), LuaValue::cfunction(builtin::lua_tonumber));
         
+        // Metatable functions
+        self.globals.insert("getmetatable".to_string(), LuaValue::cfunction(builtin::lua_getmetatable));
+        self.globals.insert("setmetatable".to_string(), LuaValue::cfunction(builtin::lua_setmetatable));
+        self.globals.insert("rawget".to_string(), LuaValue::cfunction(builtin::lua_rawget));
+        self.globals.insert("rawset".to_string(), LuaValue::cfunction(builtin::lua_rawset));
+        self.globals.insert("rawlen".to_string(), LuaValue::cfunction(builtin::lua_rawlen));
+        
         // Iterator functions
         self.globals.insert("next".to_string(), LuaValue::cfunction(builtin::lua_next));
         self.globals.insert("pairs".to_string(), LuaValue::cfunction(builtin::lua_pairs));
@@ -286,9 +293,10 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        let left = &frame.registers[b];
-        let right = &frame.registers[c];
-        match (left, right) {
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+        
+        match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l + r);
                 Ok(())
@@ -297,13 +305,21 @@ impl VM {
                 frame.registers[a] = LuaValue::integer(i + j);
                 Ok(())
             }
-            (left, right) if left.is_number() && right.is_number() => {
-                let l = left.as_number().unwrap();
-                let r = right.as_number().unwrap();
-                frame.registers[a] = LuaValue::number(l + r);
+            (l, r) if l.is_number() && r.is_number() => {
+                let l_num = l.as_number().unwrap();
+                let r_num = r.as_number().unwrap();
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::number(l_num + r_num);
                 Ok(())
             }
-            _ => Err("Addition on non-number values".to_string()),
+            _ => {
+                // Try metamethod
+                if self.call_binop_metamethod(&left, &right, "__add", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to add non-number values ({:?} + {:?})", left, right))
+                }
+            }
         }
     }
 
@@ -313,9 +329,10 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        let left = &frame.registers[b];
-        let right = &frame.registers[c];
-        match (left, right) {
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+        
+        match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l - r);
                 Ok(())
@@ -324,13 +341,21 @@ impl VM {
                 frame.registers[a] = LuaValue::integer(i - j);
                 Ok(())
             }
-            (left, right) if left.is_number() && right.is_number() => {
-                let l = left.as_number().unwrap();
-                let r = right.as_number().unwrap();
-                frame.registers[a] = LuaValue::number(l - r);
+            (l, r) if l.is_number() && r.is_number() => {
+                let l_num = l.as_number().unwrap();
+                let r_num = r.as_number().unwrap();
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::number(l_num - r_num);
                 Ok(())
             }
-            _ => Err("Subtraction on non-number values".to_string()),
+            _ => {
+                // Try __sub metamethod
+                if self.call_binop_metamethod(&left, &right, "__sub", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to subtract non-number values"))
+                }
+            }
         }
     }
 
@@ -340,9 +365,10 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        let left = &frame.registers[b];
-        let right = &frame.registers[c];
-        match (left, right) {
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+        
+        match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l * r);
                 Ok(())
@@ -351,13 +377,21 @@ impl VM {
                 frame.registers[a] = LuaValue::integer(i * j);
                 Ok(())
             }
-            (left, right) if left.is_number() && right.is_number() => {
-                let l = left.as_number().unwrap();
-                let r = right.as_number().unwrap();
-                frame.registers[a] = LuaValue::number(l * r);
+            (l, r) if l.is_number() && r.is_number() => {
+                let l_num = l.as_number().unwrap();
+                let r_num = r.as_number().unwrap();
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::number(l_num * r_num);
                 Ok(())
             }
-            _ => Err("Multiplication on non-number values".to_string()),
+            _ => {
+                // Try __mul metamethod
+                if self.call_binop_metamethod(&left, &right, "__mul", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to multiply non-number values"))
+                }
+            }
         }
     }
 
@@ -367,25 +401,33 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        let left = &frame.registers[b];
-        let right = &frame.registers[c];
-        match (left, right) {
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+        
+        match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l / r);
                 Ok(())
             }
-            (left, right) if left.is_number() && right.is_number() => {
-                let l = left.as_number().unwrap();
-                let r = right.as_number().unwrap();
-                let value = l / r;
-                if value.fract() == 0.0 {
-                    frame.registers[a] = LuaValue::integer(value as i64);
-                } else {
-                    frame.registers[a] = LuaValue::number(value);
-                }
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::number(*i as f64 / *j as f64);
                 Ok(())
             }
-            _ => Err("Division on non-number values".to_string()),
+            (l, r) if l.is_number() && r.is_number() => {
+                let l_num = l.as_number().unwrap();
+                let r_num = r.as_number().unwrap();
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::number(l_num / r_num);
+                Ok(())
+            }
+            _ => {
+                // Try __div metamethod
+                if self.call_binop_metamethod(&left, &right, "__div", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to divide non-number values"))
+                }
+            }
         }
     }
 
@@ -393,21 +435,35 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
+
         let frame = self.current_frame_mut();
-        let left = &frame.registers[b];
-        let right = &frame.registers[c];
-        match (left, right) {
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+        
+        match (&left, &right) {
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::number(l % r);
+                Ok(())
+            }
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
                 frame.registers[a] = LuaValue::integer(i % j);
                 Ok(())
             }
-            (left, right) if left.is_integer() && right.is_integer() => {
-                let l = left.as_integer().unwrap();
-                let r = right.as_integer().unwrap();
-                frame.registers[a] = LuaValue::integer(l % r);
+            (l, r) if l.is_number() && r.is_number() => {
+                let l_num = l.as_number().unwrap();
+                let r_num = r.as_number().unwrap();
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::number(l_num % r_num);
                 Ok(())
             }
-            _ => Err("Modulo on non-number values".to_string()),
+            _ => {
+                // Try __mod metamethod
+                if self.call_binop_metamethod(&left, &right, "__mod", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to perform modulo on non-number values"))
+                }
+            }
         }
     }
 
@@ -415,37 +471,91 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
+
         let frame = self.current_frame_mut();
-        let left = &frame.registers[b];
-        let right = &frame.registers[c];
-        match (left, right) {
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::number(l.powf(*r));
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+        
+        match (&left, &right) {
+            (l, r) if l.is_number() && r.is_number() => {
+                let l_num = l.as_number().unwrap();
+                let r_num = r.as_number().unwrap();
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::number(l_num.powf(r_num));
                 Ok(())
             }
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::number((*i as f64).powf(*j as f64));
-                Ok(())
+            _ => {
+                // Try __pow metamethod
+                if self.call_binop_metamethod(&left, &right, "__pow", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to exponentiate non-number values"))
+                }
             }
-            (left, right) if left.is_number() && right.is_number() => {
-                let l = left.as_number().unwrap();
-                let r = right.as_number().unwrap();
-                frame.registers[a] = LuaValue::number(l.powf(r));
-                Ok(())
-            }
-            _ => Err("Exponentiation on non-number values".to_string()),
         }
     }
 
     fn op_unm(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
+
         let frame = self.current_frame_mut();
-        let value = frame.registers[b]
-            .as_number()
-            .ok_or("Unary minus on non-number")?;
-        frame.registers[a] = LuaValue::number(-value);
-        Ok(())
+        let value = frame.registers[b].clone();
+        
+        match &value {
+            LuaValue::Float(f) => {
+                frame.registers[a] = LuaValue::number(-f);
+                Ok(())
+            }
+            LuaValue::Integer(i) => {
+                frame.registers[a] = LuaValue::integer(-i);
+                Ok(())
+            }
+            _ => {
+                // Try __unm metamethod
+                if self.call_unop_metamethod(&value, "__unm", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to negate non-number value"))
+                }
+            }
+        }
+    }
+
+    fn op_idiv(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+
+        let frame = self.current_frame_mut();
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+        
+        match (&left, &right) {
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                if *j == 0 {
+                    return Err("attempt to divide by zero".to_string());
+                }
+                frame.registers[a] = LuaValue::integer(i / j);
+                Ok(())
+            }
+            (l, r) if l.is_number() && r.is_number() => {
+                let l_num = l.as_number().unwrap();
+                let r_num = r.as_number().unwrap();
+                let result = (l_num / r_num).floor();
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::integer(result as i64);
+                Ok(())
+            }
+            _ => {
+                // Try __idiv metamethod
+                if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
+                    Ok(())
+                } else {
+                    Err(format!("attempt to perform integer division on non-number values"))
+                }
+            }
+        }
     }
 
     fn op_not(&mut self, instr: u32) -> Result<(), String> {
@@ -460,18 +570,34 @@ impl VM {
     fn op_len(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        let frame = self.current_frame_mut();
-
-        let len = if let Some(s) = frame.registers[b].as_string() {
-            s.as_str().len() as f64
-        } else if let Some(t) = frame.registers[b].as_table() {
-            t.borrow().len() as f64
-        } else {
-            return Err("Length of non-sequence value".to_string());
+        
+        let value = {
+            let frame = self.current_frame();
+            frame.registers[b].clone()
         };
 
-        frame.registers[a] = LuaValue::number(len);
-        Ok(())
+        // Strings have raw length
+        if let Some(s) = value.as_string() {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::integer(s.as_str().len() as i64);
+            return Ok(());
+        }
+
+        // Try __len metamethod for tables
+        if value.as_table().is_some() {
+            if self.call_unop_metamethod(&value, "__len", a)? {
+                return Ok(());
+            }
+            
+            // No __len metamethod, use raw length
+            if let Some(t) = value.as_table() {
+                let frame = self.current_frame_mut();
+                frame.registers[a] = LuaValue::integer(t.borrow().len() as i64);
+                return Ok(());
+            }
+        }
+
+        Err("attempt to get length of a non-sequence value".to_string())
     }
 
     fn op_eq(&mut self, instr: u32) -> Result<(), String> {
@@ -484,10 +610,30 @@ impl VM {
             (frame.registers[b].clone(), frame.registers[c].clone())
         };
 
-        let result = self.values_equal(&left, &right);
+        // First try raw equality
+        if self.values_equal(&left, &right) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::boolean(true);
+            return Ok(());
+        }
+
+        // Try __eq metamethod only if both values are tables or both are userdata
+        // and have the same metamethod
+        let left_mm = self.get_metamethod(&left, "__eq");
+        let right_mm = self.get_metamethod(&right, "__eq");
+        
+        if let (Some(mm_left), Some(mm_right)) = (&left_mm, &right_mm) {
+            // Both must have the same __eq metamethod
+            if self.values_equal(mm_left, mm_right) {
+                if self.call_binop_metamethod(&left, &right, "__eq", a)? {
+                    return Ok(());
+                }
+            }
+        }
+
+        // No metamethod or different metamethods, return false
         let frame = self.current_frame_mut();
-        // Store boolean result in register A
-        frame.registers[a] = LuaValue::boolean(result);
+        frame.registers[a] = LuaValue::boolean(false);
         Ok(())
     }
 
@@ -496,17 +642,31 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b]
-            .as_number()
-            .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c]
-            .as_number()
-            .ok_or("Comparison on non-number")?;
+        let (left, right) = {
+            let frame = self.current_frame();
+            (frame.registers[b].clone(), frame.registers[c].clone())
+        };
 
-        // Store boolean result in register A
-        frame.registers[a] = LuaValue::boolean(left < right);
-        Ok(())
+        // Try numbers first
+        if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::boolean(l < r);
+            return Ok(());
+        }
+
+        // Try strings
+        if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::boolean(l.as_str() < r.as_str());
+            return Ok(());
+        }
+
+        // Try __lt metamethod
+        if self.call_binop_metamethod(&left, &right, "__lt", a)? {
+            return Ok(());
+        }
+
+        Err("attempt to compare incompatible values".to_string())
     }
 
     fn op_le(&mut self, instr: u32) -> Result<(), String> {
@@ -514,17 +674,44 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b]
-            .as_number()
-            .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c]
-            .as_number()
-            .ok_or("Comparison on non-number")?;
+        let (left, right) = {
+            let frame = self.current_frame();
+            (frame.registers[b].clone(), frame.registers[c].clone())
+        };
 
-        // Store boolean result in register A
-        frame.registers[a] = LuaValue::boolean(left <= right);
-        Ok(())
+        // Try numbers first
+        if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::boolean(l <= r);
+            return Ok(());
+        }
+
+        // Try strings
+        if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::boolean(l.as_str() <= r.as_str());
+            return Ok(());
+        }
+
+        // Try __le metamethod
+        if self.call_binop_metamethod(&left, &right, "__le", a)? {
+            return Ok(());
+        }
+
+        // If __le is not available, try __lt and negate: not (b < a)
+        // This implements: a <= b as not (b < a)
+        if let Some(_) = self.get_metamethod(&left, "__lt") {
+            // Call __lt with swapped arguments
+            if self.call_binop_metamethod(&right, &left, "__lt", a)? {
+                // Negate the result
+                let frame = self.current_frame_mut();
+                let result = frame.registers[a].is_truthy();
+                frame.registers[a] = LuaValue::boolean(!result);
+                return Ok(());
+            }
+        }
+
+        Err("attempt to compare incompatible values".to_string())
     }
 
     fn op_jmp(&mut self, instr: u32) -> Result<(), String> {
@@ -843,21 +1030,69 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let mut result = String::new();
+        // For now, concat b and b+1 (simple binary concat)
+        // Full Lua supports concat from b to c
+        if c > b + 1 {
+            // Multiple concatenations - do them sequentially
+            let frame = self.current_frame_mut();
+            let mut result = String::new();
 
-        for i in b..=c {
-            if let Some(s) = frame.registers[i].as_string() {
-                result.push_str(s.as_str());
-            } else if let Some(n) = frame.registers[i].as_number() {
-                result.push_str(&n.to_string());
+            for i in b..=c {
+                if let Some(s) = frame.registers[i].as_string() {
+                    result.push_str(s.as_str());
+                } else if let Some(n) = frame.registers[i].as_number() {
+                    result.push_str(&n.to_string());
+                } else {
+                    return Err("attempt to concatenate a non-string/number value".to_string());
+                }
             }
+
+            let string = self.create_string(result);
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::String(string);
+            return Ok(());
         }
 
-        let string = self.create_string(result);
-        let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::String(string);
-        Ok(())
+        // Binary concat with metamethod support
+        let (left, right) = {
+            let frame = self.current_frame();
+            (frame.registers[b].clone(), frame.registers[b + 1].clone())
+        };
+
+        // Try direct concatenation
+        let can_concat = (left.as_string().is_some() || left.as_number().is_some()) &&
+                         (right.as_string().is_some() || right.as_number().is_some());
+
+        if can_concat {
+            let left_str = if let Some(s) = left.as_string() {
+                s.as_str().to_string()
+            } else if let Some(n) = left.as_number() {
+                n.to_string()
+            } else {
+                unreachable!()
+            };
+
+            let right_str = if let Some(s) = right.as_string() {
+                s.as_str().to_string()
+            } else if let Some(n) = right.as_number() {
+                n.to_string()
+            } else {
+                unreachable!()
+            };
+
+            let result = left_str + &right_str;
+            let string = self.create_string(result);
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::String(string);
+            return Ok(());
+        }
+
+        // Try __concat metamethod
+        if self.call_binop_metamethod(&left, &right, "__concat", a)? {
+            return Ok(());
+        }
+
+        Err("attempt to concatenate incompatible values".to_string())
     }
 
     fn op_getglobal(&mut self, instr: u32) -> Result<(), String> {
@@ -1009,124 +1244,121 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
+        
         let frame = self.current_frame_mut();
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
 
-        let left = frame.registers[b]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        let right = frame.registers[c]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        frame.registers[a] = LuaValue::integer(left & right);
-        Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::integer(l & r);
+            Ok(())
+        } else if self.call_binop_metamethod(&left, &right, "__band", a)? {
+            Ok(())
+        } else {
+            Err("Bitwise operation requires integer".to_string())
+        }
     }
 
     fn op_bor(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
+        
         let frame = self.current_frame_mut();
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
 
-        let left = frame.registers[b]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        let right = frame.registers[c]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        frame.registers[a] = LuaValue::integer(left | right);
-        Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::integer(l | r);
+            Ok(())
+        } else if self.call_binop_metamethod(&left, &right, "__bor", a)? {
+            Ok(())
+        } else {
+            Err("Bitwise operation requires integer".to_string())
+        }
     }
 
     fn op_bxor(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
+        
         let frame = self.current_frame_mut();
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
 
-        let left = frame.registers[b]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        let right = frame.registers[c]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        frame.registers[a] = LuaValue::integer(left ^ right);
-        Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::integer(l ^ r);
+            Ok(())
+        } else if self.call_binop_metamethod(&left, &right, "__bxor", a)? {
+            Ok(())
+        } else {
+            Err("Bitwise operation requires integer".to_string())
+        }
     }
 
     fn op_shl(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
+        
         let frame = self.current_frame_mut();
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
 
-        let left = frame.registers[b]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        let right = frame.registers[c]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")? as u32;
-        frame.registers[a] = LuaValue::integer(left << right);
-        Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::integer(l << (r as u32));
+            Ok(())
+        } else if self.call_binop_metamethod(&left, &right, "__shl", a)? {
+            Ok(())
+        } else {
+            Err("Bitwise operation requires integer".to_string())
+        }
     }
 
     fn op_shr(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
+        
         let frame = self.current_frame_mut();
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
 
-        let left = frame.registers[b]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        let right = frame.registers[c]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")? as u32;
-        frame.registers[a] = LuaValue::integer(left >> right);
-        Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::integer(l >> (r as u32));
+            Ok(())
+        } else if self.call_binop_metamethod(&left, &right, "__shr", a)? {
+            Ok(())
+        } else {
+            Err("Bitwise operation requires integer".to_string())
+        }
     }
 
     fn op_bnot(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
+        
         let frame = self.current_frame_mut();
+        let value = frame.registers[b].clone();
 
-        let value = frame.registers[b]
-            .as_integer()
-            .ok_or("Bitwise operation requires integer")?;
-        frame.registers[a] = LuaValue::integer(!value);
-        Ok(())
+        if let Some(i) = value.as_integer() {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::integer(!i);
+            Ok(())
+        } else if self.call_unop_metamethod(&value, "__bnot", a)? {
+            Ok(())
+        } else {
+            Err("Bitwise operation requires integer".to_string())
+        }
     }
 
     // Integer division
-    fn op_idiv(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-        let frame = self.current_frame_mut();
-
-        let left = frame.registers[b]
-            .as_number()
-            .ok_or("Division on non-number")?;
-        let right = frame.registers[c]
-            .as_number()
-            .ok_or("Division on non-number")?;
-        if right == 0.0 {
-            return Err("Division by zero".to_string());
-        }
-        // Integer division returns integer if both operands can be integers
-        let result = (left / right).floor();
-        if let (Some(l), Some(r)) = (
-            frame.registers[b].as_integer(),
-            frame.registers[c].as_integer(),
-        ) {
-            if r != 0 {
-                frame.registers[a] = LuaValue::integer(l / r);
-                return Ok(());
-            }
-        }
-        frame.registers[a] = LuaValue::number(result);
-        Ok(())
-    }
     
     /// Close all open upvalues for a specific frame
     /// Called when a frame exits to move values from stack to heap
@@ -1290,5 +1522,128 @@ impl VM {
             stats.old_gen_size,
             stats.promoted_objects
         )
+    }
+    
+    /// Try to get a metamethod from a value
+    fn get_metamethod(&self, value: &LuaValue, event: &str) -> Option<LuaValue> {
+        match value {
+            LuaValue::Table(t) => {
+                if let Some(mt) = t.borrow().get_metatable() {
+                    let key = LuaValue::String(Rc::new(LuaString::new(event.to_string())));
+                    mt.borrow().raw_get(&key)
+                } else {
+                    None
+                }
+            }
+            // TODO: Support metatables for other types (strings, userdata)
+            _ => None
+        }
+    }
+    
+    /// Call a binary metamethod (like __add, __sub, etc.)
+    fn call_binop_metamethod(&mut self, left: &LuaValue, right: &LuaValue, event: &str, result_reg: usize) -> Result<bool, String> {
+        // Try left operand's metamethod first
+        let metamethod = self.get_metamethod(left, event)
+            .or_else(|| self.get_metamethod(right, event));
+        
+        if let Some(mm) = metamethod {
+            self.call_metamethod_with_args(mm, vec![left.clone(), right.clone()], result_reg)
+        } else {
+            Ok(false)
+        }
+    }
+    
+    /// Call a unary metamethod (like __unm, __bnot, etc.)
+    fn call_unop_metamethod(&mut self, value: &LuaValue, event: &str, result_reg: usize) -> Result<bool, String> {
+        if let Some(mm) = self.get_metamethod(value, event) {
+            self.call_metamethod_with_args(mm, vec![value.clone()], result_reg)
+        } else {
+            Ok(false)
+        }
+    }
+    
+    /// Generic method to call a metamethod with given arguments
+    fn call_metamethod_with_args(&mut self, metamethod: LuaValue, args: Vec<LuaValue>, result_reg: usize) -> Result<bool, String> {
+        match metamethod {
+            LuaValue::Function(f) => {
+                // Save current state
+                let frame_id = self.next_frame_id;
+                self.next_frame_id += 1;
+                
+                // In Lua calling convention:
+                // Register 0: the function being called
+                // Register 1+: arguments
+                let mut registers = vec![LuaValue::nil(); f.chunk.max_stack_size];
+                // Don't put function in register[0], it's handled by the function itself
+                // Parameters start at local variable positions
+                // For a function with N parameters, they are in registers[0..N]
+                for (i, arg) in args.iter().enumerate() {
+                    if i < registers.len() {
+                        registers[i] = arg.clone();
+                    }
+                }
+                
+                let temp_frame = CallFrame {
+                    frame_id,
+                    function: f.clone(),
+                    pc: 0,
+                    registers,
+                    base: self.frames.len(),
+                    result_reg,
+                    num_results: 1,
+                };
+                
+                self.frames.push(temp_frame);
+                
+                // Execute the metamethod
+                let result = self.run()?;
+                
+                // Store result in the target register
+                if !self.frames.is_empty() {
+                    let frame = self.current_frame_mut();
+                    frame.registers[result_reg] = result;
+                }
+                
+                Ok(true)
+            }
+            LuaValue::CFunction(cf) => {
+                // Create temporary frame for CFunction
+                let frame_id = self.next_frame_id;
+                self.next_frame_id += 1;
+                
+                let mut registers = vec![LuaValue::nil(); 10];
+                registers[0] = LuaValue::CFunction(cf);
+                for (i, arg) in args.iter().enumerate() {
+                    registers[i + 1] = arg.clone();
+                }
+                
+                let temp_frame = CallFrame {
+                    frame_id,
+                    function: self.current_frame().function.clone(),
+                    pc: self.current_frame().pc,
+                    registers,
+                    base: self.frames.len(),
+                    result_reg: 0,
+                    num_results: 1,
+                };
+                
+                self.frames.push(temp_frame);
+                
+                // Call the CFunction
+                let multi_result = cf(self)?;
+                
+                // Pop temporary frame
+                self.frames.pop();
+                
+                // Store result
+                let values = multi_result.all_values();
+                let result = values.first().cloned().unwrap_or(LuaValue::Nil);
+                let frame = self.current_frame_mut();
+                frame.registers[result_reg] = result;
+                
+                Ok(true)
+            }
+            _ => Ok(false)
+        }
     }
 }

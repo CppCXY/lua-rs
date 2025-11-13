@@ -363,6 +363,8 @@ pub struct LuaTable {
     array: Option<Vec<LuaValue>>,
     /// Hash part - allocated on first non-array key access
     hash: Option<HashMap<LuaValue, LuaValue>>,
+    /// Metatable - optional table that defines special behaviors
+    metatable: Option<Rc<RefCell<LuaTable>>>,
 }
 
 impl LuaTable {
@@ -370,10 +372,22 @@ impl LuaTable {
         LuaTable {
             array: None,
             hash: None,
+            metatable: None,
         }
     }
+    
+    /// Get the metatable of this table
+    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
+        self.metatable.clone()
+    }
+    
+    /// Set the metatable of this table
+    pub fn set_metatable(&mut self, mt: Option<Rc<RefCell<LuaTable>>>) {
+        self.metatable = mt;
+    }
 
-    pub fn get(&self, key: &LuaValue) -> Option<LuaValue> {
+    /// Get value with raw access (no metamethods)
+    pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         // Try array part first for integer keys
         if let Some(i) = key.as_integer() {
             let idx = i as usize;
@@ -390,7 +404,41 @@ impl LuaTable {
         self.hash.as_ref().and_then(|h| h.get(key).cloned())
     }
 
-    pub fn set(&mut self, key: LuaValue, value: LuaValue) {
+    pub fn get(&self, key: &LuaValue) -> Option<LuaValue> {
+        // First try raw get
+        if let Some(value) = self.raw_get(key) {
+            if !value.is_nil() {
+                return Some(value);
+            }
+        }
+        
+        // If not found and we have a metatable, check __index
+        if let Some(ref mt) = self.metatable {
+            let mt_borrowed = mt.borrow();
+            let index_key = LuaValue::String(Rc::new(LuaString::new("__index".to_string())));
+            
+            if let Some(index_value) = mt_borrowed.raw_get(&index_key) {
+                match index_value {
+                    // __index is a table - look up in that table
+                    LuaValue::Table(ref t) => {
+                        return t.borrow().get(key);
+                    }
+                    // __index is a function - will be called by VM
+                    LuaValue::Function(_) | LuaValue::CFunction(_) => {
+                        // Return a special marker that tells VM to call __index
+                        // For now, return None and let VM handle it
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
+        Some(LuaValue::Nil)
+    }
+
+    /// Set value with raw access (no metamethods)
+    pub fn raw_set(&mut self, key: LuaValue, value: LuaValue) {
         // Try array part first for integer keys in range
         if let Some(i) = key.as_integer() {
             let idx = i as usize;
@@ -412,6 +460,42 @@ impl LuaTable {
         // Use hash part for all other keys
         let hash = self.hash.get_or_insert_with(HashMap::new);
         hash.insert(key, value);
+    }
+
+    pub fn set(&mut self, key: LuaValue, value: LuaValue) {
+        // Check if key already exists
+        let has_key = self.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false);
+        
+        if has_key {
+            // Key exists, use raw set
+            self.raw_set(key, value);
+            return;
+        }
+        
+        // Key doesn't exist, check for __newindex metamethod
+        if let Some(ref mt) = self.metatable.clone() {
+            let mt_borrowed = mt.borrow();
+            let newindex_key = LuaValue::String(Rc::new(LuaString::new("__newindex".to_string())));
+            
+            if let Some(newindex_value) = mt_borrowed.raw_get(&newindex_key) {
+                match newindex_value {
+                    // __newindex is a table - set in that table
+                    LuaValue::Table(ref t) => {
+                        t.borrow_mut().set(key, value);
+                        return;
+                    }
+                    // __newindex is a function - VM will call it
+                    // For now, fall through to raw_set
+                    LuaValue::Function(_) | LuaValue::CFunction(_) => {
+                        // VM should handle this
+                    }
+                    _ => {}
+                }
+            }
+        }
+        
+        // No metamethod or key exists, use raw set
+        self.raw_set(key, value);
     }
 
     pub fn len(&self) -> usize {
