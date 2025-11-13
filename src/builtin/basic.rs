@@ -1,14 +1,15 @@
 // Basic library functions (print, type, assert, etc.)
 
-use crate::value::LuaValue;
+use crate::value::{LuaValue, MultiValue};
 use crate::vm::VM;
+use crate::LuaString;
 
 /// Lua print() function - prints values to stdout
 /// 
 /// In our register-based VM, function arguments are passed in consecutive registers
 /// starting from register 0. The number of arguments is determined by the calling convention.
 /// For simplicity, we'll print all non-nil registers.
-pub fn lua_print(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_print(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -36,11 +37,11 @@ pub fn lua_print(vm: &mut VM) -> Result<LuaValue, String> {
         println!();
     }
     
-    Ok(LuaValue::Nil)
+    Ok(MultiValue::empty())
 }
 
 /// Lua type() function - returns the type name of a value
-pub fn lua_type(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_type(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -61,11 +62,11 @@ pub fn lua_type(vm: &mut VM) -> Result<LuaValue, String> {
         LuaValue::Userdata(_) => "userdata",
     };
     
-    Ok(LuaValue::string(crate::value::LuaString::new(type_name.to_string())))
+    Ok(MultiValue::single(LuaValue::string(LuaString::new(type_name.to_string()))))
 }
 
 /// Lua assert() function - raises error if condition is false
-pub fn lua_assert(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_assert(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -84,46 +85,48 @@ pub fn lua_assert(vm: &mut VM) -> Result<LuaValue, String> {
     }
     
     // Return the first argument
-    Ok(condition.clone())
+    Ok(MultiValue::single(condition.clone()))
 }
 
 /// Lua tostring() function - converts value to string
-pub fn lua_tostring(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_tostring(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
     if registers.len() <= 1 {
-        return Ok(LuaValue::string(crate::value::LuaString::new("nil".to_string())));
+        return Ok(MultiValue::single(LuaValue::string(LuaString::new("nil".to_string()))));
     }
     
     let value = &registers[1];
-    Ok(LuaValue::string(crate::value::LuaString::new(value.to_string_repr())))
+    Ok(MultiValue::single(LuaValue::string(LuaString::new(value.to_string_repr()))))
 }
 
 /// Lua tonumber() function - converts value to number
-pub fn lua_tonumber(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_tonumber(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
     if registers.len() <= 1 {
-        return Ok(LuaValue::Nil);
+        return Ok(MultiValue::single(LuaValue::Nil));
     }
     
     let value = &registers[1];
     
-    match value {
-        LuaValue::Integer(i) => Ok(LuaValue::Integer(*i)),
-        LuaValue::Float(f) => Ok(LuaValue::Float(*f)),
+    let result = match value {
+        LuaValue::Integer(i) => LuaValue::Integer(*i),
+        LuaValue::Float(f) => LuaValue::Float(*f),
         LuaValue::String(s) => {
             // Try to parse as integer first
             if let Ok(i) = s.as_str().parse::<i64>() {
-                Ok(LuaValue::Integer(i))
+                LuaValue::Integer(i)
             } else if let Ok(f) = s.as_str().parse::<f64>() {
-                Ok(LuaValue::Float(f))
+                LuaValue::Float(f)
             } else {
-                Ok(LuaValue::Nil)
+                LuaValue::Nil
             }
         }
-        _ => Ok(LuaValue::Nil),
-    }
+        _ => LuaValue::Nil,
+    };
+    
+    Ok(MultiValue::single(result))
 }

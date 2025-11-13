@@ -1,10 +1,10 @@
 // Table library functions
 
-use crate::value::LuaValue;
+use crate::value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
 /// Lua table.insert() function - inserts element into array part of table
-pub fn table_insert(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn table_insert(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -19,11 +19,11 @@ pub fn table_insert(vm: &mut VM) -> Result<LuaValue, String> {
     
     // TODO: implement array insertion when Table supports array operations
     // For now, just return nil
-    Ok(LuaValue::Nil)
+    Ok(MultiValue::empty())
 }
 
 /// Lua table.remove() function - removes element from array part of table
-pub fn table_remove(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn table_remove(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -37,14 +37,14 @@ pub fn table_remove(vm: &mut VM) -> Result<LuaValue, String> {
     };
     
     // TODO: implement array removal when Table supports array operations
-    Ok(LuaValue::Nil)
+    Ok(MultiValue::single(LuaValue::Nil))
 }
 
 /// Lua next() function - returns next key-value pair in table
 /// Usage: k, v = next(table, key)
 /// If key is nil, returns first key-value pair
 /// If key is last key, returns nil
-pub fn lua_next(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_next(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -69,17 +69,14 @@ pub fn lua_next(vm: &mut VM) -> Result<LuaValue, String> {
     let pairs: Vec<_> = table_ref.iter_all().collect();
     
     if pairs.is_empty() {
-        // Clear return values for empty table
-        vm.return_values.clear();
-        return Ok(LuaValue::Nil); // Empty table
+        // Empty table
+        return Ok(MultiValue::single(LuaValue::Nil));
     }
     
     // If index is nil, return first key-value pair
     if index_val.is_nil() {
         let (key, value) = &pairs[0];
-        // Store both key and value in return_values
-        vm.return_values = vec![key.clone(), value.clone()];
-        return Ok(key.clone());
+        return Ok(MultiValue::multiple(vec![key.clone(), value.clone()]));
     }
     
     // Find current key position and return next
@@ -87,13 +84,10 @@ pub fn lua_next(vm: &mut VM) -> Result<LuaValue, String> {
         if key == index_val {
             if i + 1 < pairs.len() {
                 let (next_key, next_value) = &pairs[i + 1];
-                // Store both key and value in return_values
-                vm.return_values = vec![next_key.clone(), next_value.clone()];
-                return Ok(next_key.clone());
+                return Ok(MultiValue::multiple(vec![next_key.clone(), next_value.clone()]));
             } else {
-                // No more keys - clear return values
-                vm.return_values.clear();
-                return Ok(LuaValue::Nil); // No more keys
+                // No more keys
+                return Ok(MultiValue::single(LuaValue::Nil));
             }
         }
     }
@@ -104,7 +98,7 @@ pub fn lua_next(vm: &mut VM) -> Result<LuaValue, String> {
 /// Lua pairs() function - returns iterator for table
 /// Usage: for k, v in pairs(table) do ... end
 /// Returns: next, table, nil
-pub fn lua_pairs(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_pairs(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -121,15 +115,12 @@ pub fn lua_pairs(vm: &mut VM) -> Result<LuaValue, String> {
     // First return value is the next function
     let next_func = vm.get_global("next").unwrap_or(LuaValue::Nil);
     
-    // Store additional return values in return_values buffer
-    vm.return_values = vec![next_func.clone(), table_val.clone(), LuaValue::Nil];
-    
-    // Return first value (next function)
-    Ok(next_func)
+    // Return all three values via MultiValue
+    Ok(MultiValue::multiple(vec![next_func, table_val.clone(), LuaValue::Nil]))
 }
 
 /// Iterator function for ipairs - returns next index and value
-fn ipairs_next(vm: &mut VM) -> Result<LuaValue, String> {
+fn ipairs_next(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -159,20 +150,18 @@ fn ipairs_next(vm: &mut VM) -> Result<LuaValue, String> {
     if let Some(value) = table_ref.get(&next_index_val) {
         if !value.is_nil() {
             // Return (index, value)
-            vm.return_values = vec![next_index_val.clone(), value.clone()];
-            return Ok(next_index_val);
+            return Ok(MultiValue::multiple(vec![next_index_val, value]));
         }
     }
     
     // No more values - return nil
-    vm.return_values.clear();
-    Ok(LuaValue::Nil)
+    Ok(MultiValue::single(LuaValue::Nil))
 }
 
 /// Lua ipairs() function - returns iterator for table array part
 /// Usage: for i, v in ipairs(table) do ... end
 /// Returns: ipairs_next, table, 0
-pub fn lua_ipairs(vm: &mut VM) -> Result<LuaValue, String> {
+pub fn lua_ipairs(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
     
@@ -188,9 +177,6 @@ pub fn lua_ipairs(vm: &mut VM) -> Result<LuaValue, String> {
     // Return (ipairs_next, table, 0) as three values
     let iter_func = LuaValue::cfunction(ipairs_next);
     
-    // Store additional return values
-    vm.return_values = vec![iter_func.clone(), table_val.clone(), LuaValue::integer(0)];
-    
-    // Return first value (iterator function)
-    Ok(iter_func)
+    // Return all three values via MultiValue
+    Ok(MultiValue::multiple(vec![iter_func, table_val.clone(), LuaValue::integer(0)]))
 }

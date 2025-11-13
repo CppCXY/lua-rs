@@ -1,15 +1,45 @@
 // Lua 5.4 compatible value representation with GC support
 // This implementation separates Integer and Float types as per Lua 5.4 spec
 
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::fmt;
 use std::any::Any;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt;
+use std::rc::Rc;
+
+use crate::VM;
+
+/// Multi-return values from Lua functions
+/// The first value is the primary return value, additional values go in the Vec
+#[derive(Debug, Clone)]
+pub struct MultiValue {
+    pub values: Option<Vec<LuaValue>>,
+}
+
+impl MultiValue {
+    pub fn empty() -> Self {
+        MultiValue { values: None }
+    }
+
+
+    pub fn single(value: LuaValue) -> Self {
+        MultiValue {
+            values: Some(vec![value]),
+        }
+    }
+
+    pub fn multiple(values: Vec<LuaValue>) -> Self {
+        MultiValue { values: Some(values) }
+    }
+
+    pub fn all_values(self) -> Vec<LuaValue> {
+        self.values.unwrap_or_default()
+    }
+}
 
 /// C Function type - Rust function callable from Lua
-/// Takes VM reference and returns Result<LuaValue, String>
-pub type CFunction = fn(&mut crate::vm::VM) -> Result<LuaValue, String>;
+/// Returns MultiValue for supporting multiple return values
+pub type CFunction = fn(&mut VM) -> Result<MultiValue, String>;
 
 /// Lua value types following Lua 5.4 specification
 /// Size: 16 bytes (8-byte discriminant + 8-byte payload)
@@ -341,9 +371,8 @@ impl LuaTable {
                 return Some(self.array[idx - 1].clone());
             }
         }
-        
-        let result = self.hash.get(key)
-            .cloned();
+
+        let result = self.hash.get(key).cloned();
         result
     }
 
@@ -360,7 +389,7 @@ impl LuaTable {
                 return;
             }
         }
-        
+
         // Use hash part for all other keys
         self.hash.insert(key, value);
     }
@@ -371,14 +400,14 @@ impl LuaTable {
 
     /// Iterate over all key-value pairs (both array and hash parts)
     pub fn iter_all(&self) -> impl Iterator<Item = (LuaValue, LuaValue)> + '_ {
-        let array_iter = self.array.iter().enumerate().map(|(i, v)| {
-            (LuaValue::integer((i + 1) as i64), v.clone())
-        });
-        
-        let hash_iter = self.hash.iter().map(|(k, v)| {
-            (k.clone(), v.clone())
-        });
-        
+        let array_iter = self
+            .array
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (LuaValue::integer((i + 1) as i64), v.clone()));
+
+        let hash_iter = self.hash.iter().map(|(k, v)| (k.clone(), v.clone()));
+
         array_iter.chain(hash_iter)
     }
 }
@@ -445,7 +474,7 @@ impl StringPool {
             if let Some(existing) = self.pool.get(&s) {
                 return Rc::clone(existing);
             }
-            
+
             // Not in pool: create and insert
             let lua_str = Rc::new(LuaString::new(s.clone()));
             self.pool.insert(s, Rc::clone(&lua_str));
@@ -482,10 +511,10 @@ mod string_pool_tests {
     #[test]
     fn test_short_string_interning() {
         let mut pool = StringPool::new();
-        
+
         let s1 = pool.intern("hello".to_string());
         let s2 = pool.intern("hello".to_string());
-        
+
         // Should be the same Rc instance
         assert!(Rc::ptr_eq(&s1, &s2));
         assert_eq!(pool.stats().0, 1); // Only 1 unique string
@@ -494,11 +523,11 @@ mod string_pool_tests {
     #[test]
     fn test_long_string_no_interning() {
         let mut pool = StringPool::with_max_len(10);
-        
+
         let long_str = "a".repeat(50);
         let s1 = pool.intern(long_str.clone());
         let s2 = pool.intern(long_str);
-        
+
         // Long strings are NOT interned
         assert!(!Rc::ptr_eq(&s1, &s2));
         assert_eq!(pool.stats().0, 0); // No strings in pool
@@ -507,12 +536,12 @@ mod string_pool_tests {
     #[test]
     fn test_multiple_short_strings() {
         let mut pool = StringPool::new();
-        
+
         let _ = pool.intern("foo".to_string());
         let _ = pool.intern("bar".to_string());
         let _ = pool.intern("foo".to_string()); // Duplicate
         let _ = pool.intern("baz".to_string());
-        
+
         assert_eq!(pool.stats().0, 3); // 3 unique strings
     }
 }
@@ -525,12 +554,12 @@ mod value_tests {
     fn test_integer_float_distinction() {
         let int_val = LuaValue::integer(42);
         let float_val = LuaValue::number(42.0);
-        
+
         assert!(int_val.is_integer());
         assert!(!int_val.is_float());
         assert!(float_val.is_integer());
         assert!(float_val.is_float());
-        
+
         // Both are numbers
         assert!(int_val.is_number());
         assert!(float_val.is_number());
@@ -540,13 +569,13 @@ mod value_tests {
     fn test_integer_float_conversion() {
         let int_val = LuaValue::integer(42);
         let float_val = LuaValue::number(42.5);
-        
+
         // Integer can convert to float via as_float
         assert_eq!(int_val.as_float(), Some(42.0));
-        
+
         // Float with fraction cannot convert to integer
         assert_eq!(float_val.as_integer(), None);
-        
+
         // Float without fraction can convert to integer
         let exact_float = LuaValue::number(42.0);
         assert_eq!(exact_float.as_integer(), Some(42));
@@ -556,7 +585,7 @@ mod value_tests {
     fn test_as_number_unified() {
         let int_val = LuaValue::integer(42);
         let float_val = LuaValue::number(3.14);
-        
+
         // as_number works for both
         assert_eq!(int_val.as_number(), Some(42.0));
         assert_eq!(float_val.as_number(), Some(3.14));
@@ -565,7 +594,7 @@ mod value_tests {
     #[test]
     fn test_value_size() {
         use std::mem::size_of;
-        
+
         // LuaValue should be 16 bytes (enum discriminant + largest variant)
         assert_eq!(size_of::<LuaValue>(), 16);
     }

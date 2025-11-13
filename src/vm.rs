@@ -567,7 +567,7 @@ impl VM {
             self.frames.push(temp_frame);
             
             // Call the CFunction
-            let result = cfunc(self)?;
+            let multi_result = cfunc(self)?;
             
             // Pop the temporary frame
             self.frames.pop();
@@ -578,27 +578,29 @@ impl VM {
             // C = 2: 1 return value expected (at register a)
             // C = 3: 2 return values expected (at registers a, a+1)
             // etc.
+            
+            // Get all return values from MultiValue
+            let all_returns = multi_result.all_values();
+            let num_returns = all_returns.len();
+            
             let num_expected = if c == 0 {
-                self.return_values.len()
+                num_returns
             } else {
                 c - 1
             };
             
-            // Collect all return values first
-            let mut values_to_store = vec![result];
-            for i in 1..num_expected {
-                if i < self.return_values.len() {
-                    values_to_store.push(self.return_values[i].clone());
-                } else {
-                    values_to_store.push(LuaValue::nil());
+            // Store them in registers
+            let current_frame = self.current_frame_mut();
+            for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
+                if a + i < current_frame.registers.len() {
+                    current_frame.registers[a + i] = value;
                 }
             }
             
-            // Store them in registers
-            let current_frame = self.current_frame_mut();
-            for (i, value) in values_to_store.into_iter().enumerate() {
+            // Fill remaining expected registers with nil
+            for i in num_returns..num_expected {
                 if a + i < current_frame.registers.len() {
-                    current_frame.registers[a + i] = value;
+                    current_frame.registers[a + i] = LuaValue::nil();
                 }
             }
             
