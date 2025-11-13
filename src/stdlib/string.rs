@@ -199,10 +199,233 @@ fn string_format(vm: &mut VM) -> Result<MultiValue, String> {
         .as_string()
         .ok_or_else(|| "bad argument #1 to 'string.format' (string expected)".to_string())?;
     
-    // TODO: Implement proper format string parsing
-    // For now, just return the format string
-    let result = vm.create_string(format_str.as_str().to_string());
-    Ok(MultiValue::single(LuaValue::String(result)))
+    let format = format_str.as_str();
+    let mut result = String::new();
+    let mut arg_index = 1;
+    let mut chars = format.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            if chars.peek().is_some() {
+                // Parse format flags and width
+                let mut flags = String::new();
+                let mut has_format_char = false;
+                
+                // Collect format specifier (flags, width, precision)
+                while let Some(&c) = chars.peek() {
+                    if c == '-' || c == '+' || c == ' ' || c == '#' || c == '0' || c.is_numeric() || c == '.' {
+                        flags.push(c);
+                        chars.next();
+                    } else {
+                        has_format_char = true;
+                        break;
+                    }
+                }
+                
+                if !has_format_char {
+                    return Err("incomplete format string".to_string());
+                }
+                
+                let format_char = chars.next().unwrap();
+                
+                match format_char {
+                    '%' => {
+                        result.push('%');
+                    }
+                    'c' => {
+                        // Character
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_integer()
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        if num >= 0 && num <= 255 {
+                            result.push(num as u8 as char);
+                        } else {
+                            return Err(format!("bad argument #{} to 'format' (invalid value for '%%c')", arg_index + 1));
+                        }
+                        arg_index += 1;
+                    }
+                    'd' | 'i' => {
+                        // Integer
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_integer()
+                            .or_else(|| val.as_number().map(|n| n as i64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        result.push_str(&format!("{}", num));
+                        arg_index += 1;
+                    }
+                    'o' => {
+                        // Octal
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_integer()
+                            .or_else(|| val.as_number().map(|n| n as i64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        result.push_str(&format!("{:o}", num));
+                        arg_index += 1;
+                    }
+                    'u' => {
+                        // Unsigned integer
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_integer()
+                            .or_else(|| val.as_number().map(|n| n as i64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        result.push_str(&format!("{}", num as u64));
+                        arg_index += 1;
+                    }
+                    'x' => {
+                        // Lowercase hexadecimal
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_integer()
+                            .or_else(|| val.as_number().map(|n| n as i64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        result.push_str(&format!("{:x}", num));
+                        arg_index += 1;
+                    }
+                    'X' => {
+                        // Uppercase hexadecimal
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_integer()
+                            .or_else(|| val.as_number().map(|n| n as i64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        result.push_str(&format!("{:X}", num));
+                        arg_index += 1;
+                    }
+                    'e' => {
+                        // Scientific notation (lowercase)
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_number()
+                            .or_else(|| val.as_integer().map(|i| i as f64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        result.push_str(&format!("{:e}", num));
+                        arg_index += 1;
+                    }
+                    'E' => {
+                        // Scientific notation (uppercase)
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_number()
+                            .or_else(|| val.as_integer().map(|i| i as f64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        result.push_str(&format!("{:E}", num));
+                        arg_index += 1;
+                    }
+                    'f' => {
+                        // Floating point
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_number()
+                            .or_else(|| val.as_integer().map(|i| i as f64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        
+                        // Parse precision from flags (e.g., ".2")
+                        if let Some(dot_pos) = flags.find('.') {
+                            let precision_str = &flags[dot_pos + 1..];
+                            if let Ok(precision) = precision_str.parse::<usize>() {
+                                result.push_str(&format!("{:.prec$}", num, prec = precision));
+                            } else {
+                                result.push_str(&format!("{}", num));
+                            }
+                        } else {
+                            result.push_str(&format!("{}", num));
+                        }
+                        arg_index += 1;
+                    }
+                    'g' => {
+                        // Automatic format (lowercase) - use shorter of %e or %f
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_number()
+                            .or_else(|| val.as_integer().map(|i| i as f64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        
+                        // Use scientific notation for very large or very small numbers
+                        if num.abs() < 0.0001 || num.abs() >= 1e10 {
+                            result.push_str(&format!("{:e}", num));
+                        } else {
+                            result.push_str(&format!("{}", num));
+                        }
+                        arg_index += 1;
+                    }
+                    'G' => {
+                        // Automatic format (uppercase) - use shorter of %E or %f
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let num = val.as_number()
+                            .or_else(|| val.as_integer().map(|i| i as f64))
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (number expected)", arg_index + 1))?;
+                        
+                        // Use scientific notation for very large or very small numbers
+                        if num.abs() < 0.0001 || num.abs() >= 1e10 {
+                            result.push_str(&format!("{:E}", num));
+                        } else {
+                            result.push_str(&format!("{}", num));
+                        }
+                        arg_index += 1;
+                    }
+                    's' => {
+                        // String
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        
+                        let s = if let Some(s) = val.as_string() {
+                            s.as_str().to_string()
+                        } else if let Some(n) = val.as_integer() {
+                            n.to_string()
+                        } else if let Some(n) = val.as_number() {
+                            n.to_string()
+                        } else {
+                            // Try __tostring metamethod
+                            match vm.call_tostring_metamethod(&val) {
+                                Ok(Some(s)) => s.as_str().to_string(),
+                                Ok(None) => val.to_string_repr(),
+                                Err(e) => return Err(e),
+                            }
+                        };
+                        result.push_str(&s);
+                        arg_index += 1;
+                    }
+                    'q' => {
+                        // Quoted string
+                        let val = get_arg(vm, arg_index)
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (no value)", arg_index + 1))?;
+                        let s = val.as_string()
+                            .ok_or_else(|| format!("bad argument #{} to 'format' (string expected)", arg_index + 1))?;
+                        
+                        result.push('"');
+                        for ch in s.as_str().chars() {
+                            match ch {
+                                '"' => result.push_str("\\\""),
+                                '\\' => result.push_str("\\\\"),
+                                '\n' => result.push_str("\\n"),
+                                '\r' => result.push_str("\\r"),
+                                '\t' => result.push_str("\\t"),
+                                _ if ch.is_control() => result.push_str(&format!("\\{}", ch as u8)),
+                                _ => result.push(ch),
+                            }
+                        }
+                        result.push('"');
+                        arg_index += 1;
+                    }
+                    _ => {
+                        return Err(format!("invalid option '%{}' to 'format'", format_char));
+                    }
+                }
+            } else {
+                return Err("incomplete format string".to_string());
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    let result_str = vm.create_string(result);
+    Ok(MultiValue::single(LuaValue::String(result_str)))
 }
 
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
@@ -346,57 +569,39 @@ fn string_gmatch(vm: &mut VM) -> Result<MultiValue, String> {
         Err(e) => return Err(format!("invalid pattern: {}", e)),
     };
     
-    // Store state in a table: { string, pattern, position }
-    use crate::value::LuaTable;
+    // Create a state structure to store in userdata
+    #[allow(dead_code)]
+    #[derive(Clone)]
+    struct GmatchState {
+        string: String,
+        pattern: String,
+        position: usize,
+    }
+    
+    let state = GmatchState {
+        string: s.as_str().to_string(),
+        pattern: pattern_str.as_str().to_string(),
+        position: 0,
+    };
+    
+    // Store state directly in userdata using Box for stable pointer
     use std::rc::Rc;
     use std::cell::RefCell;
+    let state_box = Box::new(RefCell::new(state));
+    let state_ptr = Box::into_raw(state_box) as usize;
     
-    let state_table = Rc::new(RefCell::new(LuaTable::new()));
-    state_table.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("str".to_string())),
-        LuaValue::String(s.clone()),
-    );
-    state_table.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("pattern".to_string())),
-        LuaValue::String(pattern_str.clone()),
-    );
-    state_table.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("pos".to_string())),
-        LuaValue::Integer(0),
-    );
+    let userdata = LuaValue::userdata(state_ptr);
     
-    // Return the state table itself, and rely on for-loop to call the iterator
-    // Actually, we need to return a function. Let's use a simpler approach:
-    // Return a CFunction that closes over nothing and uses global state
-    
-    // Better approach: return a table that can be used with pairs/ipairs
-    // But for gmatch, we need to return an iterator function
-    // The standard Lua pattern is: for match in string.gmatch(s, pattern) do ... end
-    // This requires returning a function
-    
-    // Store the state in the global table temporarily
-    // Use a unique key based on the string address
-    let state_key = format!("__gmatch_state_{:p}", state_table.as_ref());
-    vm.set_global(&state_key, LuaValue::Table(state_table.clone()));
-    
-    // Create a CFunction that retrieves this state
-    // This won't work because CFunctions can't capture state easily
-    
-    // Alternative: use userdata with __call metamethod
-    // Store the Rc pointer value as a usize for lookup
-    let table_ptr = Rc::as_ptr(&state_table) as usize;
-    let userdata = LuaValue::userdata(table_ptr);
-    
-    // Also store in global table for retrieval
-    let state_key = format!("__gmatch_state_{}", table_ptr);
-    vm.set_global(&state_key, LuaValue::Table(state_table.clone()));
-    
-    // Create metatable with __call
+    // Create metatable with __call and __gc
     if let LuaValue::Userdata(ref ud) = userdata {
-        let mt = Rc::new(RefCell::new(LuaTable::new()));
+        let mt = Rc::new(RefCell::new(crate::value::LuaTable::new()));
         mt.borrow_mut().raw_set(
             LuaValue::String(vm.create_string("__call".to_string())),
-            LuaValue::CFunction(gmatch_iterator),
+            LuaValue::CFunction(gmatch_iterator_optimized),
+        );
+        mt.borrow_mut().raw_set(
+            LuaValue::String(vm.create_string("__gc".to_string())),
+            LuaValue::CFunction(gmatch_gc_optimized),
         );
         
         ud.set_metatable(Some(mt));
@@ -405,8 +610,16 @@ fn string_gmatch(vm: &mut VM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(userdata))
 }
 
-/// Iterator function called when gmatch userdata is called
-fn gmatch_iterator(vm: &mut VM) -> Result<MultiValue, String> {
+/// Optimized iterator that stores state directly in userdata
+fn gmatch_iterator_optimized(vm: &mut VM) -> Result<MultiValue, String> {
+    #[allow(dead_code)]
+    #[derive(Clone)]
+    struct GmatchState {
+        string: String,
+        pattern: String,
+        position: usize,
+    }
+    
     // For __call metamethod, register 1 is self (the userdata)
     let frame = vm.frames.last().unwrap();
     if frame.registers.len() < 2 {
@@ -415,8 +628,8 @@ fn gmatch_iterator(vm: &mut VM) -> Result<MultiValue, String> {
     
     let state_val = &frame.registers[1];
     
-    // Extract table pointer from userdata
-    let table_ptr = if let LuaValue::Userdata(ud) = state_val {
+    // Extract state pointer from userdata
+    let state_ptr = if let LuaValue::Userdata(ud) = state_val {
         let data = ud.get_data();
         let data_ref = data.borrow();
         if let Some(&ptr) = data_ref.downcast_ref::<usize>() {
@@ -428,68 +641,68 @@ fn gmatch_iterator(vm: &mut VM) -> Result<MultiValue, String> {
         return Err("gmatch iterator: expected userdata".to_string());
     };
     
-    // Retrieve state table from globals
-    let state_key = format!("__gmatch_state_{}", table_ptr);
-    let state_table = match vm.get_global(&state_key) {
-        Some(LuaValue::Table(t)) => t,
-        _ => return Err("gmatch iterator: state table not found".to_string()),
-    };
-    
-    // Get string, pattern string, and position from state
-    let str_key = vm.create_string("str".to_string());
-    let pattern_key = vm.create_string("pattern".to_string());
-    let pos_key = vm.create_string("pos".to_string());
-    
-    let s_val = state_table.borrow().raw_get(&LuaValue::String(str_key.clone()));
-    let s = match s_val {
-        Some(LuaValue::String(s)) => s.as_str().to_string(),
-        _ => return Err("gmatch iterator: invalid state - missing string".to_string()),
-    };
-    
-    let pattern_str = match state_table.borrow().raw_get(&LuaValue::String(pattern_key.clone())) {
-        Some(LuaValue::String(p)) => p.as_str().to_string(),
-        _ => return Err("gmatch iterator: invalid state - missing pattern".to_string()),
-    };
-    
-    let pos = match state_table.borrow().raw_get(&LuaValue::String(pos_key.clone())) {
-        Some(LuaValue::Integer(n)) => n as usize,
-        _ => 0,
-    };
+    // SAFETY: We created this pointer in string_gmatch and it's managed by the GC
+    let state_box = unsafe { &mut *(state_ptr as *mut std::cell::RefCell<GmatchState>) };
+    let mut state = state_box.borrow_mut();
     
     // Parse pattern
-    let pattern = match crate::lua_pattern::parse_pattern(&pattern_str) {
+    let pattern = match crate::lua_pattern::parse_pattern(&state.pattern) {
         Ok(p) => p,
         Err(e) => return Err(format!("invalid pattern: {}", e)),
     };
     
-    // Find next match using the find function
-    let result = crate::lua_pattern::find(&s, &pattern, pos);
-    
-    match result {
-        Some((start, end, captures)) => {
-            // Update position for next iteration
-            let next_pos = if end > start { end } else { start + 1 };
-            state_table.borrow_mut().raw_set(
-                LuaValue::String(pos_key),
-                LuaValue::Integer(next_pos as i64),
-            );
-            
-            // Return captures if any, otherwise return the whole match
-            if captures.is_empty() {
-                let matched = &s[start..end];
-                Ok(MultiValue::single(LuaValue::String(vm.create_string(matched.to_string()))))
-            } else {
-                let results: Vec<LuaValue> = captures.iter()
-                    .map(|cap| LuaValue::String(vm.create_string(cap.clone())))
-                    .collect();
-                Ok(MultiValue::multiple(results))
+    // Find next match
+    if let Some((start, end, captures)) = crate::lua_pattern::find(&state.string, &pattern, state.position) {
+        // Update position for next iteration
+        state.position = if end > start { end } else { end + 1 };
+        
+        // Return captures if any, otherwise return the matched string
+        if captures.is_empty() {
+            let matched = &state.string[start..end];
+            Ok(MultiValue::single(LuaValue::String(vm.create_string(matched.to_string()))))
+        } else {
+            let mut results = Vec::new();
+            for cap in captures {
+                results.push(LuaValue::String(vm.create_string(cap)));
             }
+            Ok(MultiValue::multiple(results))
         }
-        None => {
-            // No more matches, return nil to signal end of iteration
-            Ok(MultiValue::single(LuaValue::Nil))
-        }
+    } else {
+        // No more matches, return nil
+        Ok(MultiValue::single(LuaValue::Nil))
     }
 }
 
-
+/// Optimized cleanup function
+fn gmatch_gc_optimized(vm: &mut VM) -> Result<MultiValue, String> {
+    #[allow(dead_code)]
+    #[derive(Clone)]
+    struct GmatchState {
+        string: String,
+        pattern: String,
+        position: usize,
+    }
+    
+    // For __gc metamethod, register 0 is self (the userdata)
+    let frame = vm.frames.last().unwrap();
+    if frame.registers.is_empty() {
+        return Ok(MultiValue::empty());
+    }
+    
+    let state_val = &frame.registers[0];
+    
+    // Extract state pointer from userdata and free it
+    if let LuaValue::Userdata(ud) = state_val {
+        let data = ud.get_data();
+        let data_ref = data.borrow();
+        if let Some(&state_ptr) = data_ref.downcast_ref::<usize>() {
+            // SAFETY: We own this pointer and are cleaning it up
+            unsafe {
+                let _ = Box::from_raw(state_ptr as *mut std::cell::RefCell<GmatchState>);
+                // Box will be dropped here, freeing the memory
+            }
+        }
+    }
+    
+    Ok(MultiValue::empty())
+}
