@@ -350,63 +350,83 @@ impl LuaString {
 }
 
 /// Lua table (mutable associative array)
+/// Uses lazy allocation - only creates Vec/HashMap when needed
 #[derive(Debug)]
 pub struct LuaTable {
-    array: Vec<LuaValue>,
-    hash: HashMap<LuaValue, LuaValue>,
+    /// Array part - allocated on first integer key access
+    array: Option<Vec<LuaValue>>,
+    /// Hash part - allocated on first non-array key access
+    hash: Option<HashMap<LuaValue, LuaValue>>,
 }
 
 impl LuaTable {
     pub fn new() -> Self {
         LuaTable {
-            array: Vec::new(),
-            hash: HashMap::new(),
+            array: None,
+            hash: None,
         }
     }
 
     pub fn get(&self, key: &LuaValue) -> Option<LuaValue> {
+        // Try array part first for integer keys
         if let Some(i) = key.as_integer() {
             let idx = i as usize;
-            if idx > 0 && idx <= self.array.len() {
-                return Some(self.array[idx - 1].clone());
+            if idx > 0 {
+                if let Some(ref arr) = self.array {
+                    if idx <= arr.len() {
+                        return Some(arr[idx - 1].clone());
+                    }
+                }
             }
         }
 
-        let result = self.hash.get(key).cloned();
-        result
+        // Try hash part
+        self.hash.as_ref().and_then(|h| h.get(key).cloned())
     }
 
     pub fn set(&mut self, key: LuaValue, value: LuaValue) {
         // Try array part first for integer keys in range
         if let Some(i) = key.as_integer() {
             let idx = i as usize;
-            if idx > 0 && idx <= self.array.len() + 1 {
-                if idx == self.array.len() + 1 {
-                    self.array.push(value);
-                } else {
-                    self.array[idx - 1] = value;
+            if idx > 0 {
+                // Get or create array
+                let arr = self.array.get_or_insert_with(Vec::new);
+                
+                if idx <= arr.len() + 1 {
+                    if idx == arr.len() + 1 {
+                        arr.push(value);
+                    } else {
+                        arr[idx - 1] = value;
+                    }
+                    return;
                 }
-                return;
             }
         }
 
         // Use hash part for all other keys
-        self.hash.insert(key, value);
+        let hash = self.hash.get_or_insert_with(HashMap::new);
+        hash.insert(key, value);
     }
 
     pub fn len(&self) -> usize {
-        self.array.len()
+        self.array.as_ref().map(|a| a.len()).unwrap_or(0)
     }
 
     /// Iterate over all key-value pairs (both array and hash parts)
     pub fn iter_all(&self) -> impl Iterator<Item = (LuaValue, LuaValue)> + '_ {
         let array_iter = self
             .array
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (LuaValue::integer((i + 1) as i64), v.clone()));
+            .as_ref()
+            .map(|a| a.iter().enumerate().map(|(i, v)| (LuaValue::integer((i + 1) as i64), v.clone())))
+            .into_iter()
+            .flatten();
 
-        let hash_iter = self.hash.iter().map(|(k, v)| (k.clone(), v.clone()));
+        let hash_iter = self
+            .hash
+            .as_ref()
+            .map(|h| h.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .into_iter()
+            .flatten();
 
         array_iter.chain(hash_iter)
     }

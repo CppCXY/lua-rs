@@ -95,13 +95,39 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
 /// Compile assignment statement
 fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
+    use emmylua_parser::LuaExpr;
+    use super::expr::compile_call_expr_with_returns;
+    
     // Get vars and expressions from children
     let (vars, exprs) = stat.get_var_and_expr_list();
 
+    if vars.is_empty() {
+        return Ok(());
+    }
+
     // Compile expressions
     let mut val_regs = Vec::new();
-    for expr in exprs {
-        let reg = compile_expr(c, &expr)?;
+    
+    for (i, expr) in exprs.iter().enumerate() {
+        let is_last = i == exprs.len() - 1;
+        
+        // If this is the last expression and it's a call, request multiple returns
+        if is_last && matches!(expr, LuaExpr::CallExpr(_)) {
+            let remaining_vars = vars.len().saturating_sub(val_regs.len());
+            if remaining_vars > 0 {
+                if let LuaExpr::CallExpr(call_expr) = expr {
+                    let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
+                    // Collect all return values
+                    for j in 0..remaining_vars {
+                        val_regs.push(base_reg + j as u32);
+                    }
+                    break;
+                }
+            }
+        }
+        
+        // Regular expression
+        let reg = compile_expr(c, expr)?;
         val_regs.push(reg);
     }
 
