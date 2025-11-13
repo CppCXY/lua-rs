@@ -228,13 +228,8 @@ impl VM {
         };
 
         if let Some(tbl) = table.as_table() {
-            // Call get which may trigger metamethods
-            // Clone the Rc to pass to get method
-            let tbl_rc = tbl.clone();
-            let value = {
-                let borrowed = tbl.borrow();
-                borrowed.get(tbl_rc, self, &key).unwrap_or(LuaValue::Nil)
-            };
+            // Use VM's table_get which handles metamethods
+            let value = self.table_get(tbl, &key).unwrap_or(LuaValue::Nil);
             let frame = self.current_frame_mut();
             frame.registers[a] = value;
             Ok(())
@@ -248,13 +243,17 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let table = frame.registers[a].clone();
-        let key = frame.registers[b].clone();
-        let value = frame.registers[c].clone();
+        let (table, key, value) = {
+            let frame = self.current_frame();
+            (
+                frame.registers[a].clone(),
+                frame.registers[b].clone(),
+                frame.registers[c].clone(),
+            )
+        };
 
         if let Some(tbl) = table.as_table() {
-            tbl.borrow_mut().set(key, value);
+            self.table_set(tbl, key, value)?;
             Ok(())
         } else {
             Err("Attempt to index a non-table value".to_string())
@@ -1127,6 +1126,123 @@ impl VM {
 
     pub fn get_global(&self, name: &str) -> Option<LuaValue> {
         self.globals.get(name).cloned()
+    }
+
+    /// Get value from table with metatable support
+    /// Handles __index metamethod
+    pub fn table_get(
+        &mut self,
+        table_rc: Rc<RefCell<LuaTable>>,
+        key: &LuaValue,
+    ) -> Option<LuaValue> {
+        // First try raw get
+        let value = {
+            let table = table_rc.borrow();
+            table.raw_get(key).unwrap_or(LuaValue::Nil)
+        };
+        
+        if !value.is_nil() {
+            return Some(value);
+        }
+
+        // If not found, check for __index metamethod
+        let metatable = {
+            let table = table_rc.borrow();
+            table.get_metatable()
+        };
+
+        if let Some(mt) = metatable {
+            let index_key = LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
+            
+            let index_value = {
+                let mt_borrowed = mt.borrow();
+                mt_borrowed.raw_get(&index_key)
+            };
+            
+            if let Some(index_val) = index_value {
+                match index_val {
+                    // __index is a table - look up in that table
+                    LuaValue::Table(ref t) => {
+                        let t_rc = t.clone();
+                        return self.table_get(t_rc, key);
+                    }
+                    // __index is a function - call it with (table, key)
+                    LuaValue::CFunction(_) | LuaValue::Function(_) => {
+                        let self_value = LuaValue::Table(table_rc);
+                        let args = vec![self_value, key.clone()];
+                        
+                        match self.call_metamethod(&index_val, &args) {
+                            Ok(result) => return result,
+                            Err(_) => return None,
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Set value in table with metatable support
+    /// Handles __newindex metamethod
+    pub fn table_set(
+        &mut self,
+        table_rc: Rc<RefCell<LuaTable>>,
+        key: LuaValue,
+        value: LuaValue,
+    ) -> Result<(), String> {
+        // Check if key already exists
+        let has_key = {
+            let table = table_rc.borrow();
+            table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false)
+        };
+
+        if has_key {
+            // Key exists, use raw set
+            table_rc.borrow_mut().raw_set(key, value);
+            return Ok(());
+        }
+
+        // Key doesn't exist, check for __newindex metamethod
+        let metatable = {
+            let table = table_rc.borrow();
+            table.get_metatable()
+        };
+
+        if let Some(mt) = metatable {
+            let newindex_key = LuaValue::String(Rc::new(crate::value::LuaString::new("__newindex".to_string())));
+            
+            let newindex_value = {
+                let mt_borrowed = mt.borrow();
+                mt_borrowed.raw_get(&newindex_key)
+            };
+            
+            if let Some(newindex_val) = newindex_value {
+                match newindex_val {
+                    // __newindex is a table - set in that table
+                    LuaValue::Table(ref t) => {
+                        let t_rc = t.clone();
+                        return self.table_set(t_rc, key, value);
+                    }
+                    // __newindex is a function - call it with (table, key, value)
+                    LuaValue::CFunction(_) | LuaValue::Function(_) => {
+                        let self_value = LuaValue::Table(table_rc);
+                        let args = vec![self_value, key, value];
+                        
+                        match self.call_metamethod(&newindex_val, &args) {
+                            Ok(_) => return Ok(()),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // No metamethod or key doesn't exist, use raw set
+        table_rc.borrow_mut().raw_set(key, value);
+        Ok(())
     }
 
     /// Call a Lua value (function or CFunction) with the given arguments
