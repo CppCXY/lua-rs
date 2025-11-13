@@ -48,6 +48,11 @@ impl VM {
         self.globals.insert("tostring".to_string(), LuaValue::cfunction(builtin::lua_tostring));
         self.globals.insert("tonumber".to_string(), LuaValue::cfunction(builtin::lua_tonumber));
         
+        // Iterator functions
+        self.globals.insert("next".to_string(), LuaValue::cfunction(builtin::lua_next));
+        self.globals.insert("pairs".to_string(), LuaValue::cfunction(builtin::lua_pairs));
+        self.globals.insert("ipairs".to_string(), LuaValue::cfunction(builtin::lua_ipairs));
+        
         // Table library (as a table)
         let mut table_lib = LuaTable::new();
         table_lib.set(

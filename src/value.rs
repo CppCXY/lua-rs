@@ -229,6 +229,34 @@ impl fmt::Debug for LuaValue {
     }
 }
 
+impl PartialEq for LuaValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (LuaValue::Nil, LuaValue::Nil) => true,
+            (LuaValue::Boolean(a), LuaValue::Boolean(b)) => a == b,
+            (LuaValue::Integer(a), LuaValue::Integer(b)) => a == b,
+            (LuaValue::Float(a), LuaValue::Float(b)) => a == b,
+            // Allow comparison between integer and float
+            (LuaValue::Integer(a), LuaValue::Float(b)) => *a as f64 == *b,
+            (LuaValue::Float(a), LuaValue::Integer(b)) => *a == *b as f64,
+            (LuaValue::String(a), LuaValue::String(b)) => a.as_str() == b.as_str(),
+            // Tables are compared by reference
+            (LuaValue::Table(a), LuaValue::Table(b)) => Rc::ptr_eq(a, b),
+            // Functions are compared by reference
+            (LuaValue::Function(a), LuaValue::Function(b)) => Rc::ptr_eq(a, b),
+            // CFunction comparison by pointer (not perfect but workable)
+            (LuaValue::CFunction(a), LuaValue::CFunction(b)) => {
+                std::ptr::eq(a as *const CFunction, b as *const CFunction)
+            }
+            // Userdata compared by reference
+            (LuaValue::Userdata(a), LuaValue::Userdata(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for LuaValue {}
+
 /// Lua string (immutable, interned)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LuaString {
@@ -293,6 +321,23 @@ impl LuaTable {
 
     pub fn len(&self) -> usize {
         self.array.len()
+    }
+
+    /// Iterate over all key-value pairs (both array and hash parts)
+    pub fn iter_all(&self) -> impl Iterator<Item = (LuaValue, LuaValue)> + '_ {
+        let array_iter = self.array.iter().enumerate().map(|(i, v)| {
+            (LuaValue::integer((i + 1) as i64), v.clone())
+        });
+        
+        let hash_iter = self.hash.iter().map(|(k, v)| {
+            let key = match k {
+                TableKey::String(s) => LuaValue::String(Rc::new(LuaString::new(s.clone()))),
+                TableKey::Integer(n) => LuaValue::integer(*n),
+            };
+            (key, v.clone())
+        });
+        
+        array_iter.chain(hash_iter)
     }
 }
 

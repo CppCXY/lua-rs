@@ -4,6 +4,7 @@ use super::expr::{compile_call_expr, compile_expr, compile_var_expr};
 use super::{Compiler, helpers::*};
 use crate::compiler::compile_block;
 use crate::opcode::{Instruction, OpCode};
+use crate::value::LuaValue;
 use emmylua_parser::{
     LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaForRangeStat, LuaForStat, LuaIfStat,
     LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaWhileStat,
@@ -354,7 +355,8 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 /// Compile generic for loop
 fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<(), String> {    
     // Structure: for <var-list> in <expr-list> do <block> end
-    // This is a simplified implementation - full iterator protocol is complex
+    // Simplified implementation: for k in next, t do ... end
+    // Full iterator protocol: for var1, var2, ... in iter_func, state, init_val do ... end
     
     // Get loop variable names
     let var_names = stat.get_var_name_list()
@@ -371,16 +373,38 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
         return Err("for-in loop requires iterator expression".to_string());
     }
 
-    // For now, we'll implement a simplified version for ipairs/pairs
-    // TODO: Full generic for with iterator protocol
-    
-    // Compile iterator expressions
+    // Compile iterator expressions into registers
+    // For pairs(t), this typically gives us 3 values: next_func, table, nil
     let mut iter_regs = Vec::new();
     for expr in &iter_exprs {
         iter_regs.push(compile_expr(c, expr)?);
     }
+    
+    // Allocate iterator state registers (these persist across iterations)
+    // iter_func, state, control_var
+    let iter_func_reg = if !iter_regs.is_empty() {
+        iter_regs[0]
+    } else {
+        return Err("for-in loop requires iterator function".to_string());
+    };
+    
+    let state_reg = if iter_regs.len() > 1 {
+        iter_regs[1]
+    } else {
+        let reg = alloc_register(c);
+        emit_load_nil(c, reg);
+        reg
+    };
+    
+    let control_var_reg = if iter_regs.len() > 2 {
+        iter_regs[2]
+    } else {
+        let reg = alloc_register(c);
+        emit_load_nil(c, reg);
+        reg
+    };
 
-    // Begin scope
+    // Begin scope for loop variables
     begin_scope(c);
 
     // Allocate registers for loop variables
@@ -390,16 +414,45 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
         add_local(c, var_name.clone(), reg);
         var_regs.push(reg);
     }
+    
+    // Begin loop
+    begin_loop(c);
 
     // Mark loop start
     let loop_start = c.chunk.code.len();
 
-    // TODO: Call iterator function and check if result is nil
-    // For now, this is a placeholder - full implementation requires:
-    // 1. Call iterator function with state and control variable
-    // 2. Check if first result is nil
-    // 3. Assign results to loop variables
-    // This would need OpCode::Call and proper iterator protocol
+    // Call iterator function: var1, var2, ... = iter_func(state, control_var)
+    // Setup call: place function in a register, followed by arguments
+    let call_base = alloc_register(c);
+    emit_move(c, call_base, iter_func_reg);
+    
+    let arg1 = alloc_register(c);
+    emit_move(c, arg1, state_reg);
+    
+    let arg2 = alloc_register(c);
+    emit_move(c, arg2, control_var_reg);
+    
+    // Call with 2 arguments, expect at least 1 return value
+    // OpCode::Call: A = func reg, B = num args + 1, C = num returns + 1
+    emit(c, Instruction::encode_abc(OpCode::Call, call_base, 3, 2));
+    
+    // Result is in call_base, move to first loop variable
+    emit_move(c, var_regs[0], call_base);
+    
+    // Update control_var for next iteration
+    emit_move(c, control_var_reg, call_base);
+    
+    // Check if first return value is nil (end of iteration)
+    let is_nil_reg = alloc_register(c);
+    let nil_const = add_constant(c, LuaValue::Nil);
+    let nil_reg = alloc_register(c);
+    emit_load_constant(c, nil_reg, nil_const);
+    
+    emit(c, Instruction::encode_abc(OpCode::Eq, is_nil_reg, var_regs[0], nil_reg));
+    
+    // If first value is nil, exit loop
+    emit(c, Instruction::encode_abc(OpCode::Test, is_nil_reg, 0, 1));
+    let end_jump = emit_jump(c, OpCode::Jmp);
 
     // Compile loop body
     if let Some(body) = stat.get_block() {
@@ -410,11 +463,15 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
     let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
     emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, -jump_offset));
 
+    // Patch end jump
+    patch_jump(c, end_jump);
+    
+    // End loop (patches all break statements)
+    end_loop(c);
+
     // End scope
     end_scope(c);
 
-    // Note: This is incomplete - proper for-in requires iterator protocol
-    // For now, marking as implemented but needs future work
     Ok(())
 }
 
