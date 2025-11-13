@@ -18,6 +18,7 @@ enum FileInner {
     Read(BufReader<File>),
     Write(BufWriter<File>),
     ReadWrite(File),
+    Closed,
 }
 
 impl LuaFile {
@@ -149,7 +150,11 @@ impl LuaFile {
     }
     
     pub fn close(&mut self) -> io::Result<()> {
-        self.flush()
+        // Flush before closing
+        self.flush()?;
+        // Replace the inner with Closed to drop the file handles
+        self.inner = FileInner::Closed;
+        Ok(())
     }
 }
 
@@ -261,24 +266,18 @@ fn file_read(vm: &mut VM) -> Result<MultiValue, String> {
 fn file_write(vm: &mut VM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().unwrap();
     
-    eprintln!("DEBUG registers:");
-    for (i, reg) in frame.registers.iter().enumerate() {
-        eprintln!("  [{}]: {:?}", i, reg);
-    }
-    
-    // For method calls from Lua, self should be passed as first argument after function
-    // But checking if register 0 is the file object
-    let file_val = &frame.registers[0];
-    
-    eprintln!("DEBUG file_write: file_val type = {:?}", file_val);
+    // For method calls from Lua, register 1 is self (file object)
+    let file_val = if frame.registers.len() > 1 {
+        &frame.registers[1]
+    } else {
+        return Err("file:write requires self parameter".to_string());
+    };
     
     // Extract LuaFile from userdata
     if let LuaValue::Userdata(ud) = file_val {
-        eprintln!("DEBUG: Got userdata, trying to downcast...");
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
-            eprintln!("DEBUG: Downcast successful!");
             // Write all arguments (starting from register 2)
             for i in 2..frame.registers.len() {
                 let val = &frame.registers[i];
@@ -299,11 +298,7 @@ fn file_write(vm: &mut VM) -> Result<MultiValue, String> {
             }
             
             return Ok(MultiValue::single(file_val.clone()));
-        } else {
-            eprintln!("DEBUG: Downcast failed!");
         }
-    } else {
-        eprintln!("DEBUG: Not userdata, type: {:?}", file_val);
     }
     
     Err("expected file handle".to_string())

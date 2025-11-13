@@ -204,34 +204,72 @@ pub fn compile_call_expr_with_returns(
         .get_args()
         .collect::<Vec<_>>();
 
-    let func_src_reg = compile_expr(c, &prefix_expr)?;
-    let arg_count = arg_exprs.len();
+    // Handle method call (colon syntax: obj:method(args))
+    // For method calls, we need to insert 'self' as the first argument
+    let (func_src_reg, actual_args, self_reg_opt) = if expr.is_colon_call()
+        && let LuaExpr::IndexExpr(prefix_index_expr) = prefix_expr
+    {
+        // For obj:method(args), prefix_index_expr is obj.method
+        // We need to evaluate obj and method separately
+        let self_expr = prefix_index_expr.get_prefix_expr().ok_or("missing self expr")?;
+        
+        // Compile self (obj) into a register
+        let self_reg = compile_expr(c, &self_expr)?;
+        
+        // Compile the method lookup (obj.method) into func register
+        let func_reg = compile_index_expr(c, &prefix_index_expr)?;
+        
+        // Return: (function_register, args_to_add_after_self, Some(self_register))
+        (func_reg, arg_exprs, Some(self_reg))
+    } else {
+        // Regular call: func(args)
+        let func_reg = compile_expr(c, &prefix_expr)?;
+        (func_reg, arg_exprs, None)
+    };
+
+    // Calculate total argument count (including self for method calls)
+    let arg_count = if self_reg_opt.is_some() {
+        actual_args.len() + 1  // +1 for self
+    } else {
+        actual_args.len()
+    };
 
     // Allocate a new register for the call (to avoid overwriting source)
     let func_reg = alloc_register(c);
-    
+
     // Copy function to call register if different
     if func_src_reg != func_reg {
         emit_move(c, func_reg, func_src_reg);
     }
-    
+
     // Allocate space for arguments starting after the function register
     let args_start = func_reg + 1;
-    
+
     // Reserve registers for all arguments
     while c.next_register < args_start + arg_count as u32 {
         alloc_register(c);
     }
 
-    // Compile arguments into consecutive registers after function
-    for i in 0..arg_count {
-        let target_reg = args_start + i as u32;
-        let arg_reg = compile_expr(c, &arg_exprs[i])?;
+    // For method calls, place self as the first argument
+    let mut current_arg_pos = 0;
+    if let Some(self_reg) = self_reg_opt {
+        let target_reg = args_start;
+        if self_reg != target_reg {
+            emit_move(c, target_reg, self_reg);
+        }
+        current_arg_pos = 1;
+    }
+
+    // Compile remaining arguments into consecutive registers after self (if method call)
+    for i in 0..actual_args.len() {
+        let target_reg = args_start + current_arg_pos as u32;
+        let arg_reg = compile_expr(c, &actual_args[i])?;
 
         // If expression compiled to different register, move it
         if arg_reg != target_reg {
             emit_move(c, target_reg, arg_reg);
         }
+        current_arg_pos += 1;
     }
 
     // Emit call instruction
@@ -427,7 +465,8 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
 
             // Try to resolve as upvalue from parent scope chain
             if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
-                let instr = Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0);
+                let instr =
+                    Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0);
                 c.chunk.code.push(instr);
                 return Ok(());
             }
@@ -520,11 +559,15 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
             format!("arg{}", i)
         };
 
-        func_compiler.scope_chain.borrow_mut().locals.push(super::Local {
-            name: param_name.clone(),
-            depth: 0,
-            register: i as u32,
-        });
+        func_compiler
+            .scope_chain
+            .borrow_mut()
+            .locals
+            .push(super::Local {
+                name: param_name.clone(),
+                depth: 0,
+                register: i as u32,
+            });
         func_compiler.chunk.locals.push(param_name);
     }
 
@@ -543,7 +586,7 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
     }
 
     func_compiler.chunk.max_stack_size = func_compiler.next_register as usize;
-    
+
     // Store upvalue information from scope_chain
     let upvalues = func_compiler.scope_chain.borrow().upvalues.clone();
     func_compiler.chunk.upvalue_count = upvalues.len();
@@ -554,9 +597,10 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
             index: uv.index,
         })
         .collect();
-    
+
     // Move child chunks from func_compiler to its own chunk's child_protos
-    let child_protos: Vec<std::rc::Rc<Chunk>> = func_compiler.child_chunks
+    let child_protos: Vec<std::rc::Rc<Chunk>> = func_compiler
+        .child_chunks
         .into_iter()
         .map(std::rc::Rc::new)
         .collect();
