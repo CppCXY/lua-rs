@@ -3,6 +3,7 @@
 // match, pack, packsize, rep, reverse, sub, unpack, upper
 
 use crate::lib_registry::{LibraryModule, get_arg, require_arg, arg_count};
+use crate::lua_pattern;
 use crate::value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
@@ -275,7 +276,7 @@ fn string_match(vm: &mut VM) -> Result<MultiValue, String> {
     let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
     let text = &s.as_str()[start_pos..];
     
-    match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
+    match lua_pattern::parse_pattern(pattern_str.as_str()) {
         Ok(pattern) => {
             if let Some((start, end, captures)) = crate::lua_pattern::find(text, &pattern, 0) {
                 if captures.is_empty() {

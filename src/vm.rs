@@ -6,12 +6,11 @@ use crate::lib_registry;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 pub struct VM {
-    // Global environment
-    globals: HashMap<String, LuaValue>,
+    // Global environment table (_G and _ENV point to this)
+    globals: Rc<RefCell<LuaTable>>,
 
     // Call stack
     pub frames: Vec<CallFrame>,
@@ -42,7 +41,7 @@ pub struct CallFrame {
 impl VM {
     pub fn new() -> Self {
         let mut vm = VM {
-            globals: HashMap::new(),
+            globals: Rc::new(RefCell::new(LuaTable::new())),
             frames: Vec::new(),
             gc: GC::new(),
             return_values: Vec::new(),
@@ -52,6 +51,11 @@ impl VM {
 
         // Register built-in functions
         vm.register_builtins();
+        
+        // Set _G to point to the global table itself
+        let globals_ref = vm.globals.clone();
+        vm.set_global("_G", LuaValue::Table(globals_ref.clone()));
+        vm.set_global("_ENV", LuaValue::Table(globals_ref));
 
         vm
     }
@@ -230,6 +234,12 @@ impl VM {
         if let Some(tbl) = table.as_table() {
             // Use VM's table_get which handles metamethods
             let value = self.table_get(tbl, &key).unwrap_or(LuaValue::Nil);
+            let frame = self.current_frame_mut();
+            frame.registers[a] = value;
+            Ok(())
+        } else if let Some(ud) = table.as_userdata() {
+            // Handle userdata __index metamethod
+            let value = self.userdata_get(ud, &key).unwrap_or(LuaValue::Nil);
             let frame = self.current_frame_mut();
             frame.registers[a] = value;
             Ok(())
@@ -1079,8 +1089,8 @@ impl VM {
         let name_val = frame.function.chunk.constants[bx].clone();
 
         if let Some(name_str) = name_val.as_string() {
-            let name = name_str.as_str().to_string();
-            let value = self.globals.get(&name).cloned().unwrap_or(LuaValue::nil());
+            let name = name_str.as_str();
+            let value = self.get_global(name).unwrap_or(LuaValue::nil());
 
             let frame = self.current_frame_mut();
             frame.registers[a] = value;
@@ -1099,8 +1109,8 @@ impl VM {
         let value = frame.registers[a].clone();
 
         if let Some(name_str) = name_val.as_string() {
-            let name = name_str.as_str().to_string();
-            self.globals.insert(name, value);
+            let name = name_str.as_str();
+            self.set_global(name, value);
             Ok(())
         } else {
             Err("Invalid global name".to_string())
@@ -1120,12 +1130,14 @@ impl VM {
         left == right
     }
 
-    pub fn set_global(&mut self, name: String, value: LuaValue) {
-        self.globals.insert(name, value);
-    }
-
     pub fn get_global(&self, name: &str) -> Option<LuaValue> {
-        self.globals.get(name).cloned()
+        let key = LuaValue::String(Rc::new(LuaString::new(name.to_string())));
+        self.globals.borrow().raw_get(&key)
+    }
+    
+    pub fn set_global(&mut self, name: &str, value: LuaValue) {
+        let key = LuaValue::String(Rc::new(LuaString::new(name.to_string())));
+        self.globals.borrow_mut().raw_set(key, value);
     }
 
     /// Get value from table with metatable support
@@ -1169,6 +1181,49 @@ impl VM {
                     // __index is a function - call it with (table, key)
                     LuaValue::CFunction(_) | LuaValue::Function(_) => {
                         let self_value = LuaValue::Table(table_rc);
+                        let args = vec![self_value, key.clone()];
+                        
+                        match self.call_metamethod(&index_val, &args) {
+                            Ok(result) => return result,
+                            Err(_) => return None,
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get value from userdata with metatable support
+    /// Handles __index metamethod
+    pub fn userdata_get(
+        &mut self,
+        userdata: Rc<crate::value::LuaUserdata>,
+        key: &LuaValue,
+    ) -> Option<LuaValue> {
+        // Check for __index metamethod
+        let metatable = userdata.get_metatable();
+
+        if let Some(mt) = metatable {
+            let index_key = LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
+            
+            let index_value = {
+                let mt_borrowed = mt.borrow();
+                mt_borrowed.raw_get(&index_key)
+            };
+            
+            if let Some(index_val) = index_value {
+                match index_val {
+                    // __index is a table - look up in that table
+                    LuaValue::Table(ref t) => {
+                        let t_rc = t.clone();
+                        return self.table_get(t_rc, key);
+                    }
+                    // __index is a function - call it with (userdata, key)
+                    LuaValue::CFunction(_) | LuaValue::Function(_) => {
+                        let self_value = LuaValue::Userdata(userdata);
                         let args = vec![self_value, key.clone()];
                         
                         match self.call_metamethod(&index_val, &args) {
@@ -1769,10 +1824,8 @@ impl VM {
         // Collect all roots
         let mut roots = Vec::new();
 
-        // Add globals as roots
-        for value in self.globals.values() {
-            roots.push(value.clone());
-        }
+        // Add the global table itself as a root
+        roots.push(LuaValue::Table(self.globals.clone()));
 
         // Add all frame registers as roots
         for frame in &self.frames {

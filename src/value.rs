@@ -62,8 +62,8 @@ pub enum LuaValue {
     Function(Rc<LuaFunction>),
     /// C Function type - native Rust function
     CFunction(CFunction),
-    /// Userdata type - arbitrary Rust data
-    Userdata(Rc<RefCell<Box<dyn Any>>>),
+    /// Userdata type - arbitrary Rust data with optional metatable
+    Userdata(Rc<LuaUserdata>),
 }
 
 impl LuaValue {
@@ -107,7 +107,11 @@ impl LuaValue {
     }
 
     pub fn userdata<T: Any>(data: T) -> Self {
-        LuaValue::Userdata(Rc::new(RefCell::new(Box::new(data))))
+        LuaValue::Userdata(Rc::new(LuaUserdata::new(data)))
+    }
+    
+    pub fn userdata_with_metatable<T: Any>(data: T, metatable: Rc<RefCell<LuaTable>>) -> Self {
+        LuaValue::Userdata(Rc::new(LuaUserdata::with_metatable(data, metatable)))
     }
 
     // Type checks
@@ -222,7 +226,7 @@ impl LuaValue {
         }
     }
 
-    pub fn as_userdata(&self) -> Option<Rc<RefCell<Box<dyn Any>>>> {
+    pub fn as_userdata(&self) -> Option<Rc<LuaUserdata>> {
         match self {
             LuaValue::Userdata(u) => Some(Rc::clone(u)),
             _ => None,
@@ -678,6 +682,47 @@ impl fmt::Debug for LuaUpvalue {
                 write!(f, "Upvalue::Closed({:?})", val)
             }
         }
+    }
+}
+
+/// Userdata - arbitrary Rust data with optional metatable
+#[derive(Clone)]
+pub struct LuaUserdata {
+    data: Rc<RefCell<Box<dyn Any>>>,
+    metatable: Option<Rc<RefCell<LuaTable>>>,
+}
+
+impl LuaUserdata {
+    pub fn new<T: Any>(data: T) -> Self {
+        LuaUserdata {
+            data: Rc::new(RefCell::new(Box::new(data))),
+            metatable: None,
+        }
+    }
+    
+    pub fn with_metatable<T: Any>(data: T, metatable: Rc<RefCell<LuaTable>>) -> Self {
+        LuaUserdata {
+            data: Rc::new(RefCell::new(Box::new(data))),
+            metatable: Some(metatable),
+        }
+    }
+    
+    pub fn get_data(&self) -> Rc<RefCell<Box<dyn Any>>> {
+        self.data.clone()
+    }
+    
+    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
+        self.metatable.clone()
+    }
+    
+    pub fn set_metatable(&mut self, metatable: Option<Rc<RefCell<LuaTable>>>) {
+        self.metatable = metatable;
+    }
+}
+
+impl fmt::Debug for LuaUserdata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Userdata({:p})", self.data.as_ptr())
     }
 }
 

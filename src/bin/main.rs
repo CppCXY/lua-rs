@@ -50,7 +50,7 @@ fn main() {
     // Example: Set some global values
     let version_str = vm.create_string("0.1.0".to_string());
     vm.set_global(
-        "version".to_string(),
+        "version",
         LuaValue::String(version_str),
     );
 

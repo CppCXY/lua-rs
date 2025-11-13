@@ -137,10 +137,11 @@ fn io_open(vm: &mut VM) -> Result<MultiValue, String> {
         .as_string()
         .ok_or_else(|| "bad argument #1 to 'io.open' (string expected)".to_string())?;
     
-    let mode = get_arg(vm, 1)
+    let mode_str = get_arg(vm, 1)
         .and_then(|v| v.as_string())
-        .map(|s| s.as_str())
-        .unwrap_or("r");
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_else(|| "r".to_string());
+    let mode = mode_str.as_str();
     
     let file_result = match mode {
         "r" => LuaFile::open_read(filename.as_str()),
@@ -187,5 +188,3 @@ fn io_output(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: would need file handle support
     Err("io.output not yet implemented".to_string())
 }
-
-
