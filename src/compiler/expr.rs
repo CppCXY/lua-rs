@@ -4,6 +4,7 @@ use super::Compiler;
 use super::helpers::*;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{LuaString, LuaValue};
+use emmylua_parser::LuaClosureExpr;
 use emmylua_parser::LuaIndexExpr;
 use emmylua_parser::LuaIndexKey;
 use emmylua_parser::LuaParenExpr;
@@ -25,12 +26,7 @@ pub fn compile_expr(c: &mut Compiler, expr: &LuaExpr) -> Result<u32, String> {
         LuaExpr::CallExpr(e) => compile_call_expr(c, e),
         LuaExpr::IndexExpr(e) => compile_index_expr(c, e),
         LuaExpr::TableExpr(e) => compile_table_expr(c, e),
-        LuaExpr::ClosureExpr(_) => {
-            // TODO: implement closure compilation
-            let reg = alloc_register(c);
-            emit_load_nil(c, reg);
-            Ok(reg)
-        }
+        LuaExpr::ClosureExpr(e) => compile_closure_expr(c, e),
     }
 }
 
@@ -463,4 +459,62 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
             Ok(())
         }
     }
+}
+
+pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<u32, String> {
+    let params_list = closure.get_params_list()
+        .ok_or("closure missing params list")?;
+    
+    let params = params_list.get_params().collect::<Vec<_>>();
+    
+    let body = closure.get_block()
+        .ok_or("closure missing body")?;
+
+    // Create a new compiler for the function body
+    let mut func_compiler = Compiler::new();
+    
+    // Set up parameters as local variables
+    for (i, param) in params.iter().enumerate() {
+        // Try to get parameter name
+        let param_name = if let Some(name_token) = param.get_name_token() {
+            name_token.get_name_text().to_string()
+        } else {
+            format!("arg{}", i)
+        };
+        
+        func_compiler.locals.push(super::Local {
+            name: param_name.clone(),
+            depth: 0,
+            register: i as u32,
+        });
+        func_compiler.chunk.locals.push(param_name);
+    }
+    
+    func_compiler.chunk.param_count = params.len();
+    func_compiler.next_register = params.len() as u32;
+    
+    // Compile function body
+    crate::compiler::compile_block(&mut func_compiler, &body)?;
+    
+    // Add implicit return if needed
+    if func_compiler.chunk.code.is_empty() 
+        || Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap()) != OpCode::Return {
+        let ret_instr = Instruction::encode_abc(OpCode::Return, 0, 1, 0);
+        func_compiler.chunk.code.push(ret_instr);
+    }
+    
+    func_compiler.chunk.max_stack_size = func_compiler.next_register as usize;
+    
+    // Add the function chunk to the parent compiler
+    let chunk_index = c.child_chunks.len();
+    c.child_chunks.push(func_compiler.chunk);
+    
+    // Emit Closure instruction
+    let dest_reg = c.next_register;
+    c.next_register += 1;
+    
+    let closure_instr = Instruction::encode_abx(OpCode::Closure, dest_reg, chunk_index as u32);
+    c.chunk.code.push(closure_instr);
+    
+    Ok(dest_reg)
 }

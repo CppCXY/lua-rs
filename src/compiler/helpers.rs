@@ -68,6 +68,8 @@ pub fn begin_scope(c: &mut Compiler) {
 pub fn end_scope(c: &mut Compiler) {
     c.scope_depth -= 1;
     c.locals.retain(|l| l.depth <= c.scope_depth);
+    // Clear labels from the scope being closed
+    clear_scope_labels(c);
 }
 
 /// Get a global variable
@@ -130,4 +132,84 @@ pub fn emit_break(c: &mut Compiler) -> Result<(), String> {
     let jump_pos = emit_jump(c, OpCode::Jmp);
     c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
     Ok(())
+}
+
+/// Define a label at current position
+pub fn define_label(c: &mut Compiler, name: String) -> Result<(), String> {
+    // Check if label already exists in current scope
+    for label in &c.labels {
+        if label.name == name && label.scope_depth == c.scope_depth {
+            return Err(format!("label '{}' already defined", name));
+        }
+    }
+    
+    let position = c.chunk.code.len();
+    c.labels.push(super::Label {
+        name: name.clone(),
+        position,
+        scope_depth: c.scope_depth,
+    });
+    
+    // Try to resolve any pending gotos to this label
+    resolve_pending_gotos(c, &name);
+    
+    Ok(())
+}
+
+/// Emit a goto statement
+pub fn emit_goto(c: &mut Compiler, label_name: String) -> Result<(), String> {
+    // Check if label is already defined
+    for label in &c.labels {
+        if label.name == label_name {
+            // Label found - emit direct jump
+            let current_pos = c.chunk.code.len();
+            let offset = label.position as i32 - current_pos as i32 - 1;
+            emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, offset));
+            return Ok(());
+        }
+    }
+    
+    // Label not yet defined - add to pending gotos
+    let jump_pos = emit_jump(c, OpCode::Jmp);
+    c.gotos.push(super::GotoInfo {
+        name: label_name,
+        jump_position: jump_pos,
+        scope_depth: c.scope_depth,
+    });
+    
+    Ok(())
+}
+
+/// Resolve pending gotos for a newly defined label
+fn resolve_pending_gotos(c: &mut Compiler, label_name: &str) {
+    let label_pos = c.labels.iter()
+        .find(|l| l.name == label_name)
+        .map(|l| l.position)
+        .unwrap();
+    
+    // Find and patch all gotos to this label
+    let mut i = 0;
+    while i < c.gotos.len() {
+        if c.gotos[i].name == label_name {
+            let goto = c.gotos.remove(i);
+            let offset = label_pos as i32 - goto.jump_position as i32 - 1;
+            c.chunk.code[goto.jump_position] = Instruction::encode_asbx(OpCode::Jmp, 0, offset);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Check for unresolved gotos (call at end of compilation)
+pub fn check_unresolved_gotos(c: &Compiler) -> Result<(), String> {
+    if !c.gotos.is_empty() {
+        let names: Vec<_> = c.gotos.iter().map(|g| g.name.as_str()).collect();
+        return Err(format!("undefined label(s): {}", names.join(", ")));
+    }
+    Ok(())
+}
+
+/// Clear labels when leaving a scope
+pub fn clear_scope_labels(c: &mut Compiler) {
+    c.labels.retain(|l| l.scope_depth < c.scope_depth);
 }

@@ -27,6 +27,8 @@ pub struct CallFrame {
     pub pc: usize,                // Program counter
     pub registers: Vec<LuaValue>, // Register file
     pub base: usize, // Stack base for this frame
+    pub result_reg: usize,        // Register to store return value
+    pub num_results: usize,       // Number of expected return values
 }
 
 impl VM {
@@ -83,6 +85,8 @@ impl VM {
             pc: 0,
             registers: vec![LuaValue::nil(); chunk.max_stack_size],
             base: 0,
+            result_reg: 0,
+            num_results: 0,
         };
 
         self.frames.push(frame);
@@ -562,6 +566,8 @@ impl VM {
                 pc: self.current_frame().pc,
                 registers: arg_registers,
                 base: self.frames.len(),
+                result_reg: 0,
+                num_results: 0,
             };
             
             self.frames.push(temp_frame);
@@ -628,6 +634,8 @@ impl VM {
                 pc: 0,
                 registers: new_registers,
                 base: self.frames.len(),
+                result_reg: a,
+                num_results: if c == 0 { usize::MAX } else { c - 1 },
             };
 
             self.frames.push(new_frame);
@@ -667,13 +675,38 @@ impl VM {
             }
         }
         
+        // Save caller info before popping
+        let caller_result_reg = self.current_frame().result_reg;
+        let caller_num_results = self.current_frame().num_results;
+        
         self.frames.pop();
         
         // Store return values
-        self.return_values = values;
+        self.return_values = values.clone();
+        
+        // If there's a caller frame, copy return values to its registers
+        if !self.frames.is_empty() {
+            let frame = self.current_frame_mut();
+            let num_to_copy = caller_num_results.min(values.len());
+            
+            for (i, val) in values.iter().take(num_to_copy).enumerate() {
+                if caller_result_reg + i < frame.registers.len() {
+                    frame.registers[caller_result_reg + i] = val.clone();
+                }
+            }
+            
+            // Fill remaining expected results with nil
+            if caller_num_results != usize::MAX {
+                for i in num_to_copy..caller_num_results {
+                    if caller_result_reg + i < frame.registers.len() {
+                        frame.registers[caller_result_reg + i] = LuaValue::nil();
+                    }
+                }
+            }
+        }
 
         // For backward compatibility, return first value or nil
-        Ok(self.return_values.get(0).cloned().unwrap_or(LuaValue::nil()))
+        Ok(values.get(0).cloned().unwrap_or(LuaValue::nil()))
     }
 
     fn op_getupval(&mut self, instr: u32) -> Result<(), String> {
@@ -701,8 +734,30 @@ impl VM {
         Ok(())
     }
 
-    fn op_closure(&mut self, _instr: u32) -> Result<(), String> {
-        // Simplified: closures not fully implemented
+    fn op_closure(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let bx = Instruction::get_bx(instr) as usize;
+        
+        let frame = self.current_frame();
+        let parent_chunk = &frame.function.chunk;
+        
+        // Get the child chunk (prototype)
+        if bx >= parent_chunk.child_protos.len() {
+            return Err(format!("Invalid prototype index: {}", bx));
+        }
+        
+        let proto = parent_chunk.child_protos[bx].clone();
+        
+        // Create new function (closure)
+        // TODO: Capture upvalues properly
+        let func = LuaFunction {
+            chunk: proto,
+            upvalues: Vec::new(),
+        };
+        
+        let frame = self.current_frame_mut();
+        frame.registers[a] = LuaValue::Function(Rc::new(func));
+        
         Ok(())
     }
 

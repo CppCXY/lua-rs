@@ -448,6 +448,7 @@ pub struct Chunk {
     pub upvalue_count: usize,
     pub param_count: usize,
     pub max_stack_size: usize,
+    pub child_protos: Vec<Rc<Chunk>>,  // Nested function prototypes
 }
 
 impl Chunk {
@@ -459,6 +460,7 @@ impl Chunk {
             upvalue_count: 0,
             param_count: 0,
             max_stack_size: 0,
+            child_protos: Vec::new(),
         }
     }
 }
