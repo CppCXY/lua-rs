@@ -186,7 +186,11 @@ pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, St
 }
 
 /// Compile a call expression with specified number of expected return values
-pub fn compile_call_expr_with_returns(c: &mut Compiler, expr: &LuaCallExpr, num_returns: usize) -> Result<u32, String> {
+pub fn compile_call_expr_with_returns(
+    c: &mut Compiler,
+    expr: &LuaCallExpr,
+    num_returns: usize,
+) -> Result<u32, String> {
     // Get prefix (function) and arguments from children
     let prefix_expr = expr.get_prefix_expr().ok_or("missing prefix expr")?;
     let arg_exprs = expr
@@ -207,16 +211,16 @@ pub fn compile_call_expr_with_returns(c: &mut Compiler, expr: &LuaCallExpr, num_
     // Compile arguments directly into their target registers
     for i in 0..arg_count {
         let target_reg = func_reg + (i as u32) + 1;
-        
+
         // Temporarily set next_register to compile into target position
         let saved_next = c.next_register;
         c.next_register = target_reg;
-        
+
         let arg_reg = compile_expr(c, &arg_exprs[i])?;
-        
+
         // Restore next_register
         c.next_register = saved_next.max(c.next_register);
-        
+
         // If expression compiled to different register, move it
         if arg_reg != target_reg {
             emit_move(c, target_reg, arg_reg);
@@ -226,7 +230,11 @@ pub fn compile_call_expr_with_returns(c: &mut Compiler, expr: &LuaCallExpr, num_
     // Emit call instruction
     // B = number of arguments + 1 (includes the function itself)
     // C = number of expected return values + 1 (0 means all returns, 1 means 0 returns, 2 means 1 return, etc.)
-    let c_param = if num_returns == 0 { 0 } else { (num_returns + 1) as u32 };
+    let c_param = if num_returns == 0 {
+        0
+    } else {
+        (num_returns + 1) as u32
+    };
     emit(
         c,
         Instruction::encode_abc(OpCode::Call, func_reg, (arg_count + 1) as u32, c_param),
@@ -268,8 +276,19 @@ fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, Stri
         }
         LuaIndexKey::Integer(number_token) => {
             // table[123]
-            let num_value = number_token.get_float_value();
-            let const_idx = add_constant(c, LuaValue::number(num_value));
+            let num_value = if number_token.is_float() {
+                let f_value = number_token.get_float_value();
+                // If it's an integer literal, use Integer type
+                if f_value.fract() == 0.0 && f_value.is_finite() {
+                    LuaValue::integer(f_value as i64)
+                } else {
+                    LuaValue::number(f_value)
+                }
+            } else {
+                LuaValue::integer(number_token.get_int_value())
+            };
+
+            let const_idx = add_constant(c, num_value);
             let key_reg = alloc_register(c);
             emit_load_constant(c, key_reg, const_idx);
             key_reg
@@ -290,13 +309,94 @@ fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, Stri
 }
 
 /// Compile table constructor expression
-fn compile_table_expr(c: &mut Compiler, _expr: &LuaTableExpr) -> Result<u32, String> {
+fn compile_table_expr(c: &mut Compiler, expr: &LuaTableExpr) -> Result<u32, String> {
     let reg = alloc_register(c);
 
     // Create empty table
     emit(c, Instruction::encode_abc(OpCode::NewTable, reg, 0, 0));
 
-    // TODO: Compile table fields
+    // Track array index for list-style entries
+    let mut array_index = 1i64;
+
+    // Compile table fields
+    for field in expr.get_fields() {
+        if field.is_value_field() {
+            // Value only format: { 10, 20, 30 } - array part
+            let value_reg = if let Some(value_expr) = field.get_value_expr() {
+                compile_expr(c, &value_expr)?
+            } else {
+                let r = alloc_register(c);
+                emit_load_nil(c, r);
+                r
+            };
+
+            // Generate numeric key for array element
+            let key_const = add_constant(c, LuaValue::integer(array_index));
+            let key_reg = alloc_register(c);
+            emit_load_constant(c, key_reg, key_const);
+
+            // Set table[array_index] = value
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
+            );
+
+            array_index += 1;
+        } else {
+            let Some(field_key) = field.get_field_key() else {
+                continue;
+            };
+
+            let key_reg = match field_key {
+                LuaIndexKey::Name(name_token) => {
+                    // key is an identifier
+                    let key_name = name_token.get_name_text().to_string();
+                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(key_name)));
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    key_reg
+                }
+                LuaIndexKey::String(string_token) => {
+                    // key is a string literal
+                    let string_value = string_token.get_value();
+                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(string_value)));
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    key_reg
+                }
+                LuaIndexKey::Integer(number_token) => {
+                    // key is a numeric literal
+                    let num_value = number_token.get_float_value();
+                    let const_idx = add_constant(c, LuaValue::number(num_value));
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    key_reg
+                }
+                LuaIndexKey::Expr(key_expr) => {
+                    // key is an expression
+                    compile_expr(c, &key_expr)?
+                }
+                LuaIndexKey::Idx(_i) => {
+                    return Err("Unsupported table field key type".to_string());
+                }
+            };
+
+            // Compile value expression
+            let value_reg = if let Some(value_expr) = field.get_value_expr() {
+                compile_expr(c, &value_expr)?
+            } else {
+                let r = alloc_register(c);
+                emit_load_nil(c, r);
+                r
+            };
+
+            // Set table field: table[key] = value
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
+            );
+        }
+    }
 
     Ok(reg)
 }

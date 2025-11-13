@@ -387,9 +387,12 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 
 /// Compile generic for loop
 fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<(), String> {    
+    use emmylua_parser::LuaExpr;
+    use super::expr::compile_call_expr_with_returns;
+    
     // Structure: for <var-list> in <expr-list> do <block> end
-    // Simplified implementation: for k in next, t do ... end
     // Full iterator protocol: for var1, var2, ... in iter_func, state, init_val do ... end
+    // Also supports: for var1, var2 in pairs(t) do ... end
     
     // Get loop variable names
     let var_names = stat.get_var_name_list()
@@ -406,35 +409,47 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
         return Err("for-in loop requires iterator expression".to_string());
     }
 
-    // Compile iterator expressions into registers
-    // For pairs(t), this typically gives us 3 values: next_func, table, nil
-    let mut iter_regs = Vec::new();
-    for expr in &iter_exprs {
-        iter_regs.push(compile_expr(c, expr)?);
-    }
-    
-    // Allocate iterator state registers (these persist across iterations)
-    // iter_func, state, control_var
-    let iter_func_reg = if !iter_regs.is_empty() {
-        iter_regs[0]
+    // Check if we have a single call expression (like pairs(t) or ipairs(t))
+    // which returns multiple values
+    let (iter_func_reg, state_reg, control_var_reg) = if iter_exprs.len() == 1 {
+        if let LuaExpr::CallExpr(call_expr) = &iter_exprs[0] {
+            // Single call expression - expect it to return (iter_func, state, control_var)
+            let base_reg = compile_call_expr_with_returns(c, call_expr, 3)?;
+            (base_reg, base_reg + 1, base_reg + 2)
+        } else {
+            // Single non-call expression - not valid for for-in
+            return Err("for-in loop requires iterator function".to_string());
+        }
     } else {
-        return Err("for-in loop requires iterator function".to_string());
-    };
-    
-    let state_reg = if iter_regs.len() > 1 {
-        iter_regs[1]
-    } else {
-        let reg = alloc_register(c);
-        emit_load_nil(c, reg);
-        reg
-    };
-    
-    let control_var_reg = if iter_regs.len() > 2 {
-        iter_regs[2]
-    } else {
-        let reg = alloc_register(c);
-        emit_load_nil(c, reg);
-        reg
+        // Multiple expressions: iter_func, state, control_var
+        let mut iter_regs = Vec::new();
+        for expr in &iter_exprs {
+            iter_regs.push(compile_expr(c, expr)?);
+        }
+        
+        let iter_func_reg = if !iter_regs.is_empty() {
+            iter_regs[0]
+        } else {
+            return Err("for-in loop requires iterator function".to_string());
+        };
+        
+        let state_reg = if iter_regs.len() > 1 {
+            iter_regs[1]
+        } else {
+            let reg = alloc_register(c);
+            emit_load_nil(c, reg);
+            reg
+        };
+        
+        let control_var_reg = if iter_regs.len() > 2 {
+            iter_regs[2]
+        } else {
+            let reg = alloc_register(c);
+            emit_load_nil(c, reg);
+            reg
+        };
+        
+        (iter_func_reg, state_reg, control_var_reg)
     };
 
     // Begin scope for loop variables

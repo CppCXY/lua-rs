@@ -103,7 +103,7 @@ pub fn lua_next(vm: &mut VM) -> Result<LuaValue, String> {
 
 /// Lua pairs() function - returns iterator for table
 /// Usage: for k, v in pairs(table) do ... end
-/// Returns: iterator_function, table, nil
+/// Returns: next, table, nil
 pub fn lua_pairs(vm: &mut VM) -> Result<LuaValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
@@ -117,15 +117,61 @@ pub fn lua_pairs(vm: &mut VM) -> Result<LuaValue, String> {
         return Err("pairs expects a table as argument".to_string());
     };
     
-    // Return the next function as a CFunction
-    // TODO: This needs multi-return support to return (next, table, nil)
-    // For now, return the table itself as a placeholder
-    Ok(table_val.clone())
+    // Return (next, table, nil) as three values
+    // First return value is the next function
+    let next_func = vm.get_global("next").unwrap_or(LuaValue::Nil);
+    
+    // Store additional return values in return_values buffer
+    vm.return_values = vec![next_func.clone(), table_val.clone(), LuaValue::Nil];
+    
+    // Return first value (next function)
+    Ok(next_func)
+}
+
+/// Iterator function for ipairs - returns next index and value
+fn ipairs_next(vm: &mut VM) -> Result<LuaValue, String> {
+    let frame = vm.frames.last().ok_or("No call frame")?;
+    let registers = &frame.registers;
+    
+    if registers.len() < 3 {
+        return Err("ipairs iterator requires 2 arguments".to_string());
+    }
+    
+    let table_val = &registers[1];
+    let index_val = &registers[2];
+    
+    let Some(table) = table_val.as_table() else {
+        return Err("ipairs iterator expects a table".to_string());
+    };
+    
+    // Get current index (should be integer)
+    let current_index = if let Some(n) = index_val.as_number() {
+        n as i64
+    } else {
+        0
+    };
+    
+    let next_index = current_index + 1;
+    let next_index_val = LuaValue::integer(next_index);
+    
+    // Try to get value at next index
+    let table_ref = table.borrow();
+    if let Some(value) = table_ref.get(&next_index_val) {
+        if !value.is_nil() {
+            // Return (index, value)
+            vm.return_values = vec![next_index_val.clone(), value.clone()];
+            return Ok(next_index_val);
+        }
+    }
+    
+    // No more values - return nil
+    vm.return_values.clear();
+    Ok(LuaValue::Nil)
 }
 
 /// Lua ipairs() function - returns iterator for table array part
 /// Usage: for i, v in ipairs(table) do ... end
-/// Returns: iterator_function, table, 0
+/// Returns: ipairs_next, table, 0
 pub fn lua_ipairs(vm: &mut VM) -> Result<LuaValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
@@ -139,8 +185,12 @@ pub fn lua_ipairs(vm: &mut VM) -> Result<LuaValue, String> {
         return Err("ipairs expects a table as argument".to_string());
     };
     
-    // Return the ipairs_next function
-    // TODO: This needs multi-return support to return (ipairs_next, table, 0)
-    // For now, return the table itself as a placeholder
-    Ok(table_val.clone())
+    // Return (ipairs_next, table, 0) as three values
+    let iter_func = LuaValue::cfunction(ipairs_next);
+    
+    // Store additional return values
+    vm.return_values = vec![iter_func.clone(), table_val.clone(), LuaValue::integer(0)];
+    
+    // Return first value (iterator function)
+    Ok(iter_func)
 }

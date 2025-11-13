@@ -289,31 +289,43 @@ impl LuaTable {
     }
 
     pub fn get(&self, key: &LuaValue) -> Option<LuaValue> {
-        if let Some(n) = key.as_number() {
-            let idx = n as usize;
+        eprintln!("DEBUG Table::get key={:?}", key);
+        if let Some(i) = key.as_integer() {
+            let idx = i as usize;
+            eprintln!("  Integer key: idx={}, array.len()={}", idx, self.array.len());
             if idx > 0 && idx <= self.array.len() {
+                eprintln!("  Returning array[{}] = {:?}", idx-1, self.array[idx-1]);
                 return Some(self.array[idx - 1].clone());
             }
         }
         
-        TableKey::from_value(key)
+        let result = TableKey::from_value(key)
             .and_then(|k| self.hash.get(&k))
-            .cloned()
+            .cloned();
+        eprintln!("  Hash lookup: {:?}", result);
+        result
     }
 
     pub fn set(&mut self, key: LuaValue, value: LuaValue) {
-        if let Some(n) = key.as_number() {
-            let idx = n as usize;
+        eprintln!("DEBUG Table::set key={:?}, value={:?}", key, value);
+        // Try array part first for integer keys in range
+        if let Some(i) = key.as_integer() {
+            let idx = i as usize;
+            eprintln!("  Integer key: idx={}, array.len()={}", idx, self.array.len());
             if idx > 0 && idx <= self.array.len() + 1 {
                 if idx == self.array.len() + 1 {
+                    eprintln!("  Pushing to array");
                     self.array.push(value);
                 } else {
+                    eprintln!("  Setting array[{}]", idx-1);
                     self.array[idx - 1] = value;
                 }
                 return;
             }
         }
         
+        // Use hash part for all other keys
+        eprintln!("  Using hash part");
         if let Some(k) = TableKey::from_value(&key) {
             self.hash.insert(k, value);
         }
@@ -330,36 +342,63 @@ impl LuaTable {
         });
         
         let hash_iter = self.hash.iter().map(|(k, v)| {
-            let key = match k {
-                TableKey::String(s) => LuaValue::String(Rc::new(LuaString::new(s.clone()))),
-                TableKey::Integer(n) => LuaValue::integer(*n),
-            };
-            (key, v.clone())
+            (k.to_value(), v.clone())
         });
         
         array_iter.chain(hash_iter)
     }
 }
 
-/// Table key (can be string or number)
+/// Table key - supports all Lua types that can be table keys
+/// (everything except nil, NaN, and tables without __eq metamethod)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum TableKey {
     String(String),
     Integer(i64),
+    Boolean(bool),
+    // Float keys are converted to their bit representation for hashing
+    Float(u64),  // Bit pattern of f64
+    // Functions can be keys (compared by reference)
+    // We store them as usize (pointer) for hashing
+    FunctionPtr(usize),
+    CFunction(usize),
 }
 
 impl TableKey {
     fn from_value(value: &LuaValue) -> Option<Self> {
-        if let Some(s) = value.as_string() {
-            Some(TableKey::String(s.as_str().to_string()))
-        } else if let Some(n) = value.as_number() {
-            if n.fract() == 0.0 {
-                Some(TableKey::Integer(n as i64))
-            } else {
-                None
+        match value {
+            LuaValue::Nil => None,  // nil cannot be a key
+            LuaValue::Boolean(b) => Some(TableKey::Boolean(*b)),
+            LuaValue::Integer(n) => Some(TableKey::Integer(*n)),
+            LuaValue::Float(f) => {
+                if f.is_nan() {
+                    None  // NaN cannot be a key
+                } else {
+                    Some(TableKey::Float(f.to_bits()))
+                }
             }
-        } else {
-            None
+            LuaValue::String(s) => Some(TableKey::String(s.as_str().to_string())),
+            LuaValue::Function(f) => {
+                Some(TableKey::FunctionPtr(Rc::as_ptr(f) as usize))
+            }
+            LuaValue::CFunction(f) => {
+                Some(TableKey::CFunction(*f as usize))
+            }
+            // Tables and Userdata could be keys with metatables, but not supported yet
+            _ => None,
+        }
+    }
+    
+    fn to_value(&self) -> LuaValue {
+        match self {
+            TableKey::String(s) => LuaValue::String(Rc::new(LuaString::new(s.clone()))),
+            TableKey::Integer(n) => LuaValue::Integer(*n),
+            TableKey::Boolean(b) => LuaValue::Boolean(*b),
+            TableKey::Float(bits) => LuaValue::Float(f64::from_bits(*bits)),
+            // For function keys, we can't reconstruct the original value perfectly
+            // This is a limitation - in practice, iterating over function keys is rare
+            TableKey::FunctionPtr(_) => LuaValue::Nil,  // Placeholder
+            TableKey::CFunction(_) => LuaValue::Nil,     // Placeholder
         }
     }
 }
