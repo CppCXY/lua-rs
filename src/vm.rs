@@ -51,7 +51,7 @@ impl VM {
 
         // Register built-in functions
         vm.register_builtins();
-        
+
         // Set _G to point to the global table itself
         let globals_ref = vm.globals.clone();
         vm.set_global("_G", LuaValue::Table(globals_ref.clone()));
@@ -753,38 +753,40 @@ impl VM {
                     // Replace func with the __call function
                     // But we need to pass the original value as the first argument
                     // This means shifting all arguments: (func, arg1, arg2) -> (call_func, func, arg1, arg2)
-                    
+
                     let current_frame = self.current_frame_mut();
-                    
+
                     // Shift arguments right by one position
                     // We need to be careful about register allocation
                     let original_func = func.clone();
                     let call_function = call_func.clone();
-                    
+
                     // Create new register layout: [call_func, original_func, arg1, arg2, ...]
                     current_frame.registers[a] = call_function;
-                    
+
                     // Shift existing arguments
                     for i in (1..b).rev() {
                         if a + i + 1 < current_frame.registers.len() {
-                            current_frame.registers[a + i + 1] = current_frame.registers[a + i].clone();
+                            current_frame.registers[a + i + 1] =
+                                current_frame.registers[a + i].clone();
                         }
                     }
-                    
+
                     // Place original func as first argument
                     if a + 1 < current_frame.registers.len() {
                         current_frame.registers[a + 1] = original_func;
                     }
-                    
+
                     // Adjust b to include the extra argument
                     let new_b = b + 1;
-                    
+
                     // Recreate instruction with new b
-                    let new_instr = Instruction::encode_abc(OpCode::Call, a as u32, new_b as u32, c as u32);
+                    let new_instr =
+                        Instruction::encode_abc(OpCode::Call, a as u32, new_b as u32, c as u32);
                     return self.op_call(new_instr);
                 }
             }
-            
+
             return Err("Attempt to call a non-function value".to_string());
         }
 
@@ -1060,57 +1062,35 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        // For now, concat b and b+1 (simple binary concat)
-        // Full Lua supports concat from b to c
-        if c > b + 1 {
-            // Multiple concatenations - do them sequentially
-            let frame = self.current_frame_mut();
-            let mut result = String::new();
-
-            for i in b..=c {
-                if let Some(s) = frame.registers[i].as_string() {
-                    result.push_str(s.as_str());
-                } else if let Some(n) = frame.registers[i].as_number() {
-                    result.push_str(&n.to_string());
-                } else {
-                    return Err("attempt to concatenate a non-string/number value".to_string());
-                }
-            }
-
-            let string = self.create_string(result);
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::String(string);
-            return Ok(());
-        }
-
         // Binary concat with metamethod support
         let (left, right) = {
             let frame = self.current_frame();
-            (frame.registers[b].clone(), frame.registers[b + 1].clone())
+            (frame.registers[b].clone(), frame.registers[c].clone())
         };
 
-        // Try direct concatenation
-        let can_concat = (left.as_string().is_some() || left.as_number().is_some())
-            && (right.as_string().is_some() || right.as_number().is_some());
+        // Try direct concatenation or __tostring
+        let left_str = if let Some(s) = left.as_string() {
+            Some(s.as_str().to_string())
+        } else if let Some(n) = left.as_number() {
+            Some(n.to_string())
+        } else if let Some(s) = self.call_tostring_metamethod(&left)? {
+            Some(s.as_str().to_string())
+        } else {
+            None
+        };
 
-        if can_concat {
-            let left_str = if let Some(s) = left.as_string() {
-                s.as_str().to_string()
-            } else if let Some(n) = left.as_number() {
-                n.to_string()
-            } else {
-                unreachable!()
-            };
+        let right_str = if let Some(s) = right.as_string() {
+            Some(s.as_str().to_string())
+        } else if let Some(n) = right.as_number() {
+            Some(n.to_string())
+        } else if let Some(s) = self.call_tostring_metamethod(&right)? {
+            Some(s.as_str().to_string())
+        } else {
+            None
+        };
 
-            let right_str = if let Some(s) = right.as_string() {
-                s.as_str().to_string()
-            } else if let Some(n) = right.as_number() {
-                n.to_string()
-            } else {
-                unreachable!()
-            };
-
-            let result = left_str + &right_str;
+        if let (Some(l), Some(r)) = (left_str, right_str) {
+            let result = l + &r;
             let string = self.create_string(result);
             let frame = self.current_frame_mut();
             frame.registers[a] = LuaValue::String(string);
@@ -1178,7 +1158,7 @@ impl VM {
         let key = LuaValue::String(Rc::new(LuaString::new(name.to_string())));
         self.globals.borrow().raw_get(&key)
     }
-    
+
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
         let key = LuaValue::String(Rc::new(LuaString::new(name.to_string())));
         self.globals.borrow_mut().raw_set(key, value);
@@ -1196,7 +1176,7 @@ impl VM {
             let table = table_rc.borrow();
             table.raw_get(key).unwrap_or(LuaValue::Nil)
         };
-        
+
         if !value.is_nil() {
             return Some(value);
         }
@@ -1208,13 +1188,14 @@ impl VM {
         };
 
         if let Some(mt) = metatable {
-            let index_key = LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
-            
+            let index_key =
+                LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
+
             let index_value = {
                 let mt_borrowed = mt.borrow();
                 mt_borrowed.raw_get(&index_key)
             };
-            
+
             if let Some(index_val) = index_value {
                 match index_val {
                     // __index is a table - look up in that table
@@ -1226,7 +1207,7 @@ impl VM {
                     LuaValue::CFunction(_) | LuaValue::Function(_) => {
                         let self_value = LuaValue::Table(table_rc);
                         let args = vec![self_value, key.clone()];
-                        
+
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -1251,13 +1232,14 @@ impl VM {
         let metatable = userdata.get_metatable();
 
         if let Some(mt) = metatable {
-            let index_key = LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
-            
+            let index_key =
+                LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
+
             let index_value = {
                 let mt_borrowed = mt.borrow();
                 mt_borrowed.raw_get(&index_key)
             };
-            
+
             if let Some(index_val) = index_value {
                 match index_val {
                     // __index is a table - look up in that table
@@ -1269,7 +1251,7 @@ impl VM {
                     LuaValue::CFunction(_) | LuaValue::Function(_) => {
                         let self_value = LuaValue::Userdata(userdata);
                         let args = vec![self_value, key.clone()];
-                        
+
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -1310,13 +1292,15 @@ impl VM {
         };
 
         if let Some(mt) = metatable {
-            let newindex_key = LuaValue::String(Rc::new(crate::value::LuaString::new("__newindex".to_string())));
-            
+            let newindex_key = LuaValue::String(Rc::new(crate::value::LuaString::new(
+                "__newindex".to_string(),
+            )));
+
             let newindex_value = {
                 let mt_borrowed = mt.borrow();
                 mt_borrowed.raw_get(&newindex_key)
             };
-            
+
             if let Some(newindex_val) = newindex_value {
                 match newindex_val {
                     // __newindex is a table - set in that table
@@ -1328,7 +1312,7 @@ impl VM {
                     LuaValue::CFunction(_) | LuaValue::Function(_) => {
                         let self_value = LuaValue::Table(table_rc);
                         let args = vec![self_value, key, value];
-                        
+
                         match self.call_metamethod(&newindex_val, &args) {
                             Ok(_) => return Ok(()),
                             Err(e) => return Err(e),
@@ -1409,7 +1393,7 @@ impl VM {
 
                 // Create a new call frame
                 let mut registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
-                
+
                 // Copy arguments to registers (starting from register 0)
                 for (i, arg) in args.iter().enumerate() {
                     if i < registers.len() {
@@ -1424,7 +1408,7 @@ impl VM {
                     registers,
                     base: self.frames.len(),
                     result_reg: 0,
-                    num_results: 1, // We expect at least one return value
+                    num_results: 0, // Don't write back to caller's registers
                 };
 
                 let initial_frame_count = self.frames.len();
@@ -1452,7 +1436,7 @@ impl VM {
 
                     // Decode and execute
                     let opcode = Instruction::get_opcode(instr);
-                    
+
                     // Special handling for Return opcode
                     if let OpCode::Return = opcode {
                         match self.op_return(instr) {
@@ -1468,7 +1452,7 @@ impl VM {
                             }
                         }
                     }
-                    
+
                     // Execute the instruction
                     let step_result = match opcode {
                         OpCode::Move => self.op_move(instr),
@@ -1542,7 +1526,6 @@ impl VM {
             _ => Err("Attempt to call a non-function value".to_string()),
         }
     }
-
 
     // Additional comparison operators
     fn op_ne(&mut self, instr: u32) -> Result<(), String> {
@@ -2057,6 +2040,42 @@ impl VM {
                 Ok(true)
             }
             _ => Ok(false),
+        }
+    }
+
+    /// Call __tostring metamethod if it exists, return the string result
+    pub fn call_tostring_metamethod(
+        &mut self,
+        value: &LuaValue,
+    ) -> Result<Option<Rc<LuaString>>, String> {
+        // Check for __tostring metamethod
+        if let Some(metatable) = value.get_metatable() {
+            let tostring_key = self.create_string("__tostring".to_string());
+            if let Some(tostring_func) = metatable.borrow().raw_get(&LuaValue::String(tostring_key))
+            {
+                // Call the metamethod with the value as argument
+                let result = self.call_metamethod(&tostring_func, &[value.clone()])?;
+                
+                // Extract string from result
+                if let Some(result_val) = result {
+                    if let Some(s) = result_val.as_string() {
+                        return Ok(Some(s));
+                    } else {
+                        return Err("'__tostring' must return a string".to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Convert a value to string, calling __tostring metamethod if present
+    pub fn value_to_string(&mut self, value: &LuaValue) -> Result<String, String> {
+        if let Some(s) = self.call_tostring_metamethod(value)? {
+            Ok(s.as_str().to_string())
+        } else {
+            Ok(value.to_string_repr())
         }
     }
 }

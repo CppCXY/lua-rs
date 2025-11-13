@@ -132,9 +132,9 @@ fn lua_tonumber(vm: &mut VM) -> Result<MultiValue, String> {
 fn lua_tostring(vm: &mut VM) -> Result<MultiValue, String> {
     let value = get_arg(vm, 0).unwrap_or(LuaValue::Nil);
 
-    // TODO: Check for __tostring metamethod
-
-    let result = vm.create_string(value.to_string_repr());
+    // Check for __tostring metamethod
+    let value_str = vm.value_to_string(&value)?;
+    let result = vm.create_string(value_str);
     Ok(MultiValue::single(LuaValue::String(result)))
 }
 

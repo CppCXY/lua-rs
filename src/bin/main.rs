@@ -19,8 +19,6 @@ fn main() {
                             if !result.is_nil() {
                                 println!("Result: {:?}", result);
                             }
-                            // Print GC statistics
-                            eprintln!("\n{}", vm.gc_stats());
                         }
                         Err(e) => {
                             eprintln!("Runtime error: {}", e);
