@@ -2,6 +2,7 @@
 // Executes compiled bytecode with register-based architecture
 
 use crate::gc::{GC, GcObjectType};
+use crate::jit::{HotPathTracker, JitCompiler};
 use crate::lib_registry;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue};
@@ -26,6 +27,15 @@ pub struct VM {
 
     // Next frame ID (for tracking frames)
     next_frame_id: usize,
+
+    // JIT compiler (optional, enabled by default)
+    jit_compiler: Option<JitCompiler>,
+
+    // Hot path tracker for JIT compilation
+    hot_path_tracker: HotPathTracker,
+
+    // JIT enabled flag
+    jit_enabled: bool,
 }
 
 pub struct CallFrame {
@@ -40,6 +50,16 @@ pub struct CallFrame {
 
 impl VM {
     pub fn new() -> Self {
+        Self::new_with_jit(true)
+    }
+
+    pub fn new_with_jit(enable_jit: bool) -> Self {
+        let jit_compiler = if enable_jit {
+            JitCompiler::new().ok()
+        } else {
+            None
+        };
+
         let mut vm = VM {
             globals: Rc::new(RefCell::new(LuaTable::new())),
             frames: Vec::new(),
@@ -47,6 +67,9 @@ impl VM {
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
             next_frame_id: 0,
+            jit_compiler,
+            hot_path_tracker: HotPathTracker::new(),
+            jit_enabled: enable_jit,
         };
 
         // Register built-in functions
@@ -110,18 +133,63 @@ impl VM {
 
             // Fetch instruction
             let pc = self.frames[frame_idx].pc;
-            let chunk = &self.frames[frame_idx].function.chunk;
+            let chunk_ptr = Rc::clone(&self.frames[frame_idx].function.chunk);
 
-            if pc >= chunk.code.len() {
+            if pc >= chunk_ptr.code.len() {
                 // End of code
                 self.frames.pop();
                 continue;
             }
 
-            let instr = chunk.code[pc];
+            // JIT compilation check
+            if self.jit_enabled && self.jit_compiler.is_some() {
+                // Check if this is a hot path
+                if self.hot_path_tracker.record(pc) {
+                    // Try to compile this hot path
+                    let chunk_id = chunk_ptr.as_ref() as *const Chunk as usize;
+                    
+                    // Check if already compiled or try to compile
+                    let jit_func_opt = if let Some(ref mut jit) = self.jit_compiler {
+                        if let Some(jit_func) = jit.get_compiled(chunk_id, pc) {
+                            Some(jit_func)
+                        } else {
+                            // Compile hot path
+                            match jit.compile_hot_path(&chunk_ptr, pc) {
+                                Ok(jit_func) => Some(jit_func),
+                                Err(_) => {
+                                    // Compilation failed, fall back to interpreter
+                                    self.hot_path_tracker.reset(pc);
+                                    None
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    // Execute JIT compiled code if available
+                    if let Some(jit_func) = jit_func_opt {
+                        let frame = &mut self.frames[frame_idx];
+                        let registers_ptr = frame.registers.as_mut_ptr();
+                        let constants_ptr = chunk_ptr.constants.as_ptr();
+                        
+                        unsafe {
+                            let new_pc = jit_func(registers_ptr, constants_ptr);
+                            frame.pc = new_pc as usize;
+                            
+                            if let Some(ref mut jit) = self.jit_compiler {
+                                jit.stats.native_executions += 1;
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            let instr = chunk_ptr.code[pc];
             self.frames[frame_idx].pc += 1;
 
-            // Decode and execute
+            // Decode and execute (interpreter path)
             let opcode = Instruction::get_opcode(instr);
 
             match opcode {
@@ -2305,6 +2373,28 @@ impl VM {
                 }
             }
             _ => Err("attempt to call a non-function value".to_string()),
+        }
+    }
+
+    /// Enable or disable JIT compilation
+    pub fn set_jit_enabled(&mut self, enabled: bool) {
+        self.jit_enabled = enabled;
+    }
+
+    /// Check if JIT is enabled
+    pub fn is_jit_enabled(&self) -> bool {
+        self.jit_enabled
+    }
+
+    /// Get JIT statistics
+    pub fn get_jit_stats(&self) -> Option<&crate::jit::JitStats> {
+        self.jit_compiler.as_ref().map(|jit| &jit.stats)
+    }
+
+    /// Clear JIT compilation cache
+    pub fn clear_jit_cache(&mut self) {
+        if let Some(ref mut jit) = self.jit_compiler {
+            jit.clear_cache();
         }
     }
 }
