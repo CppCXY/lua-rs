@@ -57,7 +57,7 @@ impl VM {
     }
 
     fn register_builtins(&mut self) {
-        lib_registry::create_standard_registry().load_all(self);
+        let _ = lib_registry::create_standard_registry().load_all(self);
     }
 
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> Result<LuaValue, String> {
@@ -222,12 +222,20 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let table = frame.registers[b].clone();
-        let key = frame.registers[c].clone();
+        let (table, key) = {
+            let frame = self.current_frame();
+            (frame.registers[b].clone(), frame.registers[c].clone())
+        };
 
         if let Some(tbl) = table.as_table() {
-            let value = tbl.borrow().get(&key).unwrap_or(LuaValue::Nil);
+            // Call get which may trigger metamethods
+            // Clone the Rc to pass to get method
+            let tbl_rc = tbl.clone();
+            let value = {
+                let borrowed = tbl.borrow();
+                borrowed.get(tbl_rc, self, &key).unwrap_or(LuaValue::Nil)
+            };
+            let frame = self.current_frame_mut();
             frame.registers[a] = value;
             Ok(())
         } else {
@@ -1120,6 +1128,194 @@ impl VM {
     pub fn get_global(&self, name: &str) -> Option<LuaValue> {
         self.globals.get(name).cloned()
     }
+
+    /// Call a Lua value (function or CFunction) with the given arguments
+    /// Returns the first return value, or None if the call fails
+    pub fn call_metamethod(
+        &mut self,
+        func: &LuaValue,
+        args: &[LuaValue],
+    ) -> Result<Option<LuaValue>, String> {
+        match func {
+            LuaValue::CFunction(cfunc) => {
+                // Create a temporary frame for the call
+                let mut registers = vec![func.clone()];
+                registers.extend_from_slice(args);
+                registers.resize(16, LuaValue::Nil);
+
+                let frame_id = self.next_frame_id;
+                self.next_frame_id += 1;
+
+                // We need a dummy function for the frame - use an empty one
+                let dummy_func = Rc::new(LuaFunction {
+                    chunk: Rc::new(Chunk {
+                        code: Vec::new(),
+                        constants: Vec::new(),
+                        locals: Vec::new(),
+                        upvalue_count: 0,
+                        param_count: 0,
+                        max_stack_size: 16,
+                        child_protos: Vec::new(),
+                        upvalue_descs: Vec::new(),
+                    }),
+                    upvalues: Vec::new(),
+                });
+
+                let temp_frame = CallFrame {
+                    frame_id,
+                    function: dummy_func,
+                    pc: 0,
+                    registers,
+                    base: self.frames.len(),
+                    result_reg: 0,
+                    num_results: 0,
+                };
+
+                self.frames.push(temp_frame);
+
+                // Call the CFunction
+                let result = cfunc(self);
+
+                // Pop the temporary frame
+                self.frames.pop();
+
+                match result {
+                    Ok(multi_val) => {
+                        let values = multi_val.all_values();
+                        Ok(values.get(0).cloned())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            LuaValue::Function(lua_func) => {
+                // Call Lua function
+                let frame_id = self.next_frame_id;
+                self.next_frame_id += 1;
+
+                // Create a new call frame
+                let mut registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
+                
+                // Copy arguments to registers (starting from register 0)
+                for (i, arg) in args.iter().enumerate() {
+                    if i < registers.len() {
+                        registers[i] = arg.clone();
+                    }
+                }
+
+                let new_frame = CallFrame {
+                    frame_id,
+                    function: lua_func.clone(),
+                    pc: 0,
+                    registers,
+                    base: self.frames.len(),
+                    result_reg: 0,
+                    num_results: 1, // We expect at least one return value
+                };
+
+                let initial_frame_count = self.frames.len();
+                self.frames.push(new_frame);
+
+                // Execute instructions in this frame until it returns
+                let exec_result = loop {
+                    if self.frames.len() <= initial_frame_count {
+                        // Frame has been popped (function returned)
+                        break Ok(());
+                    }
+
+                    let frame_idx = self.frames.len() - 1;
+                    let pc = self.frames[frame_idx].pc;
+                    let chunk = self.frames[frame_idx].function.chunk.clone();
+
+                    if pc >= chunk.code.len() {
+                        // End of code
+                        self.frames.pop();
+                        break Ok(());
+                    }
+
+                    let instr = chunk.code[pc];
+                    self.frames[frame_idx].pc += 1;
+
+                    // Decode and execute
+                    let opcode = Instruction::get_opcode(instr);
+                    
+                    // Special handling for Return opcode
+                    if let OpCode::Return = opcode {
+                        match self.op_return(instr) {
+                            Ok(_val) => {
+                                // Return values are now in self.return_values
+                                break Ok(());
+                            }
+                            Err(e) => {
+                                if self.frames.len() > initial_frame_count {
+                                    self.frames.pop();
+                                }
+                                break Err(e);
+                            }
+                        }
+                    }
+                    
+                    // Execute the instruction
+                    let step_result = match opcode {
+                        OpCode::Move => self.op_move(instr),
+                        OpCode::LoadK => self.op_loadk(instr),
+                        OpCode::LoadBool => self.op_loadbool(instr),
+                        OpCode::LoadNil => self.op_loadnil(instr),
+                        OpCode::GetGlobal => self.op_getglobal(instr),
+                        OpCode::SetGlobal => self.op_setglobal(instr),
+                        OpCode::GetTable => self.op_gettable(instr),
+                        OpCode::SetTable => self.op_settable(instr),
+                        OpCode::NewTable => self.op_newtable(instr),
+                        OpCode::Call => self.op_call(instr),
+                        OpCode::Add => self.op_add(instr),
+                        OpCode::Sub => self.op_sub(instr),
+                        OpCode::Mul => self.op_mul(instr),
+                        OpCode::Div => self.op_div(instr),
+                        OpCode::Mod => self.op_mod(instr),
+                        OpCode::Pow => self.op_pow(instr),
+                        OpCode::Unm => self.op_unm(instr),
+                        OpCode::Not => self.op_not(instr),
+                        OpCode::Len => self.op_len(instr),
+                        OpCode::Concat => self.op_concat(instr),
+                        OpCode::Jmp => self.op_jmp(instr),
+                        OpCode::Eq => self.op_eq(instr),
+                        OpCode::Lt => self.op_lt(instr),
+                        OpCode::Le => self.op_le(instr),
+                        OpCode::Test => self.op_test(instr),
+                        OpCode::TestSet => self.op_testset(instr),
+                        OpCode::Closure => self.op_closure(instr),
+                        OpCode::GetUpval => self.op_getupval(instr),
+                        OpCode::SetUpval => self.op_setupval(instr),
+                        _ => Err(format!("Unimplemented opcode: {:?}", opcode)),
+                    };
+
+                    if let Err(e) = step_result {
+                        // Pop the frame on error
+                        if self.frames.len() > initial_frame_count {
+                            self.frames.pop();
+                        }
+                        break Err(e);
+                    }
+                };
+
+                match exec_result {
+                    Ok(_) => {
+                        // Get the return value from return_values buffer
+                        let result = if !self.return_values.is_empty() {
+                            Some(self.return_values[0].clone())
+                        } else {
+                            None
+                        };
+                        // Clear return values
+                        self.return_values.clear();
+                        Ok(result)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Err("Attempt to call a non-function value".to_string()),
+        }
+    }
+
 
     // Additional comparison operators
     fn op_ne(&mut self, instr: u32) -> Result<(), String> {

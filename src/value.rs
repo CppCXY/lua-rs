@@ -484,7 +484,14 @@ impl LuaTable {
         self.hash.as_ref().and_then(|h| h.get(key).cloned())
     }
 
-    pub fn get(&self, key: &LuaValue) -> Option<LuaValue> {
+    /// Get value with metatable support
+    /// table_rc: Rc to the table itself (needed for __index metamethod calls)
+    pub fn get(
+        &self,
+        table_rc: Rc<RefCell<LuaTable>>,
+        vm: &mut crate::vm::VM,
+        key: &LuaValue,
+    ) -> Option<LuaValue> {
         // First try raw get
         let value = self.raw_get(key).unwrap_or(LuaValue::Nil);
         if !value.is_nil() {
@@ -493,21 +500,44 @@ impl LuaTable {
 
         // If not found and we have a metatable, check __index
         if let Some(ref mt) = self.metatable {
-            let mt_borrowed = mt.borrow();
             let index_key = LuaValue::String(Rc::new(LuaString::new("__index".to_string())));
-
-            let index_value = mt_borrowed.raw_get(&index_key)?;
-            match index_value {
-                // __index is a table - look up in that table
-                LuaValue::Table(ref t) => {
-                    return t.borrow().get(key);
+            
+            // Get the index value and clone it to avoid borrowing issues
+            let index_value = {
+                let mt_borrowed = mt.borrow();
+                mt_borrowed.raw_get(&index_key)
+            };
+            
+            if let Some(index_val) = index_value {
+                match index_val {
+                    // __index is a table - look up in that table
+                    LuaValue::Table(ref t) => {
+                        let t_rc = t.clone();
+                        return t.borrow().get(t_rc, vm, key);
+                    }
+                    // __index is a function - call it with (table, key)
+                    LuaValue::CFunction(_) => {
+                        // Use the provided Rc for the table value
+                        let self_value = LuaValue::Table(table_rc);
+                        let args = vec![self_value, key.clone()];
+                        
+                        match vm.call_metamethod(&index_val, &args) {
+                            Ok(result) => return result,
+                            Err(_) => return None,
+                        }
+                    }
+                    LuaValue::Function(_) => {
+                        // Use the provided Rc for the table value
+                        let self_value = LuaValue::Table(table_rc);
+                        let args = vec![self_value, key.clone()];
+                        
+                        match vm.call_metamethod(&index_val, &args) {
+                            Ok(result) => return result,
+                            Err(_) => return None,
+                        }
+                    }
+                    _ => {}
                 }
-                // __index is a function - will be called by VM
-                LuaValue::Function(_) | LuaValue::CFunction(_) => {
-                    // Return nil for now, VM will call the metamethod
-                    return None;
-                }
-                _ => {}
             }
         }
 
