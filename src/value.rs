@@ -21,7 +21,6 @@ impl MultiValue {
         MultiValue { values: None }
     }
 
-
     pub fn single(value: LuaValue) -> Self {
         MultiValue {
             values: Some(vec![value]),
@@ -29,7 +28,9 @@ impl MultiValue {
     }
 
     pub fn multiple(values: Vec<LuaValue>) -> Self {
-        MultiValue { values: Some(values) }
+        MultiValue {
+            values: Some(values),
+        }
     }
 
     pub fn all_values(self) -> Vec<LuaValue> {
@@ -375,12 +376,12 @@ impl LuaTable {
             metatable: None,
         }
     }
-    
+
     /// Get the metatable of this table
     pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
         self.metatable.clone()
     }
-    
+
     /// Set the metatable of this table
     pub fn set_metatable(&mut self, mt: Option<Rc<RefCell<LuaTable>>>) {
         self.metatable = mt;
@@ -394,7 +395,7 @@ impl LuaTable {
             if idx > 0 {
                 if let Some(ref arr) = self.array {
                     if idx <= arr.len() {
-                        return Some(arr[idx - 1].clone());
+                        return arr.get(idx - 1).cloned();
                     }
                 }
             }
@@ -406,35 +407,32 @@ impl LuaTable {
 
     pub fn get(&self, key: &LuaValue) -> Option<LuaValue> {
         // First try raw get
-        if let Some(value) = self.raw_get(key) {
-            if !value.is_nil() {
-                return Some(value);
-            }
+        let value = self.raw_get(key).unwrap_or(LuaValue::Nil);
+        if !value.is_nil() {
+            return Some(value);
         }
-        
+
         // If not found and we have a metatable, check __index
         if let Some(ref mt) = self.metatable {
             let mt_borrowed = mt.borrow();
             let index_key = LuaValue::String(Rc::new(LuaString::new("__index".to_string())));
-            
-            if let Some(index_value) = mt_borrowed.raw_get(&index_key) {
-                match index_value {
-                    // __index is a table - look up in that table
-                    LuaValue::Table(ref t) => {
-                        return t.borrow().get(key);
-                    }
-                    // __index is a function - will be called by VM
-                    LuaValue::Function(_) | LuaValue::CFunction(_) => {
-                        // Return a special marker that tells VM to call __index
-                        // For now, return None and let VM handle it
-                        return None;
-                    }
-                    _ => {}
+
+            let index_value = mt_borrowed.raw_get(&index_key)?;
+            match index_value {
+                // __index is a table - look up in that table
+                LuaValue::Table(ref t) => {
+                    return t.borrow().get(key);
                 }
+                // __index is a function - will be called by VM
+                LuaValue::Function(_) | LuaValue::CFunction(_) => {
+                    // Return nil for now, VM will call the metamethod
+                    return None;
+                }
+                _ => {}
             }
         }
-        
-        Some(LuaValue::Nil)
+
+        None
     }
 
     /// Set value with raw access (no metamethods)
@@ -445,7 +443,7 @@ impl LuaTable {
             if idx > 0 {
                 // Get or create array
                 let arr = self.array.get_or_insert_with(Vec::new);
-                
+
                 if idx <= arr.len() + 1 {
                     if idx == arr.len() + 1 {
                         arr.push(value);
@@ -465,18 +463,18 @@ impl LuaTable {
     pub fn set(&mut self, key: LuaValue, value: LuaValue) {
         // Check if key already exists
         let has_key = self.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false);
-        
+
         if has_key {
             // Key exists, use raw set
             self.raw_set(key, value);
             return;
         }
-        
+
         // Key doesn't exist, check for __newindex metamethod
         if let Some(ref mt) = self.metatable.clone() {
             let mt_borrowed = mt.borrow();
             let newindex_key = LuaValue::String(Rc::new(LuaString::new("__newindex".to_string())));
-            
+
             if let Some(newindex_value) = mt_borrowed.raw_get(&newindex_key) {
                 match newindex_value {
                     // __newindex is a table - set in that table
@@ -493,7 +491,7 @@ impl LuaTable {
                 }
             }
         }
-        
+
         // No metamethod or key exists, use raw set
         self.raw_set(key, value);
     }
@@ -507,7 +505,11 @@ impl LuaTable {
         let array_iter = self
             .array
             .as_ref()
-            .map(|a| a.iter().enumerate().map(|(i, v)| (LuaValue::integer((i + 1) as i64), v.clone())))
+            .map(|a| {
+                a.iter()
+                    .enumerate()
+                    .map(|(i, v)| (LuaValue::integer((i + 1) as i64), v.clone()))
+            })
             .into_iter()
             .flatten();
 
@@ -520,6 +522,32 @@ impl LuaTable {
 
         array_iter.chain(hash_iter)
     }
+
+    pub fn insert_array_at(&mut self, index: usize, value: LuaValue) -> Result<(), String> {
+        let arr = self.array.get_or_insert_with(Vec::new);
+        if index <= arr.len() {
+            arr.insert(index, value);
+        } else if index == arr.len() + 1 {
+            arr.push(value);
+        } else {
+            return Err("Index out of bounds for array insertion".to_string());
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_array_at(&mut self, index: usize) -> Result<LuaValue, String> {
+        if let Some(ref mut arr) = self.array {
+            if index < arr.len() {
+                return Ok(arr.remove(index));
+            }
+        }
+        Err("Index out of bounds for array removal".to_string())
+    }
+
+    pub fn get_array_part(&mut self) -> Option<&mut Vec<LuaValue>> {
+        self.array.as_mut()
+    }
 }
 
 /// Lua function
@@ -531,11 +559,11 @@ pub struct LuaUpvalue {
 
 #[derive(Debug)]
 enum UpvalueState {
-    Open { 
-        frame_id: usize,     // Which call frame owns this variable
-        register: usize,     // Register index in that frame
+    Open {
+        frame_id: usize, // Which call frame owns this variable
+        register: usize, // Register index in that frame
     },
-    Closed(LuaValue),        // Value moved to heap after frame exits
+    Closed(LuaValue), // Value moved to heap after frame exits
 }
 
 impl LuaUpvalue {
@@ -545,29 +573,30 @@ impl LuaUpvalue {
             value: RefCell::new(UpvalueState::Open { frame_id, register }),
         })
     }
-    
+
     /// Create a closed upvalue with an owned value
     pub fn new_closed(value: LuaValue) -> Rc<Self> {
         Rc::new(LuaUpvalue {
             value: RefCell::new(UpvalueState::Closed(value)),
         })
     }
-    
+
     /// Check if this upvalue is open
     pub fn is_open(&self) -> bool {
         matches!(*self.value.borrow(), UpvalueState::Open { .. })
     }
-    
+
     /// Check if this upvalue points to a specific stack location
     pub fn points_to(&self, frame_id: usize, register: usize) -> bool {
         match *self.value.borrow() {
-            UpvalueState::Open { frame_id: fid, register: reg } => {
-                fid == frame_id && reg == register
-            }
+            UpvalueState::Open {
+                frame_id: fid,
+                register: reg,
+            } => fid == frame_id && reg == register,
             _ => false,
         }
     }
-    
+
     /// Close this upvalue (move value from stack to heap)
     pub fn close(&self, stack_value: LuaValue) {
         let mut state = self.value.borrow_mut();
@@ -575,7 +604,7 @@ impl LuaUpvalue {
             *state = UpvalueState::Closed(stack_value);
         }
     }
-    
+
     /// Get the value (requires VM to read from stack if open)
     pub fn get_value(&self, frames: &[crate::vm::CallFrame]) -> LuaValue {
         let state = self.value.borrow();
@@ -594,7 +623,7 @@ impl LuaUpvalue {
             UpvalueState::Closed(ref val) => val.clone(),
         }
     }
-    
+
     /// Set the value (requires VM to write to stack if open)
     pub fn set_value(&self, frames: &mut [crate::vm::CallFrame], value: LuaValue) {
         let state = self.value.borrow();
@@ -616,7 +645,7 @@ impl LuaUpvalue {
             }
         }
     }
-    
+
     /// Get the closed value for GC marking (returns None if open)
     pub fn get_closed_value(&self) -> Option<LuaValue> {
         match *self.value.borrow() {
@@ -647,8 +676,8 @@ pub struct LuaFunction {
 /// Upvalue descriptor
 #[derive(Debug, Clone)]
 pub struct UpvalueDesc {
-    pub is_local: bool,  // true if captures parent local, false if captures parent upvalue
-    pub index: u32,      // index in parent's register or upvalue array
+    pub is_local: bool, // true if captures parent local, false if captures parent upvalue
+    pub index: u32,     // index in parent's register or upvalue array
 }
 
 /// Compiled chunk (bytecode + metadata)
@@ -660,8 +689,8 @@ pub struct Chunk {
     pub upvalue_count: usize,
     pub param_count: usize,
     pub max_stack_size: usize,
-    pub child_protos: Vec<Rc<Chunk>>,  // Nested function prototypes
-    pub upvalue_descs: Vec<UpvalueDesc>,  // Upvalue descriptors
+    pub child_protos: Vec<Rc<Chunk>>, // Nested function prototypes
+    pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
 }
 
 impl Chunk {

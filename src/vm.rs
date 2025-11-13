@@ -1,10 +1,10 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
 
-use crate::opcode::{Instruction, OpCode};
-use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue, LuaUpvalue};
-use crate::builtin;
 use crate::gc::{GC, GcObjectType};
+use crate::lib_registry;
+use crate::opcode::{Instruction, OpCode};
+use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -18,19 +18,19 @@ pub struct VM {
 
     // Garbage collector
     gc: GC,
-    
+
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
-    
+
     // Open upvalues list (for closing when frames exit)
     open_upvalues: Vec<Rc<LuaUpvalue>>,
-    
+
     // Next frame ID (for tracking frames)
     next_frame_id: usize,
 }
 
 pub struct CallFrame {
-    pub frame_id: usize,          // Unique ID for this frame
+    pub frame_id: usize, // Unique ID for this frame
     pub function: Rc<LuaFunction>,
     pub pc: usize,                // Program counter
     pub registers: Vec<LuaValue>, // Register file
@@ -57,47 +57,13 @@ impl VM {
     }
 
     fn register_builtins(&mut self) {
-        // Basic library
-        self.globals.insert("print".to_string(), LuaValue::cfunction(builtin::lua_print));
-        self.globals.insert("type".to_string(), LuaValue::cfunction(builtin::lua_type));
-        self.globals.insert("assert".to_string(), LuaValue::cfunction(builtin::lua_assert));
-        self.globals.insert("tostring".to_string(), LuaValue::cfunction(builtin::lua_tostring));
-        self.globals.insert("tonumber".to_string(), LuaValue::cfunction(builtin::lua_tonumber));
-        
-        // Metatable functions
-        self.globals.insert("getmetatable".to_string(), LuaValue::cfunction(builtin::lua_getmetatable));
-        self.globals.insert("setmetatable".to_string(), LuaValue::cfunction(builtin::lua_setmetatable));
-        self.globals.insert("rawget".to_string(), LuaValue::cfunction(builtin::lua_rawget));
-        self.globals.insert("rawset".to_string(), LuaValue::cfunction(builtin::lua_rawset));
-        self.globals.insert("rawlen".to_string(), LuaValue::cfunction(builtin::lua_rawlen));
-        
-        // Iterator functions
-        self.globals.insert("next".to_string(), LuaValue::cfunction(builtin::lua_next));
-        self.globals.insert("pairs".to_string(), LuaValue::cfunction(builtin::lua_pairs));
-        self.globals.insert("ipairs".to_string(), LuaValue::cfunction(builtin::lua_ipairs));
-        
-        // Table library (as a table)
-        let table_lib = self.create_table();
-        {
-            let mut tbl = table_lib.borrow_mut();
-            let insert_key = self.create_string("insert".to_string());
-            let remove_key = self.create_string("remove".to_string());
-            tbl.set(
-                LuaValue::String(insert_key),
-                LuaValue::cfunction(builtin::table_insert),
-            );
-            tbl.set(
-                LuaValue::String(remove_key),
-                LuaValue::cfunction(builtin::table_remove),
-            );
-        }
-        self.globals.insert("table".to_string(), LuaValue::Table(table_lib));
+        lib_registry::create_standard_registry().load_all(self);
     }
 
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> Result<LuaValue, String> {
         // Register all constants in the chunk with GC
         self.register_chunk_constants(&chunk);
-        
+
         // Create main function
         let main_func = LuaFunction {
             chunk: chunk.clone(),
@@ -107,7 +73,7 @@ impl VM {
         // Create initial call frame
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
-        
+
         let frame = CallFrame {
             frame_id,
             function: Rc::new(main_func),
@@ -261,7 +227,7 @@ impl VM {
         let key = frame.registers[c].clone();
 
         if let Some(tbl) = table.as_table() {
-            let value = tbl.borrow().get(&key).unwrap_or(LuaValue::nil());
+            let value = tbl.borrow().get(&key).unwrap_or(LuaValue::Nil);
             frame.registers[a] = value;
             Ok(())
         } else {
@@ -295,7 +261,7 @@ impl VM {
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
-        
+
         match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l + r);
@@ -317,7 +283,10 @@ impl VM {
                 if self.call_binop_metamethod(&left, &right, "__add", a)? {
                     Ok(())
                 } else {
-                    Err(format!("attempt to add non-number values ({:?} + {:?})", left, right))
+                    Err(format!(
+                        "attempt to add non-number values ({:?} + {:?})",
+                        left, right
+                    ))
                 }
             }
         }
@@ -331,7 +300,7 @@ impl VM {
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
-        
+
         match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l - r);
@@ -367,7 +336,7 @@ impl VM {
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
-        
+
         match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l * r);
@@ -403,7 +372,7 @@ impl VM {
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
-        
+
         match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l / r);
@@ -439,7 +408,7 @@ impl VM {
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
-        
+
         match (&left, &right) {
             (LuaValue::Float(l), LuaValue::Float(r)) => {
                 frame.registers[a] = LuaValue::number(l % r);
@@ -475,7 +444,7 @@ impl VM {
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
-        
+
         match (&left, &right) {
             (l, r) if l.is_number() && r.is_number() => {
                 let l_num = l.as_number().unwrap();
@@ -501,7 +470,7 @@ impl VM {
 
         let frame = self.current_frame_mut();
         let value = frame.registers[b].clone();
-        
+
         match &value {
             LuaValue::Float(f) => {
                 frame.registers[a] = LuaValue::number(-f);
@@ -530,7 +499,7 @@ impl VM {
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
-        
+
         match (&left, &right) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
                 if *j == 0 {
@@ -552,7 +521,9 @@ impl VM {
                 if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
                     Ok(())
                 } else {
-                    Err(format!("attempt to perform integer division on non-number values"))
+                    Err(format!(
+                        "attempt to perform integer division on non-number values"
+                    ))
                 }
             }
         }
@@ -570,7 +541,7 @@ impl VM {
     fn op_len(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        
+
         let value = {
             let frame = self.current_frame();
             frame.registers[b].clone()
@@ -588,7 +559,7 @@ impl VM {
             if self.call_unop_metamethod(&value, "__len", a)? {
                 return Ok(());
             }
-            
+
             // No __len metamethod, use raw length
             if let Some(t) = value.as_table() {
                 let frame = self.current_frame_mut();
@@ -621,7 +592,7 @@ impl VM {
         // and have the same metamethod
         let left_mm = self.get_metamethod(&left, "__eq");
         let right_mm = self.get_metamethod(&right, "__eq");
-        
+
         if let (Some(mm_left), Some(mm_right)) = (&left_mm, &right_mm) {
             // Both must have the same __eq metamethod
             if self.values_equal(mm_left, mm_right) {
@@ -760,7 +731,7 @@ impl VM {
         if let Some(cfunc) = func.as_cfunction() {
             // Create a temporary call frame with arguments in registers
             let mut arg_registers = vec![func.clone()]; // Register 0 is the function itself
-            
+
             // Copy arguments to registers
             for i in 1..b {
                 if a + i < frame.registers.len() {
@@ -769,11 +740,11 @@ impl VM {
                     arg_registers.push(LuaValue::nil());
                 }
             }
-            
+
             // Create temporary frame for CFunction
             let frame_id = self.next_frame_id;
             self.next_frame_id += 1;
-            
+
             let temp_frame = CallFrame {
                 frame_id,
                 function: self.current_frame().function.clone(),
@@ -783,32 +754,28 @@ impl VM {
                 result_reg: 0,
                 num_results: 0,
             };
-            
+
             self.frames.push(temp_frame);
-            
+
             // Call the CFunction
             let multi_result = cfunc(self)?;
-            
+
             // Pop the temporary frame
             self.frames.pop();
-            
+
             // Store return values
             // C = 0: use all return values
             // C = 1: no return values expected
             // C = 2: 1 return value expected (at register a)
             // C = 3: 2 return values expected (at registers a, a+1)
             // etc.
-            
+
             // Get all return values from MultiValue
             let all_returns = multi_result.all_values();
             let num_returns = all_returns.len();
-            
-            let num_expected = if c == 0 {
-                num_returns
-            } else {
-                c - 1
-            };
-            
+
+            let num_expected = if c == 0 { num_returns } else { c - 1 };
+
             // Store them in registers
             let current_frame = self.current_frame_mut();
             for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
@@ -816,14 +783,14 @@ impl VM {
                     current_frame.registers[a + i] = value;
                 }
             }
-            
+
             // Fill remaining expected registers with nil
             for i in num_returns..num_expected {
                 if a + i < current_frame.registers.len() {
                     current_frame.registers[a + i] = LuaValue::nil();
                 }
             }
-            
+
             return Ok(());
         }
 
@@ -840,7 +807,7 @@ impl VM {
 
             let frame_id = self.next_frame_id;
             self.next_frame_id += 1;
-            
+
             let new_frame = CallFrame {
                 frame_id,
                 function: lua_func.clone(),
@@ -875,7 +842,7 @@ impl VM {
         } else {
             b - 1
         };
-        
+
         let mut values = Vec::new();
         if num_returns > 0 {
             let frame = self.current_frame();
@@ -887,31 +854,31 @@ impl VM {
                 }
             }
         }
-        
+
         // Save caller info before popping
         let caller_result_reg = self.current_frame().result_reg;
         let caller_num_results = self.current_frame().num_results;
         let exiting_frame_id = self.current_frame().frame_id;
-        
+
         // Close upvalues for the exiting frame
         self.close_upvalues(exiting_frame_id);
-        
+
         self.frames.pop();
-        
+
         // Store return values
         self.return_values = values.clone();
-        
+
         // If there's a caller frame, copy return values to its registers
         if !self.frames.is_empty() {
             let frame = self.current_frame_mut();
             let num_to_copy = caller_num_results.min(values.len());
-            
+
             for (i, val) in values.iter().take(num_to_copy).enumerate() {
                 if caller_result_reg + i < frame.registers.len() {
                     frame.registers[caller_result_reg + i] = val.clone();
                 }
             }
-            
+
             // Fill remaining expected results with nil
             if caller_num_results != usize::MAX {
                 for i in num_to_copy..caller_num_results {
@@ -929,7 +896,7 @@ impl VM {
     fn op_getupval(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        
+
         let upvalue = {
             let frame = self.current_frame();
             if b >= frame.function.upvalues.len() {
@@ -937,11 +904,11 @@ impl VM {
             }
             frame.function.upvalues[b].clone()
         };
-        
+
         // Get value from upvalue
         let value = upvalue.get_value(&self.frames);
         self.current_frame_mut().registers[a] = value;
-        
+
         Ok(())
     }
 
@@ -950,7 +917,7 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
 
         let value = self.current_frame().registers[a].clone();
-        
+
         let upvalue = {
             let frame = self.current_frame();
             if b >= frame.function.upvalues.len() {
@@ -958,41 +925,43 @@ impl VM {
             }
             frame.function.upvalues[b].clone()
         };
-        
+
         // Set value to upvalue
         upvalue.set_value(&mut self.frames, value);
-        
+
         Ok(())
     }
 
     fn op_closure(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
-        
+
         let (proto, parent_frame_id) = {
             let frame = self.current_frame();
             let parent_chunk = &frame.function.chunk;
-            
+
             // Get the child chunk (prototype)
             if bx >= parent_chunk.child_protos.len() {
                 return Err(format!("Invalid prototype index: {}", bx));
             }
-            
+
             (parent_chunk.child_protos[bx].clone(), frame.frame_id)
         };
-        
+
         // Capture upvalues according to the prototype's upvalue descriptors
         let mut upvalues = Vec::new();
         for desc in &proto.upvalue_descs {
             if desc.is_local {
                 // Capture from parent's register - create or reuse open upvalue
                 let register = desc.index as usize;
-                
+
                 // Check if an open upvalue already exists for this location
-                let existing_upvalue = self.open_upvalues.iter()
+                let existing_upvalue = self
+                    .open_upvalues
+                    .iter()
                     .find(|uv| uv.points_to(parent_frame_id, register))
                     .cloned();
-                
+
                 let upvalue = if let Some(uv) = existing_upvalue {
                     // Reuse existing open upvalue
                     uv
@@ -1002,7 +971,7 @@ impl VM {
                     self.open_upvalues.push(uv.clone());
                     uv
                 };
-                
+
                 upvalues.push(upvalue);
             } else {
                 // Capture from parent's upvalue (share the same upvalue)
@@ -1015,13 +984,13 @@ impl VM {
                 }
             }
         }
-        
+
         // Create new function (closure)
         let func = self.create_function(proto, upvalues);
-        
+
         let frame = self.current_frame_mut();
         frame.registers[a] = LuaValue::Function(func);
-        
+
         Ok(())
     }
 
@@ -1060,8 +1029,8 @@ impl VM {
         };
 
         // Try direct concatenation
-        let can_concat = (left.as_string().is_some() || left.as_number().is_some()) &&
-                         (right.as_string().is_some() || right.as_number().is_some());
+        let can_concat = (left.as_string().is_some() || left.as_number().is_some())
+            && (right.as_string().is_some() || right.as_number().is_some());
 
         if can_concat {
             let left_str = if let Some(s) = left.as_string() {
@@ -1140,7 +1109,7 @@ impl VM {
         self.frames.last_mut().expect("No active frame")
     }
 
-    fn values_equal(&self, left: &LuaValue, right: &LuaValue) -> bool {
+    pub fn values_equal(&self, left: &LuaValue, right: &LuaValue) -> bool {
         left == right
     }
 
@@ -1244,7 +1213,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
@@ -1264,7 +1233,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
@@ -1284,7 +1253,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
@@ -1304,7 +1273,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
@@ -1324,7 +1293,7 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
@@ -1343,7 +1312,7 @@ impl VM {
     fn op_bnot(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        
+
         let frame = self.current_frame_mut();
         let value = frame.registers[b].clone();
 
@@ -1359,12 +1328,14 @@ impl VM {
     }
 
     // Integer division
-    
+
     /// Close all open upvalues for a specific frame
     /// Called when a frame exits to move values from stack to heap
     fn close_upvalues(&mut self, frame_id: usize) {
         // Find all open upvalues pointing to this frame
-        let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self.open_upvalues.iter()
+        let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self
+            .open_upvalues
+            .iter()
             .filter(|uv| {
                 if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
                     // Check if any open upvalue points to this frame
@@ -1378,42 +1349,42 @@ impl VM {
             })
             .cloned()
             .collect();
-        
+
         // Close each upvalue
         for upvalue in upvalues_to_close.iter() {
             // Get the value from the stack before closing
             let value = upvalue.get_value(&self.frames);
             upvalue.close(value);
         }
-        
+
         // Remove closed upvalues from the open list
         self.open_upvalues.retain(|uv| uv.is_open());
     }
-    
+
     /// Create a new table and register it with GC
     pub fn create_table(&mut self) -> Rc<RefCell<LuaTable>> {
         let table = Rc::new(RefCell::new(LuaTable::new()));
         let ptr = Rc::as_ptr(&table) as usize;
         self.gc.register_object(ptr, GcObjectType::Table);
-        
+
         // Trigger GC if needed
         self.maybe_collect_garbage();
-        
+
         table
     }
-    
+
     /// Create a string and register it with GC
     pub fn create_string(&mut self, s: String) -> Rc<LuaString> {
         let string = Rc::new(LuaString::new(s));
         let ptr = Rc::as_ptr(&string) as usize;
         self.gc.register_object(ptr, GcObjectType::String);
-        
+
         // Trigger GC if needed
         self.maybe_collect_garbage();
-        
+
         string
     }
-    
+
     /// Create a string for builtin function returns (lighter weight, no immediate GC check)
     /// Returns are short-lived and will be registered when stored in registers
     pub fn create_builtin_string(&mut self, s: String) -> Rc<LuaString> {
@@ -1422,26 +1393,30 @@ impl VM {
         self.gc.register_object(ptr, GcObjectType::String);
         string
     }
-    
+
     /// Create a function and register it with GC
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<Rc<LuaUpvalue>>) -> Rc<LuaFunction> {
+    pub fn create_function(
+        &mut self,
+        chunk: Rc<Chunk>,
+        upvalues: Vec<Rc<LuaUpvalue>>,
+    ) -> Rc<LuaFunction> {
         let func = Rc::new(LuaFunction { chunk, upvalues });
         let ptr = Rc::as_ptr(&func) as usize;
         self.gc.register_object(ptr, GcObjectType::Function);
-        
+
         // Trigger GC if needed
         self.maybe_collect_garbage();
-        
+
         func
     }
-    
+
     /// Check if GC should run and collect garbage if needed
     fn maybe_collect_garbage(&mut self) {
         if self.gc.should_collect() {
             self.collect_garbage();
         }
     }
-    
+
     /// Register all constants in a chunk with GC
     fn register_chunk_constants(&mut self, chunk: &Chunk) {
         for value in &chunk.constants {
@@ -1464,40 +1439,40 @@ impl VM {
             }
         }
     }
-    
+
     /// Perform garbage collection
-    fn collect_garbage(&mut self) {
+    pub fn collect_garbage(&mut self) {
         // Collect all roots
         let mut roots = Vec::new();
-        
+
         // Add globals as roots
         for value in self.globals.values() {
             roots.push(value.clone());
         }
-        
+
         // Add all frame registers as roots
         for frame in &self.frames {
             for value in &frame.registers {
                 roots.push(value.clone());
             }
         }
-        
+
         // Add return values as roots
         for value in &self.return_values {
             roots.push(value.clone());
         }
-        
+
         // Add open upvalues as roots (only closed ones that have values)
         for upvalue in &self.open_upvalues {
             if let Some(value) = upvalue.get_closed_value() {
                 roots.push(value);
             }
         }
-        
+
         // Run GC
         self.gc.collect(&roots);
     }
-    
+
     /// Get GC statistics
     pub fn gc_stats(&self) -> String {
         let stats = self.gc.stats();
@@ -1523,7 +1498,7 @@ impl VM {
             stats.promoted_objects
         )
     }
-    
+
     /// Try to get a metamethod from a value
     fn get_metamethod(&self, value: &LuaValue, event: &str) -> Option<LuaValue> {
         match value {
@@ -1536,40 +1511,57 @@ impl VM {
                 }
             }
             // TODO: Support metatables for other types (strings, userdata)
-            _ => None
+            _ => None,
         }
     }
-    
+
     /// Call a binary metamethod (like __add, __sub, etc.)
-    fn call_binop_metamethod(&mut self, left: &LuaValue, right: &LuaValue, event: &str, result_reg: usize) -> Result<bool, String> {
+    fn call_binop_metamethod(
+        &mut self,
+        left: &LuaValue,
+        right: &LuaValue,
+        event: &str,
+        result_reg: usize,
+    ) -> Result<bool, String> {
         // Try left operand's metamethod first
-        let metamethod = self.get_metamethod(left, event)
+        let metamethod = self
+            .get_metamethod(left, event)
             .or_else(|| self.get_metamethod(right, event));
-        
+
         if let Some(mm) = metamethod {
             self.call_metamethod_with_args(mm, vec![left.clone(), right.clone()], result_reg)
         } else {
             Ok(false)
         }
     }
-    
+
     /// Call a unary metamethod (like __unm, __bnot, etc.)
-    fn call_unop_metamethod(&mut self, value: &LuaValue, event: &str, result_reg: usize) -> Result<bool, String> {
+    fn call_unop_metamethod(
+        &mut self,
+        value: &LuaValue,
+        event: &str,
+        result_reg: usize,
+    ) -> Result<bool, String> {
         if let Some(mm) = self.get_metamethod(value, event) {
             self.call_metamethod_with_args(mm, vec![value.clone()], result_reg)
         } else {
             Ok(false)
         }
     }
-    
+
     /// Generic method to call a metamethod with given arguments
-    fn call_metamethod_with_args(&mut self, metamethod: LuaValue, args: Vec<LuaValue>, result_reg: usize) -> Result<bool, String> {
+    fn call_metamethod_with_args(
+        &mut self,
+        metamethod: LuaValue,
+        args: Vec<LuaValue>,
+        result_reg: usize,
+    ) -> Result<bool, String> {
         match metamethod {
             LuaValue::Function(f) => {
                 // Save current state
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
-                
+
                 // In Lua calling convention:
                 // Register 0: the function being called
                 // Register 1+: arguments
@@ -1582,7 +1574,7 @@ impl VM {
                         registers[i] = arg.clone();
                     }
                 }
-                
+
                 let temp_frame = CallFrame {
                     frame_id,
                     function: f.clone(),
@@ -1592,31 +1584,31 @@ impl VM {
                     result_reg,
                     num_results: 1,
                 };
-                
+
                 self.frames.push(temp_frame);
-                
+
                 // Execute the metamethod
                 let result = self.run()?;
-                
+
                 // Store result in the target register
                 if !self.frames.is_empty() {
                     let frame = self.current_frame_mut();
                     frame.registers[result_reg] = result;
                 }
-                
+
                 Ok(true)
             }
             LuaValue::CFunction(cf) => {
                 // Create temporary frame for CFunction
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
-                
+
                 let mut registers = vec![LuaValue::nil(); 10];
                 registers[0] = LuaValue::CFunction(cf);
                 for (i, arg) in args.iter().enumerate() {
                     registers[i + 1] = arg.clone();
                 }
-                
+
                 let temp_frame = CallFrame {
                     frame_id,
                     function: self.current_frame().function.clone(),
@@ -1626,24 +1618,24 @@ impl VM {
                     result_reg: 0,
                     num_results: 1,
                 };
-                
+
                 self.frames.push(temp_frame);
-                
+
                 // Call the CFunction
                 let multi_result = cf(self)?;
-                
+
                 // Pop temporary frame
                 self.frames.pop();
-                
+
                 // Store result
                 let values = multi_result.all_values();
                 let result = values.first().cloned().unwrap_or(LuaValue::Nil);
                 let frame = self.current_frame_mut();
                 frame.registers[result_reg] = result;
-                
+
                 Ok(true)
             }
-            _ => Ok(false)
+            _ => Ok(false),
         }
     }
 }

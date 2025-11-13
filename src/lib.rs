@@ -6,13 +6,15 @@ pub mod opcode;
 pub mod compiler;
 pub mod vm;
 pub mod gc;
-pub mod builtin;
+pub mod lib_registry;
+pub mod stdlib;
 
 pub use value::{LuaValue, LuaString, LuaTable, LuaFunction, Chunk};
 pub use opcode::{OpCode, Instruction};
 pub use compiler::Compiler;
 pub use vm::VM;
 pub use gc::GC;
+pub use lib_registry::LibraryRegistry;
 
 use std::rc::Rc;
 
