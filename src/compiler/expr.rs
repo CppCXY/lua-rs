@@ -4,7 +4,7 @@ use super::Compiler;
 use super::helpers::*;
 use crate::compiler::compile_block;
 use crate::opcode::{Instruction, OpCode};
-use crate::value::{LuaString, LuaValue};
+use crate::value::{Chunk, LuaValue};
 use emmylua_parser::LuaClosureExpr;
 use emmylua_parser::LuaIndexExpr;
 use emmylua_parser::LuaIndexKey;
@@ -56,8 +56,8 @@ fn compile_literal_expr(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<u32, 
             emit_load_constant(c, reg, const_idx);
         }
         LuaLiteralToken::String(s) => {
-            let lua_string = LuaString::new(s.get_value());
-            let const_idx = add_constant(c, LuaValue::string(lua_string));
+            let lua_string = intern_string(c, s.get_value());
+            let const_idx = add_constant(c, LuaValue::String(lua_string));
             emit_load_constant(c, reg, const_idx);
         }
         _ => {}
@@ -74,6 +74,14 @@ fn compile_name_expr(c: &mut Compiler, expr: &LuaNameExpr) -> Result<u32, String
     // Check if it's a local variable
     if let Some(local) = resolve_local(c, &name) {
         return Ok(local.register);
+    }
+
+    // Try to resolve as upvalue from parent scope chain
+    if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
+        let reg = alloc_register(c);
+        let instr = Instruction::encode_abc(OpCode::GetUpval, reg, upvalue_index as u32, 0);
+        c.chunk.code.push(instr);
+        return Ok(reg);
     }
 
     // It's a global variable
@@ -260,7 +268,8 @@ fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, Stri
         LuaIndexKey::Name(name_token) => {
             // table.field
             let field_name = name_token.get_name_text().to_string();
-            let const_idx = add_constant(c, LuaValue::string(LuaString::new(field_name)));
+            let lua_str = intern_string(c, field_name);
+            let const_idx = add_constant(c, LuaValue::String(lua_str));
             let key_reg = alloc_register(c);
             emit_load_constant(c, key_reg, const_idx);
             key_reg
@@ -268,7 +277,8 @@ fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, Stri
         LuaIndexKey::String(string_token) => {
             // table["string"]
             let string_value = string_token.get_value();
-            let const_idx = add_constant(c, LuaValue::string(LuaString::new(string_value)));
+            let lua_str = intern_string(c, string_value);
+            let const_idx = add_constant(c, LuaValue::String(lua_str));
             let key_reg = alloc_register(c);
             emit_load_constant(c, key_reg, const_idx);
             key_reg
@@ -350,7 +360,8 @@ fn compile_table_expr(c: &mut Compiler, expr: &LuaTableExpr) -> Result<u32, Stri
                 LuaIndexKey::Name(name_token) => {
                     // key is an identifier
                     let key_name = name_token.get_name_text().to_string();
-                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(key_name)));
+                    let lua_str = intern_string(c, key_name);
+                    let const_idx = add_constant(c, LuaValue::String(lua_str));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg
@@ -358,7 +369,8 @@ fn compile_table_expr(c: &mut Compiler, expr: &LuaTableExpr) -> Result<u32, Stri
                 LuaIndexKey::String(string_token) => {
                     // key is a string literal
                     let string_value = string_token.get_value();
-                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(string_value)));
+                    let lua_str = intern_string(c, string_value);
+                    let const_idx = add_constant(c, LuaValue::String(lua_str));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg
@@ -410,10 +422,18 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
             if let Some(local) = resolve_local(c, &name) {
                 // Move to local register
                 emit_move(c, local.register, value_reg);
-            } else {
-                // Set global
-                emit_set_global(c, &name, value_reg);
+                return Ok(());
             }
+
+            // Try to resolve as upvalue from parent scope chain
+            if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
+                let instr = Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0);
+                c.chunk.code.push(instr);
+                return Ok(());
+            }
+
+            // Set global
+            emit_set_global(c, &name, value_reg);
             Ok(())
         }
         LuaVarExpr::IndexExpr(index_expr) => {
@@ -436,7 +456,8 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                 LuaIndexKey::Name(name_token) => {
                     // table.field
                     let field_name = name_token.get_name_text().to_string();
-                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(field_name)));
+                    let lua_str = intern_string(c, field_name);
+                    let const_idx = add_constant(c, LuaValue::String(lua_str));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg
@@ -444,7 +465,8 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                 LuaIndexKey::String(string_token) => {
                     // table["string"]
                     let string_value = string_token.get_value();
-                    let const_idx = add_constant(c, LuaValue::string(LuaString::new(string_value)));
+                    let lua_str = intern_string(c, string_value);
+                    let const_idx = add_constant(c, LuaValue::String(lua_str));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg
@@ -485,11 +507,9 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
 
     let body = closure.get_block().ok_or("closure missing body")?;
 
-    // Create a new compiler for the function body
-    let mut func_compiler = Compiler::new();
-    
-    // Save parent locals for upvalue resolution
-    let parent_locals = c.locals.clone();
+    // Create a new compiler for the function body with parent scope chain
+    // No need to sync anymore - scope_chain is already current
+    let mut func_compiler = Compiler::new_with_parent(c.scope_chain.clone(), c.string_pool.clone());
 
     // Set up parameters as local variables
     for (i, param) in params.iter().enumerate() {
@@ -500,7 +520,7 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
             format!("arg{}", i)
         };
 
-        func_compiler.locals.push(super::Local {
+        func_compiler.scope_chain.borrow_mut().locals.push(super::Local {
             name: param_name.clone(),
             depth: 0,
             register: i as u32,
@@ -512,7 +532,6 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
     func_compiler.next_register = params.len() as u32;
 
     // Compile function body
-    // TODO: Capture upvalue references during compilation
     compile_block(&mut func_compiler, &body)?;
 
     // Add implicit return if needed
@@ -525,10 +544,25 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
 
     func_compiler.chunk.max_stack_size = func_compiler.next_register as usize;
     
-    // TODO: Resolve upvalues and emit GetUpval/SetUpval instructions
-    // For now, upvalues are not fully implemented
+    // Store upvalue information from scope_chain
+    let upvalues = func_compiler.scope_chain.borrow().upvalues.clone();
+    func_compiler.chunk.upvalue_count = upvalues.len();
+    func_compiler.chunk.upvalue_descs = upvalues
+        .iter()
+        .map(|uv| crate::value::UpvalueDesc {
+            is_local: uv.is_local,
+            index: uv.index,
+        })
+        .collect();
+    
+    // Move child chunks from func_compiler to its own chunk's child_protos
+    let child_protos: Vec<std::rc::Rc<Chunk>> = func_compiler.child_chunks
+        .into_iter()
+        .map(std::rc::Rc::new)
+        .collect();
+    func_compiler.chunk.child_protos = child_protos;
 
-    // Add the function chunk to the parent compiler
+    // Add the function chunk to the parent compiler's child_chunks
     let chunk_index = c.child_chunks.len();
     c.child_chunks.push(func_compiler.chunk);
 

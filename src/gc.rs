@@ -82,7 +82,10 @@ impl GC {
     /// Mark function upvalues
     fn mark_function(&self, func: &crate::value::LuaFunction, worklist: &mut Vec<LuaValue>) {
         for upval in &func.upvalues {
-            worklist.push(upval.clone());
+            // Only mark closed upvalues (open ones are on the stack already)
+            if let Some(val) = upval.get_closed_value() {
+                worklist.push(val);
+            }
         }
     }
 

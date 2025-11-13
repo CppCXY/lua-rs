@@ -3,12 +3,13 @@
 use super::expr::{compile_call_expr, compile_expr, compile_var_expr};
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
-use crate::compiler::expr::compile_closure_expr;
+use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr};
 use crate::opcode::{Instruction, OpCode};
-use crate::value::{LuaValue, LuaString};
-use std::rc::Rc;
+use crate::value::LuaValue;
 use emmylua_parser::{
-    LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat
+    LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat, LuaForStat, LuaFuncStat,
+    LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat,
+    LuaWhileStat,
 };
 
 /// Compile any statement
@@ -100,9 +101,6 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
 /// Compile assignment statement
 fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
-    use super::expr::compile_call_expr_with_returns;
-    use emmylua_parser::LuaExpr;
-
     // Get vars and expressions from children
     let (vars, exprs) = stat.get_var_and_expr_list();
 
@@ -629,9 +627,9 @@ fn compile_function_stat(c: &mut Compiler, stat: &LuaFuncStat) -> Result<(), Str
 
     // Compile the closure to get function value
     let func_reg = compile_closure_expr(c, &closure)?;
-    
+
     compile_var_expr(c, &func_name_var_expr, func_reg)?;
-    
+
     Ok(())
 }
 
@@ -642,7 +640,8 @@ fn compile_local_function_stat(
     let local_name = stat
         .get_local_name()
         .ok_or("local function statement missing function name")?;
-    let func_name = local_name.get_name_token()
+    let func_name = local_name
+        .get_name_token()
         .ok_or("local function statement missing function name token")?
         .get_name_text()
         .to_string();
@@ -654,29 +653,29 @@ fn compile_local_function_stat(
     // Declare the local variable first (for recursion support)
     let func_reg = c.next_register;
     c.next_register += 1;
-    
-    c.locals.push(Local {
+
+    c.scope_chain.borrow_mut().locals.push(Local {
         name: func_name.clone(),
         depth: c.scope_depth,
         register: func_reg,
     });
     c.chunk.locals.push(func_name);
-    
+
     // Save and restore next_register to compile closure into func_reg
     let saved_next = c.next_register;
     c.next_register = func_reg;
-    
+
     // Compile the closure
-    let closure_reg = super::expr::compile_closure_expr(c, &closure)?;
-    
+    let closure_reg = compile_closure_expr(c, &closure)?;
+
     // Restore next_register (should be func_reg + 1)
     c.next_register = saved_next.max(closure_reg + 1);
-    
+
     // Move closure to the local variable register if different
     if closure_reg != func_reg {
         let move_instr = Instruction::encode_abc(OpCode::Move, func_reg, closure_reg, 0);
         c.chunk.code.push(move_instr);
     }
-    
+
     Ok(())
 }

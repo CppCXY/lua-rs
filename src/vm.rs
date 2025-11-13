@@ -2,8 +2,9 @@
 // Executes compiled bytecode with register-based architecture
 
 use crate::opcode::{Instruction, OpCode};
-use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
+use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue, LuaUpvalue};
 use crate::builtin;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -20,13 +21,25 @@ pub struct VM {
     
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
+    
+    // Open upvalues list (for closing when frames exit)
+    open_upvalues: Vec<Rc<LuaUpvalue>>,
+    
+    // Next frame ID (for tracking frames)
+    next_frame_id: usize,
+    
+    // Allocated tables (for future GC tracking)
+    // We track table count, not actual references (simplified for now)
+    #[allow(dead_code)]
+    table_count: usize,
 }
 
 pub struct CallFrame {
+    pub frame_id: usize,          // Unique ID for this frame
     pub function: Rc<LuaFunction>,
     pub pc: usize,                // Program counter
     pub registers: Vec<LuaValue>, // Register file
-    pub base: usize, // Stack base for this frame
+    pub base: usize,              // Stack base for this frame
     pub result_reg: usize,        // Register to store return value
     pub num_results: usize,       // Number of expected return values
 }
@@ -38,6 +51,9 @@ impl VM {
             frames: Vec::new(),
             gc_roots: Vec::new(),
             return_values: Vec::new(),
+            open_upvalues: Vec::new(),
+            next_frame_id: 0,
+            table_count: 0,
         };
 
         // Register built-in functions
@@ -80,7 +96,11 @@ impl VM {
         };
 
         // Create initial call frame
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+        
         let frame = CallFrame {
+            frame_id,
             function: Rc::new(main_func),
             pc: 0,
             registers: vec![LuaValue::nil(); chunk.max_stack_size],
@@ -216,8 +236,9 @@ impl VM {
 
     fn op_newtable(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
+        let table = self.create_table();
         let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::table(LuaTable::new());
+        frame.registers[a] = LuaValue::Table(table);
         Ok(())
     }
 
@@ -561,7 +582,11 @@ impl VM {
             }
             
             // Create temporary frame for CFunction
+            let frame_id = self.next_frame_id;
+            self.next_frame_id += 1;
+            
             let temp_frame = CallFrame {
+                frame_id,
                 function: self.current_frame().function.clone(),
                 pc: self.current_frame().pc,
                 registers: arg_registers,
@@ -629,7 +654,11 @@ impl VM {
                 }
             }
 
+            let frame_id = self.next_frame_id;
+            self.next_frame_id += 1;
+            
             let new_frame = CallFrame {
+                frame_id,
                 function: lua_func.clone(),
                 pc: 0,
                 registers: new_registers,
@@ -678,6 +707,10 @@ impl VM {
         // Save caller info before popping
         let caller_result_reg = self.current_frame().result_reg;
         let caller_num_results = self.current_frame().num_results;
+        let exiting_frame_id = self.current_frame().frame_id;
+        
+        // Close upvalues for the exiting frame
+        self.close_upvalues(exiting_frame_id);
         
         self.frames.pop();
         
@@ -712,25 +745,39 @@ impl VM {
     fn op_getupval(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        let frame = self.current_frame_mut();
-
-        if b < frame.function.upvalues.len() {
-            frame.registers[a] = frame.function.upvalues[b].clone();
-        }
+        
+        let upvalue = {
+            let frame = self.current_frame();
+            if b >= frame.function.upvalues.len() {
+                return Err(format!("Invalid upvalue index: {}", b));
+            }
+            frame.function.upvalues[b].clone()
+        };
+        
+        // Get value from upvalue
+        let value = upvalue.get_value(&self.frames);
+        self.current_frame_mut().registers[a] = value;
+        
         Ok(())
     }
 
     fn op_setupval(&mut self, instr: u32) -> Result<(), String> {
-        let _a = Instruction::get_a(instr) as usize;
-        let _b = Instruction::get_b(instr) as usize;
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
 
-        // Note: Upvalues not fully implemented yet
-        // let value = self.current_frame().registers[a].clone();
-        // let frame = self.current_frame_mut();
-
-        // if b < frame.function.upvalues.len() {
-        //     frame.function.upvalues[b] = value;
-        // }
+        let value = self.current_frame().registers[a].clone();
+        
+        let upvalue = {
+            let frame = self.current_frame();
+            if b >= frame.function.upvalues.len() {
+                return Err(format!("Invalid upvalue index: {}", b));
+            }
+            frame.function.upvalues[b].clone()
+        };
+        
+        // Set value to upvalue
+        upvalue.set_value(&mut self.frames, value);
+        
         Ok(())
     }
 
@@ -738,21 +785,57 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
         
-        let frame = self.current_frame();
-        let parent_chunk = &frame.function.chunk;
+        let (proto, parent_frame_id) = {
+            let frame = self.current_frame();
+            let parent_chunk = &frame.function.chunk;
+            
+            // Get the child chunk (prototype)
+            if bx >= parent_chunk.child_protos.len() {
+                return Err(format!("Invalid prototype index: {}", bx));
+            }
+            
+            (parent_chunk.child_protos[bx].clone(), frame.frame_id)
+        };
         
-        // Get the child chunk (prototype)
-        if bx >= parent_chunk.child_protos.len() {
-            return Err(format!("Invalid prototype index: {}", bx));
+        // Capture upvalues according to the prototype's upvalue descriptors
+        let mut upvalues = Vec::new();
+        for desc in &proto.upvalue_descs {
+            if desc.is_local {
+                // Capture from parent's register - create or reuse open upvalue
+                let register = desc.index as usize;
+                
+                // Check if an open upvalue already exists for this location
+                let existing_upvalue = self.open_upvalues.iter()
+                    .find(|uv| uv.points_to(parent_frame_id, register))
+                    .cloned();
+                
+                let upvalue = if let Some(uv) = existing_upvalue {
+                    // Reuse existing open upvalue
+                    uv
+                } else {
+                    // Create new open upvalue
+                    let uv = LuaUpvalue::new_open(parent_frame_id, register);
+                    self.open_upvalues.push(uv.clone());
+                    uv
+                };
+                
+                upvalues.push(upvalue);
+            } else {
+                // Capture from parent's upvalue (share the same upvalue)
+                let frame = self.current_frame();
+                if (desc.index as usize) < frame.function.upvalues.len() {
+                    upvalues.push(frame.function.upvalues[desc.index as usize].clone());
+                } else {
+                    // Fallback: create closed upvalue with nil
+                    upvalues.push(LuaUpvalue::new_closed(LuaValue::Nil));
+                }
+            }
         }
         
-        let proto = parent_chunk.child_protos[bx].clone();
-        
         // Create new function (closure)
-        // TODO: Capture upvalues properly
         let func = LuaFunction {
             chunk: proto,
-            upvalues: Vec::new(),
+            upvalues,
         };
         
         let frame = self.current_frame_mut();
@@ -1078,5 +1161,46 @@ impl VM {
         }
         frame.registers[a] = LuaValue::number(result);
         Ok(())
+    }
+    
+    /// Close all open upvalues for a specific frame
+    /// Called when a frame exits to move values from stack to heap
+    fn close_upvalues(&mut self, frame_id: usize) {
+        // Find all open upvalues pointing to this frame
+        let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self.open_upvalues.iter()
+            .filter(|uv| {
+                if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
+                    // Check if any open upvalue points to this frame
+                    for reg_idx in 0..frame.registers.len() {
+                        if uv.points_to(frame_id, reg_idx) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect();
+        
+        // Close each upvalue
+        for upvalue in upvalues_to_close.iter() {
+            // Get the value from the stack before closing
+            let value = upvalue.get_value(&self.frames);
+            upvalue.close(value);
+        }
+        
+        // Remove closed upvalues from the open list
+        self.open_upvalues.retain(|uv| uv.is_open());
+    }
+    
+    /// Create a new table and track it for GC
+    pub fn create_table(&mut self) -> Rc<RefCell<LuaTable>> {
+        self.table_count += 1;
+        Rc::new(RefCell::new(LuaTable::new()))
+    }
+    
+    /// Get statistics about allocated tables
+    pub fn table_stats(&self) -> usize {
+        self.table_count
     }
 }

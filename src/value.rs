@@ -433,10 +433,132 @@ impl LuaTable {
 }
 
 /// Lua function
-#[derive(Debug, Clone)]
+/// Runtime upvalue - can be open (pointing to stack) or closed (owns value)
+/// This matches Lua's UpVal implementation
+pub struct LuaUpvalue {
+    value: RefCell<UpvalueState>,
+}
+
+#[derive(Debug)]
+enum UpvalueState {
+    Open { 
+        frame_id: usize,     // Which call frame owns this variable
+        register: usize,     // Register index in that frame
+    },
+    Closed(LuaValue),        // Value moved to heap after frame exits
+}
+
+impl LuaUpvalue {
+    /// Create an open upvalue pointing to a stack location
+    pub fn new_open(frame_id: usize, register: usize) -> Rc<Self> {
+        Rc::new(LuaUpvalue {
+            value: RefCell::new(UpvalueState::Open { frame_id, register }),
+        })
+    }
+    
+    /// Create a closed upvalue with an owned value
+    pub fn new_closed(value: LuaValue) -> Rc<Self> {
+        Rc::new(LuaUpvalue {
+            value: RefCell::new(UpvalueState::Closed(value)),
+        })
+    }
+    
+    /// Check if this upvalue is open
+    pub fn is_open(&self) -> bool {
+        matches!(*self.value.borrow(), UpvalueState::Open { .. })
+    }
+    
+    /// Check if this upvalue points to a specific stack location
+    pub fn points_to(&self, frame_id: usize, register: usize) -> bool {
+        match *self.value.borrow() {
+            UpvalueState::Open { frame_id: fid, register: reg } => {
+                fid == frame_id && reg == register
+            }
+            _ => false,
+        }
+    }
+    
+    /// Close this upvalue (move value from stack to heap)
+    pub fn close(&self, stack_value: LuaValue) {
+        let mut state = self.value.borrow_mut();
+        if matches!(*state, UpvalueState::Open { .. }) {
+            *state = UpvalueState::Closed(stack_value);
+        }
+    }
+    
+    /// Get the value (requires VM to read from stack if open)
+    pub fn get_value(&self, frames: &[crate::vm::CallFrame]) -> LuaValue {
+        let state = self.value.borrow();
+        match *state {
+            UpvalueState::Open { frame_id, register } => {
+                // Release the borrow before accessing frames
+                drop(state);
+                // Find the frame and read the register
+                if let Some(frame) = frames.iter().find(|f| f.frame_id == frame_id) {
+                    if register < frame.registers.len() {
+                        return frame.registers[register].clone();
+                    }
+                }
+                LuaValue::Nil
+            }
+            UpvalueState::Closed(ref val) => val.clone(),
+        }
+    }
+    
+    /// Set the value (requires VM to write to stack if open)
+    pub fn set_value(&self, frames: &mut [crate::vm::CallFrame], value: LuaValue) {
+        let state = self.value.borrow();
+        match *state {
+            UpvalueState::Open { frame_id, register } => {
+                // Release the borrow before accessing frames
+                drop(state);
+                // Find the frame and write the register
+                if let Some(frame) = frames.iter_mut().find(|f| f.frame_id == frame_id) {
+                    if register < frame.registers.len() {
+                        frame.registers[register] = value;
+                    }
+                }
+            }
+            UpvalueState::Closed(_) => {
+                // Release the borrow before mut borrow
+                drop(state);
+                *self.value.borrow_mut() = UpvalueState::Closed(value);
+            }
+        }
+    }
+    
+    /// Get the closed value for GC marking (returns None if open)
+    pub fn get_closed_value(&self) -> Option<LuaValue> {
+        match *self.value.borrow() {
+            UpvalueState::Closed(ref val) => Some(val.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Debug for LuaUpvalue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self.value.borrow() {
+            UpvalueState::Open { frame_id, register } => {
+                write!(f, "Upvalue::Open(frame={}, reg={})", frame_id, register)
+            }
+            UpvalueState::Closed(ref val) => {
+                write!(f, "Upvalue::Closed({:?})", val)
+            }
+        }
+    }
+}
+
 pub struct LuaFunction {
     pub chunk: Rc<Chunk>,
-    pub upvalues: Vec<LuaValue>,
+    pub upvalues: Vec<Rc<LuaUpvalue>>,
+}
+
+/// Upvalue descriptor
+#[derive(Debug, Clone)]
+pub struct UpvalueDesc {
+    pub is_local: bool,  // true if captures parent local, false if captures parent upvalue
+    pub index: u32,      // index in parent's register or upvalue array
 }
 
 /// Compiled chunk (bytecode + metadata)
@@ -449,6 +571,7 @@ pub struct Chunk {
     pub param_count: usize,
     pub max_stack_size: usize,
     pub child_protos: Vec<Rc<Chunk>>,  // Nested function prototypes
+    pub upvalue_descs: Vec<UpvalueDesc>,  // Upvalue descriptors
 }
 
 impl Chunk {
@@ -461,6 +584,7 @@ impl Chunk {
             param_count: 0,
             max_stack_size: 0,
             child_protos: Vec::new(),
+            upvalue_descs: Vec::new(),
         }
     }
 }

@@ -19,6 +19,11 @@ fn main() {
                             if !result.is_nil() {
                                 println!("Result: {:?}", result);
                             }
+                            // Print VM statistics
+                            let table_count = vm.table_stats();
+                            if table_count > 0 {
+                                eprintln!("[VM] Created {} tables during execution", table_count);
+                            }
                         }
                         Err(e) => {
                             eprintln!("Runtime error: {}", e);

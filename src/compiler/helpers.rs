@@ -1,8 +1,14 @@
 // Compiler helper functions
 
-use crate::opcode::{OpCode, Instruction};
-use crate::value::{LuaValue, LuaString};
 use super::{Compiler, Local};
+use crate::opcode::{Instruction, OpCode};
+use crate::value::{LuaString, LuaValue};
+use std::rc::Rc;
+
+/// Create a string using the string pool
+pub fn intern_string(c: &Compiler, s: String) -> Rc<LuaString> {
+    c.string_pool.borrow_mut().intern(s)
+}
 
 /// Emit an instruction and return its position
 pub fn emit(c: &mut Compiler, instr: u32) -> usize {
@@ -45,18 +51,78 @@ pub fn free_register(c: &mut Compiler) {
     }
 }
 
-/// Add a local variable
+/// Add a local variable to the current scope
 pub fn add_local(c: &mut Compiler, name: String, register: u32) {
-    c.locals.push(Local {
+    let local = Local {
         name,
         depth: c.scope_depth,
         register,
-    });
+    };
+    c.scope_chain.borrow_mut().locals.push(local);
 }
 
-/// Resolve a local variable by name
-pub fn resolve_local<'a>(c: &'a Compiler, name: &str) -> Option<&'a Local> {
-    c.locals.iter().rev().find(|l| l.name == name)
+/// Resolve a local variable by name (searches from innermost to outermost scope)
+/// Now uses scope_chain directly
+pub fn resolve_local<'a>(c: &'a Compiler, name: &str) -> Option<Local> {
+    // Search in current scope_chain's locals
+    let scope = c.scope_chain.borrow();
+    scope.locals.iter().rev().find(|l| l.name == name).cloned()
+}
+
+
+/// Add an upvalue to the current compiler's upvalue list
+/// Returns the index of the upvalue in the list
+pub fn add_upvalue(c: &mut Compiler, name: String, is_local: bool, index: u32) -> usize {
+    let mut scope = c.scope_chain.borrow_mut();
+    
+    // Check if we already have this upvalue
+    for (i, uv) in scope.upvalues.iter().enumerate() {
+        if uv.name == name && uv.is_local == is_local && uv.index == index {
+            return i;
+        }
+    }
+
+    // Add new upvalue
+    scope.upvalues.push(super::Upvalue {
+        name,
+        is_local,
+        index,
+    });
+    scope.upvalues.len() - 1
+}
+
+/// Resolve an upvalue by searching parent scopes through the scope chain
+/// This is called when a variable is not found in local scope
+pub fn resolve_upvalue_from_chain(
+    c: &mut Compiler,
+    name: &str,
+) -> Option<usize> {
+    // Check if already in current upvalues
+    if let Some((idx, _)) = c.scope_chain.borrow().upvalues.iter().enumerate().find(|(_, uv)| uv.name == name) {
+        return Some(idx);
+    }
+    
+    // Get parent scope
+    let parent = c.scope_chain.borrow().parent.clone();
+    if let Some(parent_scope) = parent {
+        let parent_scope_ref = parent_scope.borrow();
+        
+        // First, try to find in parent's locals
+        if let Some(local) = parent_scope_ref.locals.iter().rev().find(|l| l.name == name) {
+            // Found in parent's local variables - capture as upvalue
+            let upvalue_index = add_upvalue(c, name.to_string(), true, local.register);
+            return Some(upvalue_index);
+        }
+        
+        // If not in parent's locals, try parent's upvalues (for nested closures)
+        if let Some((idx, _)) = parent_scope_ref.upvalues.iter().enumerate().find(|(_, uv)| uv.name == name) {
+            // Found in parent's upvalues - capture as upvalue from parent's upvalue
+            let upvalue_index = add_upvalue(c, name.to_string(), false, idx as u32);
+            return Some(upvalue_index);
+        }
+    }
+    
+    None
 }
 
 /// Begin a new scope
@@ -67,21 +133,29 @@ pub fn begin_scope(c: &mut Compiler) {
 /// End the current scope
 pub fn end_scope(c: &mut Compiler) {
     c.scope_depth -= 1;
-    c.locals.retain(|l| l.depth <= c.scope_depth);
+    c.scope_chain.borrow_mut().locals.retain(|l| l.depth <= c.scope_depth);
     // Clear labels from the scope being closed
     clear_scope_labels(c);
 }
 
 /// Get a global variable
 pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
-    let const_idx = add_constant(c, LuaValue::string(LuaString::new(name.to_string())));
-    emit(c, Instruction::encode_abx(OpCode::GetGlobal, dest_reg, const_idx));
+    let lua_str = intern_string(c, name.to_string());
+    let const_idx = add_constant(c, LuaValue::String(lua_str));
+    emit(
+        c,
+        Instruction::encode_abx(OpCode::GetGlobal, dest_reg, const_idx),
+    );
 }
 
 /// Set a global variable
 pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
-    let const_idx = add_constant(c, LuaValue::string(LuaString::new(name.to_string())));
-    emit(c, Instruction::encode_abx(OpCode::SetGlobal, src_reg, const_idx));
+    let lua_str = intern_string(c, name.to_string());
+    let const_idx = add_constant(c, LuaValue::String(lua_str));
+    emit(
+        c,
+        Instruction::encode_abx(OpCode::SetGlobal, src_reg, const_idx),
+    );
 }
 
 /// Load nil into a register
@@ -91,7 +165,10 @@ pub fn emit_load_nil(c: &mut Compiler, reg: u32) {
 
 /// Load boolean into a register
 pub fn emit_load_bool(c: &mut Compiler, reg: u32, value: bool) {
-    emit(c, Instruction::encode_abc(OpCode::LoadBool, reg, value as u32, 0));
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::LoadBool, reg, value as u32, 0),
+    );
 }
 
 /// Load constant into a register
@@ -128,7 +205,7 @@ pub fn emit_break(c: &mut Compiler) -> Result<(), String> {
     if c.loop_stack.is_empty() {
         return Err("break statement outside loop".to_string());
     }
-    
+
     let jump_pos = emit_jump(c, OpCode::Jmp);
     c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
     Ok(())
@@ -142,17 +219,17 @@ pub fn define_label(c: &mut Compiler, name: String) -> Result<(), String> {
             return Err(format!("label '{}' already defined", name));
         }
     }
-    
+
     let position = c.chunk.code.len();
     c.labels.push(super::Label {
         name: name.clone(),
         position,
         scope_depth: c.scope_depth,
     });
-    
+
     // Try to resolve any pending gotos to this label
     resolve_pending_gotos(c, &name);
-    
+
     Ok(())
 }
 
@@ -168,7 +245,7 @@ pub fn emit_goto(c: &mut Compiler, label_name: String) -> Result<(), String> {
             return Ok(());
         }
     }
-    
+
     // Label not yet defined - add to pending gotos
     let jump_pos = emit_jump(c, OpCode::Jmp);
     c.gotos.push(super::GotoInfo {
@@ -176,17 +253,19 @@ pub fn emit_goto(c: &mut Compiler, label_name: String) -> Result<(), String> {
         jump_position: jump_pos,
         scope_depth: c.scope_depth,
     });
-    
+
     Ok(())
 }
 
 /// Resolve pending gotos for a newly defined label
 fn resolve_pending_gotos(c: &mut Compiler, label_name: &str) {
-    let label_pos = c.labels.iter()
+    let label_pos = c
+        .labels
+        .iter()
         .find(|l| l.name == label_name)
         .map(|l| l.position)
         .unwrap();
-    
+
     // Find and patch all gotos to this label
     let mut i = 0;
     while i < c.gotos.len() {
