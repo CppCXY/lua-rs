@@ -190,7 +190,10 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let frame = self.current_frame_mut();
-        frame.registers[a] = frame.registers[b].clone();
+        // SAFETY: Compiler guarantees a,b are within max_stack_size
+        unsafe {
+            *frame.registers.get_unchecked_mut(a) = frame.registers.get_unchecked(b).clone();
+        }
         Ok(())
     }
 
@@ -459,25 +462,28 @@ impl VM {
 
         let frame = self.current_frame_mut();
 
-        // Fast path: avoid cloning by matching references directly
-        match (&frame.registers[b], &frame.registers[c]) {
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::Integer(i + j);
-                return Ok(());
+        // SAFETY: Compiler guarantees indices are within bounds
+        // Fast path: avoid cloning and bounds check
+        unsafe {
+            match (frame.registers.get_unchecked(b), frame.registers.get_unchecked(c)) {
+                (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Integer(i + j);
+                    return Ok(());
+                }
+                (LuaValue::Float(l), LuaValue::Float(r)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(l + r);
+                    return Ok(());
+                }
+                (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(*i as f64 + f);
+                    return Ok(());
+                }
+                (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(f + *i as f64);
+                    return Ok(());
+                }
+                _ => {}
             }
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::Float(l + r);
-                return Ok(());
-            }
-            (LuaValue::Integer(i), LuaValue::Float(f)) => {
-                frame.registers[a] = LuaValue::Float(*i as f64 + f);
-                return Ok(());
-            }
-            (LuaValue::Float(f), LuaValue::Integer(i)) => {
-                frame.registers[a] = LuaValue::Float(f + *i as f64);
-                return Ok(());
-            }
-            _ => {}
         }
 
         // Slow path: clone for metamethods
@@ -502,25 +508,27 @@ impl VM {
 
         let frame = self.current_frame_mut();
 
-        // Fast path: avoid cloning
-        match (&frame.registers[b], &frame.registers[c]) {
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::Integer(i - j);
-                return Ok(());
+        // SAFETY: Compiler guarantees indices are within bounds
+        unsafe {
+            match (frame.registers.get_unchecked(b), frame.registers.get_unchecked(c)) {
+                (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Integer(i - j);
+                    return Ok(());
+                }
+                (LuaValue::Float(l), LuaValue::Float(r)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(l - r);
+                    return Ok(());
+                }
+                (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(*i as f64 - f);
+                    return Ok(());
+                }
+                (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(f - *i as f64);
+                    return Ok(());
+                }
+                _ => {}
             }
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::Float(l - r);
-                return Ok(());
-            }
-            (LuaValue::Integer(i), LuaValue::Float(f)) => {
-                frame.registers[a] = LuaValue::Float(*i as f64 - f);
-                return Ok(());
-            }
-            (LuaValue::Float(f), LuaValue::Integer(i)) => {
-                frame.registers[a] = LuaValue::Float(f - *i as f64);
-                return Ok(());
-            }
-            _ => {}
         }
 
         // Slow path
@@ -542,25 +550,27 @@ impl VM {
 
         let frame = self.current_frame_mut();
 
-        // Fast path
-        match (&frame.registers[b], &frame.registers[c]) {
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::Integer(i * j);
-                return Ok(());
+        // SAFETY: Compiler guarantees indices are within bounds
+        unsafe {
+            match (frame.registers.get_unchecked(b), frame.registers.get_unchecked(c)) {
+                (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Integer(i * j);
+                    return Ok(());
+                }
+                (LuaValue::Float(l), LuaValue::Float(r)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(l * r);
+                    return Ok(());
+                }
+                (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(*i as f64 * f);
+                    return Ok(());
+                }
+                (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                    *frame.registers.get_unchecked_mut(a) = LuaValue::Float(f * *i as f64);
+                    return Ok(());
+                }
+                _ => {}
             }
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::Float(l * r);
-                return Ok(());
-            }
-            (LuaValue::Integer(i), LuaValue::Float(f)) => {
-                frame.registers[a] = LuaValue::Float(*i as f64 * f);
-                return Ok(());
-            }
-            (LuaValue::Float(f), LuaValue::Integer(i)) => {
-                frame.registers[a] = LuaValue::Float(f * *i as f64);
-                return Ok(());
-            }
-            _ => {}
         }
 
         // Slow path
@@ -1006,53 +1016,56 @@ impl VM {
 
         // R(A) is index, R(A+1) is limit, R(A+2) is step
         // Add step: R(A) += R(A+2)
-        let (new_value, continue_loop) = match (
-            &frame.registers[a],
-            &frame.registers[a + 1],
-            &frame.registers[a + 2],
-        ) {
-            (LuaValue::Integer(idx), LuaValue::Integer(limit), LuaValue::Integer(step)) => {
-                let new_idx = idx + step;
-                let cont = if *step >= 0 {
-                    new_idx <= *limit
-                } else {
-                    new_idx >= *limit
-                };
-                (LuaValue::Integer(new_idx), cont)
-            }
-            (LuaValue::Float(idx), LuaValue::Float(limit), LuaValue::Float(step)) => {
-                let new_idx = idx + step;
-                let cont = if *step >= 0.0 {
-                    new_idx <= *limit
-                } else {
-                    new_idx >= *limit
-                };
-                (LuaValue::Float(new_idx), cont)
-            }
-            (idx, limit, step) if idx.is_number() && limit.is_number() && step.is_number() => {
-                let idx_f = idx.as_number().unwrap();
-                let limit_f = limit.as_number().unwrap();
-                let step_f = step.as_number().unwrap();
-                let new_idx = idx_f + step_f;
-                let cont = if step_f >= 0.0 {
-                    new_idx <= limit_f
-                } else {
-                    new_idx >= limit_f
-                };
-                (LuaValue::Float(new_idx), cont)
-            }
-            _ => {
-                return Err("'for' step/limit must be a number".to_string());
-            }
-        };
+        // SAFETY: Compiler guarantees a+3 is within bounds
+        unsafe {
+            let (new_value, continue_loop) = match (
+                frame.registers.get_unchecked(a),
+                frame.registers.get_unchecked(a + 1),
+                frame.registers.get_unchecked(a + 2),
+            ) {
+                (LuaValue::Integer(idx), LuaValue::Integer(limit), LuaValue::Integer(step)) => {
+                    let new_idx = idx + step;
+                    let cont = if *step >= 0 {
+                        new_idx <= *limit
+                    } else {
+                        new_idx >= *limit
+                    };
+                    (LuaValue::Integer(new_idx), cont)
+                }
+                (LuaValue::Float(idx), LuaValue::Float(limit), LuaValue::Float(step)) => {
+                    let new_idx = idx + step;
+                    let cont = if *step >= 0.0 {
+                        new_idx <= *limit
+                    } else {
+                        new_idx >= *limit
+                    };
+                    (LuaValue::Float(new_idx), cont)
+                }
+                (idx, limit, step) if idx.is_number() && limit.is_number() && step.is_number() => {
+                    let idx_f = idx.as_number().unwrap();
+                    let limit_f = limit.as_number().unwrap();
+                    let step_f = step.as_number().unwrap();
+                    let new_idx = idx_f + step_f;
+                    let cont = if step_f >= 0.0 {
+                        new_idx <= limit_f
+                    } else {
+                        new_idx >= limit_f
+                    };
+                    (LuaValue::Float(new_idx), cont)
+                }
+                _ => {
+                    return Err("'for' step/limit must be a number".to_string());
+                }
+            };
 
-        frame.registers[a] = new_value.clone();
+            *frame.registers.get_unchecked_mut(a) = new_value.clone();
 
-        if continue_loop {
-            // Copy index to loop variable: R(A+3) = R(A)
-            frame.registers[a + 3] = new_value;
-            // Jump back to loop body
-            frame.pc = (frame.pc as i32 + sbx) as usize;
+            if continue_loop {
+                // Copy index to loop variable: R(A+3) = R(A)
+                *frame.registers.get_unchecked_mut(a + 3) = new_value;
+                // Jump back to loop body
+                frame.pc = (frame.pc as i32 + sbx) as usize;
+            }
         }
 
         Ok(())
