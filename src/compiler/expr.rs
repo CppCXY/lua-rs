@@ -395,63 +395,91 @@ fn compile_index_expr_to(
         .ok_or("Index expression missing table")?;
     let table_reg = compile_expr(c, &prefix_expr)?;
 
-    // Get index key
-    let key = expr.get_index_key().ok_or("Index expression missing key")?;
-    let key_reg = match key {
-        LuaIndexKey::Expr(key_expr) => {
-            // table[expr]
-            compile_expr(c, &key_expr)?
-        }
-        LuaIndexKey::Name(name_token) => {
-            // table.field
-            let field_name = name_token.get_name_text().to_string();
-            let lua_str = intern_string(c, field_name);
-            let const_idx = add_constant(c, LuaValue::String(lua_str));
-            let key_reg = alloc_register(c);
-            emit_load_constant(c, key_reg, const_idx);
-            key_reg
-        }
-        LuaIndexKey::String(string_token) => {
-            // table["string"]
-            let string_value = string_token.get_value();
-            let lua_str = intern_string(c, string_value);
-            let const_idx = add_constant(c, LuaValue::String(lua_str));
-            let key_reg = alloc_register(c);
-            emit_load_constant(c, key_reg, const_idx);
-            key_reg
-        }
-        LuaIndexKey::Integer(number_token) => {
-            // table[123]
-            let num_value = if number_token.is_float() {
-                let f_value = number_token.get_float_value();
-                // If it's an integer literal, use Integer type
-                if f_value.fract() == 0.0 && f_value.is_finite() {
-                    LuaValue::integer(f_value as i64)
-                } else {
-                    LuaValue::number(f_value)
-                }
-            } else {
-                LuaValue::integer(number_token.get_int_value())
-            };
+    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
 
+    // Get index key and emit optimized instruction if possible
+    let key = expr.get_index_key().ok_or("Index expression missing key")?;
+    match key {
+        LuaIndexKey::Integer(number_token) => {
+            // Optimized: table[integer_literal] -> GetTableI
+            let int_value = number_token.get_int_value();
+            if int_value >= 0 && int_value <= u32::MAX as i64 {
+                // Use GetTableI: R(A) := R(B)[C]
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::GetTableI, result_reg, table_reg, int_value as u32),
+                );
+                return Ok(result_reg);
+            }
+            // Fallback for out-of-range integers
+            let num_value = LuaValue::integer(int_value);
             let const_idx = add_constant(c, num_value);
             let key_reg = alloc_register(c);
             emit_load_constant(c, key_reg, const_idx);
-            key_reg
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
+            );
+            Ok(result_reg)
+        }
+        LuaIndexKey::Name(name_token) => {
+            // Optimized: table.field -> GetTableK
+            let field_name = name_token.get_name_text().to_string();
+            let lua_str = intern_string(c, field_name);
+            let const_idx = add_constant(c, LuaValue::String(lua_str));
+            // Use GetTableK: R(A) := R(B)[K(C)]
+            // ABC format: A=dest, B=table, C=const_idx
+            if const_idx <= 511 {  // C field is 9 bits
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::GetTableK, result_reg, table_reg, const_idx),
+                );
+                return Ok(result_reg);
+            }
+            // Fallback for large const_idx
+            let key_reg = alloc_register(c);
+            emit_load_constant(c, key_reg, const_idx);
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
+            );
+            Ok(result_reg)
+        }
+        LuaIndexKey::String(string_token) => {
+            // Optimized: table["string"] -> GetTableK
+            let string_value = string_token.get_value();
+            let lua_str = intern_string(c, string_value);
+            let const_idx = add_constant(c, LuaValue::String(lua_str));
+            if const_idx <= 511 {
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::GetTableK, result_reg, table_reg, const_idx),
+                );
+                return Ok(result_reg);
+            }
+            // Fallback
+            let key_reg = alloc_register(c);
+            emit_load_constant(c, key_reg, const_idx);
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
+            );
+            Ok(result_reg)
+        }
+        LuaIndexKey::Expr(key_expr) => {
+            // Generic: table[expr] -> GetTable
+            let key_reg = compile_expr(c, &key_expr)?;
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
+            );
+            Ok(result_reg)
         }
         LuaIndexKey::Idx(_i) => {
             // Fallback for other index types
-            return Err("Unsupported index key type".to_string());
+            Err("Unsupported index key type".to_string())
         }
-    };
-
-    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
-    );
-
-    Ok(result_reg)
+    }
 }
 
 /// Compile table constructor expression
@@ -590,56 +618,91 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
 
             let table_reg = compile_expr(c, &prefix_expr)?;
 
-            // Determine key
+            // Determine key and emit optimized instruction if possible
             let index_key = index_expr
                 .get_index_key()
                 .ok_or("Index expression missing key")?;
-            let key_reg = match index_key {
-                LuaIndexKey::Expr(key_expr) => {
-                    // table[expr]
-                    compile_expr(c, &key_expr)?
-                }
-                LuaIndexKey::Name(name_token) => {
-                    // table.field
-                    let field_name = name_token.get_name_text().to_string();
-                    let lua_str = intern_string(c, field_name);
-                    let const_idx = add_constant(c, LuaValue::String(lua_str));
-                    let key_reg = alloc_register(c);
-                    emit_load_constant(c, key_reg, const_idx);
-                    key_reg
-                }
-                LuaIndexKey::String(string_token) => {
-                    // table["string"]
-                    let string_value = string_token.get_value();
-                    let lua_str = intern_string(c, string_value);
-                    let const_idx = add_constant(c, LuaValue::String(lua_str));
-                    let key_reg = alloc_register(c);
-                    emit_load_constant(c, key_reg, const_idx);
-                    key_reg
-                }
+            
+            match index_key {
                 LuaIndexKey::Integer(number_token) => {
-                    // table[123]
-                    let num_value = if number_token.is_float() {
-                        LuaValue::number(number_token.get_float_value())
-                    } else {
-                        LuaValue::integer(number_token.get_int_value())
-                    };
-
+                    // Optimized: table[integer] = value -> SetTableI
+                    let int_value = number_token.get_int_value();
+                    if int_value >= 0 && int_value <= u32::MAX as i64 {
+                        // Use SetTableI: R(A)[B] := R(C)
+                        emit(
+                            c,
+                            Instruction::encode_abc(OpCode::SetTableI, table_reg, int_value as u32, value_reg),
+                        );
+                        return Ok(());
+                    }
+                    // Fallback for out-of-range integers
+                    let num_value = LuaValue::integer(int_value);
                     let const_idx = add_constant(c, num_value);
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
-                    key_reg
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetTable, table_reg, key_reg, value_reg),
+                    );
+                    Ok(())
+                }
+                LuaIndexKey::Name(name_token) => {
+                    // Optimized: table.field = value -> SetTableK
+                    let field_name = name_token.get_name_text().to_string();
+                    let lua_str = intern_string(c, field_name);
+                    let const_idx = add_constant(c, LuaValue::String(lua_str));
+                    // Use SetTableK: R(A)[K(B)] := R(C)
+                    // ABC format: A=table, B=const_idx, C=value
+                    if const_idx <= 511 {
+                        emit(
+                            c,
+                            Instruction::encode_abc(OpCode::SetTableK, table_reg, const_idx, value_reg),
+                        );
+                        return Ok(());
+                    }
+                    // Fallback
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetTable, table_reg, key_reg, value_reg),
+                    );
+                    Ok(())
+                }
+                LuaIndexKey::String(string_token) => {
+                    // Optimized: table["string"] = value -> SetTableK
+                    let string_value = string_token.get_value();
+                    let lua_str = intern_string(c, string_value);
+                    let const_idx = add_constant(c, LuaValue::String(lua_str));
+                    if const_idx <= 511 {
+                        emit(
+                            c,
+                            Instruction::encode_abc(OpCode::SetTableK, table_reg, const_idx, value_reg),
+                        );
+                        return Ok(());
+                    }
+                    // Fallback
+                    let key_reg = alloc_register(c);
+                    emit_load_constant(c, key_reg, const_idx);
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetTable, table_reg, key_reg, value_reg),
+                    );
+                    Ok(())
+                }
+                LuaIndexKey::Expr(key_expr) => {
+                    // Generic: table[expr] = value -> SetTable
+                    let key_reg = compile_expr(c, &key_expr)?;
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetTable, table_reg, key_reg, value_reg),
+                    );
+                    Ok(())
                 }
                 LuaIndexKey::Idx(_i) => {
-                    return Err("Unsupported index key type".to_string());
+                    Err("Unsupported index key type".to_string())
                 }
-            };
-
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::SetTable, table_reg, key_reg, value_reg),
-            );
-            Ok(())
+            }
         }
     }
 }

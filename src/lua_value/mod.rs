@@ -293,7 +293,15 @@ impl PartialEq for LuaValue {
             // Allow comparison between integer and float
             (LuaValue::Integer(a), LuaValue::Float(b)) => *a as f64 == *b,
             (LuaValue::Float(a), LuaValue::Integer(b)) => *a == *b as f64,
-            (LuaValue::String(a), LuaValue::String(b)) => a.as_str() == b.as_str(),
+            (LuaValue::String(a), LuaValue::String(b)) => {
+                // Fast path: pointer equality (only effective for interned short strings)
+                // Long strings (>40 bytes) are not interned, so always compare content
+                if Rc::ptr_eq(a, b) {
+                    return true;
+                }
+                // Content comparison (always correct for all string lengths)
+                a.as_str() == b.as_str()
+            }
             // Tables are compared by reference
             (LuaValue::Table(a), LuaValue::Table(b)) => Rc::ptr_eq(a, b),
             // Functions are compared by reference
@@ -479,45 +487,85 @@ impl LuaTable {
         self.metatable = mt;
     }
 
-    /// Get value with raw access (no metamethods)
-    pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
-        // Try array part first for integer keys
-        if let Some(i) = key.as_integer() {
-            let idx = i as usize;
-            if idx > 0 {
-                if let Some(ref arr) = self.array {
-                    if idx <= arr.len() {
-                        return arr.get(idx - 1).cloned();
-                    }
+    /// Fast integer index access - specialized for array access
+    #[inline(always)]
+    pub fn get_int(&self, key: i64) -> Option<LuaValue> {
+        let idx = key as usize;
+        if idx > 0 {
+            if let Some(ref arr) = self.array {
+                if idx <= arr.len() {
+                    return arr.get(idx - 1).cloned();
                 }
             }
         }
+        // Fallback to hash for out-of-range integers
+        self.hash.as_ref().and_then(|h| h.get(&LuaValue::Integer(key)).cloned())
+    }
 
-        // Try hash part
+    /// Fast string key access - specialized for hash access
+    #[inline(always)]
+    pub fn get_str(&self, key: &Rc<LuaString>) -> Option<LuaValue> {
+        self.hash.as_ref().and_then(|h| {
+            h.get(&LuaValue::String(Rc::clone(key))).cloned()
+        })
+    }
+
+    /// Get value with raw access (no metamethods)
+    pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
+        // Fast paths for common cases
+        match key {
+            LuaValue::Integer(i) => return self.get_int(*i),
+            LuaValue::String(s) => return self.get_str(s),
+            _ => {}
+        }
+
+        // Generic fallback
         self.hash.as_ref().and_then(|h| h.get(key).cloned())
+    }
+
+    /// Fast integer index set - specialized for array access
+    #[inline(always)]
+    pub fn set_int(&mut self, key: i64, value: LuaValue) {
+        let idx = key as usize;
+        if idx > 0 {
+            let arr = self.array.get_or_insert_with(Vec::new);
+            if idx <= arr.len() + 1 {
+                if idx == arr.len() + 1 {
+                    arr.push(value);
+                } else {
+                    arr[idx - 1] = value;
+                }
+                return;
+            }
+        }
+        // Fallback to hash
+        let hash = self.hash.get_or_insert_with(HashMap::new);
+        hash.insert(LuaValue::Integer(key), value);
+    }
+
+    /// Fast string key set - specialized for hash access
+    #[inline(always)]
+    pub fn set_str(&mut self, key: Rc<LuaString>, value: LuaValue) {
+        let hash = self.hash.get_or_insert_with(HashMap::new);
+        hash.insert(LuaValue::String(key), value);
     }
 
     /// Set value with raw access (no metamethods)
     pub fn raw_set(&mut self, key: LuaValue, value: LuaValue) {
-        // Try array part first for integer keys in range
-        if let Some(i) = key.as_integer() {
-            let idx = i as usize;
-            if idx > 0 {
-                // Get or create array
-                let arr = self.array.get_or_insert_with(Vec::new);
-
-                if idx <= arr.len() + 1 {
-                    if idx == arr.len() + 1 {
-                        arr.push(value);
-                    } else {
-                        arr[idx - 1] = value;
-                    }
-                    return;
-                }
+        // Fast paths for common cases
+        match &key {
+            LuaValue::Integer(i) => {
+                self.set_int(*i, value);
+                return;
             }
+            LuaValue::String(s) => {
+                self.set_str(Rc::clone(s), value);
+                return;
+            }
+            _ => {}
         }
 
-        // Use hash part for all other keys
+        // Generic fallback
         let hash = self.hash.get_or_insert_with(HashMap::new);
         hash.insert(key, value);
     }

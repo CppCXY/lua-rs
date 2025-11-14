@@ -134,6 +134,10 @@ impl VM {
                 OpCode::NewTable => self.op_newtable(instr)?,
                 OpCode::GetTable => self.op_gettable(instr)?,
                 OpCode::SetTable => self.op_settable(instr)?,
+                OpCode::GetTableI => self.op_gettable_i(instr)?,
+                OpCode::SetTableI => self.op_settable_i(instr)?,
+                OpCode::GetTableK => self.op_gettable_k(instr)?,
+                OpCode::SetTableK => self.op_settable_k(instr)?,
                 OpCode::Add => self.op_add(instr)?,
                 OpCode::Sub => self.op_sub(instr)?,
                 OpCode::Mul => self.op_mul(instr)?,
@@ -271,6 +275,114 @@ impl VM {
         if let Some(tbl) = table.as_table() {
             self.table_set(tbl, key, value)?;
             Ok(())
+        } else {
+            Err("Attempt to index a non-table value".to_string())
+        }
+    }
+
+    /// Optimized: R(A) := R(B)[C] where C is a literal integer
+    #[inline]
+    fn op_gettable_i(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as i64;
+
+        let table = {
+            let frame = self.current_frame();
+            frame.registers[b].clone()
+        };
+
+        if let Some(tbl) = table.as_table() {
+            // Fast path: direct integer access
+            let value = tbl.borrow().get_int(c).unwrap_or(LuaValue::Nil);
+            let frame = self.current_frame_mut();
+            frame.registers[a] = value;
+            Ok(())
+        } else {
+            Err("Attempt to index a non-table value".to_string())
+        }
+    }
+
+    /// Optimized: R(A)[B] := R(C) where B is a literal integer
+    #[inline]
+    fn op_settable_i(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as i64;
+        let c = Instruction::get_c(instr) as usize;
+
+        let (table, value) = {
+            let frame = self.current_frame();
+            (frame.registers[a].clone(), frame.registers[c].clone())
+        };
+
+        if let Some(tbl) = table.as_table() {
+            tbl.borrow_mut().set_int(b, value);
+            Ok(())
+        } else {
+            Err("Attempt to index a non-table value".to_string())
+        }
+    }
+
+    /// Optimized: R(A) := R(B)[K(C)] where K(C) is a string constant
+    #[inline]
+    fn op_gettable_k(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+
+        let (table, key) = {
+            let frame = self.current_frame();
+            (
+                frame.registers[b].clone(),
+                frame.function.chunk.constants[c].clone(),
+            )
+        };
+
+        if let Some(tbl) = table.as_table() {
+            if let Some(key_str) = key.as_string() {
+                // Fast path: direct string key access
+                let value = tbl.borrow().get_str(&key_str).unwrap_or(LuaValue::Nil);
+                let frame = self.current_frame_mut();
+                frame.registers[a] = value;
+                Ok(())
+            } else {
+                // Fallback: use generic get with metamethods
+                let value = self.table_get(tbl, &key).unwrap_or(LuaValue::Nil);
+                let frame = self.current_frame_mut();
+                frame.registers[a] = value;
+                Ok(())
+            }
+        } else {
+            Err("Attempt to index a non-table value".to_string())
+        }
+    }
+
+    /// Optimized: R(A)[K(B)] := R(C) where K(B) is a string constant
+    #[inline]
+    fn op_settable_k(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr) as usize;
+
+        let (table, key, value) = {
+            let frame = self.current_frame();
+            (
+                frame.registers[a].clone(),
+                frame.function.chunk.constants[b].clone(),
+                frame.registers[c].clone(),
+            )
+        };
+
+        if let Some(tbl) = table.as_table() {
+            if let Some(key_str) = key.as_string() {
+                // Fast path: direct string key set
+                tbl.borrow_mut().set_str(key_str, value);
+                Ok(())
+            } else {
+                // Fallback: use generic set with metamethods
+                self.table_set(tbl, key, value)?;
+                Ok(())
+            }
         } else {
             Err("Attempt to index a non-table value".to_string())
         }

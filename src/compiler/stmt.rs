@@ -354,37 +354,36 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
         emit_load_constant(c, step_reg, const_idx);
     }
 
-    // Emit FORPREP: R(base) -= R(step); jump to loop start
+    // Emit FORPREP: R(base) -= R(step); jump to FORLOOP (not loop body)
     let forprep_pc = c.chunk.code.len();
     emit(c, Instruction::encode_asbx(OpCode::ForPrep, base_reg, 0)); // Will patch later
 
     // Begin new scope for loop body
     begin_scope(c);
 
-    // The loop variable is at R(base+3), initialized by FORLOOP
+    // The loop variable is at R(base+3)
     add_local(c, var_name, var_reg);
     begin_loop(c);
 
-    let loop_start = c.chunk.code.len();
-
-    // FORLOOP will set R(base+3) = R(base) on first iteration
-    // We need to initialize it for the loop body
-    emit_move(c, var_reg, base_reg);
+    // Loop body starts here
+    let loop_body_start = c.chunk.code.len();
 
     // Compile loop body
     if let Some(body) = stat.get_block() {
         compile_block(c, &body)?;
     }
 
-    // Emit FORLOOP: increments index, checks condition, jumps back if true
-    let forloop_offset = (loop_start as i32) - (c.chunk.code.len() as i32) - 1;
+    // FORLOOP comes AFTER the body
+    let forloop_pc = c.chunk.code.len();
+    // Emit FORLOOP: increments index, checks condition, copies to var, jumps back to body
+    let forloop_offset = (loop_body_start as i32) - (forloop_pc as i32) - 1;
     emit(
         c,
         Instruction::encode_asbx(OpCode::ForLoop, base_reg, forloop_offset),
     );
 
-    // Patch FORPREP jump to skip to loop start
-    let prep_jump = (loop_start as i32) - (forprep_pc as i32) - 1;
+    // Patch FORPREP to jump to FORLOOP (not body)
+    let prep_jump = (forloop_pc as i32) - (forprep_pc as i32) - 1;
     c.chunk.code[forprep_pc] = Instruction::encode_asbx(OpCode::ForPrep, base_reg, prep_jump);
 
     end_loop(c);
