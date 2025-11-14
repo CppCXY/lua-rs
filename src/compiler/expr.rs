@@ -17,23 +17,29 @@ use emmylua_parser::{
 };
 
 /// Compile any expression and return the register containing the result
+/// If dest is Some(reg), try to compile directly into that register to avoid extra Move
 pub fn compile_expr(c: &mut Compiler, expr: &LuaExpr) -> Result<u32, String> {
+    compile_expr_to(c, expr, None)
+}
+
+/// Compile expression to a specific destination register if possible
+pub fn compile_expr_to(c: &mut Compiler, expr: &LuaExpr, dest: Option<u32>) -> Result<u32, String> {
     match expr {
-        LuaExpr::LiteralExpr(e) => compile_literal_expr(c, e),
-        LuaExpr::NameExpr(e) => compile_name_expr(c, e),
-        LuaExpr::BinaryExpr(e) => compile_binary_expr(c, e),
-        LuaExpr::UnaryExpr(e) => compile_unary_expr(c, e),
-        LuaExpr::ParenExpr(e) => compile_paren_expr(c, e),
-        LuaExpr::CallExpr(e) => compile_call_expr(c, e),
-        LuaExpr::IndexExpr(e) => compile_index_expr(c, e),
-        LuaExpr::TableExpr(e) => compile_table_expr(c, e),
-        LuaExpr::ClosureExpr(e) => compile_closure_expr(c, e),
+        LuaExpr::LiteralExpr(e) => compile_literal_expr(c, e, dest),
+        LuaExpr::NameExpr(e) => compile_name_expr_to(c, e, dest),
+        LuaExpr::BinaryExpr(e) => compile_binary_expr_to(c, e, dest),
+        LuaExpr::UnaryExpr(e) => compile_unary_expr_to(c, e, dest),
+        LuaExpr::ParenExpr(e) => compile_paren_expr_to(c, e, dest),
+        LuaExpr::CallExpr(e) => compile_call_expr_to(c, e, dest),
+        LuaExpr::IndexExpr(e) => compile_index_expr_to(c, e, dest),
+        LuaExpr::TableExpr(e) => compile_table_expr_to(c, e, dest),
+        LuaExpr::ClosureExpr(e) => compile_closure_expr_to(c, e, dest),
     }
 }
 
 /// Compile literal expression (number, string, true, false, nil)
-fn compile_literal_expr(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<u32, String> {
-    let reg = alloc_register(c);
+fn compile_literal_expr(c: &mut Compiler, expr: &LuaLiteralExpr, dest: Option<u32>) -> Result<u32, String> {
+    let reg = dest.unwrap_or_else(|| alloc_register(c));
 
     let literal_token = expr
         .get_literal()
@@ -68,30 +74,45 @@ fn compile_literal_expr(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<u32, 
 
 /// Compile name (identifier) expression
 fn compile_name_expr(c: &mut Compiler, expr: &LuaNameExpr) -> Result<u32, String> {
+    compile_name_expr_to(c, expr, None)
+}
+
+fn compile_name_expr_to(c: &mut Compiler, expr: &LuaNameExpr, dest: Option<u32>) -> Result<u32, String> {
     // Get the identifier name
     let name = expr.get_name_text().unwrap_or("".to_string());
 
     // Check if it's a local variable
     if let Some(local) = resolve_local(c, &name) {
+        // If local is already in dest register, no move needed
+        if let Some(dest_reg) = dest {
+            if local.register != dest_reg {
+                emit_move(c, dest_reg, local.register);
+            }
+            return Ok(dest_reg);
+        }
         return Ok(local.register);
     }
 
     // Try to resolve as upvalue from parent scope chain
     if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
-        let reg = alloc_register(c);
+        let reg = dest.unwrap_or_else(|| alloc_register(c));
         let instr = Instruction::encode_abc(OpCode::GetUpval, reg, upvalue_index as u32, 0);
         c.chunk.code.push(instr);
         return Ok(reg);
     }
 
     // It's a global variable
-    let reg = alloc_register(c);
+    let reg = dest.unwrap_or_else(|| alloc_register(c));
     emit_get_global(c, &name, reg);
     Ok(reg)
 }
 
 /// Compile binary expression (a + b, a - b, etc.)
 fn compile_binary_expr(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<u32, String> {
+    compile_binary_expr_to(c, expr, None)
+}
+
+fn compile_binary_expr_to(c: &mut Compiler, expr: &LuaBinaryExpr, dest: Option<u32>) -> Result<u32, String> {
     // Get left and right expressions from children
     let (left, right) = expr.get_exprs().ok_or("error")?;
     let op = expr.get_op_token().ok_or("error")?;
@@ -99,7 +120,7 @@ fn compile_binary_expr(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<u32, St
 
     let left_reg = compile_expr(c, &left)?;
     let right_reg = compile_expr(c, &right)?;
-    let result_reg = alloc_register(c);
+    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
 
     let opcode = match op_kind {
         BinaryOperator::OpAdd => OpCode::Add,
@@ -135,10 +156,14 @@ fn compile_binary_expr(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<u32, St
 
 /// Compile unary expression (-a, not a, #a)
 fn compile_unary_expr(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<u32, String> {
+    compile_unary_expr_to(c, expr, None)
+}
+
+fn compile_unary_expr_to(c: &mut Compiler, expr: &LuaUnaryExpr, dest: Option<u32>) -> Result<u32, String> {
     // Get operand from children
     let operand = expr.get_expr().ok_or("Unary expression missing operand")?;
     let operand_reg = compile_expr(c, &operand)?;
-    let result_reg = alloc_register(c);
+    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
 
     // Get operator from text
     let op_token = expr.get_op_token().ok_or("error")?;
@@ -170,7 +195,9 @@ fn compile_unary_expr(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<u32, Stri
         }
         UnaryOperator::OpNop => {
             // No operation, just move operand to result
-            emit_move(c, result_reg, operand_reg);
+            if operand_reg != result_reg {
+                emit_move(c, result_reg, operand_reg);
+            }
         }
     }
 
@@ -179,14 +206,24 @@ fn compile_unary_expr(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<u32, Stri
 
 /// Compile parenthesized expression
 fn compile_paren_expr(c: &mut Compiler, expr: &LuaParenExpr) -> Result<u32, String> {
+    compile_paren_expr_to(c, expr, None)
+}
+
+fn compile_paren_expr_to(c: &mut Compiler, expr: &LuaParenExpr, dest: Option<u32>) -> Result<u32, String> {
     // Get inner expression from children
     let inner_expr = expr.get_expr().ok_or("missing inner expr")?;
-    let reg = compile_expr(c, &inner_expr)?;
+    let reg = compile_expr_to(c, &inner_expr, dest)?;
     Ok(reg)
 }
 
 /// Compile function call expression
 pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, String> {
+    compile_call_expr_with_returns(c, expr, 1)
+}
+
+fn compile_call_expr_to(c: &mut Compiler, expr: &LuaCallExpr, _dest: Option<u32>) -> Result<u32, String> {
+    // Note: Call results are always placed in consecutive registers starting from function register
+    // Cannot honor dest for calls, use compile_call_expr_with_returns instead
     compile_call_expr_with_returns(c, expr, 1)
 }
 
@@ -317,6 +354,10 @@ pub fn compile_call_expr_with_returns(
 
 /// Compile index expression (table[key] or table.field)
 fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, String> {
+    compile_index_expr_to(c, expr, None)
+}
+
+fn compile_index_expr_to(c: &mut Compiler, expr: &LuaIndexExpr, dest: Option<u32>) -> Result<u32, String> {
     // Get prefix (table) expression
     let prefix_expr = expr
         .get_prefix_expr()
@@ -373,7 +414,7 @@ fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, Stri
         }
     };
 
-    let result_reg = alloc_register(c);
+    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
     emit(
         c,
         Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
@@ -384,7 +425,11 @@ fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, Stri
 
 /// Compile table constructor expression
 fn compile_table_expr(c: &mut Compiler, expr: &LuaTableExpr) -> Result<u32, String> {
-    let reg = alloc_register(c);
+    compile_table_expr_to(c, expr, None)
+}
+
+fn compile_table_expr_to(c: &mut Compiler, expr: &LuaTableExpr, dest: Option<u32>) -> Result<u32, String> {
+    let reg = dest.unwrap_or_else(|| alloc_register(c));
 
     // Create empty table
     emit(c, Instruction::encode_abc(OpCode::NewTable, reg, 0, 0));
@@ -565,6 +610,10 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
 }
 
 pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<u32, String> {
+    compile_closure_expr_to(c, closure, None)
+}
+
+pub fn compile_closure_expr_to(c: &mut Compiler, closure: &LuaClosureExpr, dest: Option<u32>) -> Result<u32, String> {
     let params_list = closure
         .get_params_list()
         .ok_or("closure missing params list")?;
@@ -637,9 +686,12 @@ pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Resul
     let chunk_index = c.child_chunks.len();
     c.child_chunks.push(func_compiler.chunk);
 
-    // Emit Closure instruction
-    let dest_reg = c.next_register;
-    c.next_register += 1;
+    // Emit Closure instruction - use dest if provided
+    let dest_reg = dest.unwrap_or_else(|| {
+        let r = c.next_register;
+        c.next_register += 1;
+        r
+    });
 
     let closure_instr = Instruction::encode_abx(OpCode::Closure, dest_reg, chunk_index as u32);
     c.chunk.code.push(closure_instr);

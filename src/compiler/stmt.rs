@@ -1,6 +1,6 @@
 // Statement compilation
 
-use super::expr::{compile_call_expr, compile_expr, compile_var_expr};
+use super::expr::{compile_call_expr, compile_expr, compile_expr_to, compile_var_expr};
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
 use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr};
@@ -335,30 +335,20 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
         return Err("for loop requires at least start and end expressions".to_string());
     }
 
-    // Allocate registers for loop control variables
+    // Allocate registers for loop control variables in sequence
     // R(base) = index, R(base+1) = limit, R(base+2) = step, R(base+3) = loop var
     let base_reg = alloc_register(c);
     let limit_reg = alloc_register(c);
     let step_reg = alloc_register(c);
     let var_reg = alloc_register(c);
 
-    // Compile expressions directly to target registers when possible
-    let start = compile_expr(c, &exprs[0])?;
-    if start != base_reg {
-        emit_move(c, base_reg, start);
-    }
+    // Compile expressions DIRECTLY to target registers - avoid intermediate registers
+    let _ = compile_expr_to(c, &exprs[0], Some(base_reg))?;
+    let _ = compile_expr_to(c, &exprs[1], Some(limit_reg))?;
 
-    let limit = compile_expr(c, &exprs[1])?;
-    if limit != limit_reg {
-        emit_move(c, limit_reg, limit);
-    }
-
-    // Compile and store step expression (default 1)
+    // Compile step expression (default 1)
     if exprs.len() >= 3 {
-        let step = compile_expr(c, &exprs[2])?;
-        if step != step_reg {
-            emit_move(c, step_reg, step);
-        }
+        let _ = compile_expr_to(c, &exprs[2], Some(step_reg))?;
     } else {
         let const_idx = add_constant(c, crate::value::LuaValue::Integer(1));
         emit_load_constant(c, step_reg, const_idx);
