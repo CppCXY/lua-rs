@@ -103,27 +103,21 @@ impl VM {
 
     fn run(&mut self) -> Result<LuaValue, String> {
         loop {
-            // Check if we have frames to execute
             if self.frames.is_empty() {
                 return Ok(LuaValue::nil());
             }
 
-            let frame_idx = self.frames.len() - 1;
+            let frame = self.current_frame_mut();
+            let pc = frame.pc;
 
-            // Fetch instruction
-            let pc = self.frames[frame_idx].pc;
-            let chunk_ptr = Rc::clone(&self.frames[frame_idx].function.chunk);
-
-            if pc >= chunk_ptr.code.len() {
-                // End of code
+            if pc >= frame.function.chunk.code.len() {
                 self.frames.pop();
                 continue;
             }
 
-            let instr = chunk_ptr.code[pc];
-            self.frames[frame_idx].pc += 1;
+            let instr = frame.function.chunk.code[pc];
+            frame.pc += 1;
 
-            // Decode and execute (interpreter path)
             let opcode = Instruction::get_opcode(instr);
 
             match opcode {
@@ -190,9 +184,13 @@ impl VM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let frame = self.current_frame_mut();
-        // SAFETY: Compiler guarantees a,b are within max_stack_size
+        // SAFETY: Compiler guarantees a,b are within max_stack_size and a != b
+        // Use direct memory copy for maximum speed
         unsafe {
-            *frame.registers.get_unchecked_mut(a) = frame.registers.get_unchecked(b).clone();
+            let regs_ptr = frame.registers.as_mut_ptr();
+            let src = regs_ptr.add(b);
+            let dst = regs_ptr.add(a);
+            std::ptr::copy_nonoverlapping(src, dst, 1);
         }
         Ok(())
     }
