@@ -236,6 +236,46 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
+        // Check types first to determine fast path
+        let (is_tbl_int, is_tbl_str) = {
+            let frame = self.current_frame();
+            (
+                matches!(
+                    (&frame.registers[b], &frame.registers[c]),
+                    (LuaValue::Table(_), LuaValue::Integer(_))
+                ),
+                matches!(
+                    (&frame.registers[b], &frame.registers[c]),
+                    (LuaValue::Table(_), LuaValue::String(_))
+                ),
+            )
+        };
+
+        // Fast path: integer key
+        if is_tbl_int {
+            let frame = self.current_frame();
+            if let (LuaValue::Table(tbl), LuaValue::Integer(idx)) = 
+                (&frame.registers[b], &frame.registers[c]) {
+                let value = tbl.borrow().get_int(*idx).unwrap_or(LuaValue::Nil);
+                let frame_idx = self.frames.len() - 1;
+                self.frames[frame_idx].registers[a] = value;
+                return Ok(());
+            }
+        }
+
+        // Fast path: string key
+        if is_tbl_str {
+            let frame = self.current_frame();
+            if let (LuaValue::Table(tbl), LuaValue::String(key_str)) = 
+                (&frame.registers[b], &frame.registers[c]) {
+                let value = tbl.borrow().get_str(key_str).unwrap_or(LuaValue::Nil);
+                let frame_idx = self.frames.len() - 1;
+                self.frames[frame_idx].registers[a] = value;
+                return Ok(());
+            }
+        }
+
+        // Slow path: clone for complex cases
         let (table, key) = {
             let frame = self.current_frame();
             (frame.registers[b].clone(), frame.registers[c].clone())
@@ -263,13 +303,36 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
+        // Check types and clone necessary values in one go
+        let (tbl_clone, idx_opt, key_opt, value) = {
+            let frame = self.current_frame();
+            match (&frame.registers[a], &frame.registers[b]) {
+                (LuaValue::Table(tbl), LuaValue::Integer(idx)) => {
+                    (Some(Rc::clone(tbl)), Some(*idx), None, frame.registers[c].clone())
+                }
+                (LuaValue::Table(tbl), LuaValue::String(key_str)) => {
+                    (Some(Rc::clone(tbl)), None, Some(Rc::clone(key_str)), frame.registers[c].clone())
+                }
+                _ => (None, None, None, LuaValue::Nil)
+            }
+        };
+
+        // Fast path: integer key
+        if let (Some(tbl), Some(idx)) = (tbl_clone.as_ref(), idx_opt) {
+            tbl.borrow_mut().set_int(idx, value);
+            return Ok(());
+        }
+
+        // Fast path: string key  
+        if let (Some(tbl), Some(key)) = (tbl_clone.as_ref(), key_opt.as_ref()) {
+            tbl.borrow_mut().set_str(Rc::clone(key), value);
+            return Ok(());
+        }
+
+        // Slow path
         let (table, key, value) = {
             let frame = self.current_frame();
-            (
-                frame.registers[a].clone(),
-                frame.registers[b].clone(),
-                frame.registers[c].clone(),
-            )
+            (frame.registers[a].clone(), frame.registers[b].clone(), frame.registers[c].clone())
         };
 
         if let Some(tbl) = table.as_table() {

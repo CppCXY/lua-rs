@@ -77,11 +77,6 @@ fn compile_literal_expr(
     Ok(reg)
 }
 
-/// Compile name (identifier) expression
-fn compile_name_expr(c: &mut Compiler, expr: &LuaNameExpr) -> Result<u32, String> {
-    compile_name_expr_to(c, expr, None)
-}
-
 fn compile_name_expr_to(
     c: &mut Compiler,
     expr: &LuaNameExpr,
@@ -114,11 +109,6 @@ fn compile_name_expr_to(
     let reg = dest.unwrap_or_else(|| alloc_register(c));
     emit_get_global(c, &name, reg);
     Ok(reg)
-}
-
-/// Compile binary expression (a + b, a - b, etc.)
-fn compile_binary_expr(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<u32, String> {
-    compile_binary_expr_to(c, expr, None)
 }
 
 fn compile_binary_expr_to(
@@ -165,11 +155,6 @@ fn compile_binary_expr_to(
         Instruction::encode_abc(opcode, result_reg, left_reg, right_reg),
     );
     Ok(result_reg)
-}
-
-/// Compile unary expression (-a, not a, #a)
-fn compile_unary_expr(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<u32, String> {
-    compile_unary_expr_to(c, expr, None)
 }
 
 fn compile_unary_expr_to(
@@ -219,11 +204,6 @@ fn compile_unary_expr_to(
     }
 
     Ok(result_reg)
-}
-
-/// Compile parenthesized expression
-fn compile_paren_expr(c: &mut Compiler, expr: &LuaParenExpr) -> Result<u32, String> {
-    compile_paren_expr_to(c, expr, None)
 }
 
 fn compile_paren_expr_to(
@@ -379,11 +359,6 @@ pub fn compile_call_expr_with_returns(
     Ok(func_reg)
 }
 
-/// Compile index expression (table[key] or table.field)
-fn compile_index_expr(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<u32, String> {
-    compile_index_expr_to(c, expr, None)
-}
-
 fn compile_index_expr_to(
     c: &mut Compiler,
     expr: &LuaIndexExpr,
@@ -407,7 +382,12 @@ fn compile_index_expr_to(
                 // Use GetTableI: R(A) := R(B)[C]
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::GetTableI, result_reg, table_reg, int_value as u32),
+                    Instruction::encode_abc(
+                        OpCode::GetTableI,
+                        result_reg,
+                        table_reg,
+                        int_value as u32,
+                    ),
                 );
                 return Ok(result_reg);
             }
@@ -429,7 +409,8 @@ fn compile_index_expr_to(
             let const_idx = add_constant(c, LuaValue::String(lua_str));
             // Use GetTableK: R(A) := R(B)[K(C)]
             // ABC format: A=dest, B=table, C=const_idx
-            if const_idx <= 511 {  // C field is 9 bits
+            if const_idx <= 511 {
+                // C field is 9 bits
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::GetTableK, result_reg, table_reg, const_idx),
@@ -480,11 +461,6 @@ fn compile_index_expr_to(
             Err("Unsupported index key type".to_string())
         }
     }
-}
-
-/// Compile table constructor expression
-fn compile_table_expr(c: &mut Compiler, expr: &LuaTableExpr) -> Result<u32, String> {
-    compile_table_expr_to(c, expr, None)
 }
 
 fn compile_table_expr_to(
@@ -622,7 +598,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
             let index_key = index_expr
                 .get_index_key()
                 .ok_or("Index expression missing key")?;
-            
+
             match index_key {
                 LuaIndexKey::Integer(number_token) => {
                     // Optimized: table[integer] = value -> SetTableI
@@ -631,7 +607,12 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                         // Use SetTableI: R(A)[B] := R(C)
                         emit(
                             c,
-                            Instruction::encode_abc(OpCode::SetTableI, table_reg, int_value as u32, value_reg),
+                            Instruction::encode_abc(
+                                OpCode::SetTableI,
+                                table_reg,
+                                int_value as u32,
+                                value_reg,
+                            ),
                         );
                         return Ok(());
                     }
@@ -656,7 +637,12 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                     if const_idx <= 511 {
                         emit(
                             c,
-                            Instruction::encode_abc(OpCode::SetTableK, table_reg, const_idx, value_reg),
+                            Instruction::encode_abc(
+                                OpCode::SetTableK,
+                                table_reg,
+                                const_idx,
+                                value_reg,
+                            ),
                         );
                         return Ok(());
                     }
@@ -677,7 +663,12 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                     if const_idx <= 511 {
                         emit(
                             c,
-                            Instruction::encode_abc(OpCode::SetTableK, table_reg, const_idx, value_reg),
+                            Instruction::encode_abc(
+                                OpCode::SetTableK,
+                                table_reg,
+                                const_idx,
+                                value_reg,
+                            ),
                         );
                         return Ok(());
                     }
@@ -699,9 +690,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                     );
                     Ok(())
                 }
-                LuaIndexKey::Idx(_i) => {
-                    Err("Unsupported index key type".to_string())
-                }
+                LuaIndexKey::Idx(_i) => Err("Unsupported index key type".to_string()),
             }
         }
     }
