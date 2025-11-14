@@ -6,7 +6,7 @@ mod stmt;
 
 use crate::lua_value::{Chunk, StringPool};
 use crate::opcode::{Instruction, OpCode};
-use emmylua_parser::{LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
+use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
 use helpers::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -127,7 +127,7 @@ impl Compiler {
         let mut compiler = Compiler::new();
 
         let tree = LuaParser::parse(source, ParserConfig::with_level(LuaLanguageLevel::Lua54));
-
+        let _line_index = LineIndex::parse(source);
         if tree.has_syntax_errors() {
             let errors: Vec<String> = tree
                 .get_errors()

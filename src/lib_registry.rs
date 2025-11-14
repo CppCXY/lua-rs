@@ -9,10 +9,19 @@ use std::collections::HashMap;
 /// Type for native functions that can be called from Lua
 pub type NativeFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
 
-/// A library module containing multiple functions
+/// Type for value initializers - functions that create values when the module loads
+pub type ValueInitializer = fn(&mut LuaVM) -> LuaValue;
+
+/// Entry in a library module - can be a function or a value
+pub enum LibraryEntry {
+    Function(NativeFunction),
+    Value(ValueInitializer),
+}
+
+/// A library module containing multiple functions and values
 pub struct LibraryModule {
     pub name: &'static str,
-    pub functions: Vec<(&'static str, NativeFunction)>,
+    pub entries: Vec<(&'static str, LibraryEntry)>,
 }
 
 impl LibraryModule {
@@ -20,29 +29,60 @@ impl LibraryModule {
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
-            functions: Vec::new(),
+            entries: Vec::new(),
         }
     }
 
     /// Add a function to this library
     pub fn with_function(mut self, name: &'static str, func: NativeFunction) -> Self {
-        self.functions.push((name, func));
+        self.entries.push((name, LibraryEntry::Function(func)));
+        self
+    }
+    
+    /// Add a value to this library
+    pub fn with_value(mut self, name: &'static str, value_init: ValueInitializer) -> Self {
+        self.entries.push((name, LibraryEntry::Value(value_init)));
         self
     }
 }
 
-/// Builder for creating library functions
+/// Builder for creating library modules with functions and values
 #[macro_export]
 macro_rules! lib_module {
     ($name:expr, {
-        $($func_name:expr => $func:expr),* $(,)?
+        $($item_name:expr => $item:expr),* $(,)?
     }) => {{
         let mut module = $crate::lib_registry::LibraryModule::new($name);
         $(
-            module.functions.push(($func_name, $func));
+            module.entries.push(($item_name, $crate::lib_registry::LibraryEntry::Function($item)));
         )*
         module
     }};
+}
+
+/// Builder for creating library modules with explicit types
+#[macro_export]
+macro_rules! lib_module_ex {
+    ($name:expr, {
+        $($item_type:ident : $item_name:expr => $item:expr),* $(,)?
+    }) => {{
+        let mut module = $crate::lib_registry::LibraryModule::new($name);
+        $(
+            module.entries.push((
+                $item_name,
+                lib_module_ex!(@entry $item_type, $item)
+            ));
+        )*
+        module
+    }};
+    
+    (@entry function, $func:expr) => {
+        $crate::lib_registry::LibraryEntry::Function($func)
+    };
+    
+    (@entry value, $value_init:expr) => {
+        $crate::lib_registry::LibraryEntry::Value($value_init)
+    };
 }
 
 /// Registry for all Lua standard libraries
@@ -76,25 +116,30 @@ impl LibraryRegistry {
         // Create a table for the library
         let lib_table = vm.create_table();
 
-        // Register all functions in the table
-        for (name, func) in &module.functions {
-            let func_value = LuaValue::cfunction(*func);
+        // Register all entries in the table
+        for (name, entry) in &module.entries {
+            let value = match entry {
+                LibraryEntry::Function(func) => LuaValue::cfunction(*func),
+                LibraryEntry::Value(value_init) => value_init(vm),
+            };
             let name_key = vm.create_string(name.to_string());
             lib_table
                 .borrow_mut()
-                .raw_set(LuaValue::from_string_rc(name_key), func_value);
+                .raw_set(LuaValue::from_string_rc(name_key), value);
         }
 
         // Set the library table as a global
         if module.name == "_G" {
             // For global functions, register them directly
-            for (name, func) in &module.functions {
-                let func_value = LuaValue::cfunction(*func);
-                vm.set_global(name, func_value);
+            for (name, entry) in &module.entries {
+                let value = match entry {
+                    LibraryEntry::Function(func) => LuaValue::cfunction(*func),
+                    LibraryEntry::Value(value_init) => value_init(vm),
+                };
+                vm.set_global(name, value);
             }
         } else {
             // For module libraries, set the table as global
-            // let module_name = vm.create_string(module.name.to_string());
             vm.set_global(module.name, LuaValue::from_table_rc(lib_table));
         }
 

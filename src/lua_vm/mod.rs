@@ -94,7 +94,8 @@ impl LuaVM {
         // Execute
         let result = self.run()?;
 
-        // Clean up
+        // Clean up - clear upvalues first, then frames
+        self.open_upvalues.clear();
         self.frames.clear();
 
         Ok(result)
@@ -1696,13 +1697,13 @@ impl LuaVM {
     }
 
     pub fn get_global(&self, name: &str) -> Option<LuaValue> {
-        let key = LuaValue::from_string_rc(Rc::new(LuaString::new(name.to_string())));
-        self.globals.borrow().raw_get(&key)
+        let key = Rc::new(LuaString::new(name.to_string()));
+        self.globals.borrow().get_str(&key)
     }
 
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
-        let key = LuaValue::from_string_rc(Rc::new(LuaString::new(name.to_string())));
-        self.globals.borrow_mut().raw_set(key, value);
+        let key = Rc::new(LuaString::new(name.to_string()));
+        self.globals.borrow_mut().set_str(key, value);
     }
 
     /// Get value from table with metatable support
@@ -2003,6 +2004,7 @@ impl LuaVM {
                         OpCode::SetGlobal => self.op_setglobal(instr),
                         OpCode::GetTable => self.op_gettable(instr),
                         OpCode::SetTable => self.op_settable(instr),
+                        OpCode::SetTableK => self.op_settable_k(instr),
                         OpCode::NewTable => self.op_newtable(instr),
                         OpCode::Call => self.op_call(instr),
                         OpCode::Add => self.op_add(instr),
@@ -2627,22 +2629,26 @@ impl LuaVM {
 
     /// Generate a stack traceback string
     pub fn generate_traceback(&self, error_msg: &str) -> String {
-        let mut trace = format!("Runtime error: {}\nStack traceback:", error_msg);
+        let mut trace = format!("{}\nstack traceback:", error_msg);
 
-        // Iterate through call frames from top to bottom
-        for (i, frame) in self.frames.iter().rev().enumerate() {
-            let func_name = frame
-                .func_name
-                .as_deref()
-                .or(frame.source.as_deref())
-                .unwrap_or("?");
+        // Iterate through call frames from top to bottom (most recent first)
+        for frame in self.frames.iter().rev() {
+            let source = frame.source.as_deref().unwrap_or("[?]");
+            let func_name = frame.func_name.as_deref().unwrap_or("?");
+
+            // Get line number from debug info with bounds checking
             let pc = frame.pc.saturating_sub(1);
+            let line = if !frame.function.chunk.line_info.is_empty()
+                && pc < frame.function.chunk.line_info.len()
+            {
+                frame.function.chunk.line_info[pc].to_string()
+            } else {
+                "?".to_string()
+            };
 
             trace.push_str(&format!(
-                "\n  [{}] function '{}' at PC {}",
-                self.frames.len() - i,
-                func_name,
-                pc
+                "\n\t{}:{}: in function '{}'",
+                source, line, func_name
             ));
         }
 
@@ -2664,7 +2670,10 @@ impl LuaVM {
             }
             Err(error_msg) => {
                 // Error: clean up frames and return false with error message
-                // Restore frame count (pop any frames created during the failed call)
+                // Simply clear all open upvalues to avoid dangling references
+                self.open_upvalues.clear();
+                
+                // Now pop the frames
                 while self.frames.len() > initial_frame_count {
                     self.frames.pop();
                 }
@@ -2700,6 +2709,9 @@ impl LuaVM {
         match result {
             Ok(values) => (true, values),
             Err(err_msg) => {
+                // 清空所有 open upvalues
+                self.open_upvalues.clear();
+                
                 // 回滚栈
                 while self.frames.len() > initial_frame_count {
                     self.frames.pop();
@@ -2844,6 +2856,7 @@ impl LuaVM {
                         OpCode::SetGlobal => self.op_setglobal(instr),
                         OpCode::GetTable => self.op_gettable(instr),
                         OpCode::SetTable => self.op_settable(instr),
+                        OpCode::SetTableK => self.op_settable_k(instr),
                         OpCode::NewTable => self.op_newtable(instr),
                         OpCode::Call => self.op_call(instr),
                         OpCode::Add => self.op_add(instr),

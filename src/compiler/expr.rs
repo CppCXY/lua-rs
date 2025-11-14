@@ -801,6 +801,11 @@ pub fn compile_closure_expr_to(
         c.next_register += 1;
         r
     });
+    
+    // Ensure max_stack_size accounts for this register
+    if (dest_reg + 1) as usize > c.chunk.max_stack_size {
+        c.chunk.max_stack_size = (dest_reg + 1) as usize;
+    }
 
     let closure_instr = Instruction::encode_abx(OpCode::Closure, dest_reg, chunk_index as u32);
     c.chunk.code.push(closure_instr);
