@@ -470,41 +470,51 @@ impl VM {
         let frame = self.current_frame_mut();
 
         // SAFETY: Compiler guarantees indices are within bounds
-        // Fast path: avoid cloning and bounds check
+        // Ultra-fast path: direct tag comparison (no kind() overhead)
         unsafe {
             let left = frame.registers.get_unchecked(b);
             let right = frame.registers.get_unchecked(c);
 
-            match (left.kind(), right.kind()) {
-                (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                    let i = left.as_integer().unwrap();
-                    let j = right.as_integer().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::integer(i + j);
-                    return Ok(());
-                }
-                (LuaValueKind::Float, LuaValueKind::Float) => {
-                    let l = left.as_float().unwrap();
-                    let r = right.as_float().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(l + r);
-                    return Ok(());
-                }
-                (LuaValueKind::Integer, LuaValueKind::Float) => {
-                    let i = left.as_integer().unwrap();
-                    let f = right.as_float().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(i as f64 + f);
-                    return Ok(());
-                }
-                (LuaValueKind::Float, LuaValueKind::Integer) => {
-                    let f = left.as_float().unwrap();
-                    let i = right.as_integer().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(f + i as f64);
-                    return Ok(());
-                }
-                _ => {}
+            let left_tag = left.primary();
+            let right_tag = right.primary();
+
+            // Fast path: both integers (most common case)
+            if left_tag == crate::lua_value::TAG_INTEGER 
+                && right_tag == crate::lua_value::TAG_INTEGER {
+                let i = left.secondary() as i64;
+                let j = right.secondary() as i64;
+                *frame.registers.get_unchecked_mut(a) = LuaValue::integer(i + j);
+                return Ok(());
+            }
+
+            // Both floats
+            if left_tag < crate::lua_value::NAN_BASE 
+                && right_tag < crate::lua_value::NAN_BASE {
+                let l = f64::from_bits(left_tag);
+                let r = f64::from_bits(right_tag);
+                *frame.registers.get_unchecked_mut(a) = LuaValue::float(l + r);
+                return Ok(());
+            }
+
+            // Mixed int/float - convert to float
+            if (left_tag == crate::lua_value::TAG_INTEGER || left_tag < crate::lua_value::NAN_BASE)
+                && (right_tag == crate::lua_value::TAG_INTEGER || right_tag < crate::lua_value::NAN_BASE) {
+                let l = if left_tag == crate::lua_value::TAG_INTEGER {
+                    left.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(left_tag)
+                };
+                let r = if right_tag == crate::lua_value::TAG_INTEGER {
+                    right.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(right_tag)
+                };
+                *frame.registers.get_unchecked_mut(a) = LuaValue::float(l + r);
+                return Ok(());
             }
         }
 
-        // Slow path: clone for metamethods
+        // Slow path: metamethods
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
 
@@ -1123,7 +1133,6 @@ impl VM {
     // FORLOOP: Increment index and test loop condition
     // R(A) = index, R(A+1) = limit, R(A+2) = step, R(A+3) = loop variable
     // Lua 5.4 semantics: continue if (step > 0 and idx <= limit) or (step <= 0 and idx >= limit)
-    #[inline]
     fn op_forloop(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let sbx = Instruction::get_sbx(instr);
@@ -1131,20 +1140,24 @@ impl VM {
         let frame = self.current_frame_mut();
 
         // SAFETY: Compiler guarantees a, a+1, a+2, a+3 are within register bounds
-        // Using unsafe here provides ~15-20% speedup for tight numeric loops
+        // Ultra-fast path: direct tag checking (no kind() overhead)
         unsafe {
-            // Fast path: Pure integer loop (most common case in real code)
-            // This handles > 90% of for loops in typical Lua programs
             let idx_val = frame.registers.get_unchecked(a);
             let limit_val = frame.registers.get_unchecked(a + 1);
             let step_val = frame.registers.get_unchecked(a + 2);
             
-            if let (LuaValueKind::Integer, LuaValueKind::Integer, LuaValueKind::Integer) = 
-                (idx_val.kind(), limit_val.kind(), step_val.kind()) {
+            let idx_tag = idx_val.primary();
+            let limit_tag = limit_val.primary();
+            let step_tag = step_val.primary();
+            
+            // Fast path: All integers (most common - > 95% of loops)
+            if idx_tag == crate::lua_value::TAG_INTEGER 
+                && limit_tag == crate::lua_value::TAG_INTEGER
+                && step_tag == crate::lua_value::TAG_INTEGER {
                 
-                let idx = idx_val.as_integer().unwrap();
-                let limit = limit_val.as_integer().unwrap();
-                let step = step_val.as_integer().unwrap();
+                let idx = idx_val.secondary() as i64;
+                let limit = limit_val.secondary() as i64;
+                let step = step_val.secondary() as i64;
                 
                 // Add step with wrapping (Lua 5.4 allows overflow)
                 let new_idx = idx.wrapping_add(step);
@@ -1168,60 +1181,64 @@ impl VM {
                 return Ok(());
             }
 
-            // Slow path: Float or mixed numeric types
-            let (new_value, continue_loop) = match (
-                frame.registers.get_unchecked(a).kind(),
-                frame.registers.get_unchecked(a + 1).kind(),
-                frame.registers.get_unchecked(a + 2).kind(),
-            ) {
-                (LuaValueKind::Float, LuaValueKind::Float, LuaValueKind::Float) => {
-                    let idx = frame.registers.get_unchecked(a).as_float().unwrap();
-                    let limit = frame.registers.get_unchecked(a + 1).as_float().unwrap();
-                    let step = frame.registers.get_unchecked(a + 2).as_float().unwrap();
-                    
-                    let new_idx = idx + step;
-                    let cont = if step >= 0.0 {
-                        new_idx <= limit
-                    } else {
-                        new_idx >= limit
-                    };
-                    (LuaValue::float(new_idx), cont)
+            // Slow path: Float or mixed types
+            if idx_tag < crate::lua_value::NAN_BASE 
+                && limit_tag < crate::lua_value::NAN_BASE
+                && step_tag < crate::lua_value::NAN_BASE {
+                // All floats
+                let idx = f64::from_bits(idx_tag);
+                let limit = f64::from_bits(limit_tag);
+                let step = f64::from_bits(step_tag);
+                
+                let new_idx = idx + step;
+                let continue_loop = if step >= 0.0 {
+                    new_idx <= limit
+                } else {
+                    new_idx >= limit
+                };
+
+                *frame.registers.get_unchecked_mut(a) = LuaValue::float(new_idx);
+
+                if continue_loop {
+                    *frame.registers.get_unchecked_mut(a + 3) = LuaValue::float(new_idx);
+                    frame.pc = (frame.pc as i32 + sbx) as usize;
                 }
-                _ => {
-                    // Mixed integer/float types - convert all to float
-                    let idx_val = frame.registers.get_unchecked(a);
-                    let limit_val = frame.registers.get_unchecked(a + 1);
-                    let step_val = frame.registers.get_unchecked(a + 2);
-                    
-                    if idx_val.is_number() && limit_val.is_number() && step_val.is_number() {
-                        let idx_f = idx_val.as_number().unwrap();
-                        let limit_f = limit_val.as_number().unwrap();
-                        let step_f = step_val.as_number().unwrap();
-                        let new_idx = idx_f + step_f;
-                        let cont = if step_f >= 0.0 {
-                            new_idx <= limit_f
-                        } else {
-                            new_idx >= limit_f
-                        };
-                        (LuaValue::float(new_idx), cont)
+                return Ok(());
+            }
+
+            // Mixed int/float - convert to float
+            let is_num = |tag: u64| tag == crate::lua_value::TAG_INTEGER || tag < crate::lua_value::NAN_BASE;
+            if is_num(idx_tag) && is_num(limit_tag) && is_num(step_tag) {
+                let to_float = |val: &LuaValue, tag: u64| {
+                    if tag == crate::lua_value::TAG_INTEGER {
+                        val.secondary() as i64 as f64
                     } else {
-                        return Err("'for' loop variables must be numbers".to_string());
+                        f64::from_bits(tag)
                     }
+                };
+
+                let idx = to_float(idx_val, idx_tag);
+                let limit = to_float(limit_val, limit_tag);
+                let step = to_float(step_val, step_tag);
+                
+                let new_idx = idx + step;
+                let continue_loop = if step >= 0.0 {
+                    new_idx <= limit
+                } else {
+                    new_idx >= limit
+                };
+
+                *frame.registers.get_unchecked_mut(a) = LuaValue::float(new_idx);
+
+                if continue_loop {
+                    *frame.registers.get_unchecked_mut(a + 3) = LuaValue::float(new_idx);
+                    frame.pc = (frame.pc as i32 + sbx) as usize;
                 }
-            };
-
-            // Update index register
-            *frame.registers.get_unchecked_mut(a) = new_value.clone();
-
-            if continue_loop {
-                // Copy index to loop variable: R(A+3) = R(A)
-                *frame.registers.get_unchecked_mut(a + 3) = new_value;
-                // Jump back to loop body
-                frame.pc = (frame.pc as i32 + sbx) as usize;
+                return Ok(());
             }
         }
 
-        Ok(())
+        Err("'for' loop variables must be numbers".to_string())
     }
 
     fn op_test(&mut self, instr: u32) -> Result<(), String> {

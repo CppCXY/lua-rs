@@ -12,7 +12,8 @@ use crate::VM;
 // NaN-Boxing core struct definition
 
 // Re-export the optimized LuaValue and type enum for pattern matching
-pub use value::{LuaValue, LuaValueKind};
+pub use value::{LuaValue, LuaValueKind, TAG_INTEGER, TAG_STRING, TAG_TABLE, TAG_FUNCTION, 
+                TAG_USERDATA, TAG_BOOLEAN, TAG_NIL, TAG_CFUNCTION, NAN_BASE};
 /// Multi-return values from Lua functions
 #[derive(Debug, Clone)]
 pub struct MultiValue {

@@ -36,23 +36,23 @@ use crate::{
 };
 use std::cmp::Ordering;
 
-// Primary word tags
-pub(crate) const TAG_INTEGER: u64 = 0xFFFF_0000_0000_0001;
-pub(crate) const TAG_STRING: u64 = 0xFFFE_0000_0000_0001;
-pub(crate) const TAG_TABLE: u64 = 0xFFFE_0000_0000_0002;
-pub(crate) const TAG_FUNCTION: u64 = 0xFFFE_0000_0000_0003;
-pub(crate) const TAG_USERDATA: u64 = 0xFFFE_0000_0000_0004;
-pub(crate) const TAG_BOOLEAN: u64 = 0xFFFD_0000_0000_0000;
-pub(crate) const TAG_NIL: u64 = 0xFFFC_0000_0000_0000;
-pub(crate) const TAG_CFUNCTION: u64 = 0xFFFB_0000_0000_0001;
+// Primary word tags (public for VM fast paths)
+pub const TAG_INTEGER: u64 = 0xFFFF_0000_0000_0001;
+pub const TAG_STRING: u64 = 0xFFFE_0000_0000_0001;
+pub const TAG_TABLE: u64 = 0xFFFE_0000_0000_0002;
+pub const TAG_FUNCTION: u64 = 0xFFFE_0000_0000_0003;
+pub const TAG_USERDATA: u64 = 0xFFFE_0000_0000_0004;
+pub const TAG_BOOLEAN: u64 = 0xFFFD_0000_0000_0000;
+pub const TAG_NIL: u64 = 0xFFFC_0000_0000_0000;
+pub const TAG_CFUNCTION: u64 = 0xFFFB_0000_0000_0001;
 
 // Special values
-pub(crate) const VALUE_TRUE: u64 = TAG_BOOLEAN | 1;
-pub(crate) const VALUE_FALSE: u64 = TAG_BOOLEAN;
-pub(crate) const VALUE_NIL: u64 = TAG_NIL;
+pub const VALUE_TRUE: u64 = TAG_BOOLEAN | 1;
+pub const VALUE_FALSE: u64 = TAG_BOOLEAN;
+pub const VALUE_NIL: u64 = TAG_NIL;
 
 // NaN detection (any value >= this is a tagged type)
-pub(crate) const NAN_BASE: u64 = 0x7FF8_0000_0000_0000;
+pub const NAN_BASE: u64 = 0x7FF8_0000_0000_0000;
 
 // Masks for pointer extraction
 pub(crate) const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
