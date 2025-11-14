@@ -2,7 +2,6 @@
 // Executes compiled bytecode with register-based architecture
 
 use crate::gc::{GC, GcObjectType};
-use crate::jit::JitCompiler;
 use crate::lib_registry;
 use crate::opcode::{Instruction, OpCode};
 use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue};
@@ -27,12 +26,6 @@ pub struct VM {
 
     // Next frame ID (for tracking frames)
     next_frame_id: usize,
-
-    // JIT compiler (optional, disabled by default for now)
-    jit_compiler: Option<JitCompiler>,
-
-    // JIT enabled flag
-    jit_enabled: bool,
 }
 
 pub struct CallFrame {
@@ -47,16 +40,6 @@ pub struct CallFrame {
 
 impl VM {
     pub fn new() -> Self {
-        Self::new_with_jit(true)
-    }
-
-    pub fn new_with_jit(enable_jit: bool) -> Self {
-        let jit_compiler = if enable_jit {
-            JitCompiler::new().ok()
-        } else {
-            None
-        };
-
         let mut vm = VM {
             globals: Rc::new(RefCell::new(LuaTable::new())),
             frames: Vec::new(),
@@ -64,8 +47,6 @@ impl VM {
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
             next_frame_id: 0,
-            jit_compiler,
-            jit_enabled: enable_jit,
         };
 
         // Register built-in functions
@@ -136,10 +117,6 @@ impl VM {
                 self.frames.pop();
                 continue;
             }
-
-            // JIT is currently disabled due to architectural limitations
-            // The current JIT implementation cannot safely operate on LuaValue (Rust enum)
-            // TODO: Reimplement JIT with proper value representation
 
             let instr = chunk_ptr.code[pc];
             self.frames[frame_idx].pc += 1;
@@ -299,36 +276,39 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
+        
+        // Fast path: avoid cloning by matching references directly
+        match (&frame.registers[b], &frame.registers[c]) {
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::Integer(i + j);
+                return Ok(());
+            }
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::Float(l + r);
+                return Ok(());
+            }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                frame.registers[a] = LuaValue::Float(*i as f64 + f);
+                return Ok(());
+            }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                frame.registers[a] = LuaValue::Float(f + *i as f64);
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Slow path: clone for metamethods
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
 
-        match (&left, &right) {
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::number(l + r);
-                Ok(())
-            }
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::integer(i + j);
-                Ok(())
-            }
-            (l, r) if l.is_number() && r.is_number() => {
-                let l_num = l.as_number().unwrap();
-                let r_num = r.as_number().unwrap();
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::number(l_num + r_num);
-                Ok(())
-            }
-            _ => {
-                // Try metamethod
-                if self.call_binop_metamethod(&left, &right, "__add", a)? {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "attempt to add non-number values ({:?} + {:?})",
-                        left, right
-                    ))
-                }
-            }
+        if self.call_binop_metamethod(&left, &right, "__add", a)? {
+            Ok(())
+        } else {
+            Err(format!(
+                "attempt to add non-number values ({:?} + {:?})",
+                left, right
+            ))
         }
     }
 
@@ -338,33 +318,36 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
+        
+        // Fast path: avoid cloning
+        match (&frame.registers[b], &frame.registers[c]) {
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::Integer(i - j);
+                return Ok(());
+            }
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::Float(l - r);
+                return Ok(());
+            }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                frame.registers[a] = LuaValue::Float(*i as f64 - f);
+                return Ok(());
+            }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                frame.registers[a] = LuaValue::Float(f - *i as f64);
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Slow path
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
 
-        match (&left, &right) {
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::number(l - r);
-                Ok(())
-            }
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::integer(i - j);
-                Ok(())
-            }
-            (l, r) if l.is_number() && r.is_number() => {
-                let l_num = l.as_number().unwrap();
-                let r_num = r.as_number().unwrap();
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::number(l_num - r_num);
-                Ok(())
-            }
-            _ => {
-                // Try __sub metamethod
-                if self.call_binop_metamethod(&left, &right, "__sub", a)? {
-                    Ok(())
-                } else {
-                    Err(format!("attempt to subtract non-number values"))
-                }
-            }
+        if self.call_binop_metamethod(&left, &right, "__sub", a)? {
+            Ok(())
+        } else {
+            Err(format!("attempt to subtract non-number values"))
         }
     }
 
@@ -374,33 +357,36 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
+        
+        // Fast path
+        match (&frame.registers[b], &frame.registers[c]) {
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::Integer(i * j);
+                return Ok(());
+            }
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::Float(l * r);
+                return Ok(());
+            }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                frame.registers[a] = LuaValue::Float(*i as f64 * f);
+                return Ok(());
+            }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                frame.registers[a] = LuaValue::Float(f * *i as f64);
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Slow path
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
 
-        match (&left, &right) {
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::number(l * r);
-                Ok(())
-            }
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::integer(i * j);
-                Ok(())
-            }
-            (l, r) if l.is_number() && r.is_number() => {
-                let l_num = l.as_number().unwrap();
-                let r_num = r.as_number().unwrap();
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::number(l_num * r_num);
-                Ok(())
-            }
-            _ => {
-                // Try __mul metamethod
-                if self.call_binop_metamethod(&left, &right, "__mul", a)? {
-                    Ok(())
-                } else {
-                    Err(format!("attempt to multiply non-number values"))
-                }
-            }
+        if self.call_binop_metamethod(&left, &right, "__mul", a)? {
+            Ok(())
+        } else {
+            Err(format!("attempt to multiply non-number values"))
         }
     }
 
@@ -410,33 +396,36 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
+        
+        // Fast path: division always returns float in Lua
+        match (&frame.registers[b], &frame.registers[c]) {
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::Float(*i as f64 / *j as f64);
+                return Ok(());
+            }
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::Float(l / r);
+                return Ok(());
+            }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                frame.registers[a] = LuaValue::Float(*i as f64 / f);
+                return Ok(());
+            }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                frame.registers[a] = LuaValue::Float(f / *i as f64);
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Slow path
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
 
-        match (&left, &right) {
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::number(l / r);
-                Ok(())
-            }
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::number(*i as f64 / *j as f64);
-                Ok(())
-            }
-            (l, r) if l.is_number() && r.is_number() => {
-                let l_num = l.as_number().unwrap();
-                let r_num = r.as_number().unwrap();
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::number(l_num / r_num);
-                Ok(())
-            }
-            _ => {
-                // Try __div metamethod
-                if self.call_binop_metamethod(&left, &right, "__div", a)? {
-                    Ok(())
-                } else {
-                    Err(format!("attempt to divide non-number values"))
-                }
-            }
+        if self.call_binop_metamethod(&left, &right, "__div", a)? {
+            Ok(())
+        } else {
+            Err(format!("attempt to divide non-number values"))
         }
     }
 
@@ -446,33 +435,36 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
+        
+        // Fast path
+        match (&frame.registers[b], &frame.registers[c]) {
+            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
+                frame.registers[a] = LuaValue::Integer(i % j);
+                return Ok(());
+            }
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::Float(l % r);
+                return Ok(());
+            }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                frame.registers[a] = LuaValue::Float((*i as f64) % f);
+                return Ok(());
+            }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                frame.registers[a] = LuaValue::Float(f % (*i as f64));
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Slow path
         let left = frame.registers[b].clone();
         let right = frame.registers[c].clone();
 
-        match (&left, &right) {
-            (LuaValue::Float(l), LuaValue::Float(r)) => {
-                frame.registers[a] = LuaValue::number(l % r);
-                Ok(())
-            }
-            (LuaValue::Integer(i), LuaValue::Integer(j)) => {
-                frame.registers[a] = LuaValue::integer(i % j);
-                Ok(())
-            }
-            (l, r) if l.is_number() && r.is_number() => {
-                let l_num = l.as_number().unwrap();
-                let r_num = r.as_number().unwrap();
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::number(l_num % r_num);
-                Ok(())
-            }
-            _ => {
-                // Try __mod metamethod
-                if self.call_binop_metamethod(&left, &right, "__mod", a)? {
-                    Ok(())
-                } else {
-                    Err(format!("attempt to perform modulo on non-number values"))
-                }
-            }
+        if self.call_binop_metamethod(&left, &right, "__mod", a)? {
+            Ok(())
+        } else {
+            Err(format!("attempt to perform modulo on non-number values"))
         }
     }
 
@@ -537,35 +529,44 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
-
-        match (&left, &right) {
+        
+        // Fast path
+        match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
                 if *j == 0 {
                     return Err("attempt to divide by zero".to_string());
                 }
-                frame.registers[a] = LuaValue::integer(i / j);
-                Ok(())
+                frame.registers[a] = LuaValue::Integer(i / j);
+                return Ok(());
             }
-            (l, r) if l.is_number() && r.is_number() => {
-                let l_num = l.as_number().unwrap();
-                let r_num = r.as_number().unwrap();
-                let result = (l_num / r_num).floor();
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::integer(result as i64);
-                Ok(())
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                let result = (l / r).floor();
+                frame.registers[a] = LuaValue::Integer(result as i64);
+                return Ok(());
             }
-            _ => {
-                // Try __idiv metamethod
-                if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "attempt to perform integer division on non-number values"
-                    ))
-                }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                let result = (*i as f64 / f).floor();
+                frame.registers[a] = LuaValue::Integer(result as i64);
+                return Ok(());
             }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                let result = (f / *i as f64).floor();
+                frame.registers[a] = LuaValue::Integer(result as i64);
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Slow path
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+
+        if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
+            Ok(())
+        } else {
+            Err(format!(
+                "attempt to perform integer division on non-number values"
+            ))
         }
     }
 
@@ -2328,28 +2329,6 @@ impl VM {
                 }
             }
             _ => Err("attempt to call a non-function value".to_string()),
-        }
-    }
-
-    /// Enable or disable JIT compilation
-    pub fn set_jit_enabled(&mut self, enabled: bool) {
-        self.jit_enabled = enabled;
-    }
-
-    /// Check if JIT is enabled
-    pub fn is_jit_enabled(&self) -> bool {
-        self.jit_enabled
-    }
-
-    /// Get JIT statistics
-    pub fn get_jit_stats(&self) -> Option<&crate::jit::JitStats> {
-        self.jit_compiler.as_ref().map(|jit| &jit.stats)
-    }
-
-    /// Clear JIT compilation cache
-    pub fn clear_jit_cache(&mut self) {
-        if let Some(ref mut jit) = self.jit_compiler {
-            jit.clear_cache();
         }
     }
 }

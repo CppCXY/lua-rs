@@ -5,12 +5,6 @@ edition = "2024"
 
 [dependencies]
 emmylua_parser = "0.19.0"
-cranelift = "0.125"
-cranelift-module = "0.125"
-cranelift-jit = "0.125"
-cranelift-codegen = "0.125"
-cranelift-native = "0.125"
-target-lexicon = "0.12"
 
 [[bin]]
 name = "main"

@@ -3,7 +3,6 @@
 
 pub mod compiler;
 pub mod gc;
-pub mod jit;
 pub mod lib_registry;
 pub mod lua_pattern;
 pub mod opcode;
@@ -13,13 +12,10 @@ pub mod vm;
 
 pub use compiler::Compiler;
 pub use gc::GC;
-pub use jit::JitCompiler;
 pub use lib_registry::LibraryRegistry;
 pub use opcode::{Instruction, OpCode};
 pub use value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
 pub use vm::VM;
-pub use jit::jit_fastpath as fastpath;
-
 use std::rc::Rc;
 
 
