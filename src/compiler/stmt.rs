@@ -37,7 +37,6 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
 
 /// Compile local variable declaration
 fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), String> {
-    use super::expr::compile_call_expr_with_returns;
     use emmylua_parser::LuaExpr;
 
     let names: Vec<_> = stat.get_local_name_list().collect();
@@ -49,8 +48,13 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
     if !exprs.is_empty() {
         // Compile all expressions except the last one
         for expr in exprs.iter().take(exprs.len().saturating_sub(1)) {
-            let reg = compile_expr(c, expr)?;
-            regs.push(reg);
+            // Allocate a new register for each variable
+            let dest_reg = alloc_register(c);
+            let src_reg = compile_expr(c, expr)?;
+            if src_reg != dest_reg {
+                emit_move(c, dest_reg, src_reg);
+            }
+            regs.push(dest_reg);
         }
 
         // Handle the last expression specially if we need more values
@@ -60,22 +64,39 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             // Check if last expression is a function call (which might return multiple values)
             if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
-                    // Compile call with multiple return values
+                    eprintln!("Before compile_call_expr_with_returns: next_register={}", c.next_register);
+                    // Use compile_call_expr_with_returns to handle multi-return
                     let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
-
-                    // The call result is in base_reg, and additional values in base_reg+1, base_reg+2, etc.
+                    eprintln!("After compile_call_expr_with_returns: base_reg={}, next_register={}", base_reg, c.next_register);
+                    
+                    // Ensure next_register is past all return registers
+                    while c.next_register < base_reg + remaining_vars as u32 {
+                        eprintln!("Allocating register to reach base_reg + remaining_vars: {} + {} = {}", base_reg, remaining_vars, base_reg + remaining_vars as u32);
+                        alloc_register(c);
+                    }
+                    eprintln!("Final next_register={}", c.next_register);
+                    
+                    // Add all return registers
                     for i in 0..remaining_vars {
                         regs.push(base_reg + i as u32);
                     }
                 } else {
                     // Single value needed
-                    let reg = compile_expr(c, last_expr)?;
-                    regs.push(reg);
+                    let dest_reg = alloc_register(c);
+                    let src_reg = compile_expr(c, last_expr)?;
+                    if src_reg != dest_reg {
+                        emit_move(c, dest_reg, src_reg);
+                    }
+                    regs.push(dest_reg);
                 }
             } else {
                 // Non-call expression
-                let reg = compile_expr(c, last_expr)?;
-                regs.push(reg);
+                let dest_reg = alloc_register(c);
+                let src_reg = compile_expr(c, last_expr)?;
+                if src_reg != dest_reg {
+                    emit_move(c, dest_reg, src_reg);
+                }
+                regs.push(dest_reg);
             }
         }
     }
@@ -167,13 +188,30 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     if exprs.is_empty() {
         // return (no values)
         emit(c, Instruction::encode_abc(OpCode::Return, 0, 1, 0));
-    } else {
-        // Compile first expression
-        let first_reg = compile_expr(c, &exprs[0])?;
-
-        // For simplicity, only return first value for now
-        emit(c, Instruction::encode_abc(OpCode::Return, first_reg, 2, 0));
+        return Ok(());
     }
+
+    // Allocate consecutive registers for all return values
+    let base_reg = alloc_register(c);
+    let num_exprs = exprs.len();
+    
+    // Reserve registers for all return values
+    for _ in 1..num_exprs {
+        alloc_register(c);
+    }
+    
+    // Compile all expressions into consecutive registers
+    for (i, expr) in exprs.iter().enumerate() {
+        let target_reg = base_reg + i as u32;
+        let src_reg = compile_expr(c, expr)?;
+        if src_reg != target_reg {
+            emit_move(c, target_reg, src_reg);
+        }
+    }
+
+    // Emit return: B = num_values + 1
+    // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1
+    emit(c, Instruction::encode_abc(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0));
 
     Ok(())
 }

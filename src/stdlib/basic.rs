@@ -241,66 +241,74 @@ fn lua_pairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Return next function, table, and nil
     let next_func = LuaValue::cfunction(lua_next);
+    let table_val = LuaValue::from_table_rc(table);
+    let nil_val = LuaValue::nil();
 
     Ok(MultiValue::multiple(vec![
         next_func,
-        LuaValue::from_table_rc(table),
-        LuaValue::nil(),
+        table_val,
+        nil_val,
     ]))
 }
 
 /// next(table [, index]) - Return next key-value pair
 fn lua_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let frame = vm.frames.last().ok_or("No call frame")?;
-    let registers = &frame.registers;
-
-    if registers.len() < 2 {
-        return Err("next requires at least 1 argument".to_string());
-    }
-
-    let table_val = &registers[1];
-    let Some(table) = table_val.as_table() else {
-        return Err("next expects a table as first argument".to_string());
+    // Get arguments using the proper API
+    let table_val = require_arg(vm, 0, "next")?;
+    
+    // Verify table is still valid
+    let table = table_val.as_table()
+        .ok_or_else(|| "bad argument #1 to 'next' (table expected)".to_string())?;
+    
+    let index_val = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    
+    // Try to access table - if this crashes, table is corrupted
+    let table_len = {
+        let tref = table.borrow();
+        tref.len()
     };
+    
+    eprintln!("[DEBUG next] Called with table (len={}), index={:?}", table_len, index_val.kind());
 
-    let index_val = if registers.len() >= 3 {
-        &registers[2]
-    } else {
-        &LuaValue::nil()
+    // Collect all key-value pairs into a Vec to avoid holding borrow
+    let pairs: Vec<(LuaValue, LuaValue)> = {
+        let table_ref = table.borrow();
+        let mut result = Vec::new();
+        for (k, v) in table_ref.iter_all() {
+            result.push((k, v));
+        }
+        result
     };
-
-    let table_ref = table.borrow();
-
-    // Get all key-value pairs
-    let pairs: Vec<_> = table_ref.iter_all().collect();
+    
+    eprintln!("[DEBUG next] Collected {} pairs", pairs.len());
 
     if pairs.is_empty() {
-        // Empty table
         return Ok(MultiValue::single(LuaValue::nil()));
     }
 
     // If index is nil, return first key-value pair
     if index_val.is_nil() {
-        let (key, value) = &pairs[0];
-        return Ok(MultiValue::multiple(vec![key.clone(), value.clone()]));
+        let (k, v) = &pairs[0];
+        eprintln!("[DEBUG next] Returning first pair");
+        return Ok(MultiValue::multiple(vec![k.clone(), v.clone()]));
     }
 
-    // Find current key position and return next
+    // Find current key and return next
     for (i, (key, _value)) in pairs.iter().enumerate() {
-        if key == index_val {
+        if key == &index_val {
             if i + 1 < pairs.len() {
-                let (next_key, next_value) = &pairs[i + 1];
-                return Ok(MultiValue::multiple(vec![
-                    next_key.clone(),
-                    next_value.clone(),
-                ]));
+                let (next_k, next_v) = &pairs[i + 1];
+                eprintln!("[DEBUG next] Returning next pair at index {}", i + 1);
+                return Ok(MultiValue::multiple(vec![next_k.clone(), next_v.clone()]));
             } else {
                 // No more keys
+                eprintln!("[DEBUG next] No more pairs");
                 return Ok(MultiValue::single(LuaValue::nil()));
             }
         }
     }
 
+    eprintln!("[DEBUG next] Key not found");
     Err("invalid key to 'next'".to_string())
 }
 

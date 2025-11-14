@@ -1361,8 +1361,14 @@ impl LuaVM {
 
             self.frames.push(temp_frame);
 
-            // Call the CFunction
-            let multi_result = cfunc(self)?;
+            // Call the CFunction - use explicit match to ensure frame is always popped
+            let multi_result = match cfunc(self) {
+                Ok(result) => result,
+                Err(e) => {
+                    self.frames.pop();
+                    return Err(e);
+                }
+            };
 
             // Pop the temporary frame
             self.frames.pop();
@@ -2777,7 +2783,16 @@ impl LuaVM {
                 );
 
                 self.frames.push(temp_frame);
-                let result = cfunc(self)?;
+                
+                // Call CFunction - ensure frame is always popped even on error
+                let result = match cfunc(self) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.frames.pop();
+                        return Err(e);
+                    }
+                };
+                
                 self.frames.pop();
 
                 Ok(result.all_values())
