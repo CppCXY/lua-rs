@@ -39,8 +39,8 @@ fn table_concat(vm: &mut VM) -> Result<MultiValue, String> {
 
     let mut parts = Vec::new();
     for idx in i..=j {
-        let key = LuaValue::Integer(idx);
-        let value = table_ref.raw_get(&key).unwrap_or(LuaValue::Nil);
+        let key = LuaValue::integer(idx);
+        let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
 
         if let Some(s) = value.as_string() {
             parts.push(s.as_str().to_string());
@@ -53,7 +53,7 @@ fn table_concat(vm: &mut VM) -> Result<MultiValue, String> {
     }
 
     let result = vm.create_string(parts.join(&sep));
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 /// table.insert(list, [pos,] value) - Insert element
@@ -70,7 +70,7 @@ fn table_insert(vm: &mut VM) -> Result<MultiValue, String> {
     if argc == 2 {
         // table.insert(list, value)
         let value = require_arg(vm, 1, "table.insert")?;
-        table_ref.raw_set(LuaValue::Integer(len as i64 + 1), value);
+        table_ref.raw_set(LuaValue::integer(len as i64 + 1), value);
     } else if argc == 3 {
         // table.insert(list, pos, value)
         let pos = require_arg(vm, 1, "table.insert")?
@@ -103,7 +103,7 @@ fn table_remove(vm: &mut VM) -> Result<MultiValue, String> {
     let len = table_ref.len();
 
     if len == 0 {
-        return Ok(MultiValue::single(LuaValue::Nil));
+        return Ok(MultiValue::single(LuaValue::nil()));
     }
 
     let pos = get_arg(vm, 1)
@@ -148,8 +148,8 @@ fn table_move(vm: &mut VM) -> Result<MultiValue, String> {
         let src_ref = src.borrow();
         for i in f..=e {
             let val = src_ref
-                .raw_get(&LuaValue::Integer(i))
-                .unwrap_or(LuaValue::Nil);
+                .raw_get(&LuaValue::integer(i))
+                .unwrap_or(LuaValue::nil());
             values.push(val);
         }
     }
@@ -157,11 +157,11 @@ fn table_move(vm: &mut VM) -> Result<MultiValue, String> {
     {
         let mut dst_ref = dst.borrow_mut();
         for (offset, val) in values.into_iter().enumerate() {
-            dst_ref.raw_set(LuaValue::Integer(t + offset as i64), val);
+            dst_ref.raw_set(LuaValue::integer(t + offset as i64), val);
         }
     }
 
-    Ok(MultiValue::single(LuaValue::Table(dst)))
+    Ok(MultiValue::single(LuaValue::from_table_rc(dst)))
 }
 
 /// table.pack(...) - Pack values into table
@@ -172,18 +172,18 @@ fn table_pack(vm: &mut VM) -> Result<MultiValue, String> {
     let mut table_ref = table.borrow_mut();
 
     for (i, arg) in args.iter().enumerate() {
-        table_ref.raw_set(LuaValue::Integer(i as i64 + 1), arg.clone());
+        table_ref.raw_set(LuaValue::integer(i as i64 + 1), arg.clone());
     }
 
     // Set 'n' field
     let n_key = vm.create_string("n".to_string());
     table_ref.raw_set(
-        LuaValue::String(n_key),
-        LuaValue::Integer(args.len() as i64),
+        LuaValue::from_string_rc(n_key),
+        LuaValue::integer(args.len() as i64),
     );
 
     drop(table_ref);
-    Ok(MultiValue::single(LuaValue::Table(table)))
+    Ok(MultiValue::single(LuaValue::from_table_rc(table)))
 }
 
 /// table.unpack(list [, i [, j]]) - Unpack table into values
@@ -204,8 +204,8 @@ fn table_unpack(vm: &mut VM) -> Result<MultiValue, String> {
     let mut result = Vec::new();
     for idx in i..=j {
         let val = table_ref
-            .raw_get(&LuaValue::Integer(idx))
-            .unwrap_or(LuaValue::Nil);
+            .raw_get(&LuaValue::integer(idx))
+            .unwrap_or(LuaValue::nil());
         result.push(val);
     }
 

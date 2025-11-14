@@ -157,7 +157,7 @@ pub fn end_scope(c: &mut Compiler) {
 /// Get a global variable
 pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
     let lua_str = intern_string(c, name.to_string());
-    let const_idx = add_constant(c, LuaValue::String(lua_str));
+    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
     emit(
         c,
         Instruction::encode_abx(OpCode::GetGlobal, dest_reg, const_idx),
@@ -167,7 +167,7 @@ pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
 /// Set a global variable
 pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
     let lua_str = intern_string(c, name.to_string());
-    let const_idx = add_constant(c, LuaValue::String(lua_str));
+    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
     emit(
         c,
         Instruction::encode_abx(OpCode::SetGlobal, src_reg, const_idx),

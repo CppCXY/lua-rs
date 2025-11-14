@@ -78,24 +78,24 @@ impl LibraryRegistry {
 
         // Register all functions in the table
         for (name, func) in &module.functions {
-            let func_value = LuaValue::CFunction(*func);
+            let func_value = LuaValue::cfunction(*func);
             let name_key = vm.create_string(name.to_string());
             lib_table
                 .borrow_mut()
-                .raw_set(LuaValue::String(name_key), func_value);
+                .raw_set(LuaValue::from_string_rc(name_key), func_value);
         }
 
         // Set the library table as a global
         if module.name == "_G" {
             // For global functions, register them directly
             for (name, func) in &module.functions {
-                let func_value = LuaValue::CFunction(*func);
+                let func_value = LuaValue::cfunction(*func);
                 vm.set_global(name, func_value);
             }
         } else {
             // For module libraries, set the table as global
             // let module_name = vm.create_string(module.name.to_string());
-            vm.set_global(module.name, LuaValue::Table(lib_table));
+            vm.set_global(module.name, LuaValue::from_table_rc(lib_table));
         }
 
         Ok(())

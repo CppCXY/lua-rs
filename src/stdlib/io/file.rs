@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::rc::Rc;
 
 use crate::VM;
-use crate::lua_value::{LuaTable, LuaValue, MultiValue};
+use crate::lua_value::{LuaTable, LuaValue, LuaValueKind, MultiValue};
 
 /// File handle wrapper
 pub struct LuaFile {
@@ -179,32 +179,32 @@ pub fn create_file_metatable(vm: &mut VM) -> Rc<RefCell<LuaTable>> {
 
     // file:read([format])
     index_table.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("read".to_string())),
-        LuaValue::CFunction(file_read),
+        LuaValue::from_string_rc(vm.create_string("read".to_string())),
+        LuaValue::cfunction(file_read),
     );
 
     // file:write(...)
     index_table.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("write".to_string())),
-        LuaValue::CFunction(file_write),
+        LuaValue::from_string_rc(vm.create_string("write".to_string())),
+        LuaValue::cfunction(file_write),
     );
 
     // file:flush()
     index_table.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("flush".to_string())),
-        LuaValue::CFunction(file_flush),
+        LuaValue::from_string_rc(vm.create_string("flush".to_string())),
+        LuaValue::cfunction(file_flush),
     );
 
     // file:close()
     index_table.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("close".to_string())),
-        LuaValue::CFunction(file_close),
+        LuaValue::from_string_rc(vm.create_string("close".to_string())),
+        LuaValue::cfunction(file_close),
     );
 
     // Set __index to the index table
     mt.borrow_mut().raw_set(
-        LuaValue::String(vm.create_string("__index".to_string())),
-        LuaValue::Table(index_table),
+        LuaValue::from_string_rc(vm.create_string("__index".to_string())),
+        LuaValue::from_table_rc(index_table),
     );
 
     mt
@@ -221,7 +221,7 @@ fn file_read(vm: &mut VM) -> Result<MultiValue, String> {
     };
 
     // Extract LuaFile from userdata
-    if let LuaValue::Userdata(ud) = file_val {
+    if let Some(ud) = file_val.as_userdata() {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -239,12 +239,12 @@ fn file_read(vm: &mut VM) -> Result<MultiValue, String> {
 
             let result = match format {
                 "*l" | "*L" => match lua_file.read_line() {
-                    Ok(Some(line)) => LuaValue::String(vm.create_string(line)),
-                    Ok(None) => LuaValue::Nil,
+                    Ok(Some(line)) => LuaValue::from_string_rc(vm.create_string(line)),
+                    Ok(None) => LuaValue::nil(),
                     Err(e) => return Err(format!("read error: {}", e)),
                 },
                 "*a" => match lua_file.read_all() {
-                    Ok(content) => LuaValue::String(vm.create_string(content)),
+                    Ok(content) => LuaValue::from_string_rc(vm.create_string(content)),
                     Err(e) => return Err(format!("read error: {}", e)),
                 },
                 _ => {
@@ -253,7 +253,7 @@ fn file_read(vm: &mut VM) -> Result<MultiValue, String> {
                         match lua_file.read_bytes(n) {
                             Ok(bytes) => {
                                 let s = String::from_utf8_lossy(&bytes).to_string();
-                                LuaValue::String(vm.create_string(s))
+                                LuaValue::from_string_rc(vm.create_string(s))
                             }
                             Err(e) => return Err(format!("read error: {}", e)),
                         }
@@ -282,7 +282,7 @@ fn file_write(vm: &mut VM) -> Result<MultiValue, String> {
     };
 
     // Extract LuaFile from userdata
-    if let LuaValue::Userdata(ud) = file_val {
+    if let Some(ud) = file_val.as_userdata() {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -293,10 +293,28 @@ fn file_write(vm: &mut VM) -> Result<MultiValue, String> {
                     break;
                 }
 
-                let text = match val {
-                    LuaValue::String(s) => s.as_str().to_string(),
-                    LuaValue::Integer(n) => n.to_string(),
-                    LuaValue::Float(n) => n.to_string(),
+                let text = match val.kind() {
+                    LuaValueKind::String => {
+                        if let Some(s) = val.as_string() {
+                            s.as_str().to_string()
+                        } else {
+                            return Err("write expects strings or numbers".to_string());
+                        }
+                    }
+                    LuaValueKind::Integer => {
+                        if let Some(n) = val.as_integer() {
+                            n.to_string()
+                        } else {
+                            return Err("write expects strings or numbers".to_string());
+                        }
+                    }
+                    LuaValueKind::Float => {
+                        if let Some(n) = val.as_float() {
+                            n.to_string()
+                        } else {
+                            return Err("write expects strings or numbers".to_string());
+                        }
+                    }
                     _ => return Err("write expects strings or numbers".to_string()),
                 };
 
@@ -323,7 +341,7 @@ fn file_flush(vm: &mut VM) -> Result<MultiValue, String> {
     };
 
     // Extract LuaFile from userdata
-    if let LuaValue::Userdata(ud) = file_val {
+    if let Some(ud) = file_val.as_userdata() {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -348,7 +366,7 @@ fn file_close(vm: &mut VM) -> Result<MultiValue, String> {
     };
 
     // Extract LuaFile from userdata
-    if let LuaValue::Userdata(ud) = file_val {
+    if let Some(ud) = file_val.as_userdata() {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {

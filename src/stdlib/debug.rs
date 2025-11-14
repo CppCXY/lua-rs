@@ -22,10 +22,10 @@ fn debug_traceback(vm: &mut VM) -> Result<MultiValue, String> {
         .unwrap_or_else(|| "stack traceback:".to_string());
 
     let result = vm.create_string(message);
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 fn debug_getinfo(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: return nil
-    Ok(MultiValue::single(LuaValue::Nil))
+    Ok(MultiValue::single(LuaValue::nil()))
 }

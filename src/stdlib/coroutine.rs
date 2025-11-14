@@ -16,12 +16,12 @@ pub fn create_coroutine_lib() -> LibraryModule {
 
 fn coroutine_create(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: return nil
-    Ok(MultiValue::single(LuaValue::Nil))
+    Ok(MultiValue::single(LuaValue::nil()))
 }
 
 fn coroutine_resume(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: return false
-    Ok(MultiValue::single(LuaValue::Boolean(false)))
+    Ok(MultiValue::single(LuaValue::boolean(false)))
 }
 
 fn coroutine_yield(_vm: &mut VM) -> Result<MultiValue, String> {
@@ -30,5 +30,5 @@ fn coroutine_yield(_vm: &mut VM) -> Result<MultiValue, String> {
 
 fn coroutine_status(_vm: &mut VM) -> Result<MultiValue, String> {
     let s = _vm.create_string("dead".to_string());
-    Ok(MultiValue::single(LuaValue::String(s)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(s)))
 }

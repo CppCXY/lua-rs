@@ -57,7 +57,7 @@ fn io_read(vm: &mut VM) -> Result<MultiValue, String> {
             // Read a line
             let mut line = String::new();
             match handle.read_line(&mut line) {
-                Ok(0) => Ok(MultiValue::single(LuaValue::Nil)), // EOF
+                Ok(0) => Ok(MultiValue::single(LuaValue::nil())), // EOF
                 Ok(_) => {
                     // Remove trailing newline if present
                     if format_str == "*l" && line.ends_with('\n') {
@@ -66,7 +66,7 @@ fn io_read(vm: &mut VM) -> Result<MultiValue, String> {
                             line.pop();
                         }
                     }
-                    Ok(MultiValue::single(LuaValue::String(Rc::new(
+                    Ok(MultiValue::single(LuaValue::from_string_rc(Rc::new(
                         LuaString::new(line),
                     ))))
                 }
@@ -77,7 +77,7 @@ fn io_read(vm: &mut VM) -> Result<MultiValue, String> {
             // Read all
             let mut content = String::new();
             match io::Read::read_to_string(&mut handle, &mut content) {
-                Ok(_) => Ok(MultiValue::single(LuaValue::String(Rc::new(
+                Ok(_) => Ok(MultiValue::single(LuaValue::from_string_rc(Rc::new(
                     LuaString::new(content),
                 )))),
                 Err(e) => Err(format!("read error: {}", e)),
@@ -87,15 +87,15 @@ fn io_read(vm: &mut VM) -> Result<MultiValue, String> {
             // Read a number
             let mut line = String::new();
             match handle.read_line(&mut line) {
-                Ok(0) => Ok(MultiValue::single(LuaValue::Nil)), // EOF
+                Ok(0) => Ok(MultiValue::single(LuaValue::nil())), // EOF
                 Ok(_) => {
                     let trimmed = line.trim();
                     if let Ok(n) = trimmed.parse::<i64>() {
-                        Ok(MultiValue::single(LuaValue::Integer(n)))
+                        Ok(MultiValue::single(LuaValue::integer(n)))
                     } else if let Ok(n) = trimmed.parse::<f64>() {
-                        Ok(MultiValue::single(LuaValue::Float(n)))
+                        Ok(MultiValue::single(LuaValue::float(n)))
                     } else {
-                        Ok(MultiValue::single(LuaValue::Nil))
+                        Ok(MultiValue::single(LuaValue::nil()))
                     }
                 }
                 Err(e) => Err(format!("read error: {}", e)),
@@ -106,10 +106,10 @@ fn io_read(vm: &mut VM) -> Result<MultiValue, String> {
             if let Ok(n) = format_str.parse::<usize>() {
                 let mut buffer = vec![0u8; n];
                 match io::Read::read(&mut handle, &mut buffer) {
-                    Ok(0) => Ok(MultiValue::single(LuaValue::Nil)), // EOF
+                    Ok(0) => Ok(MultiValue::single(LuaValue::nil())), // EOF
                     Ok(bytes_read) => {
                         buffer.truncate(bytes_read);
-                        Ok(MultiValue::single(LuaValue::String(Rc::new(
+                        Ok(MultiValue::single(LuaValue::from_string_rc(Rc::new(
                             LuaString::new(String::from_utf8_lossy(&buffer).to_string()),
                         ))))
                     }
@@ -166,8 +166,8 @@ fn io_open(vm: &mut VM) -> Result<MultiValue, String> {
         Err(e) => {
             // Return nil and error message
             Ok(MultiValue::multiple(vec![
-                LuaValue::Nil,
-                LuaValue::String(vm.create_string(e.to_string())),
+                LuaValue::nil(),
+                LuaValue::from_string_rc(vm.create_string(e.to_string())),
             ]))
         }
     }

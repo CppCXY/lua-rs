@@ -12,13 +12,13 @@ pub enum OpCode {
     LoadBool, // R(A) := bool(B); if C then pc++
 
     // Table operations
-    NewTable,   // R(A) := {} (size = B,C)
-    GetTable,   // R(A) := R(B)[R(C)]
-    SetTable,   // R(A)[R(B)] := R(C)
-    GetTableI,  // R(A) := R(B)[C]  - Direct integer index (C is literal int)
-    SetTableI,  // R(A)[B] := R(C)  - Direct integer index (B is literal int)
-    GetTableK,  // R(A) := R(B)[K(C)] - Direct constant key (K(C) must be string)
-    SetTableK,  // R(A)[K(B)] := R(C) - Direct constant key (K(B) must be string)
+    NewTable,  // R(A) := {} (size = B,C)
+    GetTable,  // R(A) := R(B)[R(C)]
+    SetTable,  // R(A)[R(B)] := R(C)
+    GetTableI, // R(A) := R(B)[C]  - Direct integer index (C is literal int)
+    SetTableI, // R(A)[B] := R(C)  - Direct integer index (B is literal int)
+    GetTableK, // R(A) := R(B)[K(C)] - Direct constant key (K(C) must be string)
+    SetTableK, // R(A)[K(B)] := R(C) - Direct constant key (K(B) must be string)
 
     // Arithmetic operations
     Add, // R(A) := R(B) + R(C)

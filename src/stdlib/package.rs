@@ -16,12 +16,12 @@ fn package_loadlib(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: return nil and error message
     let err = _vm.create_string("loadlib not implemented".to_string());
     Ok(MultiValue::multiple(vec![
-        LuaValue::Nil,
-        LuaValue::String(err),
+        LuaValue::nil(),
+        LuaValue::from_string_rc(err),
     ]))
 }
 
 fn package_searchpath(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: return nil
-    Ok(MultiValue::single(LuaValue::Nil))
+    Ok(MultiValue::single(LuaValue::nil()))
 }

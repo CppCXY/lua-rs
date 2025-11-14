@@ -21,7 +21,7 @@ pub fn create_string_lib() -> LibraryModule {
         "find" => string_find,
         "match" => string_match,
         "gsub" => string_gsub,
-        "gmatch" => string_gmatch,
+        // "gmatch" => string_gmatch,
     })
 }
 
@@ -50,7 +50,7 @@ fn string_byte(vm: &mut VM) -> Result<MultiValue, String> {
     for idx in start..=end.min(len) {
         if idx >= 1 && idx <= len {
             let byte = str_bytes[(idx - 1) as usize];
-            result.push(LuaValue::Integer(byte as i64));
+            result.push(LuaValue::integer(byte as i64));
         }
     }
 
@@ -81,7 +81,7 @@ fn string_char(vm: &mut VM) -> Result<MultiValue, String> {
         String::from_utf8(bytes).map_err(|_| "string.char: invalid UTF-8".to_string())?;
 
     let result = vm.create_string(result_str);
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 /// string.len(s) - Return string length
@@ -91,7 +91,7 @@ fn string_len(vm: &mut VM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #1 to 'string.len' (string expected)".to_string())?;
 
     let len = s.as_str().len() as i64;
-    Ok(MultiValue::single(LuaValue::Integer(len)))
+    Ok(MultiValue::single(LuaValue::integer(len)))
 }
 
 /// string.lower(s) - Convert to lowercase
@@ -101,7 +101,7 @@ fn string_lower(vm: &mut VM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #1 to 'string.lower' (string expected)".to_string())?;
 
     let result = vm.create_string(s.as_str().to_lowercase());
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 /// string.upper(s) - Convert to uppercase
@@ -111,7 +111,7 @@ fn string_upper(vm: &mut VM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #1 to 'string.upper' (string expected)".to_string())?;
 
     let result = vm.create_string(s.as_str().to_uppercase());
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 /// string.rep(s, n [, sep]) - Repeat string
@@ -131,7 +131,7 @@ fn string_rep(vm: &mut VM) -> Result<MultiValue, String> {
 
     if n <= 0 {
         let empty = vm.create_string(String::new());
-        return Ok(MultiValue::single(LuaValue::String(empty)));
+        return Ok(MultiValue::single(LuaValue::from_string_rc(empty)));
     }
 
     let mut result = String::new();
@@ -143,7 +143,7 @@ fn string_rep(vm: &mut VM) -> Result<MultiValue, String> {
     }
 
     let result = vm.create_string(result);
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 /// string.reverse(s) - Reverse string
@@ -154,7 +154,7 @@ fn string_reverse(vm: &mut VM) -> Result<MultiValue, String> {
 
     let reversed: String = s.as_str().chars().rev().collect();
     let result = vm.create_string(reversed);
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 /// string.sub(s, i [, j]) - Extract substring
@@ -189,7 +189,7 @@ fn string_sub(vm: &mut VM) -> Result<MultiValue, String> {
     };
 
     let result = vm.create_string(result_str);
-    Ok(MultiValue::single(LuaValue::String(result)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
 /// string.format(formatstring, ...) - Format string (simplified)
@@ -515,7 +515,7 @@ fn string_format(vm: &mut VM) -> Result<MultiValue, String> {
     }
 
     let result_str = vm.create_string(result);
-    Ok(MultiValue::single(LuaValue::String(result_str)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(result_str)))
 }
 
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
@@ -539,11 +539,11 @@ fn string_find(vm: &mut VM) -> Result<MultiValue, String> {
         if let Some(pos) = s.as_str()[start_pos..].find(pattern_str.as_str()) {
             let actual_pos = start_pos + pos;
             Ok(MultiValue::multiple(vec![
-                LuaValue::Integer((actual_pos + 1) as i64),
-                LuaValue::Integer((actual_pos + pattern_str.as_str().len()) as i64),
+                LuaValue::integer((actual_pos + 1) as i64),
+                LuaValue::integer((actual_pos + pattern_str.as_str().len()) as i64),
             ]))
         } else {
-            Ok(MultiValue::single(LuaValue::Nil))
+            Ok(MultiValue::single(LuaValue::nil()))
         }
     } else {
         // Pattern matching
@@ -553,16 +553,16 @@ fn string_find(vm: &mut VM) -> Result<MultiValue, String> {
                     crate::lua_pattern::find(s.as_str(), &pattern, start_pos)
                 {
                     let mut results = vec![
-                        LuaValue::Integer((start + 1) as i64),
-                        LuaValue::Integer(end as i64),
+                        LuaValue::integer((start + 1) as i64),
+                        LuaValue::integer(end as i64),
                     ];
                     // Add captures
                     for cap in captures {
-                        results.push(LuaValue::String(vm.create_string(cap)));
+                        results.push(LuaValue::from_string_rc(vm.create_string(cap)));
                     }
                     Ok(MultiValue::multiple(results))
                 } else {
-                    Ok(MultiValue::single(LuaValue::Nil))
+                    Ok(MultiValue::single(LuaValue::nil()))
                 }
             }
             Err(e) => Err(format!("invalid pattern: {}", e)),
@@ -591,19 +591,19 @@ fn string_match(vm: &mut VM) -> Result<MultiValue, String> {
                 if captures.is_empty() {
                     // No captures, return the matched portion
                     let matched = &text[start..end];
-                    Ok(MultiValue::single(LuaValue::String(
+                    Ok(MultiValue::single(LuaValue::from_string_rc(
                         vm.create_string(matched.to_string()),
                     )))
                 } else {
                     // Return captures
                     let results: Vec<LuaValue> = captures
                         .into_iter()
-                        .map(|s| LuaValue::String(vm.create_string(s)))
+                        .map(|s| LuaValue::from_string_rc(vm.create_string(s)))
                         .collect();
                     Ok(MultiValue::multiple(results))
                 }
             } else {
-                Ok(MultiValue::single(LuaValue::Nil))
+                Ok(MultiValue::single(LuaValue::nil()))
             }
         }
         Err(e) => Err(format!("invalid pattern: {}", e)),
@@ -611,94 +611,95 @@ fn string_match(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// string.gsub(s, pattern, repl [, n]) - Global substitution
-fn string_gsub(vm: &mut VM) -> Result<MultiValue, String> {
-    let s = require_arg(vm, 0, "string.gsub")?
-        .as_string()
-        .ok_or_else(|| "bad argument #1 to 'string.gsub' (string expected)".to_string())?;
+fn string_gsub(_vm: &mut VM) -> Result<MultiValue, String> {
+    //     let s = require_arg(vm, 0, "string.gsub")?
+    //         .as_string()
+    //         .ok_or_else(|| "bad argument #1 to 'string.gsub' (string expected)".to_string())?;
 
-    let pattern_str = require_arg(vm, 1, "string.gsub")?
-        .as_string()
-        .ok_or_else(|| "bad argument #2 to 'string.gsub' (string expected)".to_string())?;
+    //     let pattern_str = require_arg(vm, 1, "string.gsub")?
+    //         .as_string()
+    //         .ok_or_else(|| "bad argument #2 to 'string.gsub' (string expected)".to_string())?;
 
-    let repl = require_arg(vm, 2, "string.gsub")?
-        .as_string()
-        .ok_or_else(|| "bad argument #3 to 'string.gsub' (string expected)".to_string())?;
+    //     let repl = require_arg(vm, 2, "string.gsub")?
+    //         .as_string()
+    //         .ok_or_else(|| "bad argument #3 to 'string.gsub' (string expected)".to_string())?;
 
-    let max = get_arg(vm, 3)
-        .and_then(|v| v.as_integer())
-        .map(|n| n as usize);
+    //     let max = get_arg(vm, 3)
+    //         .and_then(|v| v.as_integer())
+    //         .map(|n| n as usize);
 
-    match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
-        Ok(pattern) => {
-            let (result_str, count) =
-                crate::lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max);
+    //     match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
+    //         Ok(pattern) => {
+    //             let (result_str, count) =
+    //                 crate::lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max);
 
-            let result = vm.create_string(result_str);
-            Ok(MultiValue::multiple(vec![
-                LuaValue::String(result),
-                LuaValue::Integer(count as i64),
-            ]))
-        }
-        Err(e) => Err(format!("invalid pattern: {}", e)),
-    }
-}
+    //             let result = vm.create_string(result_str);
+    //             Ok(MultiValue::multiple(vec![
+    //                 LuaValue::from_string_rc(result),
+    //                 LuaValue::integer(count as i64),
+    //             ]))
+    //         }
+    //         Err(e) => Err(format!("invalid pattern: {}", e)),
+    //     }
+    // }
 
-/// need improve
-/// string.gmatch(s, pattern) - Iterator for pattern matches
-fn string_gmatch(vm: &mut VM) -> Result<MultiValue, String> {
-    let s = require_arg(vm, 0, "string.gmatch")?
-        .as_string()
-        .ok_or_else(|| "bad argument #1 to 'string.gmatch' (string expected)".to_string())?;
+    // /// need improve
+    // /// string.gmatch(s, pattern) - Iterator for pattern matches
+    // fn string_gmatch(vm: &mut VM) -> Result<MultiValue, String> {
+    //     let s = require_arg(vm, 0, "string.gmatch")?
+    //         .as_string()
+    //         .ok_or_else(|| "bad argument #1 to 'string.gmatch' (string expected)".to_string())?;
 
-    let pattern_str = require_arg(vm, 1, "string.gmatch")?
-        .as_string()
-        .ok_or_else(|| "bad argument #2 to 'string.gmatch' (string expected)".to_string())?;
+    //     let pattern_str = require_arg(vm, 1, "string.gmatch")?
+    //         .as_string()
+    //         .ok_or_else(|| "bad argument #2 to 'string.gmatch' (string expected)".to_string())?;
 
-    // Parse and validate pattern
-    let _pattern = match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
-        Ok(p) => p,
-        Err(e) => return Err(format!("invalid pattern: {}", e)),
-    };
+    //     // Parse and validate pattern
+    //     let _pattern = match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
+    //         Ok(p) => p,
+    //         Err(e) => return Err(format!("invalid pattern: {}", e)),
+    //     };
 
-    // Create a state structure to store in userdata
-    #[allow(dead_code)]
-    #[derive(Clone)]
-    struct GmatchState {
-        string: String,
-        pattern: String,
-        position: usize,
-    }
+    //     // Create a state structure to store in userdata
+    //     #[allow(dead_code)]
+    //     #[derive(Clone)]
+    //     struct GmatchState {
+    //         string: String,
+    //         pattern: String,
+    //         position: usize,
+    //     }
 
-    let state = GmatchState {
-        string: s.as_str().to_string(),
-        pattern: pattern_str.as_str().to_string(),
-        position: 0,
-    };
+    //     let state = GmatchState {
+    //         string: s.as_str().to_string(),
+    //         pattern: pattern_str.as_str().to_string(),
+    //         position: 0,
+    //     };
 
-    // Store state directly in userdata using Box for stable pointer
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    let state_box = Box::new(RefCell::new(state));
-    let state_ptr = Box::into_raw(state_box) as usize;
+    //     // Store state directly in userdata using Box for stable pointer
+    //     use std::cell::RefCell;
+    //     use std::rc::Rc;
+    //     let state_box = Box::new(RefCell::new(state));
+    //     let state_ptr = Box::into_raw(state_box) as usize;
 
-    let userdata = LuaValue::userdata(state_ptr);
+    //     let userdata = LuaValue::from_userdata_rc(state_box);
 
-    // Create metatable with __call and __gc
-    if let LuaValue::Userdata(ref ud) = userdata {
-        let mt = Rc::new(RefCell::new(LuaTable::new()));
-        mt.borrow_mut().raw_set(
-            LuaValue::String(vm.create_string("__call".to_string())),
-            LuaValue::CFunction(gmatch_iterator_optimized),
-        );
-        mt.borrow_mut().raw_set(
-            LuaValue::String(vm.create_string("__gc".to_string())),
-            LuaValue::CFunction(gmatch_gc_optimized),
-        );
+    //     // Create metatable with __call and __gc
+    //     if let Some(ref ud) = userdata.as_userdata() {
+    //         let mt = Rc::new(RefCell::new(LuaTable::new()));
+    //         mt.borrow_mut().raw_set(
+    //             LuaValue::from_string_rc(vm.create_string("__call".to_string())),
+    //             LuaValue::cfunction(gmatch_iterator_optimized),
+    //         );
+    //         mt.borrow_mut().raw_set(
+    //             LuaValue::from_string_rc(vm.create_string("__gc".to_string())),
+    //             LuaValue::cfunction(gmatch_gc_optimized),
+    //         );
 
-        ud.set_metatable(Some(mt));
-    }
+    //         ud.set_metatable(Some(mt));
+    //     }
 
-    Ok(MultiValue::single(userdata))
+    //     Ok(MultiValue::single(userdata))
+    todo!()
 }
 
 /// Optimized iterator that stores state directly in userdata
@@ -720,7 +721,7 @@ fn gmatch_iterator_optimized(vm: &mut VM) -> Result<MultiValue, String> {
     let state_val = &frame.registers[1];
 
     // Extract state pointer from userdata
-    let state_ptr = if let LuaValue::Userdata(ud) = state_val {
+    let state_ptr = if let Some(ud) = state_val.as_userdata() {
         let data = ud.get_data();
         let data_ref = data.borrow();
         if let Some(&ptr) = data_ref.downcast_ref::<usize>() {
@@ -752,19 +753,19 @@ fn gmatch_iterator_optimized(vm: &mut VM) -> Result<MultiValue, String> {
         // Return captures if any, otherwise return the matched string
         if captures.is_empty() {
             let matched = &state.string[start..end];
-            Ok(MultiValue::single(LuaValue::String(
+            Ok(MultiValue::single(LuaValue::from_string_rc(
                 vm.create_string(matched.to_string()),
             )))
         } else {
             let mut results = Vec::new();
             for cap in captures {
-                results.push(LuaValue::String(vm.create_string(cap)));
+                results.push(LuaValue::from_string_rc(vm.create_string(cap)));
             }
             Ok(MultiValue::multiple(results))
         }
     } else {
         // No more matches, return nil
-        Ok(MultiValue::single(LuaValue::Nil))
+        Ok(MultiValue::single(LuaValue::nil()))
     }
 }
 
@@ -787,7 +788,7 @@ fn gmatch_gc_optimized(vm: &mut VM) -> Result<MultiValue, String> {
     let state_val = &frame.registers[0];
 
     // Extract state pointer from userdata and free it
-    if let LuaValue::Userdata(ud) = state_val {
+    if let Some(ud) = state_val.as_userdata() {
         let data = ud.get_data();
         let data_ref = data.borrow();
         if let Some(&state_ptr) = data_ref.downcast_ref::<usize>() {

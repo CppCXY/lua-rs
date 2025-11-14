@@ -350,7 +350,7 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     if exprs.len() >= 3 {
         let _ = compile_expr_to(c, &exprs[2], Some(step_reg))?;
     } else {
-        let const_idx = add_constant(c, LuaValue::Integer(1));
+        let const_idx = add_constant(c, LuaValue::integer(1));
         emit_load_constant(c, step_reg, const_idx);
     }
 
@@ -508,7 +508,7 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
 
     // Check if first return value is nil (end of iteration)
     let is_nil_reg = alloc_register(c);
-    let nil_const = add_constant(c, LuaValue::Nil);
+    let nil_const = add_constant(c, LuaValue::nil());
     let nil_reg = alloc_register(c);
     emit_load_constant(c, nil_reg, nil_const);
 

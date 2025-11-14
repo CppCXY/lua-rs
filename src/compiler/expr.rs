@@ -59,16 +59,16 @@ fn compile_literal_expr(
         LuaLiteralToken::Number(num) => {
             // Try to get the string representation and parse it
             let num_value = if num.is_float() {
-                LuaValue::Float(num.get_float_value())
+                LuaValue::float(num.get_float_value())
             } else {
-                LuaValue::Integer(num.get_int_value())
+                LuaValue::integer(num.get_int_value())
             };
             let const_idx = add_constant(c, num_value);
             emit_load_constant(c, reg, const_idx);
         }
         LuaLiteralToken::String(s) => {
             let lua_string = intern_string(c, s.get_value());
-            let const_idx = add_constant(c, LuaValue::String(lua_string));
+            let const_idx = add_constant(c, LuaValue::from_string_rc(lua_string));
             emit_load_constant(c, reg, const_idx);
         }
         _ => {}
@@ -265,7 +265,7 @@ pub fn compile_call_expr_with_returns(
             LuaIndexKey::Name(name_token) => {
                 let field_name = name_token.get_name_text().to_string();
                 let lua_str = intern_string(c, field_name);
-                let const_idx = add_constant(c, LuaValue::String(lua_str));
+                let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
                 let key_reg = alloc_register(c);
                 emit_load_constant(c, key_reg, const_idx);
                 key_reg
@@ -273,7 +273,7 @@ pub fn compile_call_expr_with_returns(
             LuaIndexKey::String(string_token) => {
                 let string_value = string_token.get_value();
                 let lua_str = intern_string(c, string_value);
-                let const_idx = add_constant(c, LuaValue::String(lua_str));
+                let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
                 let key_reg = alloc_register(c);
                 emit_load_constant(c, key_reg, const_idx);
                 key_reg
@@ -406,7 +406,7 @@ fn compile_index_expr_to(
             // Optimized: table.field -> GetTableK
             let field_name = name_token.get_name_text().to_string();
             let lua_str = intern_string(c, field_name);
-            let const_idx = add_constant(c, LuaValue::String(lua_str));
+            let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
             // Use GetTableK: R(A) := R(B)[K(C)]
             // ABC format: A=dest, B=table, C=const_idx
             if const_idx <= 511 {
@@ -430,7 +430,7 @@ fn compile_index_expr_to(
             // Optimized: table["string"] -> GetTableK
             let string_value = string_token.get_value();
             let lua_str = intern_string(c, string_value);
-            let const_idx = add_constant(c, LuaValue::String(lua_str));
+            let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
             if const_idx <= 511 {
                 emit(
                     c,
@@ -510,7 +510,7 @@ fn compile_table_expr_to(
                     // key is an identifier
                     let key_name = name_token.get_name_text().to_string();
                     let lua_str = intern_string(c, key_name);
-                    let const_idx = add_constant(c, LuaValue::String(lua_str));
+                    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg
@@ -519,7 +519,7 @@ fn compile_table_expr_to(
                     // key is a string literal
                     let string_value = string_token.get_value();
                     let lua_str = intern_string(c, string_value);
-                    let const_idx = add_constant(c, LuaValue::String(lua_str));
+                    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg
@@ -631,7 +631,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                     // Optimized: table.field = value -> SetTableK
                     let field_name = name_token.get_name_text().to_string();
                     let lua_str = intern_string(c, field_name);
-                    let const_idx = add_constant(c, LuaValue::String(lua_str));
+                    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
                     // Use SetTableK: R(A)[K(B)] := R(C)
                     // ABC format: A=table, B=const_idx, C=value
                     if const_idx <= 511 {
@@ -659,7 +659,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                     // Optimized: table["string"] = value -> SetTableK
                     let string_value = string_token.get_value();
                     let lua_str = intern_string(c, string_value);
-                    let const_idx = add_constant(c, LuaValue::String(lua_str));
+                    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
                     if const_idx <= 511 {
                         emit(
                             c,

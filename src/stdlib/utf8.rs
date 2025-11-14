@@ -18,7 +18,7 @@ fn utf8_len(vm: &mut VM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #1 to 'utf8.len' (string expected)".to_string())?;
 
     let len = s.as_str().chars().count();
-    Ok(MultiValue::single(LuaValue::Integer(len as i64)))
+    Ok(MultiValue::single(LuaValue::integer(len as i64)))
 }
 
 fn utf8_char(vm: &mut VM) -> Result<MultiValue, String> {
@@ -34,5 +34,5 @@ fn utf8_char(vm: &mut VM) -> Result<MultiValue, String> {
     }
 
     let s = vm.create_string(result);
-    Ok(MultiValue::single(LuaValue::String(s)))
+    Ok(MultiValue::single(LuaValue::from_string_rc(s)))
 }
