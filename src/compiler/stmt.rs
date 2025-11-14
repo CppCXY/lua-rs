@@ -4,8 +4,8 @@ use super::expr::{compile_call_expr, compile_expr, compile_expr_to, compile_var_
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
 use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr};
+use crate::lua_value::LuaValue;
 use crate::opcode::{Instruction, OpCode};
-use crate::value::LuaValue;
 use emmylua_parser::{
     LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat, LuaForStat, LuaFuncStat,
     LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat,
@@ -350,7 +350,7 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     if exprs.len() >= 3 {
         let _ = compile_expr_to(c, &exprs[2], Some(step_reg))?;
     } else {
-        let const_idx = add_constant(c, crate::value::LuaValue::Integer(1));
+        let const_idx = add_constant(c, LuaValue::Integer(1));
         emit_load_constant(c, step_reg, const_idx);
     }
 
@@ -360,13 +360,13 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 
     // Begin new scope for loop body
     begin_scope(c);
-    
+
     // The loop variable is at R(base+3), initialized by FORLOOP
     add_local(c, var_name, var_reg);
     begin_loop(c);
 
     let loop_start = c.chunk.code.len();
-    
+
     // FORLOOP will set R(base+3) = R(base) on first iteration
     // We need to initialize it for the loop body
     emit_move(c, var_reg, base_reg);
@@ -378,7 +378,10 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 
     // Emit FORLOOP: increments index, checks condition, jumps back if true
     let forloop_offset = (loop_start as i32) - (c.chunk.code.len() as i32) - 1;
-    emit(c, Instruction::encode_asbx(OpCode::ForLoop, base_reg, forloop_offset));
+    emit(
+        c,
+        Instruction::encode_asbx(OpCode::ForLoop, base_reg, forloop_offset),
+    );
 
     // Patch FORPREP jump to skip to loop start
     let prep_jump = (loop_start as i32) - (forprep_pc as i32) - 1;

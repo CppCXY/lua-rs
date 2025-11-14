@@ -2,7 +2,7 @@
 // Implements: concat, insert, move, pack, remove, sort, unpack
 
 use crate::lib_registry::{LibraryModule, get_arg, require_arg};
-use crate::value::{LuaValue, MultiValue};
+use crate::lua_value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
 pub fn create_table_lib() -> LibraryModule {
@@ -239,13 +239,13 @@ fn table_sort(vm: &mut VM) -> Result<MultiValue, String> {
     }
 
     let comp_func = comp.unwrap();
-    
+
     // Clone values for sorting (we need to modify the table during comparison calls)
     let mut sorted_values: Vec<LuaValue> = values.iter().cloned().collect();
-    
+
     // Drop the mutable borrow before we start calling the comparison function
     drop(table_ref);
-    
+
     // Custom comparison using Lua function
     // We need to use a comparison that calls the Lua function
     // Since we can't borrow vm mutably during sort, we'll do a simple insertion sort
@@ -259,7 +259,7 @@ fn table_sort(vm: &mut VM) -> Result<MultiValue, String> {
                 Ok(None) => false,
                 Err(e) => return Err(format!("error in sort comparison function: {}", e)),
             };
-            
+
             if result {
                 sorted_values.swap(j, j - 1);
                 j -= 1;
@@ -268,7 +268,7 @@ fn table_sort(vm: &mut VM) -> Result<MultiValue, String> {
             }
         }
     }
-    
+
     // Write back the sorted values
     let mut table_ref = table.borrow_mut();
     if let Some(array) = table_ref.get_array_part() {

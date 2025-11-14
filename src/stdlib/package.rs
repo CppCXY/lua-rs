@@ -2,7 +2,7 @@
 // Implements: config, cpath, loaded, loadlib, path, preload, searchers, searchpath
 
 use crate::lib_registry::LibraryModule;
-use crate::value::{LuaValue, MultiValue};
+use crate::lua_value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
 pub fn create_package_lib() -> LibraryModule {
@@ -25,4 +25,3 @@ fn package_searchpath(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: return nil
     Ok(MultiValue::single(LuaValue::Nil))
 }
-

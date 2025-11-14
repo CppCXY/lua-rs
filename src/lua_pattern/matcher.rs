@@ -6,14 +6,14 @@ use super::parser::{AnchorType, Pattern, RepeatMode};
 /// Find pattern in string, returns (start, end, captures)
 pub fn find(text: &str, pattern: &Pattern, init: usize) -> Option<(usize, usize, Vec<String>)> {
     let text_chars: Vec<char> = text.chars().collect();
-    
+
     // Try matching from each position
     for start_pos in init..=text_chars.len() {
         if let Some((end_pos, captures)) = try_match(pattern, &text_chars, start_pos) {
             return Some((start_pos, end_pos, captures));
         }
     }
-    
+
     None
 }
 
@@ -24,12 +24,17 @@ pub fn match_pattern(text: &str, pattern: &Pattern) -> Option<(usize, Vec<String
 }
 
 /// Global substitution
-pub fn gsub(text: &str, pattern: &Pattern, replacement: &str, max: Option<usize>) -> (String, usize) {
+pub fn gsub(
+    text: &str,
+    pattern: &Pattern,
+    replacement: &str,
+    max: Option<usize>,
+) -> (String, usize) {
     let mut result = String::new();
     let mut count = 0;
     let mut pos = 0;
     let text_chars: Vec<char> = text.chars().collect();
-    
+
     while pos < text_chars.len() {
         if let Some(max_count) = max {
             if count >= max_count {
@@ -38,14 +43,14 @@ pub fn gsub(text: &str, pattern: &Pattern, replacement: &str, max: Option<usize>
                 break;
             }
         }
-        
+
         if let Some((end_pos, _)) = try_match(pattern, &text_chars, pos) {
             // Found match
             count += 1;
-            
+
             // Do replacement (simplified - doesn't handle %1, %2 yet)
             result.push_str(replacement);
-            
+
             pos = end_pos.max(pos + 1); // Move past match
         } else {
             // No match, copy character
@@ -53,7 +58,7 @@ pub fn gsub(text: &str, pattern: &Pattern, replacement: &str, max: Option<usize>
             pos += 1;
         }
     }
-    
+
     (result, count)
 }
 
@@ -116,7 +121,10 @@ fn match_impl(
             }
             Some(pos)
         }
-        Pattern::Repeat { pattern: inner, mode } => {
+        Pattern::Repeat {
+            pattern: inner,
+            mode,
+        } => {
             match mode {
                 RepeatMode::ZeroOrMore => {
                     // Greedy: match as many as possible
@@ -162,32 +170,30 @@ fn match_impl(
             captures.push(captured);
             Some(end)
         }
-        Pattern::Anchor(anchor_type) => {
-            match anchor_type {
-                AnchorType::Start => {
-                    if pos == 0 {
-                        Some(pos)
-                    } else {
-                        None
-                    }
-                }
-                AnchorType::End => {
-                    if pos == text.len() {
-                        Some(pos)
-                    } else {
-                        None
-                    }
+        Pattern::Anchor(anchor_type) => match anchor_type {
+            AnchorType::Start => {
+                if pos == 0 {
+                    Some(pos)
+                } else {
+                    None
                 }
             }
-        }
+            AnchorType::End => {
+                if pos == text.len() {
+                    Some(pos)
+                } else {
+                    None
+                }
+            }
+        },
         Pattern::Balanced { open, close } => {
             if pos >= text.len() || text[pos] != *open {
                 return None;
             }
-            
+
             let mut depth = 1;
             let mut curr = pos + 1;
-            
+
             while curr < text.len() && depth > 0 {
                 if text[curr] == *open {
                     depth += 1;
@@ -196,12 +202,8 @@ fn match_impl(
                 }
                 curr += 1;
             }
-            
-            if depth == 0 {
-                Some(curr)
-            } else {
-                None
-            }
+
+            if depth == 0 { Some(curr) } else { None }
         }
     }
 }

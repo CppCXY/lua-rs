@@ -6,78 +6,78 @@
 #[repr(u8)]
 pub enum OpCode {
     // Load/Store
-    Move = 0,      // R(A) := R(B)
-    LoadK,         // R(A) := K(Bx)
-    LoadNil,       // R(A) := nil
-    LoadBool,      // R(A) := bool(B); if C then pc++
-    
+    Move = 0, // R(A) := R(B)
+    LoadK,    // R(A) := K(Bx)
+    LoadNil,  // R(A) := nil
+    LoadBool, // R(A) := bool(B); if C then pc++
+
     // Table operations
-    NewTable,      // R(A) := {} (size = B,C)
-    GetTable,      // R(A) := R(B)[R(C)]
-    SetTable,      // R(A)[R(B)] := R(C)
-    
+    NewTable, // R(A) := {} (size = B,C)
+    GetTable, // R(A) := R(B)[R(C)]
+    SetTable, // R(A)[R(B)] := R(C)
+
     // Arithmetic operations
-    Add,           // R(A) := R(B) + R(C)
-    Sub,           // R(A) := R(B) - R(C)
-    Mul,           // R(A) := R(B) * R(C)
-    Div,           // R(A) := R(B) / R(C)
-    Mod,           // R(A) := R(B) % R(C)
-    Pow,           // R(A) := R(B) ^ R(C)
-    Unm,           // R(A) := -R(B)
-    
+    Add, // R(A) := R(B) + R(C)
+    Sub, // R(A) := R(B) - R(C)
+    Mul, // R(A) := R(B) * R(C)
+    Div, // R(A) := R(B) / R(C)
+    Mod, // R(A) := R(B) % R(C)
+    Pow, // R(A) := R(B) ^ R(C)
+    Unm, // R(A) := -R(B)
+
     // Logical operations
-    Not,           // R(A) := not R(B)
-    Len,           // R(A) := length of R(B)
-    
+    Not, // R(A) := not R(B)
+    Len, // R(A) := length of R(B)
+
     // Comparison
-    Eq,            // if (R(B) == R(C)) ~= A then pc++
-    Lt,            // if (R(B) < R(C)) ~= A then pc++
-    Le,            // if (R(B) <= R(C)) ~= A then pc++
-    Ne,            // if (R(B) != R(C)) ~= A then pc++
-    Gt,            // if (R(B) > R(C)) ~= A then pc++
-    Ge,            // if (R(B) >= R(C)) ~= A then pc++
-    
+    Eq, // if (R(B) == R(C)) ~= A then pc++
+    Lt, // if (R(B) < R(C)) ~= A then pc++
+    Le, // if (R(B) <= R(C)) ~= A then pc++
+    Ne, // if (R(B) != R(C)) ~= A then pc++
+    Gt, // if (R(B) > R(C)) ~= A then pc++
+    Ge, // if (R(B) >= R(C)) ~= A then pc++
+
     // Logical operations (short-circuit)
-    And,           // R(A) := R(B) and R(C)
-    Or,            // R(A) := R(B) or R(C)
-    
+    And, // R(A) := R(B) and R(C)
+    Or,  // R(A) := R(B) or R(C)
+
     // Bitwise operations
-    BAnd,          // R(A) := R(B) & R(C)
-    BOr,           // R(A) := R(B) | R(C)
-    BXor,          // R(A) := R(B) ~ R(C)
-    Shl,           // R(A) := R(B) << R(C)
-    Shr,           // R(A) := R(B) >> R(C)
-    BNot,          // R(A) := ~R(B)
-    
+    BAnd, // R(A) := R(B) & R(C)
+    BOr,  // R(A) := R(B) | R(C)
+    BXor, // R(A) := R(B) ~ R(C)
+    Shl,  // R(A) := R(B) << R(C)
+    Shr,  // R(A) := R(B) >> R(C)
+    BNot, // R(A) := ~R(B)
+
     // Integer division
-    IDiv,          // R(A) := R(B) // R(C)
-    
+    IDiv, // R(A) := R(B) // R(C)
+
     // Numeric for loop
-    ForPrep,       // R(A) -= R(A+2); pc += sBx
-    ForLoop,       // R(A) += R(A+2); if R(A) <?= R(A+1) then pc += sBx; R(A+3) = R(A)
-    
+    ForPrep, // R(A) -= R(A+2); pc += sBx
+    ForLoop, // R(A) += R(A+2); if R(A) <?= R(A+1) then pc += sBx; R(A+3) = R(A)
+
     // Control flow
-    Jmp,           // pc += sBx
-    Test,          // if not (R(A) <=> C) then pc++
-    TestSet,       // if (R(B) <=> C) then R(A) := R(B) else pc++
-    
+    Jmp,     // pc += sBx
+    Test,    // if not (R(A) <=> C) then pc++
+    TestSet, // if (R(B) <=> C) then R(A) := R(B) else pc++
+
     // Function calls
-    Call,          // R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
-    Return,        // return R(A), ... ,R(A+B-2)
-    
+    Call,   // R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
+    Return, // return R(A), ... ,R(A+B-2)
+
     // Upvalues
-    GetUpval,      // R(A) := UpValue[B]
-    SetUpval,      // UpValue[B] := R(A)
-    
+    GetUpval, // R(A) := UpValue[B]
+    SetUpval, // UpValue[B] := R(A)
+
     // Closure
-    Closure,       // R(A) := closure(KPROTO[Bx])
-    
+    Closure, // R(A) := closure(KPROTO[Bx])
+
     // Concatenation
-    Concat,        // R(A) := R(B).. ... ..R(C)
-    
+    Concat, // R(A) := R(B).. ... ..R(C)
+
     // Global
-    GetGlobal,     // R(A) := Gbl[K(Bx)]
-    SetGlobal,     // Gbl[K(Bx)] := R(A)
+    GetGlobal, // R(A) := Gbl[K(Bx)]
+    SetGlobal, // Gbl[K(Bx)] := R(A)
 }
 
 impl OpCode {
@@ -108,28 +108,23 @@ impl Instruction {
     const A_OFFSET: u32 = Self::OPCODE_BITS;
     const B_OFFSET: u32 = Self::A_OFFSET + Self::A_BITS;
     const C_OFFSET: u32 = Self::B_OFFSET + Self::B_BITS;
-    const BX_OFFSET: u32 = Self::A_OFFSET + Self::A_BITS;  // Bx comes after A
+    const BX_OFFSET: u32 = Self::A_OFFSET + Self::A_BITS; // Bx comes after A
 
     // Encode ABC format
     pub fn encode_abc(op: OpCode, a: u32, b: u32, c: u32) -> u32 {
         assert!(a <= Self::MAX_A);
         assert!(b <= Self::MAX_B);
         assert!(c <= Self::MAX_C);
-        
-        (op as u32) 
-            | (a << Self::A_OFFSET)
-            | (b << Self::B_OFFSET)
-            | (c << Self::C_OFFSET)
+
+        (op as u32) | (a << Self::A_OFFSET) | (b << Self::B_OFFSET) | (c << Self::C_OFFSET)
     }
 
     // Encode ABx format
     pub fn encode_abx(op: OpCode, a: u32, bx: u32) -> u32 {
         assert!(a <= Self::MAX_A);
         assert!(bx <= Self::MAX_BX);
-        
-        (op as u32)
-            | (a << Self::A_OFFSET)
-            | (bx << Self::BX_OFFSET)
+
+        (op as u32) | (a << Self::A_OFFSET) | (bx << Self::BX_OFFSET)
     }
 
     // Encode AsBx format (signed Bx)
@@ -137,7 +132,7 @@ impl Instruction {
         assert!(a <= Self::MAX_A);
         let bx = (sbx + (Self::MAX_BX as i32 / 2)) as u32;
         assert!(bx <= Self::MAX_BX);
-        
+
         Self::encode_abx(op, a, bx)
     }
 
@@ -199,7 +194,7 @@ mod tests {
         println!("OpCode: {:?}", Instruction::get_opcode(instr));
         println!("A: {}", Instruction::get_a(instr));
         println!("Bx: {}", Instruction::get_bx(instr));
-        
+
         assert_eq!(Instruction::get_opcode(instr), OpCode::LoadK);
         assert_eq!(Instruction::get_bx(instr), 100);
         assert_eq!(Instruction::get_a(instr), 5);

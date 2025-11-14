@@ -14,4 +14,4 @@ mod matcher;
 mod parser;
 
 pub use matcher::{find, gsub, match_pattern};
-pub use parser::{parse_pattern, Pattern};
+pub use parser::{Pattern, parse_pattern};

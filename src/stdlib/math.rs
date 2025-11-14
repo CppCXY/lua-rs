@@ -1,10 +1,10 @@
 // Math library
-// Implements: abs, acos, asin, atan, ceil, cos, deg, exp, floor, fmod, 
-// log, max, min, modf, rad, random, randomseed, sin, sqrt, tan, tointeger, 
+// Implements: abs, acos, asin, atan, ceil, cos, deg, exp, floor, fmod,
+// log, max, min, modf, rad, random, randomseed, sin, sqrt, tan, tointeger,
 // type, ult, pi, huge, maxinteger, mininteger
 
 use crate::lib_registry::{LibraryModule, get_arg, require_arg};
-use crate::value::{LuaValue, MultiValue};
+use crate::lua_value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
 pub fn create_math_lib() -> LibraryModule {
@@ -36,9 +36,13 @@ pub fn create_math_lib() -> LibraryModule {
 }
 
 fn get_number(vm: &VM, idx: usize, func_name: &str) -> Result<f64, String> {
-    require_arg(vm, idx, func_name)?
-        .as_number()
-        .ok_or_else(|| format!("bad argument #{} to '{}' (number expected)", idx + 1, func_name))
+    require_arg(vm, idx, func_name)?.as_number().ok_or_else(|| {
+        format!(
+            "bad argument #{} to '{}' (number expected)",
+            idx + 1,
+            func_name
+        )
+    })
 }
 
 fn math_abs(vm: &mut VM) -> Result<MultiValue, String> {
@@ -96,55 +100,55 @@ fn math_fmod(vm: &mut VM) -> Result<MultiValue, String> {
 fn math_log(vm: &mut VM) -> Result<MultiValue, String> {
     let x = get_number(vm, 0, "math.log")?;
     let base = get_arg(vm, 1).and_then(|v| v.as_number());
-    
-    let result = if let Some(b) = base {
-        x.log(b)
-    } else {
-        x.ln()
-    };
-    
+
+    let result = if let Some(b) = base { x.log(b) } else { x.ln() };
+
     Ok(MultiValue::single(LuaValue::Float(result)))
 }
 
 fn math_max(vm: &mut VM) -> Result<MultiValue, String> {
     let args = crate::lib_registry::get_args(vm);
-    
+
     if args.is_empty() {
         return Err("bad argument to 'math.max' (value expected)".to_string());
     }
-    
-    let mut max = args[0].as_number()
+
+    let mut max = args[0]
+        .as_number()
         .ok_or_else(|| "bad argument to 'math.max' (number expected)".to_string())?;
-    
+
     for arg in args.iter().skip(1) {
-        let val = arg.as_number()
+        let val = arg
+            .as_number()
             .ok_or_else(|| "bad argument to 'math.max' (number expected)".to_string())?;
         if val > max {
             max = val;
         }
     }
-    
+
     Ok(MultiValue::single(LuaValue::Float(max)))
 }
 
 fn math_min(vm: &mut VM) -> Result<MultiValue, String> {
     let args = crate::lib_registry::get_args(vm);
-    
+
     if args.is_empty() {
         return Err("bad argument to 'math.min' (value expected)".to_string());
     }
-    
-    let mut min = args[0].as_number()
+
+    let mut min = args[0]
+        .as_number()
         .ok_or_else(|| "bad argument to 'math.min' (number expected)".to_string())?;
-    
+
     for arg in args.iter().skip(1) {
-        let val = arg.as_number()
+        let val = arg
+            .as_number()
             .ok_or_else(|| "bad argument to 'math.min' (number expected)".to_string())?;
         if val < min {
             min = val;
         }
     }
-    
+
     Ok(MultiValue::single(LuaValue::Float(min)))
 }
 
@@ -152,7 +156,7 @@ fn math_modf(vm: &mut VM) -> Result<MultiValue, String> {
     let x = get_number(vm, 0, "math.modf")?;
     let int_part = x.trunc();
     let frac_part = x - int_part;
-    
+
     Ok(MultiValue::multiple(vec![
         LuaValue::Float(int_part),
         LuaValue::Float(frac_part),
@@ -167,15 +171,15 @@ fn math_rad(vm: &mut VM) -> Result<MultiValue, String> {
 fn math_random(vm: &mut VM) -> Result<MultiValue, String> {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hash, Hasher};
-    
+
     let argc = crate::lib_registry::arg_count(vm);
-    
+
     // Simple pseudo-random using hash
     let mut hasher = RandomState::new().build_hasher();
     std::time::SystemTime::now().hash(&mut hasher);
     let hash = hasher.finish();
     let random = (hash % 1000000) as f64 / 1000000.0;
-    
+
     match argc {
         0 => Ok(MultiValue::single(LuaValue::Float(random))),
         1 => {
@@ -216,7 +220,7 @@ fn math_tan(vm: &mut VM) -> Result<MultiValue, String> {
 
 fn math_tointeger(vm: &mut VM) -> Result<MultiValue, String> {
     let val = require_arg(vm, 0, "math.tointeger")?;
-    
+
     let result = if let Some(i) = val.as_integer() {
         LuaValue::Integer(i)
     } else if let Some(f) = val.as_number() {
@@ -228,19 +232,19 @@ fn math_tointeger(vm: &mut VM) -> Result<MultiValue, String> {
     } else {
         LuaValue::Nil
     };
-    
+
     Ok(MultiValue::single(result))
 }
 
 fn math_type(vm: &mut VM) -> Result<MultiValue, String> {
     let val = require_arg(vm, 0, "math.type")?;
-    
+
     let type_str = match val {
         LuaValue::Integer(_) => "integer",
         LuaValue::Float(_) => "float",
         _ => return Ok(MultiValue::single(LuaValue::Nil)),
     };
-    
+
     let result = vm.create_string(type_str.to_string());
     Ok(MultiValue::single(LuaValue::String(result)))
 }
@@ -249,13 +253,12 @@ fn math_ult(vm: &mut VM) -> Result<MultiValue, String> {
     let m = require_arg(vm, 0, "math.ult")?
         .as_integer()
         .ok_or_else(|| "bad argument #1 to 'math.ult' (integer expected)".to_string())?;
-    
+
     let n = require_arg(vm, 1, "math.ult")?
         .as_integer()
         .ok_or_else(|| "bad argument #2 to 'math.ult' (integer expected)".to_string())?;
-    
+
     // Unsigned less than
     let result = (m as u64) < (n as u64);
     Ok(MultiValue::single(LuaValue::Boolean(result)))
 }
-

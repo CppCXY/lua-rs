@@ -1,18 +1,15 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
-
-use emmylua_parser::{LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
-
-use crate::opcode::{Instruction, OpCode};
-use crate::value::{Chunk, StringPool};
-use std::cell::RefCell;
-use std::rc::Rc;
-
 mod expr;
 mod helpers;
 mod stmt;
 
+use crate::lua_value::{Chunk, StringPool};
+use crate::opcode::{Instruction, OpCode};
+use emmylua_parser::{LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
 use helpers::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 use stmt::*;
 
 /// Scope chain for variable and upvalue resolution
@@ -108,7 +105,10 @@ impl Compiler {
     }
 
     /// Create a new compiler with a parent scope chain and shared string pool
-    pub fn new_with_parent(parent_scope: Rc<RefCell<ScopeChain>>, string_pool: Rc<RefCell<StringPool>>) -> Self {
+    pub fn new_with_parent(
+        parent_scope: Rc<RefCell<ScopeChain>>,
+        string_pool: Rc<RefCell<StringPool>>,
+    ) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
@@ -151,7 +151,10 @@ impl Compiler {
         // Print string pool statistics (for debugging)
         let (string_count, total_bytes) = compiler.string_pool.borrow().stats();
         if string_count > 0 {
-            eprintln!("[StringPool] Interned {} unique strings, {} bytes total", string_count, total_bytes);
+            eprintln!(
+                "[StringPool] Interned {} unique strings, {} bytes total",
+                string_count, total_bytes
+            );
         }
 
         Ok(compiler.chunk)

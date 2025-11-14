@@ -3,8 +3,10 @@
 
 use crate::gc::{GC, GcObjectType};
 use crate::lib_registry;
+use crate::lua_value::{
+    Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaUserdata, LuaValue,
+};
 use crate::opcode::{Instruction, OpCode};
-use crate::value::{Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -281,7 +283,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path: avoid cloning by matching references directly
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
@@ -324,7 +326,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path: avoid cloning
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
@@ -364,7 +366,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
@@ -404,7 +406,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path: division always returns float in Lua
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
@@ -444,7 +446,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
@@ -511,7 +513,7 @@ impl VM {
         let b = Instruction::get_b(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path: avoid clone
         match &frame.registers[b] {
             LuaValue::Integer(i) => {
@@ -541,7 +543,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(i), LuaValue::Integer(j)) => {
@@ -639,34 +641,33 @@ impl VM {
                 (LuaValue::Boolean(l), LuaValue::Boolean(r)) => Some(l == r),
                 (LuaValue::Integer(l), LuaValue::Integer(r)) => Some(l == r),
                 (LuaValue::Float(l), LuaValue::Float(r)) => Some(l == r),
-                (LuaValue::Integer(i), LuaValue::Float(f)) | (LuaValue::Float(f), LuaValue::Integer(i)) => {
-                    Some(*i as f64 == *f)
-                }
-                _ => None
+                (LuaValue::Integer(i), LuaValue::Float(f))
+                | (LuaValue::Float(f), LuaValue::Integer(i)) => Some(*i as f64 == *f),
+                _ => None,
             }
         };
-        
+
         if let Some(result) = fast_result {
             let frame = self.current_frame_mut();
             frame.registers[a] = LuaValue::Boolean(result);
             return Ok(());
         }
-                
+
         // Slow path: need to handle tables/strings/metamethods
         let (left, right) = {
             let frame = self.current_frame();
             (frame.registers[b].clone(), frame.registers[c].clone())
         };
-        
+
         if self.values_equal(&left, &right) {
             let frame = self.current_frame_mut();
             frame.registers[a] = LuaValue::Boolean(true);
             return Ok(());
         }
-        
+
         let left_mm = self.get_metamethod(&left, "__eq");
         let right_mm = self.get_metamethod(&right, "__eq");
-        
+
         if let (Some(mm_left), Some(mm_right)) = (&left_mm, &right_mm) {
             if self.values_equal(mm_left, mm_right) {
                 if self.call_binop_metamethod(&left, &right, "__eq", a)? {
@@ -674,7 +675,7 @@ impl VM {
                 }
             }
         }
-        
+
         let frame = self.current_frame_mut();
         frame.registers[a] = LuaValue::Boolean(false);
         Ok(())
@@ -687,7 +688,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path: numeric comparison without clone
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(l), LuaValue::Integer(r)) => {
@@ -733,7 +734,7 @@ impl VM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame_mut();
-        
+
         // Fast path: numeric comparison without clone
         match (&frame.registers[b], &frame.registers[c]) {
             (LuaValue::Integer(l), LuaValue::Integer(r)) => {
@@ -794,9 +795,9 @@ impl VM {
     fn op_forprep(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let sbx = Instruction::get_sbx(instr);
-        
+
         let frame = self.current_frame_mut();
-        
+
         // R(A) should be init, R(A+1) should be limit, R(A+2) should be step
         // Subtract step from init: R(A) -= R(A+2)
         match (&frame.registers[a], &frame.registers[a + 2]) {
@@ -815,7 +816,7 @@ impl VM {
                 return Err("'for' initial value must be a number".to_string());
             }
         }
-        
+
         // Jump to loop start
         frame.pc = (frame.pc as i32 + sbx) as usize;
         Ok(())
@@ -825,12 +826,16 @@ impl VM {
     fn op_forloop(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let sbx = Instruction::get_sbx(instr);
-        
+
         let frame = self.current_frame_mut();
-        
+
         // R(A) is index, R(A+1) is limit, R(A+2) is step
         // Add step: R(A) += R(A+2)
-        let (new_value, continue_loop) = match (&frame.registers[a], &frame.registers[a + 1], &frame.registers[a + 2]) {
+        let (new_value, continue_loop) = match (
+            &frame.registers[a],
+            &frame.registers[a + 1],
+            &frame.registers[a + 2],
+        ) {
             (LuaValue::Integer(idx), LuaValue::Integer(limit), LuaValue::Integer(step)) => {
                 let new_idx = idx + step;
                 let cont = if *step >= 0 {
@@ -865,16 +870,16 @@ impl VM {
                 return Err("'for' step/limit must be a number".to_string());
             }
         };
-        
+
         frame.registers[a] = new_value.clone();
-        
+
         if continue_loop {
             // Copy index to loop variable: R(A+3) = R(A)
             frame.registers[a + 3] = new_value;
             // Jump back to loop body
             frame.pc = (frame.pc as i32 + sbx) as usize;
         }
-        
+
         Ok(())
     }
 
@@ -1359,8 +1364,7 @@ impl VM {
         };
 
         if let Some(mt) = metatable {
-            let index_key =
-                LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
+            let index_key = LuaValue::String(Rc::new(LuaString::new("__index".to_string())));
 
             let index_value = {
                 let mt_borrowed = mt.borrow();
@@ -1394,17 +1398,12 @@ impl VM {
 
     /// Get value from userdata with metatable support
     /// Handles __index metamethod
-    pub fn userdata_get(
-        &mut self,
-        userdata: Rc<crate::value::LuaUserdata>,
-        key: &LuaValue,
-    ) -> Option<LuaValue> {
+    pub fn userdata_get(&mut self, userdata: Rc<LuaUserdata>, key: &LuaValue) -> Option<LuaValue> {
         // Check for __index metamethod
         let metatable = userdata.get_metatable();
 
         if let Some(mt) = metatable {
-            let index_key =
-                LuaValue::String(Rc::new(crate::value::LuaString::new("__index".to_string())));
+            let index_key = LuaValue::String(Rc::new(LuaString::new("__index".to_string())));
 
             let index_value = {
                 let mt_borrowed = mt.borrow();
@@ -1463,9 +1462,7 @@ impl VM {
         };
 
         if let Some(mt) = metatable {
-            let newindex_key = LuaValue::String(Rc::new(crate::value::LuaString::new(
-                "__newindex".to_string(),
-            )));
+            let newindex_key = LuaValue::String(Rc::new(LuaString::new("__newindex".to_string())));
 
             let newindex_value = {
                 let mt_borrowed = mt.borrow();
@@ -2226,7 +2223,7 @@ impl VM {
             {
                 // Call the metamethod with the value as argument
                 let result = self.call_metamethod(&tostring_func, &[value.clone()])?;
-                
+
                 // Extract string from result
                 if let Some(result_val) = result {
                     if let Some(s) = result_val.as_string() {
@@ -2253,31 +2250,31 @@ impl VM {
     /// Generate a stack traceback string
     pub fn generate_traceback(&self, error_msg: &str) -> String {
         let mut trace = format!("Runtime error: {}\nStack traceback:", error_msg);
-        
+
         // Iterate through call frames from top to bottom
         for (i, frame) in self.frames.iter().rev().enumerate() {
             let func_name = "?"; // Could extract from debug info if available
             let pc = frame.pc.saturating_sub(1); // Adjust to show failing instruction
-            
-            trace.push_str(&format!("\n  [{}] function '{}' at PC {}", 
-                self.frames.len() - i, func_name, pc));
+
+            trace.push_str(&format!(
+                "\n  [{}] function '{}' at PC {}",
+                self.frames.len() - i,
+                func_name,
+                pc
+            ));
         }
-        
+
         trace
     }
 
     /// Execute a function with protected call (pcall semantics)
-    pub fn protected_call(
-        &mut self,
-        func: LuaValue,
-        args: Vec<LuaValue>,
-    ) -> (bool, Vec<LuaValue>) {
+    pub fn protected_call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> (bool, Vec<LuaValue>) {
         // Save current state
         let initial_frame_count = self.frames.len();
-        
+
         // Try to call the function
         let result = self.call_function_internal(func, args);
-        
+
         match result {
             Ok(return_values) => {
                 // Success: return true and the return values
@@ -2289,10 +2286,10 @@ impl VM {
                 while self.frames.len() > initial_frame_count {
                     self.frames.pop();
                 }
-                
+
                 // Return error without traceback for now (can add later)
                 let error_str = self.create_string(error_msg);
-                
+
                 (false, vec![LuaValue::String(error_str)])
             }
         }
@@ -2304,8 +2301,6 @@ impl VM {
         func: LuaValue,
         args: Vec<LuaValue>,
     ) -> Result<Vec<LuaValue>, String> {
-        use crate::value::Chunk;
-        
         match func {
             LuaValue::CFunction(cfunc) => {
                 // For CFunction, create a temporary frame

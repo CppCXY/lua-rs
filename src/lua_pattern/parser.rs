@@ -28,31 +28,31 @@ pub enum Pattern {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CharClass {
-    Letter,        // %a
-    Control,       // %c
-    Digit,         // %d
-    Graph,         // %g
-    Lower,         // %l
-    Punct,         // %p
-    Space,         // %s
-    Upper,         // %u
-    AlphaNum,      // %w
-    Hex,           // %x
-    Any,           // %z (deprecated, but supported)
+    Letter,   // %a
+    Control,  // %c
+    Digit,    // %d
+    Graph,    // %g
+    Lower,    // %l
+    Punct,    // %p
+    Space,    // %s
+    Upper,    // %u
+    AlphaNum, // %w
+    Hex,      // %x
+    Any,      // %z (deprecated, but supported)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepeatMode {
-    ZeroOrMore,     // *
-    OneOrMore,      // +
-    ZeroOrOne,      // ?
-    Lazy,           // - (non-greedy)
+    ZeroOrMore, // *
+    OneOrMore,  // +
+    ZeroOrOne,  // ?
+    Lazy,       // - (non-greedy)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchorType {
-    Start,  // ^
-    End,    // $
+    Start, // ^
+    End,   // $
 }
 
 impl CharClass {
@@ -135,7 +135,10 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
                     }
                     // Uppercase inverts the class
                     'A' | 'C' | 'D' | 'G' | 'L' | 'P' | 'S' | 'U' | 'W' | 'X' | 'Z' => {
-                        return Err(format!("inverted character class %{} not yet supported", next));
+                        return Err(format!(
+                            "inverted character class %{} not yet supported",
+                            next
+                        ));
                     }
                     // Any other character is literal
                     _ => seq.push(Pattern::Char(next)),

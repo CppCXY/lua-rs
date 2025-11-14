@@ -4,7 +4,7 @@
 // setuservalue, traceback, upvalueid, upvaluejoin
 
 use crate::lib_registry::LibraryModule;
-use crate::value::{LuaValue, MultiValue};
+use crate::lua_value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
 pub fn create_debug_lib() -> LibraryModule {
@@ -20,7 +20,7 @@ fn debug_traceback(vm: &mut VM) -> Result<MultiValue, String> {
         .and_then(|v| v.as_string())
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| "stack traceback:".to_string());
-    
+
     let result = vm.create_string(message);
     Ok(MultiValue::single(LuaValue::String(result)))
 }
@@ -29,4 +29,3 @@ fn debug_getinfo(_vm: &mut VM) -> Result<MultiValue, String> {
     // Stub: return nil
     Ok(MultiValue::single(LuaValue::Nil))
 }
-

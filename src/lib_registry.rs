@@ -1,8 +1,8 @@
 // Library registration system for Lua standard libraries
 // Provides a clean way to register Rust functions as Lua libraries
 
+use crate::lua_value::{LuaValue, MultiValue};
 use crate::stdlib;
-use crate::value::{LuaValue, MultiValue};
 use crate::vm::VM;
 use std::collections::HashMap;
 

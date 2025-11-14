@@ -5,19 +5,18 @@ pub mod compiler;
 pub mod gc;
 pub mod lib_registry;
 pub mod lua_pattern;
+pub mod lua_value;
 pub mod opcode;
 pub mod stdlib;
-pub mod value;
 pub mod vm;
 
 pub use compiler::Compiler;
 pub use gc::GC;
 pub use lib_registry::LibraryRegistry;
+pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
 pub use opcode::{Instruction, OpCode};
-pub use value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
-pub use vm::VM;
 use std::rc::Rc;
-
+pub use vm::VM;
 
 /// Main entry point for executing Lua code
 pub fn execute(source: &str) -> Result<LuaValue, String> {

@@ -1,12 +1,12 @@
 use lua_rs::{Compiler, LuaValue, VM};
-use std::io::{self, Write};
-use std::rc::Rc;
 use std::env;
 use std::fs;
+use std::io::{self, Write};
+use std::rc::Rc;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() > 1 {
         // File mode
         let filename = &args[1];
@@ -38,7 +38,7 @@ fn main() {
         }
         return;
     }
-    
+
     // REPL mode
     println!("Lua VM - Interactive REPL");
     println!("Type Lua code and press Enter. Type 'exit' to quit.\n");
@@ -47,10 +47,7 @@ fn main() {
 
     // Example: Set some global values
     let version_str = vm.create_string("0.1.0".to_string());
-    vm.set_global(
-        "version",
-        LuaValue::String(version_str),
-    );
+    vm.set_global("version", LuaValue::String(version_str));
 
     loop {
         print!("> ");

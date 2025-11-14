@@ -1,8 +1,8 @@
 // Compiler helper functions
 
 use super::{Compiler, Local};
+use crate::lua_value::{LuaString, LuaValue};
 use crate::opcode::{Instruction, OpCode};
-use crate::value::{LuaString, LuaValue};
 use std::rc::Rc;
 
 /// Create a string using the string pool
@@ -69,12 +69,11 @@ pub fn resolve_local<'a>(c: &'a Compiler, name: &str) -> Option<Local> {
     scope.locals.iter().rev().find(|l| l.name == name).cloned()
 }
 
-
 /// Add an upvalue to the current compiler's upvalue list
 /// Returns the index of the upvalue in the list
 pub fn add_upvalue(c: &mut Compiler, name: String, is_local: bool, index: u32) -> usize {
     let mut scope = c.scope_chain.borrow_mut();
-    
+
     // Check if we already have this upvalue
     for (i, uv) in scope.upvalues.iter().enumerate() {
         if uv.name == name && uv.is_local == is_local && uv.index == index {
@@ -93,35 +92,49 @@ pub fn add_upvalue(c: &mut Compiler, name: String, is_local: bool, index: u32) -
 
 /// Resolve an upvalue by searching parent scopes through the scope chain
 /// This is called when a variable is not found in local scope
-pub fn resolve_upvalue_from_chain(
-    c: &mut Compiler,
-    name: &str,
-) -> Option<usize> {
+pub fn resolve_upvalue_from_chain(c: &mut Compiler, name: &str) -> Option<usize> {
     // Check if already in current upvalues
-    if let Some((idx, _)) = c.scope_chain.borrow().upvalues.iter().enumerate().find(|(_, uv)| uv.name == name) {
+    if let Some((idx, _)) = c
+        .scope_chain
+        .borrow()
+        .upvalues
+        .iter()
+        .enumerate()
+        .find(|(_, uv)| uv.name == name)
+    {
         return Some(idx);
     }
-    
+
     // Get parent scope
     let parent = c.scope_chain.borrow().parent.clone();
     if let Some(parent_scope) = parent {
         let parent_scope_ref = parent_scope.borrow();
-        
+
         // First, try to find in parent's locals
-        if let Some(local) = parent_scope_ref.locals.iter().rev().find(|l| l.name == name) {
+        if let Some(local) = parent_scope_ref
+            .locals
+            .iter()
+            .rev()
+            .find(|l| l.name == name)
+        {
             // Found in parent's local variables - capture as upvalue
             let upvalue_index = add_upvalue(c, name.to_string(), true, local.register);
             return Some(upvalue_index);
         }
-        
+
         // If not in parent's locals, try parent's upvalues (for nested closures)
-        if let Some((idx, _)) = parent_scope_ref.upvalues.iter().enumerate().find(|(_, uv)| uv.name == name) {
+        if let Some((idx, _)) = parent_scope_ref
+            .upvalues
+            .iter()
+            .enumerate()
+            .find(|(_, uv)| uv.name == name)
+        {
             // Found in parent's upvalues - capture as upvalue from parent's upvalue
             let upvalue_index = add_upvalue(c, name.to_string(), false, idx as u32);
             return Some(upvalue_index);
         }
     }
-    
+
     None
 }
 
@@ -133,7 +146,10 @@ pub fn begin_scope(c: &mut Compiler) {
 /// End the current scope
 pub fn end_scope(c: &mut Compiler) {
     c.scope_depth -= 1;
-    c.scope_chain.borrow_mut().locals.retain(|l| l.depth <= c.scope_depth);
+    c.scope_chain
+        .borrow_mut()
+        .locals
+        .retain(|l| l.depth <= c.scope_depth);
     // Clear labels from the scope being closed
     clear_scope_labels(c);
 }

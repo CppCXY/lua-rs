@@ -2,7 +2,7 @@
 // Implements: create, isyieldable, resume, running, status, wrap, yield
 
 use crate::lib_registry::LibraryModule;
-use crate::value::{LuaValue, MultiValue};
+use crate::lua_value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
 pub fn create_coroutine_lib() -> LibraryModule {
@@ -32,4 +32,3 @@ fn coroutine_status(_vm: &mut VM) -> Result<MultiValue, String> {
     let s = _vm.create_string("dead".to_string());
     Ok(MultiValue::single(LuaValue::String(s)))
 }
-

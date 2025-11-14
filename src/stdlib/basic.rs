@@ -3,8 +3,9 @@
 // select, ipairs, pairs, next, pcall, xpcall, getmetatable, setmetatable,
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
 
+use crate::LuaString;
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
-use crate::value::{LuaValue, MultiValue};
+use crate::lua_value::{LuaValue, MultiValue};
 use crate::vm::VM;
 
 pub fn create_basic_lib() -> LibraryModule {
@@ -86,14 +87,12 @@ fn lua_error(vm: &mut VM) -> Result<MultiValue, String> {
     let message = get_arg(vm, 0)
         .map(|v| v.to_string_repr())
         .unwrap_or_else(|| "error".to_string());
-    
+
     // Optional level parameter (default = 1)
     // level 1: error at the function that called error()
     // level 2: error at the function that called the function that called error()
-    let _level = get_arg(vm, 1)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(1);
-    
+    let _level = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1);
+
     // Generate stack traceback
     let traceback = vm.generate_traceback(&message);
 
@@ -305,10 +304,10 @@ fn lua_next(vm: &mut VM) -> Result<MultiValue, String> {
 /// pcall(f [, arg1, ...]) - Protected call
 fn lua_pcall(vm: &mut VM) -> Result<MultiValue, String> {
     // pcall(f, arg1, arg2, ...) -> status, result or error
-    
+
     // Get the function to call (argument 0)
     let func = require_arg(vm, 0, "pcall")?;
-    
+
     // Get all arguments after the function
     let all_args = get_args(vm);
     let args: Vec<LuaValue> = if all_args.len() > 1 {
@@ -316,14 +315,14 @@ fn lua_pcall(vm: &mut VM) -> Result<MultiValue, String> {
     } else {
         Vec::new()
     };
-    
+
     // Use protected_call from VM
     let (success, results) = vm.protected_call(func, args);
-    
+
     // Return status and results
     let mut return_values = vec![LuaValue::Boolean(success)];
     return_values.extend(results);
-    
+
     Ok(MultiValue::multiple(return_values))
 }
 
@@ -377,9 +376,8 @@ fn lua_setmetatable(vm: &mut VM) -> Result<MultiValue, String> {
     if let LuaValue::Table(t) = table {
         // Check if current metatable has __metatable field (protected)
         if let Some(mt) = t.borrow().get_metatable() {
-            let metatable_key = LuaValue::String(std::rc::Rc::new(crate::value::LuaString::new(
-                "__metatable".to_string(),
-            )));
+            let metatable_key =
+                LuaValue::String(std::rc::Rc::new(LuaString::new("__metatable".to_string())));
             if mt.borrow().raw_get(&metatable_key).is_some() {
                 return Err("cannot change a protected metatable".to_string());
             }

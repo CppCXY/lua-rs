@@ -109,7 +109,7 @@ impl LuaValue {
     pub fn userdata<T: Any>(data: T) -> Self {
         LuaValue::Userdata(Rc::new(LuaUserdata::new(data)))
     }
-    
+
     pub fn userdata_with_metatable<T: Any>(data: T, metatable: Rc<RefCell<LuaTable>>) -> Self {
         LuaValue::Userdata(Rc::new(LuaUserdata::with_metatable(data, metatable)))
     }
@@ -159,7 +159,7 @@ impl LuaValue {
     pub fn is_callable(&self) -> bool {
         matches!(self, LuaValue::Function(_) | LuaValue::CFunction(_))
     }
-    
+
     /// Get metatable for tables and userdata
     pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
         match self {
@@ -320,7 +320,7 @@ impl PartialOrd for LuaValue {
 impl Ord for LuaValue {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        
+
         // Define type priority: numbers < strings < others
         fn type_priority(val: &LuaValue) -> u8 {
             match val {
@@ -329,10 +329,10 @@ impl Ord for LuaValue {
                 _ => 2,
             }
         }
-        
+
         let self_priority = type_priority(self);
         let other_priority = type_priority(other);
-        
+
         // First compare by type priority
         match self_priority.cmp(&other_priority) {
             Ordering::Equal => {
@@ -349,12 +349,10 @@ impl Ord for LuaValue {
                     (LuaValue::Float(a), LuaValue::Integer(b)) => {
                         a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
                     }
-                    
+
                     // Strings: lexicographic comparison
-                    (LuaValue::String(a), LuaValue::String(b)) => {
-                        a.as_str().cmp(b.as_str())
-                    }
-                    
+                    (LuaValue::String(a), LuaValue::String(b)) => a.as_str().cmp(b.as_str()),
+
                     // Other types: compare by pointer address
                     (LuaValue::Table(a), LuaValue::Table(b)) => {
                         let ptr_a = Rc::as_ptr(a) as usize;
@@ -376,11 +374,9 @@ impl Ord for LuaValue {
                         let ptr_b = Rc::as_ptr(b) as usize;
                         ptr_a.cmp(&ptr_b)
                     }
-                    (LuaValue::Boolean(a), LuaValue::Boolean(b)) => {
-                        a.cmp(b)
-                    }
+                    (LuaValue::Boolean(a), LuaValue::Boolean(b)) => a.cmp(b),
                     (LuaValue::Nil, LuaValue::Nil) => Ordering::Equal,
-                    
+
                     // Mixed types within same priority (shouldn't happen based on type_priority)
                     _ => Ordering::Equal,
                 }
@@ -712,22 +708,22 @@ impl LuaUserdata {
             metatable: Rc::new(RefCell::new(None)),
         }
     }
-    
+
     pub fn with_metatable<T: Any>(data: T, metatable: Rc<RefCell<LuaTable>>) -> Self {
         LuaUserdata {
             data: Rc::new(RefCell::new(Box::new(data))),
             metatable: Rc::new(RefCell::new(Some(metatable))),
         }
     }
-    
+
     pub fn get_data(&self) -> Rc<RefCell<Box<dyn Any>>> {
         self.data.clone()
     }
-    
+
     pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
         self.metatable.borrow().clone()
     }
-    
+
     pub fn set_metatable(&self, metatable: Option<Rc<RefCell<LuaTable>>>) {
         *self.metatable.borrow_mut() = metatable;
     }
