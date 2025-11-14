@@ -3,7 +3,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::vm::VM;
+use crate::lua_vm::LuaVM;
 
 pub fn create_utf8_lib() -> LibraryModule {
     crate::lib_module!("utf8", {
@@ -12,7 +12,7 @@ pub fn create_utf8_lib() -> LibraryModule {
     })
 }
 
-fn utf8_len(vm: &mut VM) -> Result<MultiValue, String> {
+fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = crate::lib_registry::require_arg(vm, 0, "utf8.len")?
         .as_string()
         .ok_or_else(|| "bad argument #1 to 'utf8.len' (string expected)".to_string())?;
@@ -21,7 +21,7 @@ fn utf8_len(vm: &mut VM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(LuaValue::integer(len as i64)))
 }
 
-fn utf8_char(vm: &mut VM) -> Result<MultiValue, String> {
+fn utf8_char(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = crate::lib_registry::get_args(vm);
 
     let mut result = String::new();

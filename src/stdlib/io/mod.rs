@@ -4,7 +4,7 @@
 use crate::LuaString;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::vm::VM;
+use crate::lua_vm::LuaVM;
 use std::io::{self, BufRead, Write};
 use std::rc::Rc;
 
@@ -24,7 +24,7 @@ pub fn create_io_lib() -> LibraryModule {
 }
 
 /// io.write(...) - Write to stdout
-fn io_write(vm: &mut VM) -> Result<MultiValue, String> {
+fn io_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = crate::lib_registry::get_args(vm);
 
     for arg in args {
@@ -41,7 +41,7 @@ fn io_write(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// io.read([format]) - Read from stdin
-fn io_read(vm: &mut VM) -> Result<MultiValue, String> {
+fn io_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let format = crate::lib_registry::get_arg(vm, 0);
 
     let stdin = io::stdin();
@@ -126,13 +126,13 @@ fn io_read(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// io.flush() - Flush stdout
-fn io_flush(_vm: &mut VM) -> Result<MultiValue, String> {
+fn io_flush(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     io::stdout().flush().ok();
     Ok(MultiValue::empty())
 }
 
 /// io.open(filename [, mode]) - Open a file
-fn io_open(vm: &mut VM) -> Result<MultiValue, String> {
+fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::{get_arg, require_arg};
 
     let filename = require_arg(vm, 0, "io.open")?
@@ -174,19 +174,19 @@ fn io_open(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// io.lines([filename]) - Return iterator for lines
-fn io_lines(_vm: &mut VM) -> Result<MultiValue, String> {
+fn io_lines(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Stub: would need to return an iterator function
     Err("io.lines not yet implemented".to_string())
 }
 
 /// io.input([file]) - Set or get default input file
-fn io_input(_vm: &mut VM) -> Result<MultiValue, String> {
+fn io_input(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Stub: would need file handle support
     Err("io.input not yet implemented".to_string())
 }
 
 /// io.output([file]) - Set or get default output file
-fn io_output(_vm: &mut VM) -> Result<MultiValue, String> {
+fn io_output(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Stub: would need file handle support
     Err("io.output not yet implemented".to_string())
 }

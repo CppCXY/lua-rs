@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::rc::Rc;
 
-use crate::VM;
+use crate::LuaVM;
 use crate::lua_value::{LuaTable, LuaValue, LuaValueKind, MultiValue};
 
 /// File handle wrapper
@@ -171,7 +171,7 @@ impl LuaFile {
 }
 
 /// Create file metatable with methods
-pub fn create_file_metatable(vm: &mut VM) -> Rc<RefCell<LuaTable>> {
+pub fn create_file_metatable(vm: &mut LuaVM) -> Rc<RefCell<LuaTable>> {
     let mt = Rc::new(RefCell::new(LuaTable::new()));
 
     // Create __index table with methods
@@ -211,7 +211,7 @@ pub fn create_file_metatable(vm: &mut VM) -> Rc<RefCell<LuaTable>> {
 }
 
 /// file:read([format])
-fn file_read(vm: &mut VM) -> Result<MultiValue, String> {
+fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // For method calls from Lua, register 0 is the function, register 1 is self
     let frame = vm.frames.last().unwrap();
     let file_val = if frame.registers.len() > 1 {
@@ -271,7 +271,7 @@ fn file_read(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// file:write(...)
-fn file_write(vm: &mut VM) -> Result<MultiValue, String> {
+fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().unwrap();
 
     // For method calls from Lua, register 1 is self (file object)
@@ -331,7 +331,7 @@ fn file_write(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// file:flush()
-fn file_flush(vm: &mut VM) -> Result<MultiValue, String> {
+fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // For method calls from Lua, register 0 is the function, register 1 is self
     let frame = vm.frames.last().unwrap();
     let file_val = if frame.registers.len() > 1 {
@@ -356,7 +356,7 @@ fn file_flush(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// file:close()
-fn file_close(vm: &mut VM) -> Result<MultiValue, String> {
+fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // For method calls from Lua, register 0 is the function, register 1 is self
     let frame = vm.frames.last().unwrap();
     let file_val = if frame.registers.len() > 1 {

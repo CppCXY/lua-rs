@@ -34,7 +34,7 @@ pub fn compile_expr_to(c: &mut Compiler, expr: &LuaExpr, dest: Option<u32>) -> R
         LuaExpr::CallExpr(e) => compile_call_expr_to(c, e, dest),
         LuaExpr::IndexExpr(e) => compile_index_expr_to(c, e, dest),
         LuaExpr::TableExpr(e) => compile_table_expr_to(c, e, dest),
-        LuaExpr::ClosureExpr(e) => compile_closure_expr_to(c, e, dest),
+        LuaExpr::ClosureExpr(e) => compile_closure_expr_to(c, e, dest, false),
     }
 }
 
@@ -696,14 +696,15 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
     }
 }
 
-pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<u32, String> {
-    compile_closure_expr_to(c, closure, None)
+pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, is_method: bool) -> Result<u32, String> {
+    compile_closure_expr_to(c, closure, None, is_method)
 }
 
 pub fn compile_closure_expr_to(
     c: &mut Compiler,
     closure: &LuaClosureExpr,
     dest: Option<u32>,
+    is_method: bool,
 ) -> Result<u32, String> {
     let params_list = closure
         .get_params_list()
@@ -717,6 +718,22 @@ pub fn compile_closure_expr_to(
     // No need to sync anymore - scope_chain is already current
     let mut func_compiler = Compiler::new_with_parent(c.scope_chain.clone(), c.string_pool.clone());
 
+    // For methods (function defined with colon syntax), add implicit 'self' parameter
+    let mut param_offset = 0;
+    if is_method {
+        func_compiler
+            .scope_chain
+            .borrow_mut()
+            .locals
+            .push(super::Local {
+                name: "self".to_string(),
+                depth: 0,
+                register: 0,
+            });
+        func_compiler.chunk.locals.push("self".to_string());
+        param_offset = 1;
+    }
+
     // Set up parameters as local variables
     for (i, param) in params.iter().enumerate() {
         // Try to get parameter name
@@ -726,6 +743,7 @@ pub fn compile_closure_expr_to(
             format!("arg{}", i)
         };
 
+        let reg_index = (i + param_offset) as u32;
         func_compiler
             .scope_chain
             .borrow_mut()
@@ -733,13 +751,13 @@ pub fn compile_closure_expr_to(
             .push(super::Local {
                 name: param_name.clone(),
                 depth: 0,
-                register: i as u32,
+                register: reg_index,
             });
         func_compiler.chunk.locals.push(param_name);
     }
 
-    func_compiler.chunk.param_count = params.len();
-    func_compiler.next_register = params.len() as u32;
+    func_compiler.chunk.param_count = params.len() + param_offset;
+    func_compiler.next_register = (params.len() + param_offset) as u32;
 
     // Compile function body
     compile_block(&mut func_compiler, &body)?;

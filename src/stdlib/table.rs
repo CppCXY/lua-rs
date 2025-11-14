@@ -3,7 +3,7 @@
 
 use crate::lib_registry::{LibraryModule, get_arg, require_arg};
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::vm::VM;
+use crate::lua_vm::LuaVM;
 
 pub fn create_table_lib() -> LibraryModule {
     crate::lib_module!("table", {
@@ -18,7 +18,7 @@ pub fn create_table_lib() -> LibraryModule {
 }
 
 /// table.concat(list [, sep [, i [, j]]]) - Concatenate table elements
-fn table_concat(vm: &mut VM) -> Result<MultiValue, String> {
+fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "table.concat")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'table.concat' (table expected)".to_string())?;
@@ -57,7 +57,7 @@ fn table_concat(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// table.insert(list, [pos,] value) - Insert element
-fn table_insert(vm: &mut VM) -> Result<MultiValue, String> {
+fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "table.insert")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'table.insert' (table expected)".to_string())?;
@@ -94,7 +94,7 @@ fn table_insert(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// table.remove(list [, pos]) - Remove element
-fn table_remove(vm: &mut VM) -> Result<MultiValue, String> {
+fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "table.remove")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'table.remove' (table expected)".to_string())?;
@@ -121,7 +121,7 @@ fn table_remove(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// table.move(a1, f, e, t [, a2]) - Move elements
-fn table_move(vm: &mut VM) -> Result<MultiValue, String> {
+fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let src = require_arg(vm, 0, "table.move")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'table.move' (table expected)".to_string())?;
@@ -165,7 +165,7 @@ fn table_move(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// table.pack(...) - Pack values into table
-fn table_pack(vm: &mut VM) -> Result<MultiValue, String> {
+fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = crate::lib_registry::get_args(vm);
 
     let table = vm.create_table();
@@ -187,7 +187,7 @@ fn table_pack(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// table.unpack(list [, i [, j]]) - Unpack table into values
-fn table_unpack(vm: &mut VM) -> Result<MultiValue, String> {
+fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "table.unpack")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'table.unpack' (table expected)".to_string())?;
@@ -213,7 +213,7 @@ fn table_unpack(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// table.sort(list [, comp]) - Sort table in place
-fn table_sort(vm: &mut VM) -> Result<MultiValue, String> {
+fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "table.sort")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'table.sort' (table expected)".to_string())?;

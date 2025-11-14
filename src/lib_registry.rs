@@ -3,11 +3,11 @@
 
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::stdlib;
-use crate::vm::VM;
+use crate::lua_vm::LuaVM;
 use std::collections::HashMap;
 
 /// Type for native functions that can be called from Lua
-pub type NativeFunction = fn(&mut VM) -> Result<MultiValue, String>;
+pub type NativeFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
 
 /// A library module containing multiple functions
 pub struct LibraryModule {
@@ -64,7 +64,7 @@ impl LibraryRegistry {
     }
 
     /// Load all registered libraries into a VM
-    pub fn load_all(&self, vm: &mut VM) -> Result<(), String> {
+    pub fn load_all(&self, vm: &mut LuaVM) -> Result<(), String> {
         for module in self.modules.values() {
             self.load_module(vm, module)?;
         }
@@ -72,7 +72,7 @@ impl LibraryRegistry {
     }
 
     /// Load a specific module into the VM
-    pub fn load_module(&self, vm: &mut VM, module: &LibraryModule) -> Result<(), String> {
+    pub fn load_module(&self, vm: &mut LuaVM, module: &LibraryModule) -> Result<(), String> {
         // Create a table for the library
         let lib_table = vm.create_table();
 
@@ -133,7 +133,7 @@ pub fn create_standard_registry() -> LibraryRegistry {
 }
 
 /// Helper to get function arguments from VM registers
-pub fn get_args(vm: &VM) -> Vec<LuaValue> {
+pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
     let frame = vm.frames.last().unwrap();
     let registers = &frame.registers;
 
@@ -142,7 +142,7 @@ pub fn get_args(vm: &VM) -> Vec<LuaValue> {
 }
 
 /// Helper to get a specific argument
-pub fn get_arg(vm: &VM, index: usize) -> Option<LuaValue> {
+pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
     let frame = vm.frames.last().unwrap();
     let registers = &frame.registers;
 
@@ -155,12 +155,12 @@ pub fn get_arg(vm: &VM, index: usize) -> Option<LuaValue> {
 }
 
 /// Helper to require an argument
-pub fn require_arg(vm: &VM, index: usize, func_name: &str) -> Result<LuaValue, String> {
+pub fn require_arg(vm: &LuaVM, index: usize, func_name: &str) -> Result<LuaValue, String> {
     get_arg(vm, index).ok_or_else(|| format!("{}() requires argument {}", func_name, index + 1))
 }
 
 /// Helper to get argument count
-pub fn arg_count(vm: &VM) -> usize {
+pub fn arg_count(vm: &LuaVM) -> usize {
     let frame = vm.frames.last().unwrap();
     // Subtract 1 for the function itself
     frame.registers.len().saturating_sub(1)

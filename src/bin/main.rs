@@ -1,4 +1,4 @@
-use lua_rs::{Compiler, LuaValue, VM};
+use lua_rs::{Compiler, LuaValue, LuaVM};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -12,7 +12,7 @@ fn main() {
         let filename = &args[1];
         match fs::read_to_string(filename) {
             Ok(code) => {
-                let mut vm = VM::new();
+                let mut vm = LuaVM::new();
                 match Compiler::compile(&code) {
                     Ok(chunk) => match vm.execute(Rc::new(chunk)) {
                         Ok(result) => {
@@ -43,7 +43,7 @@ fn main() {
     println!("Lua VM - Interactive REPL");
     println!("Type Lua code and press Enter. Type 'exit' to quit.\n");
 
-    let mut vm = VM::new();
+    let mut vm = LuaVM::new();
 
     // Example: Set some global values
     let version_str = vm.create_string("0.1.0".to_string());

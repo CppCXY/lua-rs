@@ -3,7 +3,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::vm::VM;
+use crate::lua_vm::LuaVM;
 
 pub fn create_coroutine_lib() -> LibraryModule {
     crate::lib_module!("coroutine", {
@@ -14,21 +14,21 @@ pub fn create_coroutine_lib() -> LibraryModule {
     })
 }
 
-fn coroutine_create(_vm: &mut VM) -> Result<MultiValue, String> {
+fn coroutine_create(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Stub: return nil
     Ok(MultiValue::single(LuaValue::nil()))
 }
 
-fn coroutine_resume(_vm: &mut VM) -> Result<MultiValue, String> {
+fn coroutine_resume(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Stub: return false
     Ok(MultiValue::single(LuaValue::boolean(false)))
 }
 
-fn coroutine_yield(_vm: &mut VM) -> Result<MultiValue, String> {
+fn coroutine_yield(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     Err("cannot yield from outside a coroutine".to_string())
 }
 
-fn coroutine_status(_vm: &mut VM) -> Result<MultiValue, String> {
+fn coroutine_status(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = _vm.create_string("dead".to_string());
     Ok(MultiValue::single(LuaValue::from_string_rc(s)))
 }

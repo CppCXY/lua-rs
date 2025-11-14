@@ -4,7 +4,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::vm::VM;
+use crate::lua_vm::LuaVM;
 
 pub fn create_os_lib() -> LibraryModule {
     crate::lib_module!("os", {
@@ -15,7 +15,7 @@ pub fn create_os_lib() -> LibraryModule {
     })
 }
 
-fn os_clock(_vm: &mut VM) -> Result<MultiValue, String> {
+fn os_clock(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     use std::time::SystemTime;
 
     let duration = SystemTime::now()
@@ -26,7 +26,7 @@ fn os_clock(_vm: &mut VM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(LuaValue::float(secs)))
 }
 
-fn os_time(_vm: &mut VM) -> Result<MultiValue, String> {
+fn os_time(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     use std::time::SystemTime;
 
     let timestamp = SystemTime::now()
@@ -37,7 +37,7 @@ fn os_time(_vm: &mut VM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(LuaValue::integer(timestamp as i64)))
 }
 
-fn os_date(vm: &mut VM) -> Result<MultiValue, String> {
+fn os_date(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Stub: return current timestamp as string
     use std::time::SystemTime;
 
@@ -51,6 +51,6 @@ fn os_date(vm: &mut VM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(LuaValue::from_string_rc(result)))
 }
 
-fn os_exit(_vm: &mut VM) -> Result<MultiValue, String> {
+fn os_exit(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     std::process::exit(0);
 }

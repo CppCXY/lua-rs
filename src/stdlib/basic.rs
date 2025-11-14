@@ -6,7 +6,7 @@
 use crate::LuaString;
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
-use crate::vm::VM;
+use crate::lua_vm::LuaVM;
 
 pub fn create_basic_lib() -> LibraryModule {
     crate::lib_module!("_G", {
@@ -34,7 +34,7 @@ pub fn create_basic_lib() -> LibraryModule {
 }
 
 /// print(...) - Print values to stdout
-fn lua_print(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_print(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = get_args(vm);
 
     let output: Vec<String> = args.iter().map(|v| v.to_string_repr()).collect();
@@ -49,7 +49,7 @@ fn lua_print(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// type(v) - Return the type of a value as a string
-fn lua_type(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_type(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
 
     let type_name = match value.kind() {
@@ -67,7 +67,7 @@ fn lua_type(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// assert(v [, message]) - Raise error if v is false or nil
-fn lua_assert(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_assert(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let condition = get_arg(vm, 0).unwrap_or(LuaValue::nil());
 
     if !condition.is_truthy() {
@@ -83,7 +83,7 @@ fn lua_assert(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// error(message [, level]) - Raise an error
-fn lua_error(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_error(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let message = get_arg(vm, 0)
         .map(|v| v.to_string_repr())
         .unwrap_or_else(|| "error".to_string());
@@ -93,14 +93,13 @@ fn lua_error(vm: &mut VM) -> Result<MultiValue, String> {
     // level 2: error at the function that called the function that called error()
     let _level = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1);
 
-    // Generate stack traceback
-    let traceback = vm.generate_traceback(&message);
-
-    Err(traceback)
+    // Return error message directly
+    // TODO: Add traceback when stack handling is more stable
+    Err(message)
 }
 
 /// tonumber(e [, base]) - Convert to number
-fn lua_tonumber(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_tonumber(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
     let base = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(10);
 
@@ -142,7 +141,7 @@ fn lua_tonumber(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// tostring(v) - Convert to string
-fn lua_tostring(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_tostring(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
 
     // Check for __tostring metamethod
@@ -152,7 +151,7 @@ fn lua_tostring(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// select(index, ...) - Return subset of arguments
-fn lua_select(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_select(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let index_arg = require_arg(vm, 0, "select")?;
     let args = get_args(vm);
 
@@ -189,7 +188,7 @@ fn lua_select(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// ipairs(t) - Return iterator for array part of table
-fn lua_ipairs(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_ipairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "ipairs")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'ipairs' (table expected)".to_string())?;
@@ -205,7 +204,7 @@ fn lua_ipairs(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// Iterator function for ipairs
-fn ipairs_next(vm: &mut VM) -> Result<MultiValue, String> {
+fn ipairs_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "ipairs iterator")?
         .as_table()
         .ok_or_else(|| "ipairs iterator: table expected".to_string())?;
@@ -233,7 +232,7 @@ fn ipairs_next(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// pairs(t) - Return iterator for all key-value pairs
-fn lua_pairs(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_pairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = require_arg(vm, 0, "pairs")?
         .as_table()
         .ok_or_else(|| "bad argument #1 to 'pairs' (table expected)".to_string())?;
@@ -251,7 +250,7 @@ fn lua_pairs(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// next(table [, index]) - Return next key-value pair
-fn lua_next(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
 
@@ -306,7 +305,7 @@ fn lua_next(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// pcall(f [, arg1, ...]) - Protected call
-fn lua_pcall(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_pcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // pcall(f, arg1, arg2, ...) -> status, result or error
 
     // Get the function to call (argument 0)
@@ -331,17 +330,35 @@ fn lua_pcall(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
-fn lua_xpcall(vm: &mut VM) -> Result<MultiValue, String> {
-    // TODO: Implement proper protected call with error handler
-    let msg = vm.create_string("xpcall not yet implemented".to_string());
-    Ok(MultiValue::multiple(vec![
-        LuaValue::boolean(false),
-        LuaValue::from_string_rc(msg),
-    ]))
+fn lua_xpcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    // xpcall(f, msgh, arg1, arg2, ...) -> status, result or error
+    
+    // Get the function to call (argument 0)
+    let func = require_arg(vm, 0, "xpcall")?;
+    
+    // Get the error handler (argument 1)
+    let err_handler = require_arg(vm, 1, "xpcall")?;
+    
+    // Get all arguments after the function and error handler
+    let all_args = get_args(vm);
+    let args: Vec<LuaValue> = if all_args.len() > 2 {
+        all_args[2..].to_vec()
+    } else {
+        Vec::new()
+    };
+    
+    // Use protected_call_with_handler from VM
+    let (success, results) = vm.protected_call_with_handler(func, args, err_handler);
+    
+    // Return status and results
+    let mut return_values = vec![LuaValue::boolean(success)];
+    return_values.extend(results);
+    
+    Ok(MultiValue::multiple(return_values))
 }
 
 /// getmetatable(object) - Get metatable
-fn lua_getmetatable(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
 
@@ -369,7 +386,7 @@ fn lua_getmetatable(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// setmetatable(table, metatable) - Set metatable
-fn lua_setmetatable(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
 
@@ -415,7 +432,7 @@ fn lua_setmetatable(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// rawget(table, index) - Get without metamethods
-fn lua_rawget(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
 
@@ -435,7 +452,7 @@ fn lua_rawget(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// rawset(table, index, value) - Set without metamethods
-fn lua_rawset(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
 
@@ -460,7 +477,7 @@ fn lua_rawset(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// rawlen(v) - Length without metamethods
-fn lua_rawlen(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_rawlen(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let frame = vm.frames.last().ok_or("No call frame")?;
     let registers = &frame.registers;
 
@@ -494,7 +511,7 @@ fn lua_rawlen(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// rawequal(v1, v2) - Equality without metamethods
-fn lua_rawequal(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_rawequal(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let v1 = get_arg(vm, 0).unwrap_or(LuaValue::nil());
     let v2 = get_arg(vm, 1).unwrap_or(LuaValue::nil());
 
@@ -503,7 +520,7 @@ fn lua_rawequal(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// collectgarbage([opt [, arg]]) - Garbage collector control
-fn lua_collectgarbage(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_collectgarbage(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let opt = get_arg(vm, 0)
         .and_then(|v| v.as_string())
         .map(|s| s.as_str().to_string())
@@ -527,7 +544,7 @@ fn lua_collectgarbage(vm: &mut VM) -> Result<MultiValue, String> {
 }
 
 /// _VERSION - Lua version string
-fn lua_version(vm: &mut VM) -> Result<MultiValue, String> {
+fn lua_version(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let version = vm.create_string("Lua 5.4".to_string());
     Ok(MultiValue::single(LuaValue::from_string_rc(version)))
 }

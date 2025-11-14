@@ -8,7 +8,7 @@ pub mod lua_pattern;
 pub mod lua_value;
 pub mod opcode;
 pub mod stdlib;
-pub mod vm;
+pub mod lua_vm;
 
 pub use compiler::Compiler;
 pub use gc::GC;
@@ -16,7 +16,7 @@ pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
 pub use opcode::{Instruction, OpCode};
 use std::rc::Rc;
-pub use vm::VM;
+pub use lua_vm::LuaVM;
 
 /// Main entry point for executing Lua code
 pub fn execute(source: &str) -> Result<LuaValue, String> {
@@ -24,12 +24,12 @@ pub fn execute(source: &str) -> Result<LuaValue, String> {
     let chunk = Compiler::compile(source)?;
 
     // Create VM and execute
-    let mut vm = VM::new();
+    let mut vm = LuaVM::new();
     vm.execute(Rc::new(chunk))
 }
 
 /// Execute Lua code with custom VM instance
-pub fn execute_with_vm(vm: &mut VM, source: &str) -> Result<LuaValue, String> {
+pub fn execute_with_vm(vm: &mut LuaVM, source: &str) -> Result<LuaValue, String> {
     let chunk = Compiler::compile(source)?;
     vm.execute(Rc::new(chunk))
 }

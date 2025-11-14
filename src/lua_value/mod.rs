@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::VM;
+use crate::LuaVM;
 // NaN-Boxing core struct definition
 
 // Re-export the optimized LuaValue and type enum for pattern matching
@@ -43,7 +43,7 @@ impl MultiValue {
 }
 
 /// C Function type - Rust function callable from Lua
-pub type CFunction = fn(&mut VM) -> Result<MultiValue, String>;
+pub type CFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
 
 /// Lua string (immutable, interned)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -285,7 +285,7 @@ impl LuaUpvalue {
     }
 
     /// Get the value (requires VM to read from stack if open)
-    pub fn get_value(&self, frames: &[crate::vm::CallFrame]) -> LuaValue {
+    pub fn get_value(&self, frames: &[crate::lua_vm::LuaCallFrame]) -> LuaValue {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { frame_id, register } => {
@@ -304,7 +304,7 @@ impl LuaUpvalue {
     }
 
     /// Set the value (requires VM to write to stack if open)
-    pub fn set_value(&self, frames: &mut [crate::vm::CallFrame], value: LuaValue) {
+    pub fn set_value(&self, frames: &mut [crate::lua_vm::LuaCallFrame], value: LuaValue) {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { frame_id, register } => {
@@ -411,6 +411,8 @@ pub struct Chunk {
     pub max_stack_size: usize,
     pub child_protos: Vec<Rc<Chunk>>, // Nested function prototypes
     pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
+    pub source_name: Option<String>,  // Source file/chunk name for debugging
+    pub line_info: Vec<u32>,          // Line number for each instruction (for debug)
 }
 
 impl Chunk {
@@ -424,6 +426,8 @@ impl Chunk {
             max_stack_size: 0,
             child_protos: Vec::new(),
             upvalue_descs: Vec::new(),
+            source_name: None,
+            line_info: Vec::new(),
         }
     }
 }

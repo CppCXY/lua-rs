@@ -9,7 +9,7 @@ use crate::opcode::{Instruction, OpCode};
 use emmylua_parser::{
     LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat, LuaForStat, LuaFuncStat,
     LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat,
-    LuaWhileStat,
+    LuaVarExpr, LuaWhileStat,
 };
 
 /// Compile any statement
@@ -591,8 +591,16 @@ fn compile_function_stat(c: &mut Compiler, stat: &LuaFuncStat) -> Result<(), Str
         .get_closure()
         .ok_or("function statement missing function body")?;
 
+    let is_colon = if let LuaVarExpr::IndexExpr(index_expr) = &func_name_var_expr {
+        index_expr
+            .get_index_token()
+            .ok_or("Missing index token")?
+            .is_colon()
+    } else {
+        false
+    };
     // Compile the closure to get function value
-    let func_reg = compile_closure_expr(c, &closure)?;
+    let func_reg = compile_closure_expr(c, &closure, is_colon)?;
 
     compile_var_expr(c, &func_name_var_expr, func_reg)?;
 
@@ -632,7 +640,7 @@ fn compile_local_function_stat(
     c.next_register = func_reg;
 
     // Compile the closure
-    let closure_reg = compile_closure_expr(c, &closure)?;
+    let closure_reg = compile_closure_expr(c, &closure, false)?;
 
     // Restore next_register (should be func_reg + 1)
     c.next_register = saved_next.max(closure_reg + 1);

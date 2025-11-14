@@ -73,7 +73,7 @@ pub struct LuaValue {
 }
 
 // All implementation code is in compat.rs to provide a single source of truth
-
+#[allow(unused)]
 impl LuaValue {
     // ============ Core Constructors ============
 
@@ -241,7 +241,8 @@ impl LuaValue {
         if self.is_integer() {
             // Full 64-bit integer stored directly!
             Some(self.secondary as i64)
-        } else if let Some(f) = self.as_float() {
+        } else if self.is_float() {
+            let f = f64::from_bits(self.primary);
             // Lua 5.4 semantics: floats with zero fraction are integers
             if f.fract() == 0.0 && f.is_finite() {
                 Some(f as i64)
@@ -257,6 +258,8 @@ impl LuaValue {
     pub fn as_float(&self) -> Option<f64> {
         if self.is_float() {
             Some(f64::from_bits(self.primary))
+        } else if self.is_integer() {
+            Some(self.secondary as i64 as f64)
         } else {
             None
         }
@@ -317,44 +320,6 @@ impl LuaValue {
         }
     }
 
-    // ============ Basic Arithmetic ============
-
-    #[inline]
-    pub fn add(&self, other: &Self) -> Option<Self> {
-        match (self.as_integer(), other.as_integer()) {
-            (Some(a), Some(b)) => a.checked_add(b).map(Self::integer),
-            _ => {
-                let a = self.as_number()?;
-                let b = other.as_number()?;
-                Some(Self::float(a + b))
-            }
-        }
-    }
-
-    #[inline]
-    pub fn sub(&self, other: &Self) -> Option<Self> {
-        match (self.as_integer(), other.as_integer()) {
-            (Some(a), Some(b)) => a.checked_sub(b).map(Self::integer),
-            _ => {
-                let a = self.as_number()?;
-                let b = other.as_number()?;
-                Some(Self::float(a - b))
-            }
-        }
-    }
-
-    #[inline]
-    pub fn mul(&self, other: &Self) -> Option<Self> {
-        match (self.as_integer(), other.as_integer()) {
-            (Some(a), Some(b)) => a.checked_mul(b).map(Self::integer),
-            _ => {
-                let a = self.as_number()?;
-                let b = other.as_number()?;
-                Some(Self::float(a * b))
-            }
-        }
-    }
-
     // ============ Raw Access ============
 
     #[inline(always)]
@@ -403,7 +368,7 @@ impl LuaValue {
     /// Create from Rc<LuaString> (takes ownership, increments refcount)
     #[inline(always)]
     pub fn from_string_rc(s: Rc<LuaString>) -> Self {
-        let ptr = Rc::into_raw(s);  // Transfer ownership to LuaValue
+        let ptr = Rc::into_raw(s); // Transfer ownership to LuaValue
         Self::string_ptr(ptr)
     }
 
@@ -511,140 +476,80 @@ impl LuaValue {
         }
     }
 
-    // ============ Additional arithmetic operations (from old enum) ============
-
-    #[inline]
-    pub fn div(&self, other: &Self) -> Option<Self> {
-        let a = self.as_number()?;
-        let b = other.as_number()?;
-        if b == 0.0 {
-            return None;
-        }
-        Some(Self::float(a / b))
+    /// Get as_string (returns Rc) for compatibility
+    pub fn as_string(&self) -> Option<Rc<LuaString>> {
+        self.as_string_rc()
     }
 
-    #[inline]
-    pub fn idiv(&self, other: &Self) -> Option<Self> {
-        match (self.as_integer(), other.as_integer()) {
-            (Some(a), Some(b)) => {
-                if b == 0 {
-                    None
-                } else {
-                    Some(Self::integer(a / b))
-                }
-            }
-            _ => {
-                let a = self.as_number()?;
-                let b = other.as_number()?;
-                if b == 0.0 {
-                    None
-                } else {
-                    Some(Self::float((a / b).floor()))
-                }
-            }
-        }
+    /// Get as_table (returns Rc<RefCell>) for compatibility
+    pub fn as_table(&self) -> Option<Rc<RefCell<LuaTable>>> {
+        self.as_table_rc()
     }
 
-    #[inline]
-    pub fn modulo(&self, other: &Self) -> Option<Self> {
-        match (self.as_integer(), other.as_integer()) {
-            (Some(a), Some(b)) => {
-                if b == 0 {
-                    None
-                } else {
-                    Some(Self::integer(a % b))
-                }
+    /// Get as_function (returns Rc) for compatibility
+    pub fn as_function(&self) -> Option<Rc<LuaFunction>> {
+        self.as_function_rc()
+    }
+
+    /// Get as_userdata (returns Rc) for compatibility
+    pub fn as_userdata(&self) -> Option<Rc<LuaUserdata>> {
+        self.as_userdata_rc()
+    }
+
+    /// Get as_boolean for compatibility
+    pub fn as_boolean(&self) -> Option<bool> {
+        self.as_bool()
+    }
+
+    /// String representation for printing
+    pub fn to_string_repr(&self) -> String {
+        match self.kind() {
+            LuaValueKind::Nil => "nil".to_string(),
+            LuaValueKind::Boolean => self.as_bool().unwrap().to_string(),
+            LuaValueKind::Integer => self.as_integer().unwrap().to_string(),
+            LuaValueKind::Float => self.as_float().unwrap().to_string(),
+            LuaValueKind::String => {
+                let s = self.as_string_rc().unwrap();
+                s.as_str().to_string()
             }
-            _ => {
-                let a = self.as_number()?;
-                let b = other.as_number()?;
-                if b == 0.0 {
-                    None
-                } else {
-                    Some(Self::float(a - (a / b).floor() * b))
-                }
-            }
+            LuaValueKind::Table => format!("table: {:x}", self.secondary()),
+            LuaValueKind::Function => format!("function: {:x}", self.secondary()),
+            LuaValueKind::Userdata => format!("userdata: {:x}", self.secondary()),
+            LuaValueKind::CFunction => "cfunction".to_string(),
         }
     }
 
-    #[inline]
-    pub fn pow(&self, other: &Self) -> Option<Self> {
-        let a = self.as_number()?;
-        let b = other.as_number()?;
-        Some(Self::float(a.powf(b)))
+    /// Check if value is callable (function or cfunction)
+    pub fn is_callable(&self) -> bool {
+        self.is_function() || self.is_cfunction()
     }
 
-    #[inline]
-    pub fn unm(&self) -> Option<Self> {
-        if let Some(i) = self.as_integer() {
-            Some(Self::integer(-i))
-        } else if let Some(f) = self.as_float() {
-            Some(Self::float(-f))
+    /// Get metatable for tables and userdata
+    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
+        if let Some(table) = self.as_table_rc() {
+            table.borrow().get_metatable()
+        } else if let Some(userdata) = self.as_userdata_rc() {
+            userdata.get_metatable()
         } else {
             None
         }
     }
 
-    // ============ Comparison operations ============
-
-    #[inline]
-    pub fn eq(&self, other: &Self) -> bool {
-        // Fast path: same bits
-        if self.primary() == other.primary() && self.secondary() == other.secondary() {
-            return true;
-        }
-
-        // Type-specific comparison
-        if let (Some(a), Some(b)) = (self.as_integer(), other.as_integer()) {
-            a == b
-        } else if let (Some(a), Some(b)) = (self.as_float(), other.as_float()) {
-            a == b
-        } else if let (Some(a), Some(b)) = (self.as_bool(), other.as_bool()) {
-            a == b
-        } else {
-            false
-        }
-    }
-
-    #[inline]
-    pub fn lt(&self, other: &Self) -> Option<bool> {
-        match (self.as_integer(), other.as_integer()) {
-            (Some(a), Some(b)) => Some(a < b),
-            _ => {
-                let a = self.as_number()?;
-                let b = other.as_number()?;
-                Some(a < b)
-            }
-        }
-    }
-
-    #[inline]
-    pub fn le(&self, other: &Self) -> Option<bool> {
-        match (self.as_integer(), other.as_integer()) {
-            (Some(a), Some(b)) => Some(a <= b),
-            _ => {
-                let a = self.as_number()?;
-                let b = other.as_number()?;
-                Some(a <= b)
-            }
-        }
-    }
-
-    // ============ String conversion ============
-
-    pub fn to_lua_string(&self) -> Option<String> {
-        if let Some(i) = self.as_integer() {
-            Some(i.to_string())
-        } else if let Some(f) = self.as_float() {
-            Some(format!("{}", f))
-        } else if let Some(b) = self.as_bool() {
-            Some(b.to_string())
-        } else if self.is_nil() {
-            Some("nil".to_string())
-        } else if let Some(s) = self.as_string_rc() {
-            Some(s.as_str().to_string())
-        } else {
-            None
+    /// Alias for type_kind() - returns the type discriminator
+    /// Use this to check types instead of pattern matching
+    #[inline(always)]
+    pub fn kind(&self) -> LuaValueKind {
+        match self.primary {
+            VALUE_NIL => LuaValueKind::Nil,
+            VALUE_TRUE | VALUE_FALSE => LuaValueKind::Boolean,
+            TAG_INTEGER => LuaValueKind::Integer,
+            p if p < NAN_BASE => LuaValueKind::Float,
+            TAG_STRING => LuaValueKind::String,
+            TAG_TABLE => LuaValueKind::Table,
+            TAG_FUNCTION => LuaValueKind::Function,
+            TAG_USERDATA => LuaValueKind::Userdata,
+            TAG_CFUNCTION => LuaValueKind::CFunction,
+            _ => unreachable!("Invalid LuaValue primary tag"),
         }
     }
 }
@@ -687,7 +592,7 @@ impl Clone for LuaValue {
     fn clone(&self) -> Self {
         // Ultra-fast clone: For pointers, just increment refcount
         // For values (nil/bool/int/float/cfunc), just copy bits
-        
+
         match self.primary {
             TAG_STRING => {
                 // SAFETY: We know this is a valid string pointer
@@ -696,29 +601,23 @@ impl Clone for LuaValue {
                     Rc::increment_strong_count(ptr);
                 }
             }
-            TAG_TABLE => {
-                unsafe {
-                    let ptr = self.secondary as *const RefCell<LuaTable>;
-                    Rc::increment_strong_count(ptr);
-                }
-            }
-            TAG_FUNCTION => {
-                unsafe {
-                    let ptr = self.secondary as *const LuaFunction;
-                    Rc::increment_strong_count(ptr);
-                }
-            }
-            TAG_USERDATA => {
-                unsafe {
-                    let ptr = self.secondary as *const LuaUserdata;
-                    Rc::increment_strong_count(ptr);
-                }
-            }
+            TAG_TABLE => unsafe {
+                let ptr = self.secondary as *const RefCell<LuaTable>;
+                Rc::increment_strong_count(ptr);
+            },
+            TAG_FUNCTION => unsafe {
+                let ptr = self.secondary as *const LuaFunction;
+                Rc::increment_strong_count(ptr);
+            },
+            TAG_USERDATA => unsafe {
+                let ptr = self.secondary as *const LuaUserdata;
+                Rc::increment_strong_count(ptr);
+            },
             _ => {
                 // Nil, Bool, Integer, Float, CFunction - just copy bits (no refcount)
             }
         }
-        
+
         // Always return a bitwise copy (refcount already incremented if needed)
         Self {
             primary: self.primary,
@@ -730,26 +629,19 @@ impl Clone for LuaValue {
 // Implement Debug for better error messages
 impl std::fmt::Debug for LuaValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_nil() {
-            write!(f, "nil")
-        } else if let Some(b) = self.as_bool() {
-            write!(f, "{}", b)
-        } else if let Some(i) = self.as_integer() {
-            write!(f, "{}", i)
-        } else if let Some(fl) = self.as_float() {
-            write!(f, "{}", fl)
-        } else if let Some(s) = self.as_string_rc() {
-            write!(f, "\"{}\"", s.as_str())
-        } else if self.is_table() {
-            write!(f, "table: {:x}", self.secondary())
-        } else if self.is_function() {
-            write!(f, "function: {:x}", self.secondary())
-        } else if self.is_userdata() {
-            write!(f, "userdata: {:x}", self.secondary())
-        } else if self.is_cfunction() {
-            write!(f, "cfunction")
-        } else {
-            write!(f, "unknown")
+        match self.kind() {
+            LuaValueKind::Nil => write!(f, "nil"),
+            LuaValueKind::Boolean => write!(f, "{}", self.as_bool().unwrap()),
+            LuaValueKind::Integer => write!(f, "{}", self.as_integer().unwrap()),
+            LuaValueKind::Float => write!(f, "{}", self.as_float().unwrap()),
+            LuaValueKind::String => {
+                let s = self.as_string_rc().unwrap();
+                write!(f, "\"{}\"", s.as_str())
+            }
+            LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
+            LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
+            LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.secondary()),
+            LuaValueKind::CFunction => write!(f, "cfunction"),
         }
     }
 }
@@ -770,13 +662,7 @@ impl PartialEq for LuaValue {
         }
 
         // Type-specific comparison
-        if let (Some(a), Some(b)) = (self.as_integer(), other.as_integer()) {
-            a == b
-        } else if let (Some(a), Some(b)) = (self.as_float(), other.as_float()) {
-            a == b
-        } else if let (Some(a), Some(b)) = (self.as_bool(), other.as_bool()) {
-            a == b
-        } else if self.is_string() && other.is_string() {
+        if self.is_string() && other.is_string() {
             match (self.as_string_rc(), other.as_string_rc()) {
                 (Some(a), Some(b)) => {
                     if Rc::ptr_eq(&a, &b) {
@@ -806,33 +692,8 @@ impl Eq for LuaValue {}
 
 impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        if self.is_nil() {
-            0u8.hash(state);
-        } else if let Some(b) = self.as_bool() {
-            1u8.hash(state);
-            b.hash(state);
-        } else if let Some(i) = self.as_integer() {
-            2u8.hash(state);
-            i.hash(state);
-        } else if let Some(f) = self.as_float() {
-            3u8.hash(state);
-            f.to_bits().hash(state);
-        } else if let Some(s) = self.as_string_rc() {
-            4u8.hash(state);
-            s.as_str().hash(state);
-        } else if self.is_table() {
-            5u8.hash(state);
-            self.secondary().hash(state);
-        } else if self.is_function() {
-            6u8.hash(state);
-            self.secondary().hash(state);
-        } else if self.is_cfunction() {
-            7u8.hash(state);
-            self.secondary().hash(state);
-        } else if self.is_userdata() {
-            8u8.hash(state);
-            self.secondary().hash(state);
-        }
+        self.primary.hash(state);
+        self.secondary.hash(state);
     }
 }
 
@@ -864,94 +725,6 @@ impl PartialOrd for LuaValue {
 impl Ord for LuaValue {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other).unwrap()
-    }
-}
-
-// ============ Additional Methods for Compatibility ============
-
-impl LuaValue {
-    /// Get as_string (returns Rc) for compatibility
-    pub fn as_string(&self) -> Option<Rc<LuaString>> {
-        self.as_string_rc()
-    }
-
-    /// Get as_table (returns Rc<RefCell>) for compatibility
-    pub fn as_table(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        self.as_table_rc()
-    }
-
-    /// Get as_function (returns Rc) for compatibility
-    pub fn as_function(&self) -> Option<Rc<LuaFunction>> {
-        self.as_function_rc()
-    }
-
-    /// Get as_userdata (returns Rc) for compatibility
-    pub fn as_userdata(&self) -> Option<Rc<LuaUserdata>> {
-        self.as_userdata_rc()
-    }
-
-    /// Get as_boolean for compatibility
-    pub fn as_boolean(&self) -> Option<bool> {
-        self.as_bool()
-    }
-
-    /// String representation for printing
-    pub fn to_string_repr(&self) -> String {
-        if let Some(i) = self.as_integer() {
-            i.to_string()
-        } else if let Some(f) = self.as_float() {
-            f.to_string()
-        } else if let Some(b) = self.as_bool() {
-            b.to_string()
-        } else if self.is_nil() {
-            "nil".to_string()
-        } else if let Some(s) = self.as_string_rc() {
-            s.as_str().to_string()
-        } else if self.is_table() {
-            format!("table: {:x}", self.secondary())
-        } else if self.is_function() {
-            format!("function: {:x}", self.secondary())
-        } else if self.is_cfunction() {
-            "function: [C]".to_string()
-        } else if self.is_userdata() {
-            format!("userdata: {:x}", self.secondary())
-        } else {
-            "unknown".to_string()
-        }
-    }
-
-    /// Check if value is callable (function or cfunction)
-    pub fn is_callable(&self) -> bool {
-        self.is_function() || self.is_cfunction()
-    }
-
-    /// Get metatable for tables and userdata
-    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        if let Some(table) = self.as_table_rc() {
-            table.borrow().get_metatable()
-        } else if let Some(userdata) = self.as_userdata_rc() {
-            userdata.get_metatable()
-        } else {
-            None
-        }
-    }
-
-    /// Alias for type_kind() - returns the type discriminator
-    /// Use this to check types instead of pattern matching
-    #[inline(always)]
-    pub fn kind(&self) -> LuaValueKind {
-        match self.primary {
-            VALUE_NIL => LuaValueKind::Nil,
-            VALUE_TRUE | VALUE_FALSE => LuaValueKind::Boolean,
-            TAG_INTEGER => LuaValueKind::Integer,
-            p if p < NAN_BASE => LuaValueKind::Float,
-            TAG_STRING => LuaValueKind::String,
-            TAG_TABLE => LuaValueKind::Table,
-            TAG_FUNCTION => LuaValueKind::Function,
-            TAG_USERDATA => LuaValueKind::Userdata,
-            TAG_CFUNCTION => LuaValueKind::CFunction,
-            _ => unreachable!("Invalid LuaValue primary tag"),
-        }
     }
 }
 

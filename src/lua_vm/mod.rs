@@ -1,21 +1,23 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
+mod lua_call_frame;
 
 use crate::gc::{GC, GcObjectType};
 use crate::lib_registry;
 use crate::lua_value::{
     Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind,
 };
+pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 use crate::opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub struct VM {
+pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
     globals: Rc<RefCell<LuaTable>>,
 
     // Call stack
-    pub frames: Vec<CallFrame>,
+    pub frames: Vec<LuaCallFrame>,
 
     // Garbage collector
     gc: GC,
@@ -28,27 +30,21 @@ pub struct VM {
 
     // Next frame ID (for tracking frames)
     next_frame_id: usize,
+
+    // Error handling state
+    pub error_handler: Option<LuaValue>, // Current error handler for xpcall
 }
 
-pub struct CallFrame {
-    pub frame_id: usize, // Unique ID for this frame
-    pub function: Rc<LuaFunction>,
-    pub pc: usize,                // Program counter
-    pub registers: Vec<LuaValue>, // Register file
-    pub base: usize,              // Stack base for this frame
-    pub result_reg: usize,        // Register to store return value
-    pub num_results: usize,       // Number of expected return values
-}
-
-impl VM {
+impl LuaVM {
     pub fn new() -> Self {
-        let mut vm = VM {
+        let mut vm = LuaVM {
             globals: Rc::new(RefCell::new(LuaTable::new())),
             frames: Vec::new(),
             gc: GC::new(),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
             next_frame_id: 0,
+            error_handler: None,
         };
 
         // Register built-in functions
@@ -80,7 +76,7 @@ impl VM {
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
 
-        let frame = CallFrame {
+        let frame = LuaCallFrame {
             frame_id,
             function: Rc::new(main_func),
             pc: 0,
@@ -88,6 +84,9 @@ impl VM {
             base: 0,
             result_reg: 0,
             num_results: 0,
+            func_name: Some("main".to_string()),
+            source: chunk.source_name.clone(),
+            is_protected: false,
         };
 
         self.frames.push(frame);
@@ -477,8 +476,9 @@ impl VM {
             let right_tag = right.primary();
 
             // Fast path: both integers (most common case)
-            if left_tag == crate::lua_value::TAG_INTEGER 
-                && right_tag == crate::lua_value::TAG_INTEGER {
+            if left_tag == crate::lua_value::TAG_INTEGER
+                && right_tag == crate::lua_value::TAG_INTEGER
+            {
                 let i = left.secondary() as i64;
                 let j = right.secondary() as i64;
                 *frame.registers.get_unchecked_mut(a) = LuaValue::integer(i + j);
@@ -486,8 +486,7 @@ impl VM {
             }
 
             // Both floats
-            if left_tag < crate::lua_value::NAN_BASE 
-                && right_tag < crate::lua_value::NAN_BASE {
+            if left_tag < crate::lua_value::NAN_BASE && right_tag < crate::lua_value::NAN_BASE {
                 let l = f64::from_bits(left_tag);
                 let r = f64::from_bits(right_tag);
                 *frame.registers.get_unchecked_mut(a) = LuaValue::float(l + r);
@@ -496,7 +495,9 @@ impl VM {
 
             // Mixed int/float - convert to float
             if (left_tag == crate::lua_value::TAG_INTEGER || left_tag < crate::lua_value::NAN_BASE)
-                && (right_tag == crate::lua_value::TAG_INTEGER || right_tag < crate::lua_value::NAN_BASE) {
+                && (right_tag == crate::lua_value::TAG_INTEGER
+                    || right_tag < crate::lua_value::NAN_BASE)
+            {
                 let l = if left_tag == crate::lua_value::TAG_INTEGER {
                     left.secondary() as i64 as f64
                 } else {
@@ -538,7 +539,7 @@ impl VM {
         unsafe {
             let left = frame.registers.get_unchecked(b);
             let right = frame.registers.get_unchecked(c);
-            
+
             match (left.kind(), right.kind()) {
                 (LuaValueKind::Integer, LuaValueKind::Integer) => {
                     let i = left.as_integer().unwrap();
@@ -591,7 +592,7 @@ impl VM {
         unsafe {
             let left = frame.registers.get_unchecked(b);
             let right = frame.registers.get_unchecked(c);
-            
+
             match (left.kind(), right.kind()) {
                 (LuaValueKind::Integer, LuaValueKind::Integer) => {
                     let i = left.as_integer().unwrap();
@@ -897,7 +898,7 @@ impl VM {
             let frame = self.current_frame();
             let left = &frame.registers[b];
             let right = &frame.registers[c];
-            
+
             match (left.kind(), right.kind()) {
                 (LuaValueKind::Nil, LuaValueKind::Nil) => Some(true),
                 (LuaValueKind::Boolean, LuaValueKind::Boolean) => {
@@ -1105,11 +1106,12 @@ impl VM {
         }
 
         // Fast path: Pure integer arithmetic (most common)
-        if let (LuaValueKind::Integer, LuaValueKind::Integer) = 
-            (frame.registers[a].kind(), frame.registers[a + 2].kind()) {
+        if let (LuaValueKind::Integer, LuaValueKind::Integer) =
+            (frame.registers[a].kind(), frame.registers[a + 2].kind())
+        {
             let init = frame.registers[a].as_integer().unwrap();
             let step = frame.registers[a + 2].as_integer().unwrap();
-            
+
             // Subtract step so first FORLOOP iteration adds it back to get init
             let new_init = init.wrapping_sub(step);
             frame.registers[a] = LuaValue::integer(new_init);
@@ -1143,23 +1145,23 @@ impl VM {
             let idx_val = frame.registers.get_unchecked(a);
             let limit_val = frame.registers.get_unchecked(a + 1);
             let step_val = frame.registers.get_unchecked(a + 2);
-            
+
             let idx_tag = idx_val.primary();
             let limit_tag = limit_val.primary();
             let step_tag = step_val.primary();
-            
+
             // Fast path: All integers (most common - > 95% of loops)
-            if idx_tag == crate::lua_value::TAG_INTEGER 
+            if idx_tag == crate::lua_value::TAG_INTEGER
                 && limit_tag == crate::lua_value::TAG_INTEGER
-                && step_tag == crate::lua_value::TAG_INTEGER {
-                
+                && step_tag == crate::lua_value::TAG_INTEGER
+            {
                 let idx = idx_val.secondary() as i64;
                 let limit = limit_val.secondary() as i64;
                 let step = step_val.secondary() as i64;
-                
+
                 // Add step with wrapping (Lua 5.4 allows overflow)
                 let new_idx = idx.wrapping_add(step);
-                
+
                 // Lua 5.4 loop condition: (step >= 0) ? (idx <= limit) : (idx >= limit)
                 let continue_loop = if step >= 0 {
                     new_idx <= limit
@@ -1180,14 +1182,15 @@ impl VM {
             }
 
             // Slow path: Float or mixed types
-            if idx_tag < crate::lua_value::NAN_BASE 
+            if idx_tag < crate::lua_value::NAN_BASE
                 && limit_tag < crate::lua_value::NAN_BASE
-                && step_tag < crate::lua_value::NAN_BASE {
+                && step_tag < crate::lua_value::NAN_BASE
+            {
                 // All floats
                 let idx = f64::from_bits(idx_tag);
                 let limit = f64::from_bits(limit_tag);
                 let step = f64::from_bits(step_tag);
-                
+
                 let new_idx = idx + step;
                 let continue_loop = if step >= 0.0 {
                     new_idx <= limit
@@ -1205,7 +1208,8 @@ impl VM {
             }
 
             // Mixed int/float - convert to float
-            let is_num = |tag: u64| tag == crate::lua_value::TAG_INTEGER || tag < crate::lua_value::NAN_BASE;
+            let is_num =
+                |tag: u64| tag == crate::lua_value::TAG_INTEGER || tag < crate::lua_value::NAN_BASE;
             if is_num(idx_tag) && is_num(limit_tag) && is_num(step_tag) {
                 let to_float = |val: &LuaValue, tag: u64| {
                     if tag == crate::lua_value::TAG_INTEGER {
@@ -1218,7 +1222,7 @@ impl VM {
                 let idx = to_float(idx_val, idx_tag);
                 let limit = to_float(limit_val, limit_tag);
                 let step = to_float(step_val, step_tag);
-                
+
                 let new_idx = idx + step;
                 let continue_loop = if step >= 0.0 {
                     new_idx <= limit
@@ -1341,7 +1345,7 @@ impl VM {
             let frame_id = self.next_frame_id;
             self.next_frame_id += 1;
 
-            let temp_frame = CallFrame {
+            let temp_frame = LuaCallFrame {
                 frame_id,
                 function: self.current_frame().function.clone(),
                 pc: self.current_frame().pc,
@@ -1349,6 +1353,9 @@ impl VM {
                 base: self.frames.len(),
                 result_reg: 0,
                 num_results: 0,
+                func_name: Some("[C]".to_string()),
+                source: Some("[C]".to_string()),
+                is_protected: false,
             };
 
             self.frames.push(temp_frame);
@@ -1404,15 +1411,14 @@ impl VM {
             let frame_id = self.next_frame_id;
             self.next_frame_id += 1;
 
-            let new_frame = CallFrame {
+            let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
-                function: lua_func.clone(),
-                pc: 0,
-                registers: new_registers,
-                base: self.frames.len(),
-                result_reg: a,
-                num_results: if c == 0 { usize::MAX } else { c - 1 },
-            };
+                lua_func,
+                new_registers,
+                self.frames.len(),
+                a,
+                if c == 0 { usize::MAX } else { c - 1 },
+            );
 
             self.frames.push(new_frame);
             Ok(())
@@ -1676,12 +1682,12 @@ impl VM {
 
     // Helper methods
     #[inline(always)]
-    fn current_frame(&self) -> &CallFrame {
+    fn current_frame(&self) -> &LuaCallFrame {
         unsafe { self.frames.last().unwrap_unchecked() }
     }
 
     #[inline(always)]
-    fn current_frame_mut(&mut self) -> &mut CallFrame {
+    fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
         unsafe { self.frames.last_mut().unwrap_unchecked() }
     }
 
@@ -1890,19 +1896,19 @@ impl VM {
                         max_stack_size: 16,
                         child_protos: Vec::new(),
                         upvalue_descs: Vec::new(),
+                        source_name: Some("[C]".to_string()),
+                        line_info: Vec::new(),
                     }),
                     upvalues: Vec::new(),
                 });
 
-                let temp_frame = CallFrame {
+                let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
-                    function: dummy_func,
-                    pc: 0,
+                    dummy_func.clone(),
+                    0,
                     registers,
-                    base: self.frames.len(),
-                    result_reg: 0,
-                    num_results: 0,
-                };
+                    self.frames.len(),
+                );
 
                 self.frames.push(temp_frame);
 
@@ -1936,15 +1942,14 @@ impl VM {
                     }
                 }
 
-                let new_frame = CallFrame {
+                let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
-                    function: lua_func.clone(),
-                    pc: 0,
+                    lua_func,
                     registers,
-                    base: self.frames.len(),
-                    result_reg: 0,
-                    num_results: 0, // Don't write back to caller's registers
-                };
+                    self.frames.len(),
+                    0,
+                    0, // Don't write back to caller's registers
+                );
 
                 let initial_frame_count = self.frames.len();
                 self.frames.push(new_frame);
@@ -2519,15 +2524,13 @@ impl VM {
                     }
                 }
 
-                let temp_frame = CallFrame {
+                let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
-                    function: f.clone(),
-                    pc: 0,
+                    f.clone(),
+                    0,
                     registers,
-                    base: self.frames.len(),
-                    result_reg,
-                    num_results: 1,
-                };
+                    self.frames.len(),
+                );
 
                 self.frames.push(temp_frame);
 
@@ -2554,15 +2557,15 @@ impl VM {
                     registers[i + 1] = arg.clone();
                 }
 
-                let temp_frame = CallFrame {
+                let parent_func = self.current_frame().function.clone();
+                let parent_pc = self.current_frame().pc;
+                let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
-                    function: self.current_frame().function.clone(),
-                    pc: self.current_frame().pc,
+                    parent_func,
+                    parent_pc,
                     registers,
-                    base: self.frames.len(),
-                    result_reg: 0,
-                    num_results: 1,
-                };
+                    self.frames.len(),
+                );
 
                 self.frames.push(temp_frame);
 
@@ -2628,8 +2631,12 @@ impl VM {
 
         // Iterate through call frames from top to bottom
         for (i, frame) in self.frames.iter().rev().enumerate() {
-            let func_name = "?"; // Could extract from debug info if available
-            let pc = frame.pc.saturating_sub(1); // Adjust to show failing instruction
+            let func_name = frame
+                .func_name
+                .as_deref()
+                .or(frame.source.as_deref())
+                .unwrap_or("?");
+            let pc = frame.pc.saturating_sub(1);
 
             trace.push_str(&format!(
                 "\n  [{}] function '{}' at PC {}",
@@ -2670,6 +2677,51 @@ impl VM {
         }
     }
 
+    /// Protected call with error handler - 实现 xpcall 机制
+    pub fn protected_call_with_handler(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+        err_handler: LuaValue,
+    ) -> (bool, Vec<LuaValue>) {
+        // 保存当前错误处理器
+        let old_handler = self.error_handler.clone();
+        self.error_handler = Some(err_handler.clone());
+
+        // 保存当前栈深度
+        let initial_frame_count = self.frames.len();
+
+        // 尝试调用函数
+        let result = self.call_function_internal(func, args);
+
+        // 恢复错误处理器
+        self.error_handler = old_handler;
+
+        match result {
+            Ok(values) => (true, values),
+            Err(err_msg) => {
+                // 回滚栈
+                while self.frames.len() > initial_frame_count {
+                    self.frames.pop();
+                }
+
+                // 调用错误处理器
+                let err_str = self.create_string(err_msg.clone());
+                let handler_result = self
+                    .call_function_internal(err_handler, vec![LuaValue::from_string_rc(err_str)]);
+
+                match handler_result {
+                    Ok(handler_values) => (false, handler_values),
+                    Err(_) => {
+                        // 错误处理器本身出错,返回原始错误
+                        let err_str = self.create_string(err_msg);
+                        (false, vec![LuaValue::from_string_rc(err_str)])
+                    }
+                }
+            }
+        }
+    }
+
     /// Internal helper to call a function
     fn call_function_internal(
         &mut self,
@@ -2697,19 +2749,20 @@ impl VM {
                         max_stack_size: 16,
                         child_protos: Vec::new(),
                         upvalue_descs: Vec::new(),
+                        source_name: Some("[direct_call]".to_string()),
+                        line_info: Vec::new(),
                     }),
                     upvalues: Vec::new(),
                 });
 
-                let temp_frame = CallFrame {
+                let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
-                    function: dummy_func,
-                    pc: 0,
+                    dummy_func,
                     registers,
-                    base: self.frames.len(),
-                    result_reg: 0,
-                    num_results: 0,
-                };
+                    self.frames.len(),
+                    0,
+                    0,
+                );
 
                 self.frames.push(temp_frame);
                 let result = cfunc(self)?;
@@ -2730,15 +2783,14 @@ impl VM {
                     }
                 }
 
-                let new_frame = CallFrame {
+                let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
-                    function: lua_func.clone(),
-                    pc: 0,
+                    lua_func,
                     registers,
-                    base: self.frames.len(),
-                    result_reg: 0,
-                    num_results: 0,
-                };
+                    self.frames.len(),
+                    0,
+                    0,
+                );
 
                 let initial_frame_count = self.frames.len();
                 self.frames.push(new_frame);
