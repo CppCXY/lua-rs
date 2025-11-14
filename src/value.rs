@@ -131,6 +131,7 @@ impl LuaValue {
         matches!(self, LuaValue::Float(_))
     }
 
+    #[inline(always)]
     pub fn is_number(&self) -> bool {
         matches!(self, LuaValue::Integer(_) | LuaValue::Float(_))
     }
@@ -194,6 +195,7 @@ impl LuaValue {
     }
 
     /// Get as float, with automatic conversion from integer
+    #[inline(always)]
     pub fn as_float(&self) -> Option<f64> {
         match self {
             LuaValue::Integer(i) => Some(*i as f64),
@@ -203,6 +205,7 @@ impl LuaValue {
     }
 
     /// Get as number (alias for as_float for backwards compatibility)
+    #[inline(always)]
     pub fn as_number(&self) -> Option<f64> {
         self.as_float()
     }
@@ -258,6 +261,7 @@ impl LuaValue {
     }
 
     // Lua truthiness: only nil and false are falsy
+    #[inline(always)]
     pub fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Boolean(false))
     }

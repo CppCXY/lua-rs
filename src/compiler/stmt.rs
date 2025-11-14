@@ -320,6 +320,7 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
 /// Compile numeric for loop
 fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     // Structure: for <var> = <start>, <end> [, <step>] do <block> end
+    // Use efficient FORPREP/FORLOOP instructions like Lua
 
     // Get loop variable name
     let var_name = stat
@@ -328,99 +329,72 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
         .get_name_text()
         .to_string();
 
-    // Get start, end, step expressions (as iterator)
+    // Get start, end, step expressions
     let exprs = stat.get_iter_expr().collect::<Vec<_>>();
     if exprs.len() < 2 {
         return Err("for loop requires at least start and end expressions".to_string());
     }
 
-    // Compile expressions
-    let start_reg = compile_expr(c, &exprs[0])?;
-    let end_reg = compile_expr(c, &exprs[1])?;
+    // Allocate registers for loop control variables
+    // R(base) = index, R(base+1) = limit, R(base+2) = step, R(base+3) = loop var
+    let base_reg = alloc_register(c);
+    let limit_reg = alloc_register(c);
+    let step_reg = alloc_register(c);
+    let var_reg = alloc_register(c);
 
-    let step_reg = if exprs.len() >= 3 {
-        compile_expr(c, &exprs[2])?
+    // Compile expressions directly to target registers when possible
+    let start = compile_expr(c, &exprs[0])?;
+    if start != base_reg {
+        emit_move(c, base_reg, start);
+    }
+
+    let limit = compile_expr(c, &exprs[1])?;
+    if limit != limit_reg {
+        emit_move(c, limit_reg, limit);
+    }
+
+    // Compile and store step expression (default 1)
+    if exprs.len() >= 3 {
+        let step = compile_expr(c, &exprs[2])?;
+        if step != step_reg {
+            emit_move(c, step_reg, step);
+        }
     } else {
-        // Default step is 1 (positive)
-        let const_idx = add_constant(c, crate::value::LuaValue::integer(1));
-        let reg = alloc_register(c);
-        emit_load_constant(c, reg, const_idx);
-        reg
-    };
+        let const_idx = add_constant(c, crate::value::LuaValue::Integer(1));
+        emit_load_constant(c, step_reg, const_idx);
+    }
 
-    // Allocate iterator variable
-    let iter_reg = alloc_register(c);
-    emit_move(c, iter_reg, start_reg);
+    // Emit FORPREP: R(base) -= R(step); jump to loop start
+    let forprep_pc = c.chunk.code.len();
+    emit(c, Instruction::encode_asbx(OpCode::ForPrep, base_reg, 0)); // Will patch later
 
-    // Begin new scope and add loop variable
+    // Begin new scope for loop body
     begin_scope(c);
-    add_local(c, var_name, iter_reg);
-
-    // Begin loop
+    
+    // The loop variable is at R(base+3), initialized by FORLOOP
+    add_local(c, var_name, var_reg);
     begin_loop(c);
 
-    // Mark loop start
     let loop_start = c.chunk.code.len();
-
-    // Universal condition check that works for both positive and negative steps:
-    // (iter - end) * step <= 0
-    // This is equivalent to:
-    //   - If step > 0: iter <= end
-    //   - If step < 0: iter >= end
-
-    // Calculate (iter - end)
-    let diff_reg = alloc_register(c);
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::Sub, diff_reg, iter_reg, end_reg),
-    );
-
-    // Calculate (iter - end) * step
-    let product_reg = alloc_register(c);
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::Mul, product_reg, diff_reg, step_reg),
-    );
-
-    // Check if product <= 0
-    let zero_const = add_constant(c, crate::value::LuaValue::integer(0));
-    let zero_reg = alloc_register(c);
-    emit_load_constant(c, zero_reg, zero_const);
-
-    let cond_reg = alloc_register(c);
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::Le, cond_reg, product_reg, zero_reg),
-    );
-
-    // Test condition: if false, exit loop
-    emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-    let end_jump = emit_jump(c, OpCode::Jmp);
+    
+    // FORLOOP will set R(base+3) = R(base) on first iteration
+    // We need to initialize it for the loop body
+    emit_move(c, var_reg, base_reg);
 
     // Compile loop body
     if let Some(body) = stat.get_block() {
         compile_block(c, &body)?;
     }
 
-    // Increment iterator: iter = iter + step
-    let new_iter_reg = alloc_register(c);
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::Add, new_iter_reg, iter_reg, step_reg),
-    );
-    emit_move(c, iter_reg, new_iter_reg);
+    // Emit FORLOOP: increments index, checks condition, jumps back if true
+    let forloop_offset = (loop_start as i32) - (c.chunk.code.len() as i32) - 1;
+    emit(c, Instruction::encode_asbx(OpCode::ForLoop, base_reg, forloop_offset));
 
-    // Jump back to loop start
-    let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
-    emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, -jump_offset));
+    // Patch FORPREP jump to skip to loop start
+    let prep_jump = (loop_start as i32) - (forprep_pc as i32) - 1;
+    c.chunk.code[forprep_pc] = Instruction::encode_asbx(OpCode::ForPrep, base_reg, prep_jump);
 
-    // Patch end jump
-    patch_jump(c, end_jump);
-
-    // End loop (patches all break statements)
     end_loop(c);
-
-    // End scope
     end_scope(c);
 
     Ok(())

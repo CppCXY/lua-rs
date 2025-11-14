@@ -156,6 +156,8 @@ impl VM {
                 OpCode::Shr => self.op_shr(instr)?,
                 OpCode::BNot => self.op_bnot(instr)?,
                 OpCode::IDiv => self.op_idiv(instr)?,
+                OpCode::ForPrep => self.op_forprep(instr)?,
+                OpCode::ForLoop => self.op_forloop(instr)?,
                 OpCode::Jmp => self.op_jmp(instr)?,
                 OpCode::Test => self.op_test(instr)?,
                 OpCode::TestSet => self.op_testset(instr)?,
@@ -177,6 +179,7 @@ impl VM {
     }
 
     // Opcode implementations
+    #[inline(always)]
     fn op_move(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -185,6 +188,7 @@ impl VM {
         Ok(())
     }
 
+    #[inline(always)]
     fn op_loadk(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
@@ -270,6 +274,7 @@ impl VM {
         }
     }
 
+    #[inline]
     fn op_add(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -312,6 +317,7 @@ impl VM {
         }
     }
 
+    #[inline]
     fn op_sub(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -351,6 +357,7 @@ impl VM {
         }
     }
 
+    #[inline]
     fn op_mul(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -390,6 +397,7 @@ impl VM {
         }
     }
 
+    #[inline]
     fn op_div(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -429,6 +437,7 @@ impl VM {
         }
     }
 
+    #[inline]
     fn op_mod(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -496,33 +505,36 @@ impl VM {
         }
     }
 
+    #[inline(always)]
     fn op_unm(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
 
         let frame = self.current_frame_mut();
-        let value = frame.registers[b].clone();
-
-        match &value {
-            LuaValue::Float(f) => {
-                frame.registers[a] = LuaValue::number(-f);
-                Ok(())
-            }
+        
+        // Fast path: avoid clone
+        match &frame.registers[b] {
             LuaValue::Integer(i) => {
-                frame.registers[a] = LuaValue::integer(-i);
-                Ok(())
+                frame.registers[a] = LuaValue::Integer(-i);
+                return Ok(());
             }
-            _ => {
-                // Try __unm metamethod
-                if self.call_unop_metamethod(&value, "__unm", a)? {
-                    Ok(())
-                } else {
-                    Err(format!("attempt to negate non-number value"))
-                }
+            LuaValue::Float(f) => {
+                frame.registers[a] = LuaValue::Float(-f);
+                return Ok(());
             }
+            _ => {}
+        }
+
+        // Slow path: need to clone for metamethod
+        let value = frame.registers[b].clone();
+        if self.call_unop_metamethod(&value, "__unm", a)? {
+            Ok(())
+        } else {
+            Err(format!("attempt to negate non-number value"))
         }
     }
 
+    #[inline]
     fn op_idiv(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -570,6 +582,7 @@ impl VM {
         }
     }
 
+    #[inline(always)]
     fn op_not(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -612,68 +625,100 @@ impl VM {
         Err("attempt to get length of a non-sequence value".to_string())
     }
 
+    #[inline]
     fn op_eq(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
+        // Fast path: direct comparison for primitives
+        let fast_result = {
+            let frame = self.current_frame();
+            match (&frame.registers[b], &frame.registers[c]) {
+                (LuaValue::Nil, LuaValue::Nil) => Some(true),
+                (LuaValue::Boolean(l), LuaValue::Boolean(r)) => Some(l == r),
+                (LuaValue::Integer(l), LuaValue::Integer(r)) => Some(l == r),
+                (LuaValue::Float(l), LuaValue::Float(r)) => Some(l == r),
+                (LuaValue::Integer(i), LuaValue::Float(f)) | (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                    Some(*i as f64 == *f)
+                }
+                _ => None
+            }
+        };
+        
+        if let Some(result) = fast_result {
+            let frame = self.current_frame_mut();
+            frame.registers[a] = LuaValue::Boolean(result);
+            return Ok(());
+        }
+                
+        // Slow path: need to handle tables/strings/metamethods
         let (left, right) = {
             let frame = self.current_frame();
             (frame.registers[b].clone(), frame.registers[c].clone())
         };
-
-        // First try raw equality
+        
         if self.values_equal(&left, &right) {
             let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::boolean(true);
+            frame.registers[a] = LuaValue::Boolean(true);
             return Ok(());
         }
-
-        // Try __eq metamethod only if both values are tables or both are userdata
-        // and have the same metamethod
+        
         let left_mm = self.get_metamethod(&left, "__eq");
         let right_mm = self.get_metamethod(&right, "__eq");
-
+        
         if let (Some(mm_left), Some(mm_right)) = (&left_mm, &right_mm) {
-            // Both must have the same __eq metamethod
             if self.values_equal(mm_left, mm_right) {
                 if self.call_binop_metamethod(&left, &right, "__eq", a)? {
                     return Ok(());
                 }
             }
         }
-
-        // No metamethod or different metamethods, return false
+        
         let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::boolean(false);
+        frame.registers[a] = LuaValue::Boolean(false);
         Ok(())
     }
 
+    #[inline]
     fn op_lt(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let (left, right) = {
-            let frame = self.current_frame();
-            (frame.registers[b].clone(), frame.registers[c].clone())
-        };
-
-        // Try numbers first
-        if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::boolean(l < r);
-            return Ok(());
+        let frame = self.current_frame_mut();
+        
+        // Fast path: numeric comparison without clone
+        match (&frame.registers[b], &frame.registers[c]) {
+            (LuaValue::Integer(l), LuaValue::Integer(r)) => {
+                frame.registers[a] = LuaValue::Boolean(l < r);
+                return Ok(());
+            }
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::Boolean(l < r);
+                return Ok(());
+            }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                frame.registers[a] = LuaValue::Boolean((*i as f64) < *f);
+                return Ok(());
+            }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                frame.registers[a] = LuaValue::Boolean(*f < (*i as f64));
+                return Ok(());
+            }
+            _ => {}
         }
 
-        // Try strings
+        // Slow path: strings and metamethods
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+
         if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
             let frame = self.current_frame_mut();
             frame.registers[a] = LuaValue::boolean(l.as_str() < r.as_str());
             return Ok(());
         }
 
-        // Try __lt metamethod
         if self.call_binop_metamethod(&left, &right, "__lt", a)? {
             return Ok(());
         }
@@ -681,41 +726,51 @@ impl VM {
         Err("attempt to compare incompatible values".to_string())
     }
 
+    #[inline]
     fn op_le(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let (left, right) = {
-            let frame = self.current_frame();
-            (frame.registers[b].clone(), frame.registers[c].clone())
-        };
-
-        // Try numbers first
-        if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::boolean(l <= r);
-            return Ok(());
+        let frame = self.current_frame_mut();
+        
+        // Fast path: numeric comparison without clone
+        match (&frame.registers[b], &frame.registers[c]) {
+            (LuaValue::Integer(l), LuaValue::Integer(r)) => {
+                frame.registers[a] = LuaValue::Boolean(l <= r);
+                return Ok(());
+            }
+            (LuaValue::Float(l), LuaValue::Float(r)) => {
+                frame.registers[a] = LuaValue::Boolean(l <= r);
+                return Ok(());
+            }
+            (LuaValue::Integer(i), LuaValue::Float(f)) => {
+                frame.registers[a] = LuaValue::Boolean((*i as f64) <= *f);
+                return Ok(());
+            }
+            (LuaValue::Float(f), LuaValue::Integer(i)) => {
+                frame.registers[a] = LuaValue::Boolean(*f <= (*i as f64));
+                return Ok(());
+            }
+            _ => {}
         }
 
-        // Try strings
+        // Slow path
+        let left = frame.registers[b].clone();
+        let right = frame.registers[c].clone();
+
         if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
             let frame = self.current_frame_mut();
             frame.registers[a] = LuaValue::boolean(l.as_str() <= r.as_str());
             return Ok(());
         }
 
-        // Try __le metamethod
         if self.call_binop_metamethod(&left, &right, "__le", a)? {
             return Ok(());
         }
 
-        // If __le is not available, try __lt and negate: not (b < a)
-        // This implements: a <= b as not (b < a)
         if let Some(_) = self.get_metamethod(&left, "__lt") {
-            // Call __lt with swapped arguments
             if self.call_binop_metamethod(&right, &left, "__lt", a)? {
-                // Negate the result
                 let frame = self.current_frame_mut();
                 let result = frame.registers[a].is_truthy();
                 frame.registers[a] = LuaValue::boolean(!result);
@@ -726,10 +781,100 @@ impl VM {
         Err("attempt to compare incompatible values".to_string())
     }
 
+    #[inline(always)]
     fn op_jmp(&mut self, instr: u32) -> Result<(), String> {
         let sbx = Instruction::get_sbx(instr);
         let frame = self.current_frame_mut();
         frame.pc = (frame.pc as i32 + sbx) as usize;
+        Ok(())
+    }
+
+    // Numeric for loop opcodes for optimal performance
+    #[inline]
+    fn op_forprep(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let sbx = Instruction::get_sbx(instr);
+        
+        let frame = self.current_frame_mut();
+        
+        // R(A) should be init, R(A+1) should be limit, R(A+2) should be step
+        // Subtract step from init: R(A) -= R(A+2)
+        match (&frame.registers[a], &frame.registers[a + 2]) {
+            (LuaValue::Integer(init), LuaValue::Integer(step)) => {
+                frame.registers[a] = LuaValue::Integer(init - step);
+            }
+            (LuaValue::Float(init), LuaValue::Float(step)) => {
+                frame.registers[a] = LuaValue::Float(init - step);
+            }
+            (init, step) if init.is_number() && step.is_number() => {
+                let init_f = init.as_number().unwrap();
+                let step_f = step.as_number().unwrap();
+                frame.registers[a] = LuaValue::Float(init_f - step_f);
+            }
+            _ => {
+                return Err("'for' initial value must be a number".to_string());
+            }
+        }
+        
+        // Jump to loop start
+        frame.pc = (frame.pc as i32 + sbx) as usize;
+        Ok(())
+    }
+
+    #[inline]
+    fn op_forloop(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let sbx = Instruction::get_sbx(instr);
+        
+        let frame = self.current_frame_mut();
+        
+        // R(A) is index, R(A+1) is limit, R(A+2) is step
+        // Add step: R(A) += R(A+2)
+        let (new_value, continue_loop) = match (&frame.registers[a], &frame.registers[a + 1], &frame.registers[a + 2]) {
+            (LuaValue::Integer(idx), LuaValue::Integer(limit), LuaValue::Integer(step)) => {
+                let new_idx = idx + step;
+                let cont = if *step >= 0 {
+                    new_idx <= *limit
+                } else {
+                    new_idx >= *limit
+                };
+                (LuaValue::Integer(new_idx), cont)
+            }
+            (LuaValue::Float(idx), LuaValue::Float(limit), LuaValue::Float(step)) => {
+                let new_idx = idx + step;
+                let cont = if *step >= 0.0 {
+                    new_idx <= *limit
+                } else {
+                    new_idx >= *limit
+                };
+                (LuaValue::Float(new_idx), cont)
+            }
+            (idx, limit, step) if idx.is_number() && limit.is_number() && step.is_number() => {
+                let idx_f = idx.as_number().unwrap();
+                let limit_f = limit.as_number().unwrap();
+                let step_f = step.as_number().unwrap();
+                let new_idx = idx_f + step_f;
+                let cont = if step_f >= 0.0 {
+                    new_idx <= limit_f
+                } else {
+                    new_idx >= limit_f
+                };
+                (LuaValue::Float(new_idx), cont)
+            }
+            _ => {
+                return Err("'for' step/limit must be a number".to_string());
+            }
+        };
+        
+        frame.registers[a] = new_value.clone();
+        
+        if continue_loop {
+            // Copy index to loop variable: R(A+3) = R(A)
+            frame.registers[a + 3] = new_value;
+            // Jump back to loop body
+            frame.pc = (frame.pc as i32 + sbx) as usize;
+        }
+        
         Ok(())
     }
 
@@ -1166,12 +1311,14 @@ impl VM {
     }
 
     // Helper methods
+    #[inline(always)]
     fn current_frame(&self) -> &CallFrame {
-        self.frames.last().expect("No active frame")
+        unsafe { self.frames.last().unwrap_unchecked() }
     }
 
+    #[inline(always)]
     fn current_frame_mut(&mut self) -> &mut CallFrame {
-        self.frames.last_mut().expect("No active frame")
+        unsafe { self.frames.last_mut().unwrap_unchecked() }
     }
 
     pub fn values_equal(&self, left: &LuaValue, right: &LuaValue) -> bool {

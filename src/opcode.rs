@@ -52,6 +52,10 @@ pub enum OpCode {
     // Integer division
     IDiv,          // R(A) := R(B) // R(C)
     
+    // Numeric for loop
+    ForPrep,       // R(A) -= R(A+2); pc += sBx
+    ForLoop,       // R(A) += R(A+2); if R(A) <?= R(A+1) then pc += sBx; R(A+3) = R(A)
+    
     // Control flow
     Jmp,           // pc += sBx
     Test,          // if not (R(A) <=> C) then pc++
@@ -138,32 +142,38 @@ impl Instruction {
     }
 
     // Decode opcode
+    #[inline(always)]
     pub fn get_opcode(instr: u32) -> OpCode {
         let opcode_byte = (instr & ((1 << Self::OPCODE_BITS) - 1)) as u8;
         OpCode::from_u8(opcode_byte).expect("Invalid opcode")
     }
 
     // Decode A field
+    #[inline(always)]
     pub fn get_a(instr: u32) -> u32 {
         (instr >> Self::A_OFFSET) & ((1 << Self::A_BITS) - 1)
     }
 
     // Decode B field
+    #[inline(always)]
     pub fn get_b(instr: u32) -> u32 {
         (instr >> Self::B_OFFSET) & ((1 << Self::B_BITS) - 1)
     }
 
     // Decode C field
+    #[inline(always)]
     pub fn get_c(instr: u32) -> u32 {
         (instr >> Self::C_OFFSET) & ((1 << Self::C_BITS) - 1)
     }
 
     // Decode Bx field
+    #[inline(always)]
     pub fn get_bx(instr: u32) -> u32 {
         (instr >> Self::BX_OFFSET) & ((1 << Self::BX_BITS) - 1)
     }
 
     // Decode sBx field (signed)
+    #[inline(always)]
     pub fn get_sbx(instr: u32) -> i32 {
         Self::get_bx(instr) as i32 - (Self::MAX_BX as i32 / 2)
     }
