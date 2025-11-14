@@ -398,33 +398,33 @@ impl LuaValue {
     }
 
     // ============ Additional Compatibility Constructors ============
-    // ============ Additional constructors for compatibility ============
+    // Note: These increment refcount, so caller loses ownership of the Rc
 
-    /// Create from Rc<LuaString> (increments refcount)
+    /// Create from Rc<LuaString> (takes ownership, increments refcount)
+    #[inline(always)]
     pub fn from_string_rc(s: Rc<LuaString>) -> Self {
-        Rc::into_raw(Rc::clone(&s)); // Increment refcount
-        let ptr = Rc::as_ptr(&s);
+        let ptr = Rc::into_raw(s);  // Transfer ownership to LuaValue
         Self::string_ptr(ptr)
     }
 
-    /// Create from Rc<RefCell<LuaTable>> (increments refcount)
+    /// Create from Rc<RefCell<LuaTable>> (takes ownership)
+    #[inline(always)]
     pub fn from_table_rc(t: Rc<RefCell<LuaTable>>) -> Self {
-        Rc::into_raw(Rc::clone(&t)); // Increment refcount
-        let ptr = Rc::as_ptr(&t) as *const RefCell<LuaTable>;
+        let ptr = Rc::into_raw(t);
         Self::table_ptr(ptr)
     }
 
-    /// Create from Rc<LuaFunction> (increments refcount)
+    /// Create from Rc<LuaFunction> (takes ownership)
+    #[inline(always)]
     pub fn from_function_rc(f: Rc<LuaFunction>) -> Self {
-        Rc::into_raw(Rc::clone(&f)); // Increment refcount
-        let ptr = Rc::as_ptr(&f);
+        let ptr = Rc::into_raw(f);
         Self::function_ptr(ptr)
     }
 
-    /// Create from Rc<LuaUserdata> (increments refcount)
+    /// Create from Rc<LuaUserdata> (takes ownership)
+    #[inline(always)]
     pub fn from_userdata_rc(u: Rc<LuaUserdata>) -> Self {
-        Rc::into_raw(Rc::clone(&u)); // Increment refcount
-        let ptr = Rc::as_ptr(&u);
+        let ptr = Rc::into_raw(u);
         Self::userdata_ptr(ptr)
     }
 
@@ -455,52 +455,59 @@ impl LuaValue {
 
     // ============ Safe accessors that return Rc<T> ============
 
-    /// Get string as Rc (reconstructs the Rc)
+    /// Get string as Rc (creates a new Rc reference)
+    #[inline]
     pub fn as_string_rc(&self) -> Option<Rc<LuaString>> {
-        unsafe {
-            self.as_string_ptr().map(|ptr| {
-                // Clone the Rc without dropping
-                let rc = Rc::from_raw(ptr);
-                let cloned = Rc::clone(&rc);
-                Rc::into_raw(rc); // Prevent drop
-                cloned
-            })
+        if self.primary == TAG_STRING {
+            unsafe {
+                let ptr = self.secondary as *const LuaString;
+                Rc::increment_strong_count(ptr);
+                Some(Rc::from_raw(ptr))
+            }
+        } else {
+            None
         }
     }
 
-    /// Get table as Rc<RefCell<>> (reconstructs the Rc)
+    /// Get table as Rc<RefCell<>> (creates a new Rc reference)
+    #[inline]
     pub fn as_table_rc(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        unsafe {
-            self.as_table_ptr().map(|ptr| {
-                let rc = Rc::from_raw(ptr);
-                let cloned = Rc::clone(&rc);
-                Rc::into_raw(rc);
-                cloned
-            })
+        if self.primary == TAG_TABLE {
+            unsafe {
+                let ptr = self.secondary as *const RefCell<LuaTable>;
+                Rc::increment_strong_count(ptr);
+                Some(Rc::from_raw(ptr))
+            }
+        } else {
+            None
         }
     }
 
-    /// Get function as Rc (reconstructs the Rc)
+    /// Get function as Rc (creates a new Rc reference)
+    #[inline]
     pub fn as_function_rc(&self) -> Option<Rc<LuaFunction>> {
-        unsafe {
-            self.as_function_ptr().map(|ptr| {
-                let rc = Rc::from_raw(ptr);
-                let cloned = Rc::clone(&rc);
-                Rc::into_raw(rc);
-                cloned
-            })
+        if self.primary == TAG_FUNCTION {
+            unsafe {
+                let ptr = self.secondary as *const LuaFunction;
+                Rc::increment_strong_count(ptr);
+                Some(Rc::from_raw(ptr))
+            }
+        } else {
+            None
         }
     }
 
-    /// Get userdata as Rc (reconstructs the Rc)
+    /// Get userdata as Rc (creates a new Rc reference)
+    #[inline]
     pub fn as_userdata_rc(&self) -> Option<Rc<LuaUserdata>> {
-        unsafe {
-            self.as_userdata_ptr().map(|ptr| {
-                let rc = Rc::from_raw(ptr);
-                let cloned = Rc::clone(&rc);
-                Rc::into_raw(rc);
-                cloned
-            })
+        if self.primary == TAG_USERDATA {
+            unsafe {
+                let ptr = self.secondary as *const LuaUserdata;
+                Rc::increment_strong_count(ptr);
+                Some(Rc::from_raw(ptr))
+            }
+        } else {
+            None
         }
     }
 
@@ -645,24 +652,30 @@ impl LuaValue {
 // ============ Trait Implementations ============
 
 impl Drop for LuaValue {
+    #[inline(always)]
     fn drop(&mut self) {
-        // Properly drop Rc when the value is dropped
+        // Decrement Rc refcount for heap objects
+        // SAFETY: primary tag tells us the exact type
         unsafe {
-            if self.is_string() {
-                if let Some(ptr) = self.as_string_ptr() {
-                    let _ = Rc::from_raw(ptr);
+            match self.primary {
+                TAG_STRING => {
+                    let ptr = self.secondary as *const LuaString;
+                    drop(Rc::from_raw(ptr));
                 }
-            } else if self.is_table() {
-                if let Some(ptr) = self.as_table_ptr() {
-                    let _ = Rc::from_raw(ptr);
+                TAG_TABLE => {
+                    let ptr = self.secondary as *const RefCell<LuaTable>;
+                    drop(Rc::from_raw(ptr));
                 }
-            } else if self.is_function() {
-                if let Some(ptr) = self.as_function_ptr() {
-                    let _ = Rc::from_raw(ptr);
+                TAG_FUNCTION => {
+                    let ptr = self.secondary as *const LuaFunction;
+                    drop(Rc::from_raw(ptr));
                 }
-            } else if self.is_userdata() {
-                if let Some(ptr) = self.as_userdata_ptr() {
-                    let _ = Rc::from_raw(ptr);
+                TAG_USERDATA => {
+                    let ptr = self.secondary as *const LuaUserdata;
+                    drop(Rc::from_raw(ptr));
+                }
+                _ => {
+                    // Nil, Bool, Integer, Float, CFunction - no-op (no heap allocation)
                 }
             }
         }
@@ -670,42 +683,47 @@ impl Drop for LuaValue {
 }
 
 impl Clone for LuaValue {
+    #[inline(always)]
     fn clone(&self) -> Self {
-        // Clone by incrementing Rc refcount for heap objects
-        unsafe {
-            if self.is_string() {
-                if let Some(ptr) = self.as_string_ptr() {
-                    let rc = Rc::from_raw(ptr);
-                    let cloned = Rc::clone(&rc);
-                    Rc::into_raw(rc); // Don't drop original
-                    return Self::from_string_rc(cloned);
-                }
-            } else if self.is_table() {
-                if let Some(ptr) = self.as_table_ptr() {
-                    let rc = Rc::from_raw(ptr);
-                    let cloned = Rc::clone(&rc);
-                    Rc::into_raw(rc);
-                    return Self::from_table_rc(cloned);
-                }
-            } else if self.is_function() {
-                if let Some(ptr) = self.as_function_ptr() {
-                    let rc = Rc::from_raw(ptr);
-                    let cloned = Rc::clone(&rc);
-                    Rc::into_raw(rc);
-                    return Self::from_function_rc(cloned);
-                }
-            } else if self.is_userdata() {
-                if let Some(ptr) = self.as_userdata_ptr() {
-                    let rc = Rc::from_raw(ptr);
-                    let cloned = Rc::clone(&rc);
-                    Rc::into_raw(rc);
-                    return Self::from_userdata_rc(cloned);
+        // Ultra-fast clone: For pointers, just increment refcount
+        // For values (nil/bool/int/float/cfunc), just copy bits
+        
+        match self.primary {
+            TAG_STRING => {
+                // SAFETY: We know this is a valid string pointer
+                unsafe {
+                    let ptr = self.secondary as *const LuaString;
+                    Rc::increment_strong_count(ptr);
                 }
             }
+            TAG_TABLE => {
+                unsafe {
+                    let ptr = self.secondary as *const RefCell<LuaTable>;
+                    Rc::increment_strong_count(ptr);
+                }
+            }
+            TAG_FUNCTION => {
+                unsafe {
+                    let ptr = self.secondary as *const LuaFunction;
+                    Rc::increment_strong_count(ptr);
+                }
+            }
+            TAG_USERDATA => {
+                unsafe {
+                    let ptr = self.secondary as *const LuaUserdata;
+                    Rc::increment_strong_count(ptr);
+                }
+            }
+            _ => {
+                // Nil, Bool, Integer, Float, CFunction - just copy bits (no refcount)
+            }
         }
-
-        // For non-heap types (nil, bool, int, float, cfunction), just copy bits
-        Self::from_raw(self.primary(), self.secondary())
+        
+        // Always return a bitwise copy (refcount already incremented if needed)
+        Self {
+            primary: self.primary,
+            secondary: self.secondary,
+        }
     }
 }
 
