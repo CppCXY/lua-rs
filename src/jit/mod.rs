@@ -1,21 +1,19 @@
 // JIT Compiler for Lua using Cranelift
 // This module provides Just-In-Time compilation of Lua bytecode to native machine code
 // Redesigned for efficiency: uses fixed-layout values and method-JIT approach
+pub mod jit_fastpath;
+pub mod jit_pattern;
+pub mod jit_value;
+pub mod runtime;
 
+use crate::opcode::{Instruction, OpCode};
+use crate::value::Chunk;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
+use jit_value::JitValue;
 use std::collections::HashMap;
 use std::mem;
-
-use crate::jit_value::JitValue;
-use crate::opcode::{Instruction, OpCode};
-use crate::value::Chunk;
-
-/// Compiled native function signature for specialized integer loops
-/// Takes: loop variable start, loop variable end, accumulator pointer
-/// Returns: final accumulator value
-pub type JitIntegerLoopFn = unsafe extern "C" fn(i64, i64, *mut i64) -> i64;
 
 /// Generic JIT function for type-specialized code paths
 /// Takes registers array and returns success flag (0 = bailout to interpreter)
@@ -27,7 +25,6 @@ pub struct JitStats {
     pub compilations: usize,
     pub native_executions: usize,
     pub failed_compilations: usize,
-    pub specialized_loops: usize,  // 特化的循环数量
 }
 
 /// JIT Compiler using Cranelift
@@ -137,15 +134,20 @@ impl JitCompiler {
 
         // Jump to initial PC
         func_builder.seal_block(entry_block);
-        
+
         for (pc, &instr) in chunk.code.iter().enumerate() {
             func_builder.switch_to_block(blocks[pc]);
-            
+
             let opcode = Instruction::get_opcode(instr);
-            
+
             match opcode {
-                OpCode::Move | OpCode::LoadK | OpCode::LoadNil | OpCode::LoadBool
-                | OpCode::Add | OpCode::Sub | OpCode::Mul => {
+                OpCode::Move
+                | OpCode::LoadK
+                | OpCode::LoadNil
+                | OpCode::LoadBool
+                | OpCode::Add
+                | OpCode::Sub
+                | OpCode::Mul => {
                     // Compile this instruction
                     Self::compile_instruction(
                         &mut func_builder,
@@ -156,7 +158,7 @@ impl JitCompiler {
                         pointer_type,
                         value_size,
                     )?;
-                    
+
                     // Jump to next instruction
                     if pc + 1 < chunk.code.len() {
                         func_builder.ins().jump(blocks[pc + 1], &[]);
@@ -166,11 +168,11 @@ impl JitCompiler {
                         func_builder.ins().return_(&[ret_pc]);
                     }
                 }
-                
+
                 OpCode::Jmp => {
                     let sbx = Instruction::get_sbx(instr);
                     let target_pc = (pc as i32 + 1 + sbx) as usize;
-                    
+
                     if target_pc < chunk.code.len() {
                         func_builder.ins().jump(blocks[target_pc], &[]);
                     } else {
@@ -178,14 +180,14 @@ impl JitCompiler {
                         func_builder.ins().return_(&[ret_pc]);
                     }
                 }
-                
+
                 OpCode::Return | _ => {
                     // Unsupported operation: return to interpreter
                     let ret_pc = func_builder.ins().iconst(types::I32, pc as i64);
                     func_builder.ins().return_(&[ret_pc]);
                 }
             }
-            
+
             func_builder.seal_block(blocks[pc]);
         }
 
@@ -199,7 +201,8 @@ impl JitCompiler {
             .map_err(|e| format!("Failed to define function: {}", e))?;
 
         self.module.clear_context(&mut ctx);
-        self.module.finalize_definitions()
+        self.module
+            .finalize_definitions()
             .map_err(|e| format!("Failed to finalize: {}", e))?;
 
         // Get function pointer
@@ -212,112 +215,20 @@ impl JitCompiler {
         Ok(jit_func)
     }
 
-    /// Compile a specialized integer accumulation loop
-    /// This handles the common pattern: for i = start, end do sum = sum + i end
-    pub fn compile_integer_loop(&mut self, start: i64, end: i64) -> Result<JitIntegerLoopFn, String> {
-        self.stats.compilations += 1;
-        self.stats.specialized_loops += 1;
-
-        // Create function signature
-        // fn(start: i64, end: i64, accumulator: *mut i64) -> i64
-        let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // start
-        sig.params.push(AbiParam::new(types::I64)); // end
-        sig.params.push(AbiParam::new(self.module.target_config().pointer_type())); // accumulator ptr
-        sig.returns.push(AbiParam::new(types::I64)); // result
-
-        // Declare function
-        let func_name = format!("jit_int_loop_{}_{}", start, end);
-        let func_id = self
-            .module
-            .declare_function(&func_name, Linkage::Local, &sig)
-            .map_err(|e| format!("Failed to declare function: {}", e))?;
-
-        let mut func = codegen::ir::Function::with_name_signature(
-            codegen::ir::UserFuncName::user(0, func_id.as_u32()),
-            sig,
-        );
-
-        let mut builder_context = FunctionBuilderContext::new();
-        let mut func_builder = FunctionBuilder::new(&mut func, &mut builder_context);
-
-        // Create blocks
-        let entry_block = func_builder.create_block();
-        let loop_header = func_builder.create_block();
-        let loop_body = func_builder.create_block();
-        let loop_exit = func_builder.create_block();
-
-        // Entry block
-        func_builder.append_block_params_for_function_params(entry_block);
-        func_builder.switch_to_block(entry_block);
-        
-        let param_start = func_builder.block_params(entry_block)[0];
-        let param_end = func_builder.block_params(entry_block)[1];
-        let acc_ptr = func_builder.block_params(entry_block)[2];
-        
-        // Load initial accumulator value
-        let acc_init = func_builder.ins().load(types::I64, MemFlags::new(), acc_ptr, 0);
-        
-        func_builder.ins().jump(loop_header, &[param_start, acc_init]);
-        func_builder.seal_block(entry_block);
-
-        // Loop header: i, acc
-        func_builder.switch_to_block(loop_header);
-        func_builder.append_block_params_for_function_params(loop_header);
-        let i = func_builder.block_params(loop_header)[0];
-        let acc = func_builder.block_params(loop_header)[1];
-        
-        // Check: i <= end
-        let cond = func_builder.ins().icmp(IntCC::SignedLessThanOrEqual, i, param_end);
-        func_builder.ins().brif(cond, loop_body, &[i, acc], loop_exit, &[acc]);
-        func_builder.seal_block(loop_header);
-
-        // Loop body: sum = sum + i; i = i + 1
-        func_builder.switch_to_block(loop_body);
-        let i_param = func_builder.block_params(loop_body)[0];
-        let acc_param = func_builder.block_params(loop_body)[1];
-        
-        let new_acc = func_builder.ins().iadd(acc_param, i_param);
-        let one = func_builder.ins().iconst(types::I64, 1);
-        let new_i = func_builder.ins().iadd(i_param, one);
-        
-        func_builder.ins().jump(loop_header, &[new_i, new_acc]);
-        func_builder.seal_block(loop_body);
-
-        // Exit: store result and return
-        func_builder.switch_to_block(loop_exit);
-        let final_acc = func_builder.block_params(loop_exit)[0];
-        func_builder.ins().store(MemFlags::new(), final_acc, acc_ptr, 0);
-        func_builder.ins().return_(&[final_acc]);
-        func_builder.seal_block(loop_exit);
-
-        // Finalize
-        func_builder.finalize();
-
-        // Compile to machine code
-        let mut ctx = codegen::Context::for_function(func);
-        self.module
-            .define_function(func_id, &mut ctx)
-            .map_err(|e| format!("Failed to define function: {}", e))?;
-
-        self.module.clear_context(&mut ctx);
-        self.module.finalize_definitions()
-            .map_err(|e| format!("Failed to finalize: {}", e))?;
-
-        // Get function pointer
-        let code_ptr = self.module.get_finalized_function(func_id);
-        let jit_func: JitIntegerLoopFn = unsafe { mem::transmute(code_ptr) };
-
-        Ok(jit_func)
-    }
 
     /// Check if a chunk can be compiled
     fn can_compile_chunk(&self, chunk: &Chunk) -> bool {
         for &instr in &chunk.code {
             let opcode = Instruction::get_opcode(instr);
             match opcode {
-                OpCode::Move | OpCode::LoadK | OpCode::LoadNil | OpCode::LoadBool
-                | OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Jmp => {
+                OpCode::Move
+                | OpCode::LoadK
+                | OpCode::LoadNil
+                | OpCode::LoadBool
+                | OpCode::Add
+                | OpCode::Sub
+                | OpCode::Mul
+                | OpCode::Jmp => {
                     // Supported
                 }
                 _ => {
@@ -347,7 +258,7 @@ impl JitCompiler {
                 // Load R(B)
                 let b_offset = builder.ins().iconst(pointer_type, (b * value_size) as i64);
                 let b_addr = builder.ins().iadd(registers_ptr, b_offset);
-                
+
                 // Load both tag and data
                 let tag = builder.ins().load(types::I64, MemFlags::new(), b_addr, 0);
                 let data = builder.ins().load(types::I64, MemFlags::new(), b_addr, 8);
@@ -423,7 +334,9 @@ impl JitCompiler {
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
                 let discriminant = builder.ins().iconst(types::I64, 3);
-                builder.ins().store(MemFlags::new(), discriminant, a_addr, 0);
+                builder
+                    .ins()
+                    .store(MemFlags::new(), discriminant, a_addr, 0);
                 builder.ins().store(MemFlags::new(), result, a_addr, 8);
             }
 
@@ -445,7 +358,9 @@ impl JitCompiler {
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
                 let discriminant = builder.ins().iconst(types::I64, 3);
-                builder.ins().store(MemFlags::new(), discriminant, a_addr, 0);
+                builder
+                    .ins()
+                    .store(MemFlags::new(), discriminant, a_addr, 0);
                 builder.ins().store(MemFlags::new(), result, a_addr, 8);
             }
 
@@ -453,7 +368,7 @@ impl JitCompiler {
                 let a = Instruction::get_a(instr) as i32;
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
-                
+
                 // Nil tag = 0
                 let tag = builder.ins().iconst(types::I64, 0);
                 let data = builder.ins().iconst(types::I64, 0);
@@ -464,10 +379,10 @@ impl JitCompiler {
             OpCode::LoadBool => {
                 let a = Instruction::get_a(instr) as i32;
                 let b = Instruction::get_b(instr);
-                
+
                 let a_offset = builder.ins().iconst(pointer_type, (a * value_size) as i64);
                 let a_addr = builder.ins().iadd(registers_ptr, a_offset);
-                
+
                 // Boolean tag = 1
                 let tag = builder.ins().iconst(types::I64, 1);
                 let data = builder.ins().iconst(types::I64, if b != 0 { 1 } else { 0 });

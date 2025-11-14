@@ -3,6 +3,8 @@
 
 use std::mem;
 
+use crate::value::LuaValue;
+
 /// JIT value type tags (8-bit discriminant)
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +96,32 @@ impl JitValue {
     
     pub fn is_nil(&self) -> bool {
         self.tag() == JitValueTag::Nil as u8
+    }
+
+    pub fn try_from_lua(value: &LuaValue) -> Result<Self, String> {
+        match value {
+            LuaValue::Nil => Ok(JitValue::nil()),
+            LuaValue::Boolean(b) => Ok(JitValue::boolean(*b)),
+            LuaValue::Integer(i) => Ok(JitValue::integer(*i)),
+            LuaValue::Float(f) => Ok(JitValue::float(*f)),
+            other => Err(format!("LuaValue {:?} not supported by JIT", other)),
+        }
+    }
+
+    pub fn to_lua(&self) -> LuaValue {
+        match self.tag() {
+            t if t == JitValueTag::Nil as u8 => LuaValue::nil(),
+            t if t == JitValueTag::Boolean as u8 => {
+                LuaValue::boolean(unsafe { self.data.boolean })
+            }
+            t if t == JitValueTag::Integer as u8 => {
+                LuaValue::integer(unsafe { self.data.integer })
+            }
+            t if t == JitValueTag::Float as u8 => {
+                LuaValue::number(unsafe { self.data.float })
+            }
+            _ => LuaValue::nil(),
+        }
     }
 }
 

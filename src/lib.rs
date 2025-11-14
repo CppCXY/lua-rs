@@ -1,37 +1,33 @@
 // Lua Runtime
 // A compact Lua VM implementation with bytecode compiler and GC
 
-pub mod value;
-pub mod opcode;
 pub mod compiler;
-pub mod vm;
 pub mod gc;
-pub mod lib_registry;
-pub mod stdlib;
-pub mod lua_pattern;
 pub mod jit;
-pub mod jit_value;
-pub mod jit_pattern;
-pub mod jit_fastpath;
+pub mod lib_registry;
+pub mod lua_pattern;
+pub mod opcode;
+pub mod stdlib;
+pub mod value;
+pub mod vm;
 
-pub use value::{LuaValue, LuaString, LuaTable, LuaFunction, Chunk};
-pub use opcode::{OpCode, Instruction};
 pub use compiler::Compiler;
-pub use vm::VM;
 pub use gc::GC;
-pub use lib_registry::LibraryRegistry;
 pub use jit::JitCompiler;
-
-// Re-export for public API
-pub use jit_fastpath as fastpath;
+pub use lib_registry::LibraryRegistry;
+pub use opcode::{Instruction, OpCode};
+pub use value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
+pub use vm::VM;
+pub use jit::jit_fastpath as fastpath;
 
 use std::rc::Rc;
+
 
 /// Main entry point for executing Lua code
 pub fn execute(source: &str) -> Result<LuaValue, String> {
     // Compile source to bytecode
     let chunk = Compiler::compile(source)?;
-    
+
     // Create VM and execute
     let mut vm = VM::new();
     vm.execute(Rc::new(chunk))
