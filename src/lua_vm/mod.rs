@@ -73,6 +73,9 @@ pub struct LuaVM {
 
     // Error handling state
     pub error_handler: Option<LuaValue>, // Current error handler for xpcall
+    
+    // FFI state
+    ffi_state: crate::ffi::FFIState,
 }
 
 impl LuaVM {
@@ -87,6 +90,7 @@ impl LuaVM {
             open_upvalues: Vec::new(),
             next_frame_id: 0,
             error_handler: None,
+            ffi_state: crate::ffi::FFIState::new(),
         };
 
         // Register built-in functions
@@ -1599,8 +1603,26 @@ impl LuaVM {
         // Pop frame
         self.frames.pop();
 
+        // Always save return values to self.return_values for callers that need them
+        // (like call_function_internal)
+        self.return_values.clear();
+        let stack_top = self.register_stack.len().min(exiting_base_ptr + 100);
+        for i in 0..num_returns {
+            let idx = exiting_base_ptr + a + i;
+            if idx < stack_top {
+                self.return_values.push(self.register_stack[idx]);
+            } else {
+                self.return_values.push(LuaValue::nil());
+            }
+        }
+
+        // If this is the top-level return (no caller frame), we're done
+        if self.frames.is_empty() {
+            return Ok(return_value);
+        }
+
         // Fast path: no return values or caller doesn't care
-        if num_returns == 0 || self.frames.is_empty() {
+        if num_returns == 0 {
             return Ok(return_value);
         }
 
@@ -1858,6 +1880,16 @@ impl LuaVM {
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
         let key = Rc::new(LuaString::new(name.to_string()));
         self.globals.borrow_mut().set_str(key, value);
+    }
+
+    /// Get FFI state (immutable)
+    pub fn get_ffi_state(&self) -> &crate::ffi::FFIState {
+        &self.ffi_state
+    }
+
+    /// Get FFI state (mutable)
+    pub fn get_ffi_state_mut(&mut self) -> &mut crate::ffi::FFIState {
+        &mut self.ffi_state
     }
 
     /// Get value from table with metatable support
@@ -2188,6 +2220,9 @@ impl LuaVM {
                         OpCode::SetGlobal => self.op_setglobal(instr),
                         OpCode::GetTable => self.op_gettable(instr),
                         OpCode::SetTable => self.op_settable(instr),
+                        OpCode::GetTableI => self.op_gettable_i(instr),
+                        OpCode::SetTableI => self.op_settable_i(instr),
+                        OpCode::GetTableK => self.op_gettable_k(instr),
                         OpCode::SetTableK => self.op_settable_k(instr),
                         OpCode::NewTable => self.op_newtable(instr),
                         OpCode::Call => self.op_call(instr),
@@ -2935,31 +2970,31 @@ impl LuaVM {
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> (bool, Vec<LuaValue>) {
-        // 保存当前错误处理器
+        // 保存当前错误处理�?
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
-        // 保存当前栈深度
+        // 保存当前栈深�?
         let initial_frame_count = self.frames.len();
 
         // 尝试调用函数
         let result = self.call_function_internal(func, args);
 
-        // 恢复错误处理器
+        // 恢复错误处理�?
         self.error_handler = old_handler;
 
         match result {
             Ok(values) => (true, values),
             Err(err_msg) => {
-                // 清空所有 open upvalues
+                // 清空所�?open upvalues
                 self.open_upvalues.clear();
 
-                // 回滚栈
+                // 回滚�?
                 while self.frames.len() > initial_frame_count {
                     self.frames.pop();
                 }
 
-                // 调用错误处理器
+                // 调用错误处理�?
                 let err_str = self.create_string(err_msg.clone());
                 let handler_result = self
                     .call_function_internal(err_handler, vec![LuaValue::from_string_rc(err_str)]);
@@ -2967,7 +3002,7 @@ impl LuaVM {
                 match handler_result {
                     Ok(handler_values) => (false, handler_values),
                     Err(_) => {
-                        // 错误处理器本身出错,返回原始错误
+                        // 错误处理器本身出�?返回原始错误
                         let err_str = self.create_string(err_msg);
                         (false, vec![LuaValue::from_string_rc(err_str)])
                     }
@@ -3069,7 +3104,7 @@ impl LuaVM {
                     new_base,
                     max_stack_size,
                     0,
-                    0,
+                    usize::MAX,  // Want all return values
                 );
 
                 let initial_frame_count = self.frames.len();
@@ -3124,6 +3159,9 @@ impl LuaVM {
                         OpCode::SetGlobal => self.op_setglobal(instr),
                         OpCode::GetTable => self.op_gettable(instr),
                         OpCode::SetTable => self.op_settable(instr),
+                        OpCode::GetTableI => self.op_gettable_i(instr),
+                        OpCode::SetTableI => self.op_settable_i(instr),
+                        OpCode::GetTableK => self.op_gettable_k(instr),
                         OpCode::SetTableK => self.op_settable_k(instr),
                         OpCode::NewTable => self.op_newtable(instr),
                         OpCode::Call => self.op_call(instr),

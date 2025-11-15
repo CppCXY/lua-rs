@@ -14,6 +14,7 @@ pub fn create_package_lib() -> LibraryModule {
 
     // Add value fields
     module = module.with_value("loaded", create_loaded_table);
+    module = module.with_value("preload", create_preload_table);
     module = module.with_value("path", create_path_string);
     module = module.with_value("cpath", create_cpath_string);
     module = module.with_value("config", create_config_string);
@@ -23,32 +24,17 @@ pub fn create_package_lib() -> LibraryModule {
 
 // Create the package.loaded table
 fn create_loaded_table(vm: &mut LuaVM) -> LuaValue {
+    // Create an empty table. Standard libraries will be registered here
+    // by lib_registry when they are loaded.
     let loaded = vm.create_table();
-
-    // Pre-populate with already loaded standard libraries
-    let lib_names = vec![
-        "_G",
-        "string",
-        "table",
-        "math",
-        "io",
-        "os",
-        "utf8",
-        "coroutine",
-        "debug",
-        "package",
-    ];
-
-    for lib_name in lib_names {
-        if let Some(lib_table) = vm.get_global(lib_name) {
-            let key = vm.create_string(lib_name.to_string());
-            loaded
-                .borrow_mut()
-                .raw_set(LuaValue::from_string_rc(key), lib_table);
-        }
-    }
-
     LuaValue::from_table_rc(loaded)
+}
+
+// Create the package.preload table
+fn create_preload_table(vm: &mut LuaVM) -> LuaValue {
+    let preload = vm.create_table();
+    // Initially empty - modules will be registered here
+    LuaValue::from_table_rc(preload)
 }
 
 // Create package.path string

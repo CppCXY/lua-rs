@@ -4,7 +4,6 @@
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
 use crate::stdlib;
-use std::collections::HashMap;
 
 /// Type for native functions that can be called from Lua
 pub type NativeFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
@@ -87,25 +86,25 @@ macro_rules! lib_module_ex {
 
 /// Registry for all Lua standard libraries
 pub struct LibraryRegistry {
-    modules: HashMap<&'static str, LibraryModule>,
+    modules: Vec<LibraryModule>,  // Use Vec to preserve insertion order
 }
 
 impl LibraryRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
         Self {
-            modules: HashMap::new(),
+            modules: Vec::new(),
         }
     }
 
     /// Register a library module
     pub fn register(&mut self, module: LibraryModule) {
-        self.modules.insert(module.name, module);
+        self.modules.push(module);
     }
 
     /// Load all registered libraries into a VM
     pub fn load_all(&self, vm: &mut LuaVM) -> Result<(), String> {
-        for module in self.modules.values() {
+        for module in &self.modules {
             self.load_module(vm, module)?;
         }
         Ok(())
@@ -140,7 +139,27 @@ impl LibraryRegistry {
             }
         } else {
             // For module libraries, set the table as global
-            vm.set_global(module.name, LuaValue::from_table_rc(lib_table));
+            let lib_value = LuaValue::from_table_rc(lib_table);
+            vm.set_global(module.name, lib_value.clone());
+            
+            // Also register in package.loaded (if package exists)
+            // This allows require() to find standard libraries
+            if let Some(package_table) = vm.get_global("package") {
+                if let Some(package_rc) = package_table.as_table_rc() {
+                    let loaded_key = vm.create_string("loaded".to_string());
+                    if let Some(loaded_table) = package_rc.borrow().raw_get(&LuaValue::from_string_rc(loaded_key)) {
+                        unsafe {
+                            if let Some(loaded_rc) = loaded_table.as_table() {
+                                let mod_key = vm.create_string(module.name.to_string());
+                                loaded_rc.borrow_mut().raw_set(
+                                    LuaValue::from_string_rc(mod_key),
+                                    lib_value,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -148,7 +167,7 @@ impl LibraryRegistry {
 
     /// Get a module by name
     pub fn get_module(&self, name: &str) -> Option<&LibraryModule> {
-        self.modules.get(name)
+        self.modules.iter().find(|m| m.name == name)
     }
 }
 
@@ -162,7 +181,11 @@ impl Default for LibraryRegistry {
 pub fn create_standard_registry() -> LibraryRegistry {
     let mut registry = LibraryRegistry::new();
 
-    // Register all standard libraries
+    // Register package library FIRST so package.loaded exists
+    // before other libraries try to register themselves
+    registry.register(stdlib::package::create_package_lib());
+    
+    // Register all other standard libraries
     registry.register(stdlib::basic::create_basic_lib());
     registry.register(stdlib::string::create_string_lib());
     registry.register(stdlib::table::create_table_lib());
@@ -172,7 +195,7 @@ pub fn create_standard_registry() -> LibraryRegistry {
     registry.register(stdlib::utf8::create_utf8_lib());
     registry.register(stdlib::coroutine::create_coroutine_lib());
     registry.register(stdlib::debug::create_debug_lib());
-    registry.register(stdlib::package::create_package_lib());
+    registry.register(stdlib::ffi::create_ffi_lib());
 
     registry
 }
@@ -213,4 +236,14 @@ pub fn arg_count(vm: &LuaVM) -> usize {
     let frame = vm.frames.last().unwrap();
     // Subtract 1 for the function itself
     frame.top.saturating_sub(1)
+}
+
+/// Helper to get string argument
+pub fn get_string(vm: &LuaVM, index: usize, func_name: &str) -> Result<String, String> {
+    let arg = require_arg(vm, index, func_name)?;
+    unsafe {
+        arg.as_string()
+            .map(|s| s.as_str().to_string())
+            .ok_or_else(|| format!("{}() requires string argument {}", func_name, index + 1))
+    }
 }

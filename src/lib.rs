@@ -2,6 +2,7 @@
 // A compact Lua VM implementation with bytecode compiler and GC
 
 pub mod compiler;
+pub mod ffi;
 pub mod gc;
 pub mod lib_registry;
 pub mod lua_pattern;
@@ -11,6 +12,7 @@ pub mod opcode;
 pub mod stdlib;
 
 pub use compiler::Compiler;
+pub use ffi::FFIState;
 pub use gc::GC;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};

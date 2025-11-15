@@ -546,6 +546,65 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
 
+    // Try to load from package.preload first
+    unsafe {
+        if let Some(package_table) = vm.get_global("package") {
+            if let Some(package_rc) = package_table.as_table() {
+                let preload_key = vm.create_string("preload".to_string());
+                if let Some(preload_table) = package_rc
+                    .borrow()
+                    .raw_get(&LuaValue::from_string_rc(preload_key))
+                {
+                    if let Some(preload_rc) = preload_table.as_table() {
+                        let mod_key = vm.create_string(modname_str.to_string());
+                        if let Some(loader) = preload_rc
+                            .borrow()
+                            .raw_get(&LuaValue::from_string_rc(mod_key))
+                        {
+                            if !loader.is_nil() {
+                                // Call the loader function (either CFunction or Lua function)
+                                let (success, results) = vm.protected_call(loader.clone(), vec![LuaValue::from_string_rc(modname.clone())]);
+                                
+                                if !success {
+                                    let error_msg = results
+                                        .first()
+                                        .and_then(|v| v.as_string())
+                                        .map(|s| s.as_str().to_string())
+                                        .unwrap_or_else(|| "unknown error".to_string());
+                                    return Err(format!("error loading module '{}': {}", modname_str, error_msg));
+                                }
+                                
+                                // Get module return value - use true if nothing returned
+                                let module_value = if !results.is_empty() && !results[0].is_nil() {
+                                    results[0].clone()
+                                } else {
+                                    LuaValue::boolean(true)
+                                };
+                                
+                                // Store in package.loaded
+                                let loaded_key = vm.create_string("loaded".to_string());
+                                if let Some(loaded_table) = package_rc
+                                    .borrow()
+                                    .raw_get(&LuaValue::from_string_rc(loaded_key))
+                                {
+                                    if let Some(loaded_rc) = loaded_table.as_table() {
+                                        let mod_key = vm.create_string(modname_str.to_string());
+                                        loaded_rc.borrow_mut().raw_set(
+                                            LuaValue::from_string_rc(mod_key),
+                                            module_value.clone(),
+                                        );
+                                    }
+                                }
+                                
+                                return Ok(MultiValue::single(module_value));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Try to load the module from file
     let possible_paths = vec![
         format!("{}.lua", modname_str),
