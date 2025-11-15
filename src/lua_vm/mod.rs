@@ -12,12 +12,49 @@ use crate::opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Pool for reusing register Vecs to avoid allocations
+struct RegisterPool {
+    pool: Vec<Vec<LuaValue>>,
+}
+
+impl RegisterPool {
+    fn new() -> Self {
+        RegisterPool { pool: Vec::new() }
+    }
+
+    /// Get a Vec from pool or create new one
+    fn get(&mut self, size: usize) -> Vec<LuaValue> {
+        // Try to find a suitable Vec in pool
+        if let Some(mut regs) = self.pool.pop() {
+            regs.clear();
+            regs.resize(size, LuaValue::nil());
+            regs
+        } else {
+            // Create new Vec with exact capacity
+            let mut regs = Vec::with_capacity(size);
+            regs.resize(size, LuaValue::nil());
+            regs
+        }
+    }
+
+    /// Return Vec to pool for reuse
+    fn recycle(&mut self, mut regs: Vec<LuaValue>) {
+        if self.pool.len() < 16 {  // Max 16 cached Vecs
+            regs.clear();
+            self.pool.push(regs);
+        }
+    }
+}
+
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
     globals: Rc<RefCell<LuaTable>>,
 
     // Call stack
     pub frames: Vec<LuaCallFrame>,
+
+    // Register pool for reusing Vec allocations
+    register_pool: RegisterPool,
 
     // Garbage collector
     gc: GC,
@@ -40,6 +77,7 @@ impl LuaVM {
         let mut vm = LuaVM {
             globals: Rc::new(RefCell::new(LuaTable::new())),
             frames: Vec::new(),
+            register_pool: RegisterPool::new(),
             gc: GC::new(),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
@@ -72,15 +110,17 @@ impl LuaVM {
             upvalues: Vec::new(),
         };
 
-        // Create initial call frame
+        // Create initial call frame (use register pool)
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
+
+        let registers = self.register_pool.get(chunk.max_stack_size);
 
         let frame = LuaCallFrame {
             frame_id,
             function: Rc::new(main_func),
             pc: 0,
-            registers: vec![LuaValue::nil(); chunk.max_stack_size],
+            registers,
             base: 0,
             result_reg: 0,
             num_results: 0,
@@ -94,9 +134,11 @@ impl LuaVM {
         // Execute
         let result = self.run()?;
 
-        // Clean up - clear upvalues first, then frames
+        // Clean up - recycle registers back to pool, then clear
+        while let Some(frame) = self.frames.pop() {
+            self.register_pool.recycle(frame.registers);
+        }
         self.open_upvalues.clear();
-        self.frames.clear();
 
         Ok(result)
     }
@@ -1444,22 +1486,18 @@ impl LuaVM {
         // Regular Lua function call
         unsafe {
             if let Some(lua_func) = func.as_function() {
-                // Optimize: start with smaller size, grow as needed
-                let arg_count = if b == 0 { frame.registers.len() - a - 1 } else { b - 1 };
-                let initial_size = arg_count.max(8).min(lua_func.chunk.max_stack_size);
-                let mut new_registers = Vec::with_capacity(lua_func.chunk.max_stack_size);
-                new_registers.resize(initial_size, LuaValue::nil());
+                // Get max_stack_size before borrowing
+                let max_stack_size = lua_func.chunk.max_stack_size;
+                
+                // Use register pool to get a pre-allocated Vec
+                let mut new_registers = self.register_pool.get(max_stack_size);
 
-                // Copy arguments (using Copy trait)
+                // Copy arguments (using Copy trait) - need to re-borrow frame
+                let frame = self.current_frame();
                 for i in 1..b {
                     if a + i < frame.registers.len() && i - 1 < new_registers.len() {
                         new_registers[i - 1] = frame.registers[a + i];
                     }
-                }
-
-                // Ensure register capacity matches max_stack_size
-                if new_registers.len() < lua_func.chunk.max_stack_size {
-                    new_registers.resize(lua_func.chunk.max_stack_size, LuaValue::nil());
                 }
 
                 let frame_id = self.next_frame_id;
@@ -1525,7 +1563,10 @@ impl LuaVM {
         // Close upvalues for the exiting frame
         self.close_upvalues(exiting_frame_id);
 
-        self.frames.pop();
+        // Pop frame and recycle its registers to pool
+        if let Some(frame) = self.frames.pop() {
+            self.register_pool.recycle(frame.registers);
+        }
 
         // Store return values
         self.return_values = values.clone();
