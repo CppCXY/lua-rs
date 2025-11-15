@@ -108,10 +108,10 @@ impl GC {
             next_id: 1,
             allocations_since_minor_gc: 0,
             minor_gc_count: 0,
-            minor_gc_threshold: 100,
-            major_gc_threshold: 10,
+            minor_gc_threshold: 10000,
+            major_gc_threshold: 50,
             bytes_allocated: 0,
-            threshold: 1024 * 1024, // 1MB initial threshold
+            threshold: 8 * 1024 * 1024, // 8MB initial threshold
             collection_count: 0,
             stats: GCStats::default(),
         }

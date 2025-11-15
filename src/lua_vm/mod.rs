@@ -102,6 +102,7 @@ impl LuaVM {
     }
 
     fn run(&mut self) -> Result<LuaValue, String> {
+        let mut instruction_count = 0;
         loop {
             if self.frames.is_empty() {
                 return Ok(LuaValue::nil());
@@ -119,6 +120,15 @@ impl LuaVM {
             frame.pc += 1;
 
             let opcode = Instruction::get_opcode(instr);
+
+            // Periodic GC check (every 1000 instructions)
+            instruction_count += 1;
+            if instruction_count >= 1000 {
+                instruction_count = 0;
+                if self.gc.should_collect() {
+                    self.collect_garbage();
+                }
+            }
 
             match opcode {
                 OpCode::Move => self.op_move(instr)?,
@@ -1643,36 +1653,39 @@ impl LuaVM {
         // Binary concat with metamethod support
         let (left, right) = {
             let frame = self.current_frame();
-            (frame.registers[b].clone(), frame.registers[c].clone())
+            (frame.registers[b], frame.registers[c])
         };
 
-        // Try direct concatenation or __tostring
-        let left_str = unsafe {
+        // Try direct concatenation - use String capacity for efficiency
+        let mut result = String::new();
+        let mut success = false;
+
+        unsafe {
             if let Some(s) = left.as_string() {
-                Some(s.as_str().to_string())
+                result.push_str(s.as_str());
+                success = true;
             } else if let Some(n) = left.as_number() {
-                Some(n.to_string())
+                result.push_str(&n.to_string());
+                success = true;
             } else if let Some(s) = self.call_tostring_metamethod(&left)? {
-                Some(s.as_str().to_string())
-            } else {
-                None
+                result.push_str(s.as_str());
+                success = true;
             }
-        };
 
-        let right_str = unsafe {
-            if let Some(s) = right.as_string() {
-                Some(s.as_str().to_string())
-            } else if let Some(n) = right.as_number() {
-                Some(n.to_string())
-            } else if let Some(s) = self.call_tostring_metamethod(&right)? {
-                Some(s.as_str().to_string())
-            } else {
-                None
+            if success {
+                if let Some(s) = right.as_string() {
+                    result.push_str(s.as_str());
+                } else if let Some(n) = right.as_number() {
+                    result.push_str(&n.to_string());
+                } else if let Some(s) = self.call_tostring_metamethod(&right)? {
+                    result.push_str(s.as_str());
+                } else {
+                    success = false;
+                }
             }
-        };
+        }
 
-        if let (Some(l), Some(r)) = (left_str, right_str) {
-            let result = l + &r;
+        if success {
             let string = self.create_string(result);
             let frame = self.current_frame_mut();
             frame.registers[a] = LuaValue::from_string_rc(string);
@@ -2376,10 +2389,6 @@ impl LuaVM {
         let table = Rc::new(RefCell::new(LuaTable::new()));
         let ptr = Rc::as_ptr(&table) as usize;
         self.gc.register_object(ptr, GcObjectType::Table);
-
-        // Trigger GC if needed
-        self.maybe_collect_garbage();
-
         table
     }
 
@@ -2388,10 +2397,6 @@ impl LuaVM {
         let string = Rc::new(LuaString::new(s));
         let ptr = Rc::as_ptr(&string) as usize;
         self.gc.register_object(ptr, GcObjectType::String);
-
-        // Trigger GC if needed
-        self.maybe_collect_garbage();
-
         string
     }
 
@@ -2413,10 +2418,6 @@ impl LuaVM {
         let func = Rc::new(LuaFunction { chunk, upvalues });
         let ptr = Rc::as_ptr(&func) as usize;
         self.gc.register_object(ptr, GcObjectType::Function);
-
-        // Trigger GC if needed
-        self.maybe_collect_garbage();
-
         func
     }
 
