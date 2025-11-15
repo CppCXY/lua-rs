@@ -362,8 +362,8 @@ fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
     
-    let table = get_arg(vm, 1).ok_or("setmetatable() requires 2 arguments")?;
-    let metatable = get_arg(vm, 2).ok_or("setmetatable() requires 2 arguments")?;
+    let table = get_arg(vm, 0).ok_or("setmetatable() requires 2 arguments")?;
+    let metatable = get_arg(vm, 1).ok_or("setmetatable() requires 2 arguments")?;
 
     // First argument must be a table
     unsafe {

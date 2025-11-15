@@ -339,9 +339,13 @@ impl LuaVM {
                     let key_rc_clone = key_rc.clone();
                     std::mem::forget(key_rc);
                     
-                    let value = tbl.borrow().get_str(&key_rc_clone).unwrap_or(LuaValue::nil());
-                    self.set_register(base_ptr, a, value);
-                    return Ok(());
+                    let value = tbl.borrow().get_str(&key_rc_clone);
+                    // If found, return immediately (fast path)
+                    if let Some(v) = value {
+                        self.set_register(base_ptr, a, v);
+                        return Ok(());
+                    }
+                    // If not found, fall through to check metamethods
                 }
             }
         }
@@ -480,16 +484,18 @@ impl LuaVM {
                     let key_rc_clone = key_rc.clone();
                     std::mem::forget(key_rc);
                     
-                    // Fast path: direct string key access
-                    let value = tbl.borrow().get_str(&key_rc_clone).unwrap_or(LuaValue::nil());
-                    self.set_register(base_ptr, a, value);
-                    Ok(())
-                } else {
-                    // Fallback: use generic get with metamethods
-                    let value = self.table_get(tbl, &key).unwrap_or(LuaValue::nil());
-                    self.set_register(base_ptr, a, value);
-                    Ok(())
+                    // Try fast path: direct string key access
+                    let value = tbl.borrow().get_str(&key_rc_clone);
+                    if let Some(v) = value {
+                        self.set_register(base_ptr, a, v);
+                        return Ok(());
+                    }
                 }
+                
+                // Not found or not a string key: use generic get with metamethods
+                let value = self.table_get(tbl, &key).unwrap_or(LuaValue::nil());
+                self.set_register(base_ptr, a, value);
+                Ok(())
             }
         } else {
             Err("Attempt to index a non-table value".to_string())

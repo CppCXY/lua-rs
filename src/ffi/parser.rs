@@ -107,10 +107,23 @@ fn parse_function_declaration(line: &str) -> Result<Option<(String, CType)>, Str
             // Parse parameter type (ignore name)
             // Remove "const" qualifier if present
             let param = param.strip_prefix("const ").unwrap_or(param).trim();
+            
+            // Check if it's a pointer type by looking for '*'
+            let is_pointer = param.contains('*');
+            
+            // Extract the base type (before '*' or name)
             let parts: Vec<&str> = param.split_whitespace().collect();
             if !parts.is_empty() {
-                // Get the type (first part, potentially multiple words for types like "unsigned int")
-                let param_type = parse_base_type(parts[0])?;
+                // Get the base type (first part)
+                let base_type_str = parts[0];
+                // Remove any '*' from it if present
+                let base_type_str = base_type_str.trim_end_matches('*');
+                
+                let mut param_type = parse_base_type(base_type_str)?;
+                // If it's a pointer, wrap in pointer type
+                if is_pointer {
+                    param_type = CType::pointer(param_type);
+                }
                 param_types.push(param_type);
             }
         }
