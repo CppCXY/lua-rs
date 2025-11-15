@@ -391,8 +391,9 @@ fn compile_index_expr_to(
     match key {
         LuaIndexKey::Integer(number_token) => {
             // Optimized: table[integer_literal] -> GetTableI
+            // C field is 9 bits, so max value is 511
             let int_value = number_token.get_int_value();
-            if int_value >= 0 && int_value <= u32::MAX as i64 {
+            if int_value >= 0 && int_value <= 511 {
                 // Use GetTableI: R(A) := R(B)[C]
                 emit(
                     c,
@@ -616,8 +617,9 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
             match index_key {
                 LuaIndexKey::Integer(number_token) => {
                     // Optimized: table[integer] = value -> SetTableI
+                    // B field is 9 bits, so max value is 511
                     let int_value = number_token.get_int_value();
-                    if int_value >= 0 && int_value <= u32::MAX as i64 {
+                    if int_value >= 0 && int_value <= 511 {
                         // Use SetTableI: R(A)[B] := R(C)
                         emit(
                             c,

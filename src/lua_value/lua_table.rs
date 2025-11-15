@@ -4,9 +4,9 @@
 // - No insertion_order vector needed - natural iteration order
 
 use super::LuaValue;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 /// Hash node for the hash part of the table
@@ -34,15 +34,15 @@ pub struct LuaTable {
     /// Array part: stores values for integer keys [1..array.len()]
     /// Only allocated when first integer key is set
     array: Vec<LuaValue>,
-    
+
     /// Hash part: open-addressed hash table with chaining
     /// Size is always a power of 2 (or 0)
     /// Only allocated when first non-array key is set
     node: Vec<Node>,
-    
+
     /// Last free position in hash table (used for allocation)
     last_free: i32,
-    
+
     /// Metatable - optional table that defines special behaviors
     metatable: Option<Rc<RefCell<LuaTable>>>,
 }
@@ -143,16 +143,17 @@ impl LuaTable {
 
         if key > 0 {
             let idx = (key - 1) as usize;
-            // Limit array growth to reasonable size
-            if idx < 1024 {
-                if idx >= self.array.len() {
-                    self.array.resize(idx + 1, LuaValue::nil());
-                }
+            let array_len = self.array.len();
+            // Limit array growth to reasonable size (64K elements)
+            if idx < array_len {
                 self.array[idx] = value;
+                return;
+            } else if idx == array_len {
+                self.array.push(value);
                 return;
             }
         }
-        
+
         // Out of array range, use hash
         self.set_in_hash(LuaValue::integer(key), value);
     }
@@ -165,12 +166,10 @@ impl LuaTable {
 
     /// Generic key write
     pub fn raw_set(&mut self, key: LuaValue, value: LuaValue) {
-        // Try array part for small positive integers
+        // Try array part for small positive integers (up to 64K)
         if let Some(i) = key.as_integer() {
-            if i > 0 && i <= 1024 {
-                self.set_int(i, value);
-                return;
-            }
+            self.set_int(i, value);
+            return;
         }
         self.set_in_hash(key, value);
     }
@@ -236,7 +235,7 @@ impl LuaTable {
         // Main position occupied, need to handle collision
         // Clone colliding node's key before finding free position
         let colliding_key = self.node[main_pos].key.clone();
-        
+
         // Find free position
         let free_pos = match self.find_free_pos() {
             Some(pos) => pos,
@@ -263,14 +262,14 @@ impl LuaTable {
         } else {
             // Colliding node is not in main position, move it
             self.node[free_pos] = self.node[main_pos].clone();
-            
+
             // Update chain pointing to colliding node
             let mut idx = colliding_main;
             while self.node[idx].next != main_pos as i32 {
                 idx = self.node[idx].next as usize;
             }
             self.node[idx].next = free_pos as i32;
-            
+
             // Put new node in main position
             self.node[main_pos] = Node {
                 key,
@@ -307,7 +306,7 @@ impl LuaTable {
         // Find the node and its predecessor
         let mut prev_idx: Option<usize> = None;
         let mut idx = main_pos;
-        
+
         loop {
             let node = &self.node[idx];
             if node.is_empty() {
@@ -348,7 +347,7 @@ impl LuaTable {
     /// Resize hash table
     fn resize_hash(&mut self, new_size: usize) {
         let old_nodes = std::mem::take(&mut self.node);
-        
+
         // Create new table
         self.node = Vec::with_capacity(new_size);
         for _ in 0..new_size {
@@ -432,7 +431,7 @@ impl LuaTable {
             let hash = self.hash_key(key);
             let mask = self.node.len() - 1;
             let mut idx = (hash & mask) as usize;
-            
+
             loop {
                 if self.node[idx].key == *key {
                     // Found it, start searching from next position

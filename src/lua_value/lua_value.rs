@@ -592,31 +592,34 @@ impl Clone for LuaValue {
     fn clone(&self) -> Self {
         // Ultra-fast clone: For pointers, just increment refcount
         // For values (nil/bool/int/float/cfunc), just copy bits
-
-        match self.primary {
-            TAG_STRING => {
-                // SAFETY: We know this is a valid string pointer
-                unsafe {
-                    let ptr = self.secondary as *const LuaString;
-                    Rc::increment_strong_count(ptr);
+        
+        // Fast path: most common case is non-pointer values
+        // Check if it's a pointer type (has bits set in specific pattern)
+        if self.primary >= TAG_STRING && self.primary <= TAG_USERDATA {
+            // Pointer type - need to increment refcount
+            unsafe {
+                match self.primary {
+                    TAG_STRING => {
+                        let ptr = self.secondary as *const LuaString;
+                        Rc::increment_strong_count(ptr);
+                    }
+                    TAG_TABLE => {
+                        let ptr = self.secondary as *const RefCell<LuaTable>;
+                        Rc::increment_strong_count(ptr);
+                    }
+                    TAG_FUNCTION => {
+                        let ptr = self.secondary as *const LuaFunction;
+                        Rc::increment_strong_count(ptr);
+                    }
+                    TAG_USERDATA => {
+                        let ptr = self.secondary as *const LuaUserdata;
+                        Rc::increment_strong_count(ptr);
+                    }
+                    _ => unreachable!(),
                 }
             }
-            TAG_TABLE => unsafe {
-                let ptr = self.secondary as *const RefCell<LuaTable>;
-                Rc::increment_strong_count(ptr);
-            },
-            TAG_FUNCTION => unsafe {
-                let ptr = self.secondary as *const LuaFunction;
-                Rc::increment_strong_count(ptr);
-            },
-            TAG_USERDATA => unsafe {
-                let ptr = self.secondary as *const LuaUserdata;
-                Rc::increment_strong_count(ptr);
-            },
-            _ => {
-                // Nil, Bool, Integer, Float, CFunction - just copy bits (no refcount)
-            }
         }
+        // else: Value type (nil/bool/int/float/cfunc) - no refcount needed
 
         // Always return a bitwise copy (refcount already incremented if needed)
         Self {
