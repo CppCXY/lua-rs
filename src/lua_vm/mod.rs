@@ -1397,184 +1397,165 @@ impl LuaVM {
 
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
-        let func = self.get_register(base_ptr, a);
+        let func = self.register_stack[base_ptr + a];
 
-        // Check for __call metamethod on non-functions (tables, userdata)
-        if !func.is_function() && !func.is_cfunction() {
-            // Look for __call metamethod
-            if let Some(metatable) = func.get_metatable() {
-                let call_key = self.create_string("__call".to_string());
-                if let Some(call_func) = metatable
-                    .borrow()
-                    .raw_get(&LuaValue::from_string_rc(call_key))
-                {
-                    // Replace func with the __call function
-                    // But we need to pass the original value as the first argument
-                    // This means shifting all arguments: (func, arg1, arg2) -> (call_func, func, arg1, arg2)
+        // Fast path: Lua function (most common case)
+        if func.is_function() {
+            unsafe {
+                if let Some(lua_func) = func.as_function() {
+                    let max_stack_size = lua_func.chunk.max_stack_size;
+                    let new_base = self.register_stack.len();
+                    self.ensure_stack_capacity(new_base + max_stack_size);
 
-                    let original_func = func;
-                    let call_function = call_func.clone();
-
+                    // Fast copy arguments directly without function calls
                     let frame = self.current_frame();
-                    let base_ptr = frame.base_ptr;
+                    let src_base = frame.base_ptr + a;
                     let top = frame.top;
-
-                    // Create new register layout: [call_func, original_func, arg1, arg2, ...]
-                    self.set_register(base_ptr, a, call_function);
-
-                    // Shift existing arguments right by one position
-                    for i in (1..b).rev() {
-                        if a + i + 1 < top {
-                            let val = self.get_register(base_ptr, a + i);
-                            self.set_register(base_ptr, a + i + 1, val);
+                    let frame_base = frame.base_ptr;
+                    let arg_count = if b == 0 { top - a - 1 } else { b - 1 };
+                    
+                    // Batch copy arguments
+                    for i in 0..arg_count {
+                        let src_idx = src_base + 1 + i;
+                        if src_idx < frame_base + top {
+                            let val = self.register_stack[src_idx];
+                            self.register_stack[new_base + i] = val;
                         }
                     }
 
-                    // Place original func as first argument
-                    if a + 1 < top {
-                        self.set_register(base_ptr, a + 1, original_func);
-                    }
+                    let frame_id = self.next_frame_id;
+                    self.next_frame_id += 1;
 
-                    // Adjust b to include the extra argument
-                    let new_b = b + 1;
+                    // Create temporary Rc for LuaCallFrame
+                    let func_rc = Rc::from_raw(lua_func as *const LuaFunction);
+                    let func_rc_clone = func_rc.clone();
+                    std::mem::forget(func_rc);
 
-                    // Recreate instruction with new b
-                    let new_instr =
-                        Instruction::encode_abc(OpCode::Call, a as u32, new_b as u32, c as u32);
-                    return self.op_call(new_instr);
+                    let new_frame = LuaCallFrame::new_lua_function(
+                        frame_id,
+                        func_rc_clone,
+                        new_base,
+                        max_stack_size,
+                        a,
+                        if c == 0 { usize::MAX } else { c - 1 },
+                    );
+
+                    self.frames.push(new_frame);
+                    return Ok(());
                 }
             }
-
-            return Err("Attempt to call a non-function value".to_string());
         }
 
-        // Check for CFunction (native Rust function)
-        if let Some(cfunc) = func.as_cfunction() {
-            // Optimize: pre-allocate exact capacity needed
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            let top = frame.top;
-            
-            let arg_count = if b == 0 { top - a } else { b };
-            let mut arg_registers = Vec::with_capacity(arg_count);
-            arg_registers.push(func); // Register 0 is the function itself (Copy, no clone)
-
-            // Copy arguments to registers (using Copy trait, no clone overhead)
-            for i in 1..b {
-                if a + i < top {
-                    arg_registers.push(self.get_register(base_ptr, a + i));
-                } else {
-                    arg_registers.push(LuaValue::nil());
-                }
-            }
-
-            // Create temporary frame for CFunction
-            let frame_id = self.next_frame_id;
-            self.next_frame_id += 1;
-
-            let cfunc_base = self.register_stack.len();
-            self.ensure_stack_capacity(cfunc_base + arg_registers.len());
-            for (i, val) in arg_registers.iter().enumerate() {
-                self.register_stack[cfunc_base + i] = *val;
-            }
-
-            let temp_frame = LuaCallFrame::new_c_function(
-                frame_id,
-                self.current_frame().function.clone(),
-                self.current_frame().pc,
-                cfunc_base,
-                arg_registers.len(),  // Pass the number of arguments
-            );
-
-            self.frames.push(temp_frame);
-
-            // Call the CFunction - use explicit match to ensure frame is always popped
-            let multi_result = match cfunc(self) {
-                Ok(result) => result,
-                Err(e) => {
-                    self.frames.pop();
-                    return Err(e);
-                }
-            };
-
-            // Pop the temporary frame
-            self.frames.pop();
-
-            // Store return values
-            // C = 0: use all return values
-            // C = 1: no return values expected
-            // C = 2: 1 return value expected (at register a)
-            // C = 3: 2 return values expected (at registers a, a+1)
-            // etc.
-
-            // Get all return values from MultiValue
-            let all_returns = multi_result.all_values();
-            let num_returns = all_returns.len();
-
-            let num_expected = if c == 0 { num_returns } else { c - 1 };
-
-            // Store them in registers
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            let top = frame.top;
-            
-            for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
-                if a + i < top {
-                    self.set_register(base_ptr, a + i, value);
-                }
-            }
-
-            // Fill remaining expected registers with nil
-            for i in num_returns..num_expected {
-                if a + i < top {
-                    self.set_register(base_ptr, a + i, LuaValue::nil());
-                }
-            }
-
-            return Ok(());
-        }
-
-        // Regular Lua function call
-        unsafe {
-            if let Some(lua_func) = func.as_function() {
-                // Get max_stack_size before borrowing
-                let max_stack_size = lua_func.chunk.max_stack_size;
-                
-                // Allocate new register window in the global stack
-                let new_base = self.register_stack.len();
-                self.ensure_stack_capacity(new_base + max_stack_size);
-
-                // Copy arguments - need to re-borrow frame
+        // Fast path: C function
+        if func.is_cfunction() {
+            if let Some(cfunc) = func.as_cfunction() {
                 let frame = self.current_frame();
                 let base_ptr = frame.base_ptr;
                 let top = frame.top;
                 
+                let arg_count = if b == 0 { top - a } else { b };
+                let mut arg_registers = Vec::with_capacity(arg_count);
+                arg_registers.push(func);
+
+                // Copy arguments to registers
                 for i in 1..b {
                     if a + i < top {
-                        let arg = self.get_register(base_ptr, a + i);
-                        self.register_stack[new_base + i - 1] = arg;
+                        arg_registers.push(self.register_stack[base_ptr + a + i]);
+                    } else {
+                        arg_registers.push(LuaValue::nil());
                     }
                 }
 
+                // Create temporary frame for CFunction
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                // Create temporary Rc for LuaCallFrame
-                let func_rc = Rc::from_raw(lua_func as *const LuaFunction);
-                let func_rc_clone = func_rc.clone();
-                std::mem::forget(func_rc);
+                let cfunc_base = self.register_stack.len();
+                self.ensure_stack_capacity(cfunc_base + arg_registers.len());
+                for (i, val) in arg_registers.iter().enumerate() {
+                    self.register_stack[cfunc_base + i] = *val;
+                }
 
-                let new_frame = LuaCallFrame::new_lua_function(
+                let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
-                    func_rc_clone,
-                    new_base,
-                    max_stack_size,
-                    a,
-                    if c == 0 { usize::MAX } else { c - 1 },
+                    self.current_frame().function.clone(),
+                    self.current_frame().pc,
+                    cfunc_base,
+                    arg_registers.len(),
                 );
 
-                self.frames.push(new_frame);
+                self.frames.push(temp_frame);
+
+                // Call the CFunction
+                let multi_result = match cfunc(self) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        self.frames.pop();
+                        return Err(e);
+                    }
+                };
+
+                self.frames.pop();
+
+                // Store return values
+                let all_returns = multi_result.all_values();
+                let num_returns = all_returns.len();
+                let num_expected = if c == 0 { num_returns } else { c - 1 };
+
+                let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                let top = frame.top;
+                
+                for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
+                    if a + i < top {
+                        self.register_stack[base_ptr + a + i] = value;
+                    }
+                }
+
+                // Fill remaining expected registers with nil
+                for i in num_returns..num_expected {
+                    if a + i < top {
+                        self.register_stack[base_ptr + a + i] = LuaValue::nil();
+                    }
+                }
+
                 return Ok(());
+            }
+        }
+
+        // Slow path: Check for __call metamethod on non-functions (tables, userdata)
+        if let Some(metatable) = func.get_metatable() {
+            let call_key = self.create_string("__call".to_string());
+            if let Some(call_func) = metatable
+                .borrow()
+                .raw_get(&LuaValue::from_string_rc(call_key))
+            {
+                let original_func = func;
+                let call_function = call_func.clone();
+
+                let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                let top = frame.top;
+
+                // Create new register layout
+                self.register_stack[base_ptr + a] = call_function;
+
+                // Shift existing arguments right by one position
+                for i in (1..b).rev() {
+                    if a + i + 1 < top {
+                        let val = self.register_stack[base_ptr + a + i];
+                        self.register_stack[base_ptr + a + i + 1] = val;
+                    }
+                }
+
+                // Place original func as first argument
+                if a + 1 < top {
+                    self.register_stack[base_ptr + a + 1] = original_func;
+                }
+
+                let new_b = b + 1;
+                let new_instr = Instruction::encode_abc(OpCode::Call, a as u32, new_b as u32, c as u32);
+                return self.op_call(new_instr);
             }
         }
 
@@ -1586,73 +1567,67 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
 
         // Collect return values
-        // B = 0: return all values from A to top
-        // B = 1: return 0 values
-        // B = 2: return 1 value (registers[a])
-        // B = 3: return 2 values (registers[a], registers[a+1])
-        // etc.
         let num_returns = if b == 0 {
-            // Return all values from A to top of stack
             let frame = self.current_frame();
             frame.top.saturating_sub(a)
         } else {
             b - 1
         };
 
-        let mut values = Vec::new();
-        if num_returns > 0 {
+        // Fast path: single return value (most common case)
+        let return_value = if num_returns == 1 {
             let frame = self.current_frame();
             let base_ptr = frame.base_ptr;
-            let top = frame.top;
-            
-            for i in 0..num_returns {
-                if a + i < top {
-                    values.push(self.get_register(base_ptr, a + i));
-                } else {
-                    values.push(LuaValue::nil());
-                }
+            if a < frame.top {
+                self.register_stack[base_ptr + a]
+            } else {
+                LuaValue::nil()
             }
-        }
+        } else {
+            LuaValue::nil()
+        };
 
         // Save caller info before popping
         let caller_result_reg = self.current_frame().result_reg;
         let caller_num_results = self.current_frame().num_results;
         let exiting_frame_id = self.current_frame().frame_id;
+        let exiting_base_ptr = self.current_frame().base_ptr;
 
         // Close upvalues for the exiting frame
         self.close_upvalues(exiting_frame_id);
 
-        // Pop frame (no need to recycle registers - using global stack)
+        // Pop frame
         self.frames.pop();
 
-        // Store return values
-        self.return_values = values.clone();
+        // Fast path: no return values or caller doesn't care
+        if num_returns == 0 || self.frames.is_empty() {
+            return Ok(return_value);
+        }
 
-        // If there's a caller frame, copy return values to its registers
-        if !self.frames.is_empty() {
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            let top = frame.top;
-            let num_to_copy = caller_num_results.min(values.len());
+        // Store return values directly to caller's registers
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let top = frame.top;
+        let num_to_copy = caller_num_results.min(num_returns);
 
-            for (i, val) in values.iter().take(num_to_copy).enumerate() {
-                if caller_result_reg + i < top {
-                    self.set_register(base_ptr, caller_result_reg + i, *val);
-                }
+        // Direct copy without intermediate Vec
+        for i in 0..num_to_copy {
+            if caller_result_reg + i < top && a + i < exiting_base_ptr + top {
+                let val = self.register_stack[exiting_base_ptr + a + i];
+                self.register_stack[base_ptr + caller_result_reg + i] = val;
             }
+        }
 
-            // Fill remaining expected results with nil
-            if caller_num_results != usize::MAX {
-                for i in num_to_copy..caller_num_results {
-                    if caller_result_reg + i < top {
-                        self.set_register(base_ptr, caller_result_reg + i, LuaValue::nil());
-                    }
+        // Fill remaining expected results with nil
+        if caller_num_results != usize::MAX {
+            for i in num_to_copy..caller_num_results {
+                if caller_result_reg + i < top {
+                    self.register_stack[base_ptr + caller_result_reg + i] = LuaValue::nil();
                 }
             }
         }
 
-        // For backward compatibility, return first value or nil
-        Ok(values.get(0).cloned().unwrap_or(LuaValue::nil()))
+        Ok(return_value)
     }
 
     fn op_getupval(&mut self, instr: u32) -> Result<(), String> {
