@@ -5,7 +5,7 @@
 use crate::lib_registry::{LibraryModule, get_arg, require_arg};
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
-use crate::{LuaTable, lua_pattern};
+use crate::lua_pattern;
 
 pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
@@ -28,7 +28,7 @@ pub fn create_string_lib() -> LibraryModule {
 /// string.byte(s [, i [, j]]) - Return byte values
 fn string_byte(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.byte")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.byte' (string expected)".to_string())?;
 
     let str_bytes = s.as_str().as_bytes();
@@ -87,7 +87,7 @@ fn string_char(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.len(s) - Return string length
 fn string_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.len")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.len' (string expected)".to_string())?;
 
     let len = s.as_str().len() as i64;
@@ -97,7 +97,7 @@ fn string_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.lower(s) - Convert to lowercase
 fn string_lower(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.lower")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.lower' (string expected)".to_string())?;
 
     let result = vm.create_string(s.as_str().to_lowercase());
@@ -107,7 +107,7 @@ fn string_lower(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.upper(s) - Convert to uppercase
 fn string_upper(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.upper")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.upper' (string expected)".to_string())?;
 
     let result = vm.create_string(s.as_str().to_uppercase());
@@ -117,7 +117,7 @@ fn string_upper(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.rep(s, n [, sep]) - Repeat string
 fn string_rep(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.rep")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.rep' (string expected)".to_string())?;
 
     let n = require_arg(vm, 1, "string.rep")?
@@ -125,7 +125,7 @@ fn string_rep(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #2 to 'string.rep' (number expected)".to_string())?;
 
     let sep = get_arg(vm, 2)
-        .and_then(|v| v.as_string())
+        .and_then(|v| v.as_string_rc())
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
 
@@ -149,7 +149,7 @@ fn string_rep(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.reverse(s) - Reverse string
 fn string_reverse(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.reverse")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.reverse' (string expected)".to_string())?;
 
     let reversed: String = s.as_str().chars().rev().collect();
@@ -160,7 +160,7 @@ fn string_reverse(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.sub(s, i [, j]) - Extract substring
 fn string_sub(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.sub")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.sub' (string expected)".to_string())?;
 
     let len = s.as_str().len() as i64;
@@ -195,7 +195,7 @@ fn string_sub(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.format(formatstring, ...) - Format string (simplified)
 fn string_format(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let format_str = require_arg(vm, 0, "string.format")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.format' (string expected)".to_string())?;
 
     let format = format_str.as_str();
@@ -458,18 +458,20 @@ fn string_format(vm: &mut LuaVM) -> Result<MultiValue, String> {
                             format!("bad argument #{} to 'format' (no value)", arg_index + 1)
                         })?;
 
-                        let s = if let Some(s) = val.as_string() {
-                            s.as_str().to_string()
-                        } else if let Some(n) = val.as_integer() {
-                            n.to_string()
-                        } else if let Some(n) = val.as_number() {
-                            n.to_string()
-                        } else {
-                            // Try __tostring metamethod
-                            match vm.call_tostring_metamethod(&val) {
-                                Ok(Some(s)) => s.as_str().to_string(),
-                                Ok(None) => val.to_string_repr(),
-                                Err(e) => return Err(e),
+                        let s = unsafe {
+                            if let Some(s) = val.as_string() {
+                                s.as_str().to_string()
+                            } else if let Some(n) = val.as_integer() {
+                                n.to_string()
+                            } else if let Some(n) = val.as_number() {
+                                n.to_string()
+                            } else {
+                                // Try __tostring metamethod
+                                match vm.call_tostring_metamethod(&val) {
+                                    Ok(Some(s)) => s.as_str().to_string(),
+                                    Ok(None) => val.to_string_repr(),
+                                    Err(e) => return Err(e),
+                                }
                             }
                         };
                         result.push_str(&s);
@@ -480,7 +482,7 @@ fn string_format(vm: &mut LuaVM) -> Result<MultiValue, String> {
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
                             format!("bad argument #{} to 'format' (no value)", arg_index + 1)
                         })?;
-                        let s = val.as_string().ok_or_else(|| {
+                        let s = val.as_string_rc().ok_or_else(|| {
                             format!(
                                 "bad argument #{} to 'format' (string expected)",
                                 arg_index + 1
@@ -521,11 +523,11 @@ fn string_format(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
 fn string_find(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.find")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.find' (string expected)".to_string())?;
 
     let pattern_str = require_arg(vm, 1, "string.find")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #2 to 'string.find' (string expected)".to_string())?;
 
     let init = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
@@ -573,11 +575,11 @@ fn string_find(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.match(s, pattern [, init]) - Match pattern
 fn string_match(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = require_arg(vm, 0, "string.match")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'string.match' (string expected)".to_string())?;
 
     let pattern_str = require_arg(vm, 1, "string.match")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #2 to 'string.match' (string expected)".to_string())?;
 
     let init = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
@@ -721,16 +723,18 @@ fn gmatch_iterator_optimized(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let state_val = &frame.registers[1];
 
     // Extract state pointer from userdata
-    let state_ptr = if let Some(ud) = state_val.as_userdata() {
-        let data = ud.get_data();
-        let data_ref = data.borrow();
-        if let Some(&ptr) = data_ref.downcast_ref::<usize>() {
-            ptr
+    let state_ptr = unsafe {
+        if let Some(ud) = state_val.as_userdata() {
+            let data = ud.get_data();
+            let data_ref = data.borrow();
+            if let Some(&ptr) = data_ref.downcast_ref::<usize>() {
+                ptr
+            } else {
+                return Err("gmatch iterator: invalid state type".to_string());
+            }
         } else {
-            return Err("gmatch iterator: invalid state type".to_string());
+            return Err("gmatch iterator: expected userdata".to_string());
         }
-    } else {
-        return Err("gmatch iterator: expected userdata".to_string());
     };
 
     // SAFETY: We created this pointer in string_gmatch and it's managed by the GC
@@ -788,12 +792,12 @@ fn gmatch_gc_optimized(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let state_val = &frame.registers[0];
 
     // Extract state pointer from userdata and free it
-    if let Some(ud) = state_val.as_userdata() {
-        let data = ud.get_data();
-        let data_ref = data.borrow();
-        if let Some(&state_ptr) = data_ref.downcast_ref::<usize>() {
-            // SAFETY: We own this pointer and are cleaning it up
-            unsafe {
+    unsafe {
+        if let Some(ud) = state_val.as_userdata() {
+            let data = ud.get_data();
+            let data_ref = data.borrow();
+            if let Some(&state_ptr) = data_ref.downcast_ref::<usize>() {
+                // SAFETY: We own this pointer and are cleaning it up
                 let _ = Box::from_raw(state_ptr as *mut std::cell::RefCell<GmatchState>);
                 // Box will be dropped here, freeing the memory
             }

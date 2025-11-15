@@ -6,7 +6,6 @@
 use crate::lua_value::LuaValue;
 use crate::{LuaFunction, LuaTable};
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 
 /// GC Generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -295,10 +294,12 @@ impl GC {
             }
 
             // Mark children
-            if let Some(table) = value.as_table() {
-                self.mark_table(&table.borrow(), &mut worklist);
-            } else if let Some(func) = value.as_function() {
-                self.mark_function(&func, &mut worklist);
+            unsafe {
+                if let Some(table) = value.as_table() {
+                    self.mark_table(&table.borrow(), &mut worklist);
+                } else if let Some(func) = value.as_function() {
+                    self.mark_function(&func, &mut worklist);
+                }
             }
         }
 
@@ -335,14 +336,16 @@ impl GC {
 
     /// Get pointer address for a value
     fn get_value_ptr(&self, value: &LuaValue) -> Option<usize> {
-        if value.is_string() {
-            value.as_string().map(|s| Rc::as_ptr(&s) as usize)
-        } else if value.is_table() {
-            value.as_table().map(|t| Rc::as_ptr(&t) as usize)
-        } else if value.is_function() {
-            value.as_function().map(|f| Rc::as_ptr(&f) as usize)
-        } else {
-            None
+        unsafe {
+            if value.is_string() {
+                value.as_string().map(|s| s as *const _ as usize)
+            } else if value.is_table() {
+                value.as_table().map(|t| t as *const _ as usize)
+            } else if value.is_function() {
+                value.as_function().map(|f| f as *const _ as usize)
+            } else {
+                None
+            }
         }
     }
 

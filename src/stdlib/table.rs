@@ -19,12 +19,13 @@ pub fn create_table_lib() -> LibraryModule {
 
 /// table.concat(list [, sep [, i [, j]]]) - Concatenate table elements
 fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let table = require_arg(vm, 0, "table.concat")?
-        .as_table()
+    let table_val = require_arg(vm, 0, "table.concat")?;
+    let table = table_val
+        .as_table_rc()
         .ok_or_else(|| "bad argument #1 to 'table.concat' (table expected)".to_string())?;
 
     let sep = get_arg(vm, 1)
-        .and_then(|v| v.as_string())
+        .and_then(|v| v.as_string_rc())
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
 
@@ -42,13 +43,15 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
         let key = LuaValue::integer(idx);
         let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
 
-        if let Some(s) = value.as_string() {
-            parts.push(s.as_str().to_string());
-        } else {
-            return Err(format!(
-                "bad value at index {} in 'table.concat' (string expected)",
-                idx
-            ));
+        unsafe {
+            if let Some(s) = value.as_string() {
+                parts.push(s.as_str().to_string());
+            } else {
+                return Err(format!(
+                    "bad value at index {} in 'table.concat' (string expected)",
+                    idx
+                ));
+            }
         }
     }
 
@@ -58,8 +61,9 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// table.insert(list, [pos,] value) - Insert element
 fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let table = require_arg(vm, 0, "table.insert")?
-        .as_table()
+    let table_val = require_arg(vm, 0, "table.insert")?;
+    let table = table_val
+        .as_table_rc()
         .ok_or_else(|| "bad argument #1 to 'table.insert' (table expected)".to_string())?;
 
     let argc = crate::lib_registry::arg_count(vm);
@@ -95,8 +99,9 @@ fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// table.remove(list [, pos]) - Remove element
 fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let table = require_arg(vm, 0, "table.remove")?
-        .as_table()
+    let table_val = require_arg(vm, 0, "table.remove")?;
+    let table = table_val
+        .as_table_rc()
         .ok_or_else(|| "bad argument #1 to 'table.remove' (table expected)".to_string())?;
 
     let mut table_ref = table.borrow_mut();
@@ -122,8 +127,9 @@ fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// table.move(a1, f, e, t [, a2]) - Move elements
 fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let src = require_arg(vm, 0, "table.move")?
-        .as_table()
+    let src_val = require_arg(vm, 0, "table.move")?;
+    let src = src_val
+        .as_table_rc()
         .ok_or_else(|| "bad argument #1 to 'table.move' (table expected)".to_string())?;
 
     let f = require_arg(vm, 1, "table.move")?
@@ -139,7 +145,7 @@ fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #4 to 'table.move' (number expected)".to_string())?;
 
     let dst = get_arg(vm, 4)
-        .and_then(|v| v.as_table())
+        .and_then(|v| v.as_table_rc())
         .unwrap_or_else(|| src.clone());
 
     // Copy elements
@@ -188,8 +194,9 @@ fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// table.unpack(list [, i [, j]]) - Unpack table into values
 fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let table = require_arg(vm, 0, "table.unpack")?
-        .as_table()
+    let table_val = require_arg(vm, 0, "table.unpack")?;
+    let table = table_val
+        .as_table_rc()
         .ok_or_else(|| "bad argument #1 to 'table.unpack' (table expected)".to_string())?;
 
     let table_ref = table.borrow();
@@ -214,8 +221,9 @@ fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// table.sort(list [, comp]) - Sort table in place
 fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let table = require_arg(vm, 0, "table.sort")?
-        .as_table()
+    let table_val = require_arg(vm, 0, "table.sort")?;
+    let table = table_val
+        .as_table_rc()
         .ok_or_else(|| "bad argument #1 to 'table.sort' (table expected)".to_string())?;
 
     let comp = get_arg(vm, 1);

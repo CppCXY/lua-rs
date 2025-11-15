@@ -17,7 +17,7 @@ pub fn create_debug_lib() -> LibraryModule {
 fn debug_traceback(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Simple traceback
     let message = crate::lib_registry::get_arg(vm, 0)
-        .and_then(|v| v.as_string())
+        .and_then(|v| v.as_string_rc())
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| "stack traceback:".to_string());
 

@@ -14,7 +14,7 @@ pub fn create_utf8_lib() -> LibraryModule {
 
 fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = crate::lib_registry::require_arg(vm, 0, "utf8.len")?
-        .as_string()
+        .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'utf8.len' (string expected)".to_string())?;
 
     let len = s.as_str().chars().count();
