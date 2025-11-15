@@ -212,13 +212,10 @@ pub fn create_file_metatable(vm: &mut LuaVM) -> Rc<RefCell<LuaTable>> {
 
 /// file:read([format])
 fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    // For method calls from Lua, register 0 is the function, register 1 is self
-    let frame = vm.frames.last().unwrap();
-    let file_val = if frame.registers.len() > 1 {
-        &frame.registers[1]
-    } else {
-        return Err("file:read requires self parameter".to_string());
-    };
+    use crate::lib_registry::get_arg;
+    
+    // For method calls from Lua, register 1 is self (file object)
+    let file_val = get_arg(vm, 1).ok_or("file:read requires self parameter")?;
 
     // Extract LuaFile from userdata
     unsafe {
@@ -227,8 +224,8 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
                 // Get format (default "*l") - register 2 is first argument after self
-                let format_str = if frame.registers.len() > 2 {
-                    if let Some(s) = frame.registers[2].as_string() {
+                let format_str = if let Some(fmt) = get_arg(vm, 2) {
+                    if let Some(s) = fmt.as_string() {
                         s.as_str().to_string()
                     } else {
                         "*l".to_string()
@@ -274,14 +271,10 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:write(...)
 fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let frame = vm.frames.last().unwrap();
-
+    use crate::lib_registry::{get_arg, get_args};
+    
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = if frame.registers.len() > 1 {
-        &frame.registers[1]
-    } else {
-        return Err("file:write requires self parameter".to_string());
-    };
+    let file_val = get_arg(vm, 1).ok_or("file:write requires self parameter")?;
 
     // Extract LuaFile from userdata
     unsafe {
@@ -290,8 +283,9 @@ fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
                 // Write all arguments (starting from register 2)
-                for i in 2..frame.registers.len() {
-                    let val = &frame.registers[i];
+                let args = get_args(vm);
+                for i in 2..args.len() {
+                    let val = &args[i];
                     if val.is_nil() {
                         break;
                     }
@@ -336,13 +330,10 @@ fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:flush()
 fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    // For method calls from Lua, register 0 is the function, register 1 is self
-    let frame = vm.frames.last().unwrap();
-    let file_val = if frame.registers.len() > 1 {
-        &frame.registers[1]
-    } else {
-        return Err("file:flush requires self parameter".to_string());
-    };
+    use crate::lib_registry::get_arg;
+    
+    // For method calls from Lua, register 1 is self (file object)
+    let file_val = get_arg(vm, 1).ok_or("file:flush requires self parameter")?;
 
     // Extract LuaFile from userdata
     unsafe {
@@ -363,13 +354,10 @@ fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:close()
 fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    // For method calls from Lua, register 0 is the function, register 1 is self
-    let frame = vm.frames.last().unwrap();
-    let file_val = if frame.registers.len() > 1 {
-        &frame.registers[1]
-    } else {
-        return Err("file:close requires self parameter".to_string());
-    };
+    use crate::lib_registry::get_arg;
+    
+    // For method calls from Lua, register 1 is self (file object)
+    let file_val = get_arg(vm, 1).ok_or("file:close requires self parameter")?;
 
     // Extract LuaFile from userdata
     unsafe {

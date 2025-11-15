@@ -119,16 +119,19 @@ impl LuaUpvalue {
     }
 
     /// Get the value (requires VM to read from stack if open)
-    pub fn get_value(&self, frames: &[crate::lua_vm::LuaCallFrame]) -> LuaValue {
+    pub fn get_value(&self, frames: &[crate::lua_vm::LuaCallFrame], register_stack: &[LuaValue]) -> LuaValue {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { frame_id, register } => {
                 // Release the borrow before accessing frames
                 drop(state);
-                // Find the frame and read the register
+                // Find the frame and read the register from global stack
                 if let Some(frame) = frames.iter().find(|f| f.frame_id == frame_id) {
-                    if register < frame.registers.len() {
-                        return frame.registers[register].clone();
+                    if register < frame.top {
+                        let index = frame.base_ptr + register;
+                        if index < register_stack.len() {
+                            return register_stack[index];
+                        }
                     }
                 }
                 LuaValue::nil()
@@ -138,16 +141,19 @@ impl LuaUpvalue {
     }
 
     /// Set the value (requires VM to write to stack if open)
-    pub fn set_value(&self, frames: &mut [crate::lua_vm::LuaCallFrame], value: LuaValue) {
+    pub fn set_value(&self, frames: &mut [crate::lua_vm::LuaCallFrame], register_stack: &mut [LuaValue], value: LuaValue) {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { frame_id, register } => {
                 // Release the borrow before accessing frames
                 drop(state);
-                // Find the frame and write the register
+                // Find the frame and write the register to global stack
                 if let Some(frame) = frames.iter_mut().find(|f| f.frame_id == frame_id) {
-                    if register < frame.registers.len() {
-                        frame.registers[register] = value;
+                    if register < frame.top {
+                        let index = frame.base_ptr + register;
+                        if index < register_stack.len() {
+                            register_stack[index] = value;
+                        }
                     }
                 }
             }

@@ -335,14 +335,9 @@ fn lua_xpcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// getmetatable(object) - Get metatable
 fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let frame = vm.frames.last().ok_or("No call frame")?;
-    let registers = &frame.registers;
-
-    if registers.len() <= 1 {
-        return Ok(MultiValue::single(LuaValue::nil()));
-    }
-
-    let value = &registers[1];
+    use crate::lib_registry::get_arg;
+    
+    let value = get_arg(vm, 1).ok_or("getmetatable() requires 1 argument")?;
 
     match value.kind() {
         LuaValueKind::Table => {
@@ -365,15 +360,10 @@ fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// setmetatable(table, metatable) - Set metatable
 fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let frame = vm.frames.last().ok_or("No call frame")?;
-    let registers = &frame.registers;
-
-    if registers.len() <= 2 {
-        return Err("setmetatable() requires 2 arguments".to_string());
-    }
-
-    let table = &registers[1];
-    let metatable = &registers[2];
+    use crate::lib_registry::get_arg;
+    
+    let table = get_arg(vm, 1).ok_or("setmetatable() requires 2 arguments")?;
+    let metatable = get_arg(vm, 2).ok_or("setmetatable() requires 2 arguments")?;
 
     // First argument must be a table
     unsafe {
@@ -416,19 +406,14 @@ fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// rawget(table, index) - Get without metamethods
 fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let frame = vm.frames.last().ok_or("No call frame")?;
-    let registers = &frame.registers;
-
-    if registers.len() <= 2 {
-        return Err("rawget() requires 2 arguments".to_string());
-    }
-
-    let table = &registers[1];
-    let key = &registers[2];
+    use crate::lib_registry::get_arg;
+    
+    let table = get_arg(vm, 1).ok_or("rawget() requires 2 arguments")?;
+    let key = get_arg(vm, 2).ok_or("rawget() requires 2 arguments")?;
 
     unsafe {
         if let Some(t) = table.as_table() {
-            let value = t.borrow().raw_get(key).unwrap_or(LuaValue::nil());
+            let value = t.borrow().raw_get(&key).unwrap_or(LuaValue::nil());
             Ok(MultiValue::single(value))
         } else {
             Err("rawget() first argument must be a table".to_string())
@@ -438,16 +423,11 @@ fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// rawset(table, index, value) - Set without metamethods
 fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let frame = vm.frames.last().ok_or("No call frame")?;
-    let registers = &frame.registers;
-
-    if registers.len() <= 3 {
-        return Err("rawset() requires 3 arguments".to_string());
-    }
-
-    let table = &registers[1];
-    let key = &registers[2];
-    let value = &registers[3];
+    use crate::lib_registry::get_arg;
+    
+    let table = get_arg(vm, 1).ok_or("rawset() requires 3 arguments")?;
+    let key = get_arg(vm, 2).ok_or("rawset() requires 3 arguments")?;
+    let value = get_arg(vm, 3).ok_or("rawset() requires 3 arguments")?;
 
     unsafe {
         if let Some(t) = table.as_table() {
@@ -465,14 +445,9 @@ fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// rawlen(v) - Length without metamethods
 fn lua_rawlen(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let frame = vm.frames.last().ok_or("No call frame")?;
-    let registers = &frame.registers;
-
-    if registers.len() <= 1 {
-        return Err("rawlen() requires 1 argument".to_string());
-    }
-
-    let value = &registers[1];
+    use crate::lib_registry::get_arg;
+    
+    let value = get_arg(vm, 1).ok_or("rawlen() requires 1 argument")?;
 
     let len = unsafe {
         match value.kind() {

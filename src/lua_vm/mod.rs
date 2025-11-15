@@ -53,7 +53,10 @@ pub struct LuaVM {
     // Call stack
     pub frames: Vec<LuaCallFrame>,
 
-    // Register pool for reusing Vec allocations
+    // Global register stack (unified stack architecture, like Lua 5.4)
+    pub register_stack: Vec<LuaValue>,
+
+    // Register pool for reusing Vec allocations (deprecated, will remove after full migration)
     register_pool: RegisterPool,
 
     // Garbage collector
@@ -77,6 +80,7 @@ impl LuaVM {
         let mut vm = LuaVM {
             globals: Rc::new(RefCell::new(LuaTable::new())),
             frames: Vec::new(),
+            register_stack: Vec::with_capacity(1024), // Pre-allocate for initial stack
             register_pool: RegisterPool::new(),
             gc: GC::new(),
             return_values: Vec::new(),
@@ -96,6 +100,24 @@ impl LuaVM {
         vm
     }
 
+    // Register access helpers for unified stack architecture
+    #[inline(always)]
+    fn get_register(&self, base_ptr: usize, reg: usize) -> LuaValue {
+        self.register_stack[base_ptr + reg]
+    }
+
+    #[inline(always)]
+    fn set_register(&mut self, base_ptr: usize, reg: usize, value: LuaValue) {
+        self.register_stack[base_ptr + reg] = value;
+    }
+
+    #[inline(always)]
+    fn ensure_stack_capacity(&mut self, required: usize) {
+        if self.register_stack.len() < required {
+            self.register_stack.resize(required, LuaValue::nil());
+        }
+    }
+
     fn register_builtins(&mut self) {
         let _ = lib_registry::create_standard_registry().load_all(self);
     }
@@ -110,34 +132,30 @@ impl LuaVM {
             upvalues: Vec::new(),
         };
 
-        // Create initial call frame (use register pool)
+        // Create initial call frame using unified stack
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
 
-        let registers = self.register_pool.get(chunk.max_stack_size);
+        let base_ptr = self.register_stack.len();
+        let required_size = base_ptr + chunk.max_stack_size;
+        self.ensure_stack_capacity(required_size);
 
-        let frame = LuaCallFrame {
+        let frame = LuaCallFrame::new_lua_function(
             frame_id,
-            function: Rc::new(main_func),
-            pc: 0,
-            registers,
-            base: 0,
-            result_reg: 0,
-            num_results: 0,
-            func_name: Some("main".to_string()),
-            source: chunk.source_name.clone(),
-            is_protected: false,
-        };
+            Rc::new(main_func),
+            base_ptr,
+            chunk.max_stack_size,
+            0,
+            0,
+        );
 
         self.frames.push(frame);
 
         // Execute
         let result = self.run()?;
 
-        // Clean up - recycle registers back to pool, then clear
-        while let Some(frame) = self.frames.pop() {
-            self.register_pool.recycle(frame.registers);
-        }
+        // Clean up - clear stack used by this execution
+        self.register_stack.clear();
         self.open_upvalues.clear();
 
         Ok(result)
@@ -235,9 +253,9 @@ impl LuaVM {
     fn op_move(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        let frame = self.current_frame_mut();
-        // Clone the value to properly manage Rc refcounts
-        frame.registers[a] = frame.registers[b].clone();
+        let base_ptr = self.current_frame().base_ptr;
+        let value = self.get_register(base_ptr, b);
+        self.set_register(base_ptr, a, value);
         Ok(())
     }
 
@@ -245,16 +263,17 @@ impl LuaVM {
     fn op_loadk(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
         let constant = frame.function.chunk.constants[bx].clone();
-        frame.registers[a] = constant;
+        let base_ptr = frame.base_ptr;
+        self.set_register(base_ptr, a, constant);
         Ok(())
     }
 
     fn op_loadnil(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
-        let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::nil();
+        let base_ptr = self.current_frame().base_ptr;
+        self.set_register(base_ptr, a, LuaValue::nil());
         Ok(())
     }
 
@@ -262,10 +281,10 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr);
         let c = Instruction::get_c(instr);
-        let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::boolean(b != 0);
+        let base_ptr = self.current_frame().base_ptr;
+        self.set_register(base_ptr, a, LuaValue::boolean(b != 0));
         if c != 0 {
-            frame.pc += 1;
+            self.current_frame_mut().pc += 1;
         }
         Ok(())
     }
@@ -273,8 +292,8 @@ impl LuaVM {
     fn op_newtable(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let table = self.create_table();
-        let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::from_table_rc(table);
+        let base_ptr = self.current_frame().base_ptr;
+        self.set_register(base_ptr, a, LuaValue::from_table_rc(table));
         Ok(())
     }
 
@@ -283,37 +302,33 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
         // Check types first to determine fast path
-        let (is_tbl_int, is_tbl_str) = {
-            let frame = self.current_frame();
-            let is_table = frame.registers[b].is_table();
-            (
-                is_table && frame.registers[c].is_integer(),
-                is_table && frame.registers[c].is_string(),
-            )
-        };
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
+        let is_tbl_int = val_b.is_table() && val_c.is_integer();
+        let is_tbl_str = val_b.is_table() && val_c.is_string();
 
         // Fast path: integer key
         if is_tbl_int {
-            let frame = self.current_frame();
             if let (Some(tbl), Some(idx)) = (
-                &frame.registers[b].as_table_rc(),
-                &frame.registers[c].as_integer(),
+                val_b.as_table_rc(),
+                val_c.as_integer(),
             ) {
-                let value = tbl.borrow().get_int(*idx).unwrap_or(LuaValue::nil());
-                let frame_idx = self.frames.len() - 1;
-                self.frames[frame_idx].registers[a] = value;
+                let value = tbl.borrow().get_int(idx).unwrap_or(LuaValue::nil());
+                self.set_register(base_ptr, a, value);
                 return Ok(());
             }
         }
 
         // Fast path: string key
         if is_tbl_str {
-            let frame = self.current_frame();
             unsafe {
                 if let (Some(tbl), Some(key_str)) = (
-                    &frame.registers[b].as_table_rc(),
-                    frame.registers[c].as_string(),
+                    val_b.as_table_rc(),
+                    val_c.as_string(),
                 ) {
                     // Need to create temporary Rc for get_str
                     let key_rc = Rc::from_raw(key_str as *const LuaString);
@@ -321,30 +336,25 @@ impl LuaVM {
                     std::mem::forget(key_rc);
                     
                     let value = tbl.borrow().get_str(&key_rc_clone).unwrap_or(LuaValue::nil());
-                    let frame_idx = self.frames.len() - 1;
-                    self.frames[frame_idx].registers[a] = value;
+                    self.set_register(base_ptr, a, value);
                     return Ok(());
                 }
             }
         }
 
         // Slow path: clone for complex cases
-        let (table, key) = {
-            let frame = self.current_frame();
-            (frame.registers[b].clone(), frame.registers[c].clone())
-        };
+        let table = val_b;
+        let key = val_c;
 
         if let Some(tbl) = table.as_table_rc() {
             // Use VM's table_get which handles metamethods
             let value = self.table_get(tbl, &key).unwrap_or(LuaValue::nil());
-            let frame = self.current_frame_mut();
-            frame.registers[a] = value;
+            self.set_register(base_ptr, a, value);
             Ok(())
         } else if let Some(ud) = table.as_userdata_rc() {
             // Handle userdata __index metamethod
             let value = self.userdata_get(ud, &key).unwrap_or(LuaValue::nil());
-            let frame = self.current_frame_mut();
-            frame.registers[a] = value;
+            self.set_register(base_ptr, a, value);
             Ok(())
         } else {
             Err("Attempt to index a non-table value".to_string())
@@ -356,45 +366,44 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        // Check types and clone necessary values in one go
-        let (tbl_clone, idx_opt, key_opt, value) = {
-            let frame = self.current_frame();
-            match (frame.registers[a].kind(), frame.registers[b].kind()) {
-                (LuaValueKind::Table, LuaValueKind::Integer) => {
-                    let tbl = frame.registers[a].as_table_rc().unwrap();
-                    let idx = frame.registers[b].as_integer().unwrap();
-                    (Some(tbl), Some(idx), None, frame.registers[c].clone())
-                }
-                (LuaValueKind::Table, LuaValueKind::String) => {
-                    let tbl = frame.registers[a].as_table_rc().unwrap();
-                    let key_str = frame.registers[b].as_string_rc().unwrap();
-                    (Some(tbl), None, Some(key_str), frame.registers[c].clone())
-                }
-                _ => (None, None, None, LuaValue::nil()),
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        // Check types and get values
+        let val_a = self.get_register(base_ptr, a);
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
+        
+        let (tbl_clone, idx_opt, key_opt) = match (val_a.kind(), val_b.kind()) {
+            (LuaValueKind::Table, LuaValueKind::Integer) => {
+                let tbl = val_a.as_table_rc().unwrap();
+                let idx = val_b.as_integer().unwrap();
+                (Some(tbl), Some(idx), None)
             }
+            (LuaValueKind::Table, LuaValueKind::String) => {
+                let tbl = val_a.as_table_rc().unwrap();
+                let key_str = val_b.as_string_rc().unwrap();
+                (Some(tbl), None, Some(key_str))
+            }
+            _ => (None, None, None),
         };
 
         // Fast path: integer key
         if let (Some(tbl), Some(idx)) = (tbl_clone.as_ref(), idx_opt) {
-            tbl.borrow_mut().set_int(idx, value);
+            tbl.borrow_mut().set_int(idx, val_c);
             return Ok(());
         }
 
         // Fast path: string key
         if let (Some(tbl), Some(key)) = (tbl_clone.as_ref(), key_opt.as_ref()) {
-            tbl.borrow_mut().set_str(Rc::clone(key), value);
+            tbl.borrow_mut().set_str(Rc::clone(key), val_c);
             return Ok(());
         }
 
         // Slow path
-        let (table, key, value) = {
-            let frame = self.current_frame();
-            (
-                frame.registers[a].clone(),
-                frame.registers[b].clone(),
-                frame.registers[c].clone(),
-            )
-        };
+        let table = val_a;
+        let key = val_b;
+        let value = val_c;
 
         if let Some(tbl) = table.as_table_rc() {
             self.table_set(tbl, key, value)?;
@@ -411,16 +420,14 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as i64;
 
-        let table = {
-            let frame = self.current_frame();
-            frame.registers[b].clone()
-        };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let table = self.get_register(base_ptr, b);
 
         if let Some(tbl) = table.as_table_rc() {
             // Fast path: direct integer access
             let value = tbl.borrow().get_int(c).unwrap_or(LuaValue::nil());
-            let frame = self.current_frame_mut();
-            frame.registers[a] = value;
+            self.set_register(base_ptr, a, value);
             Ok(())
         } else {
             Err("Attempt to index a non-table value".to_string())
@@ -434,10 +441,10 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as i64;
         let c = Instruction::get_c(instr) as usize;
 
-        let (table, value) = {
-            let frame = self.current_frame();
-            (frame.registers[a].clone(), frame.registers[c].clone())
-        };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let table = self.get_register(base_ptr, a);
+        let value = self.get_register(base_ptr, c);
 
         unsafe {
             if let Some(tbl) = table.as_table() {
@@ -456,13 +463,10 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let (table, key) = {
-            let frame = self.current_frame();
-            (
-                frame.registers[b].clone(),
-                frame.function.chunk.constants[c].clone(),
-            )
-        };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let table = self.get_register(base_ptr, b);
+        let key = frame.function.chunk.constants[c].clone();
 
         if let Some(tbl) = table.as_table_rc() {
             unsafe {
@@ -474,14 +478,12 @@ impl LuaVM {
                     
                     // Fast path: direct string key access
                     let value = tbl.borrow().get_str(&key_rc_clone).unwrap_or(LuaValue::nil());
-                    let frame = self.current_frame_mut();
-                    frame.registers[a] = value;
+                    self.set_register(base_ptr, a, value);
                     Ok(())
                 } else {
                     // Fallback: use generic get with metamethods
                     let value = self.table_get(tbl, &key).unwrap_or(LuaValue::nil());
-                    let frame = self.current_frame_mut();
-                    frame.registers[a] = value;
+                    self.set_register(base_ptr, a, value);
                     Ok(())
                 }
             }
@@ -497,14 +499,11 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let (table, key, value) = {
-            let frame = self.current_frame();
-            (
-                frame.registers[a].clone(),
-                frame.function.chunk.constants[b].clone(),
-                frame.registers[c].clone(),
-            )
-        };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let table = self.get_register(base_ptr, a);
+        let key = frame.function.chunk.constants[b].clone();
+        let value = self.get_register(base_ptr, c);
 
         if let Some(tbl) = table.as_table_rc() {
             unsafe {
@@ -534,13 +533,14 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // SAFETY: Compiler guarantees indices are within bounds
         // Ultra-fast path: direct tag comparison (no kind() overhead)
         unsafe {
-            let left = frame.registers.get_unchecked(b);
-            let right = frame.registers.get_unchecked(c);
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            let right = self.register_stack.get_unchecked(base_ptr + c);
 
             let left_tag = left.primary();
             let right_tag = right.primary();
@@ -551,7 +551,7 @@ impl LuaVM {
             {
                 let i = left.secondary() as i64;
                 let j = right.secondary() as i64;
-                *frame.registers.get_unchecked_mut(a) = LuaValue::integer(i + j);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i + j);
                 return Ok(());
             }
 
@@ -559,7 +559,7 @@ impl LuaVM {
             if left_tag < crate::lua_value::NAN_BASE && right_tag < crate::lua_value::NAN_BASE {
                 let l = f64::from_bits(left_tag);
                 let r = f64::from_bits(right_tag);
-                *frame.registers.get_unchecked_mut(a) = LuaValue::float(l + r);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l + r);
                 return Ok(());
             }
 
@@ -578,14 +578,14 @@ impl LuaVM {
                 } else {
                     f64::from_bits(right_tag)
                 };
-                *frame.registers.get_unchecked_mut(a) = LuaValue::float(l + r);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l + r);
                 return Ok(());
             }
         }
 
         // Slow path: metamethods
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if self.call_binop_metamethod(&left, &right, "__add", a)? {
             Ok(())
@@ -603,36 +603,37 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // SAFETY: Compiler guarantees indices are within bounds
         unsafe {
-            let left = frame.registers.get_unchecked(b);
-            let right = frame.registers.get_unchecked(c);
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            let right = self.register_stack.get_unchecked(base_ptr + c);
 
             match (left.kind(), right.kind()) {
                 (LuaValueKind::Integer, LuaValueKind::Integer) => {
                     let i = left.as_integer().unwrap();
                     let j = right.as_integer().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::integer(i - j);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i - j);
                     return Ok(());
                 }
                 (LuaValueKind::Float, LuaValueKind::Float) => {
                     let l = left.as_float().unwrap();
                     let r = right.as_float().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(l - r);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l - r);
                     return Ok(());
                 }
                 (LuaValueKind::Integer, LuaValueKind::Float) => {
                     let i = left.as_integer().unwrap();
                     let f = right.as_float().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(i as f64 - f);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(i as f64 - f);
                     return Ok(());
                 }
                 (LuaValueKind::Float, LuaValueKind::Integer) => {
                     let f = left.as_float().unwrap();
                     let i = right.as_integer().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(f - i as f64);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(f - i as f64);
                     return Ok(());
                 }
                 _ => {}
@@ -640,8 +641,8 @@ impl LuaVM {
         }
 
         // Slow path
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if self.call_binop_metamethod(&left, &right, "__sub", a)? {
             Ok(())
@@ -656,36 +657,37 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // SAFETY: Compiler guarantees indices are within bounds
         unsafe {
-            let left = frame.registers.get_unchecked(b);
-            let right = frame.registers.get_unchecked(c);
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            let right = self.register_stack.get_unchecked(base_ptr + c);
 
             match (left.kind(), right.kind()) {
                 (LuaValueKind::Integer, LuaValueKind::Integer) => {
                     let i = left.as_integer().unwrap();
                     let j = right.as_integer().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::integer(i * j);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i * j);
                     return Ok(());
                 }
                 (LuaValueKind::Float, LuaValueKind::Float) => {
                     let l = left.as_float().unwrap();
                     let r = right.as_float().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(l * r);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l * r);
                     return Ok(());
                 }
                 (LuaValueKind::Integer, LuaValueKind::Float) => {
                     let i = left.as_integer().unwrap();
                     let f = right.as_float().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(i as f64 * f);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(i as f64 * f);
                     return Ok(());
                 }
                 (LuaValueKind::Float, LuaValueKind::Integer) => {
                     let f = left.as_float().unwrap();
                     let i = right.as_integer().unwrap();
-                    *frame.registers.get_unchecked_mut(a) = LuaValue::float(f * i as f64);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(f * i as f64);
                     return Ok(());
                 }
                 _ => {}
@@ -693,8 +695,8 @@ impl LuaVM {
         }
 
         // Slow path
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if self.call_binop_metamethod(&left, &right, "__mul", a)? {
             Ok(())
@@ -709,40 +711,43 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
 
         // Fast path: division always returns float in Lua
-        match (frame.registers[b].kind(), frame.registers[c].kind()) {
+        match (val_b.kind(), val_c.kind()) {
             (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let j = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::float(i as f64 / j as f64);
+                let i = val_b.as_integer().unwrap();
+                let j = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float(i as f64 / j as f64));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = frame.registers[b].as_float().unwrap();
-                let r = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::float(l / r);
+                let l = val_b.as_float().unwrap();
+                let r = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float(l / r));
                 return Ok(());
             }
             (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let f = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::float(i as f64 / f);
+                let i = val_b.as_integer().unwrap();
+                let f = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float(i as f64 / f));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = frame.registers[b].as_float().unwrap();
-                let i = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::float(f / i as f64);
+                let f = val_b.as_float().unwrap();
+                let i = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float(f / i as f64));
                 return Ok(());
             }
             _ => {}
         }
 
         // Slow path
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = val_b;
+        let right = val_c;
 
         if self.call_binop_metamethod(&left, &right, "__div", a)? {
             Ok(())
@@ -757,40 +762,43 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
 
         // Fast path
-        match (frame.registers[b].kind(), frame.registers[c].kind()) {
+        match (val_b.kind(), val_c.kind()) {
             (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let j = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::integer(i % j);
+                let i = val_b.as_integer().unwrap();
+                let j = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::integer(i % j));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = frame.registers[b].as_float().unwrap();
-                let r = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::float(l % r);
+                let l = val_b.as_float().unwrap();
+                let r = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float(l % r));
                 return Ok(());
             }
             (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let f = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::float((i as f64) % f);
+                let i = val_b.as_integer().unwrap();
+                let f = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float((i as f64) % f));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = frame.registers[b].as_float().unwrap();
-                let i = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::float(f % (i as f64));
+                let f = val_b.as_float().unwrap();
+                let i = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float(f % (i as f64)));
                 return Ok(());
             }
             _ => {}
         }
 
         // Slow path
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = val_b;
+        let right = val_c;
 
         if self.call_binop_metamethod(&left, &right, "__mod", a)? {
             Ok(())
@@ -804,16 +812,16 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         match (&left, &right) {
             (l, r) if l.is_number() && r.is_number() => {
                 let l_num = l.as_number().unwrap();
                 let r_num = r.as_number().unwrap();
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::number(l_num.powf(r_num));
+                self.set_register(base_ptr, a, LuaValue::number(l_num.powf(r_num)));
                 Ok(())
             }
             _ => {
@@ -832,25 +840,27 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let val = self.get_register(base_ptr, b);
 
         // Fast path: avoid clone
-        match frame.registers[b].kind() {
+        match val.kind() {
             LuaValueKind::Integer => {
-                let i = frame.registers[b].as_integer().unwrap();
-                frame.registers[a] = LuaValue::integer(-i);
+                let i = val.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::integer(-i));
                 return Ok(());
             }
             LuaValueKind::Float => {
-                let f = frame.registers[b].as_float().unwrap();
-                frame.registers[a] = LuaValue::float(-f);
+                let f = val.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::float(-f));
                 return Ok(());
             }
             _ => {}
         }
 
         // Slow path: need to clone for metamethod
-        let value = frame.registers[b].clone();
+        let value = val;
         if self.call_unop_metamethod(&value, "__unm", a)? {
             Ok(())
         } else {
@@ -864,46 +874,49 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
 
         // Fast path
-        match (frame.registers[b].kind(), frame.registers[c].kind()) {
+        match (val_b.kind(), val_c.kind()) {
             (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let j = frame.registers[c].as_integer().unwrap();
+                let i = val_b.as_integer().unwrap();
+                let j = val_c.as_integer().unwrap();
                 if j == 0 {
                     return Err("attempt to divide by zero".to_string());
                 }
-                frame.registers[a] = LuaValue::integer(i / j);
+                self.set_register(base_ptr, a, LuaValue::integer(i / j));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = frame.registers[b].as_float().unwrap();
-                let r = frame.registers[c].as_float().unwrap();
+                let l = val_b.as_float().unwrap();
+                let r = val_c.as_float().unwrap();
                 let result = (l / r).floor();
-                frame.registers[a] = LuaValue::integer(result as i64);
+                self.set_register(base_ptr, a, LuaValue::integer(result as i64));
                 return Ok(());
             }
             (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let f = frame.registers[c].as_float().unwrap();
+                let i = val_b.as_integer().unwrap();
+                let f = val_c.as_float().unwrap();
                 let result = (i as f64 / f).floor();
-                frame.registers[a] = LuaValue::integer(result as i64);
+                self.set_register(base_ptr, a, LuaValue::integer(result as i64));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = frame.registers[b].as_float().unwrap();
-                let i = frame.registers[c].as_integer().unwrap();
+                let f = val_b.as_float().unwrap();
+                let i = val_c.as_integer().unwrap();
                 let result = (f / i as f64).floor();
-                frame.registers[a] = LuaValue::integer(result as i64);
+                self.set_register(base_ptr, a, LuaValue::integer(result as i64));
                 return Ok(());
             }
             _ => {}
         }
 
         // Slow path
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = val_b;
+        let right = val_c;
 
         if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
             Ok(())
@@ -918,9 +931,10 @@ impl LuaVM {
     fn op_not(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        let frame = self.current_frame_mut();
-        let value = frame.registers[b].is_truthy();
-        frame.registers[a] = LuaValue::boolean(!value);
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let value = self.get_register(base_ptr, b).is_truthy();
+        self.set_register(base_ptr, a, LuaValue::boolean(!value));
         Ok(())
     }
 
@@ -928,16 +942,14 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
 
-        let value = {
-            let frame = self.current_frame();
-            frame.registers[b].clone()
-        };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let value = self.get_register(base_ptr, b);
 
         // Strings have raw length
         unsafe {
             if let Some(s) = value.as_string() {
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::integer(s.as_str().len() as i64);
+                self.set_register(base_ptr, a, LuaValue::integer(s.as_str().len() as i64));
                 return Ok(());
             }
         }
@@ -951,8 +963,7 @@ impl LuaVM {
 
                 // No __len metamethod, use raw length
                 if let Some(t) = value.as_table() {
-                    let frame = self.current_frame_mut();
-                    frame.registers[a] = LuaValue::integer(t.borrow().len() as i64);
+                    self.set_register(base_ptr, a, LuaValue::integer(t.borrow().len() as i64));
                     return Ok(());
                 }
             }
@@ -970,8 +981,9 @@ impl LuaVM {
         // Fast path: direct comparison for primitives
         let fast_result = {
             let frame = self.current_frame();
-            let left = &frame.registers[b];
-            let right = &frame.registers[c];
+            let base_ptr = frame.base_ptr;
+            let left = self.get_register(base_ptr, b);
+            let right = self.get_register(base_ptr, c);
 
             match (left.kind(), right.kind()) {
                 (LuaValueKind::Nil, LuaValueKind::Nil) => Some(true),
@@ -1000,19 +1012,22 @@ impl LuaVM {
 
         if let Some(result) = fast_result {
             let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::boolean(result);
+            let base_ptr = frame.base_ptr;
+            self.set_register(base_ptr, a, LuaValue::boolean(result));
             return Ok(());
         }
 
         // Slow path: need to handle tables/strings/metamethods
         let (left, right) = {
             let frame = self.current_frame();
-            (frame.registers[b].clone(), frame.registers[c].clone())
+            let base_ptr = frame.base_ptr;
+            (self.get_register(base_ptr, b), self.get_register(base_ptr, c))
         };
 
         if self.values_equal(&left, &right) {
             let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::boolean(true);
+            let base_ptr = frame.base_ptr;
+            self.set_register(base_ptr, a, LuaValue::boolean(true));
             return Ok(());
         }
 
@@ -1028,7 +1043,8 @@ impl LuaVM {
         }
 
         let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::boolean(false);
+        let base_ptr = frame.base_ptr;
+        self.set_register(base_ptr, a, LuaValue::boolean(false));
         Ok(())
     }
 
@@ -1038,45 +1054,50 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // Fast path: numeric comparison without clone
-        match (frame.registers[b].kind(), frame.registers[c].kind()) {
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
+        
+        match (val_b.kind(), val_c.kind()) {
             (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let l = frame.registers[b].as_integer().unwrap();
-                let r = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::boolean(l < r);
+                let l = val_b.as_integer().unwrap();
+                let r = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean(l < r));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = frame.registers[b].as_float().unwrap();
-                let r = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::boolean(l < r);
+                let l = val_b.as_float().unwrap();
+                let r = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean(l < r));
                 return Ok(());
             }
             (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let f = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::boolean((i as f64) < f);
+                let i = val_b.as_integer().unwrap();
+                let f = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean((i as f64) < f));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = frame.registers[b].as_float().unwrap();
-                let i = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::boolean(f < (i as f64));
+                let f = val_b.as_float().unwrap();
+                let i = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean(f < (i as f64)));
                 return Ok(());
             }
             _ => {}
         }
 
         // Slow path: strings and metamethods
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = val_b;
+        let right = val_c;
 
         unsafe {
             if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::boolean(l.as_str() < r.as_str());
+                let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() < r.as_str()));
                 return Ok(());
             }
         }
@@ -1094,45 +1115,50 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // Fast path: numeric comparison without clone
-        match (frame.registers[b].kind(), frame.registers[c].kind()) {
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
+        
+        match (val_b.kind(), val_c.kind()) {
             (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let l = frame.registers[b].as_integer().unwrap();
-                let r = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::boolean(l <= r);
+                let l = val_b.as_integer().unwrap();
+                let r = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean(l <= r));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = frame.registers[b].as_float().unwrap();
-                let r = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::boolean(l <= r);
+                let l = val_b.as_float().unwrap();
+                let r = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean(l <= r));
                 return Ok(());
             }
             (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = frame.registers[b].as_integer().unwrap();
-                let f = frame.registers[c].as_float().unwrap();
-                frame.registers[a] = LuaValue::boolean((i as f64) <= f);
+                let i = val_b.as_integer().unwrap();
+                let f = val_c.as_float().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean((i as f64) <= f));
                 return Ok(());
             }
             (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = frame.registers[b].as_float().unwrap();
-                let i = frame.registers[c].as_integer().unwrap();
-                frame.registers[a] = LuaValue::boolean(f <= (i as f64));
+                let f = val_b.as_float().unwrap();
+                let i = val_c.as_integer().unwrap();
+                self.set_register(base_ptr, a, LuaValue::boolean(f <= (i as f64)));
                 return Ok(());
             }
             _ => {}
         }
 
         // Slow path
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let left = val_b;
+        let right = val_c;
 
         unsafe {
             if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
-                let frame = self.current_frame_mut();
-                frame.registers[a] = LuaValue::boolean(l.as_str() <= r.as_str());
+                let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() <= r.as_str()));
                 return Ok(());
             }
         }
@@ -1143,9 +1169,10 @@ impl LuaVM {
 
         if let Some(_) = self.get_metamethod(&left, "__lt") {
             if self.call_binop_metamethod(&right, &left, "__lt", a)? {
-                let frame = self.current_frame_mut();
-                let result = frame.registers[a].is_truthy();
-                frame.registers[a] = LuaValue::boolean(!result);
+                let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                let result = self.get_register(base_ptr, a).is_truthy();
+                self.set_register(base_ptr, a, LuaValue::boolean(!result));
                 return Ok(());
             }
         }
@@ -1169,41 +1196,47 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let sbx = Instruction::get_sbx(instr);
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // R(A) = init, R(A+1) = limit, R(A+2) = step
         // Validate that all are numbers
-        if !frame.registers[a].is_number() {
+        let val_a = self.get_register(base_ptr, a);
+        let val_a1 = self.get_register(base_ptr, a + 1);
+        let val_a2 = self.get_register(base_ptr, a + 2);
+        
+        if !val_a.is_number() {
             return Err("'for' initial value must be a number".to_string());
         }
-        if !frame.registers[a + 1].is_number() {
+        if !val_a1.is_number() {
             return Err("'for' limit must be a number".to_string());
         }
-        if !frame.registers[a + 2].is_number() {
+        if !val_a2.is_number() {
             return Err("'for' step must be a number".to_string());
         }
 
         // Fast path: Pure integer arithmetic (most common)
         if let (LuaValueKind::Integer, LuaValueKind::Integer) =
-            (frame.registers[a].kind(), frame.registers[a + 2].kind())
+            (val_a.kind(), val_a2.kind())
         {
-            let init = frame.registers[a].as_integer().unwrap();
-            let step = frame.registers[a + 2].as_integer().unwrap();
+            let init = val_a.as_integer().unwrap();
+            let step = val_a2.as_integer().unwrap();
 
             // Subtract step so first FORLOOP iteration adds it back to get init
             let new_init = init.wrapping_sub(step);
-            frame.registers[a] = LuaValue::integer(new_init);
-            frame.registers[a + 3] = LuaValue::integer(new_init);
+            self.set_register(base_ptr, a, LuaValue::integer(new_init));
+            self.set_register(base_ptr, a + 3, LuaValue::integer(new_init));
         } else {
             // Float path: Any operand is float or needs float precision
-            let init = frame.registers[a].as_number().unwrap();
-            let step = frame.registers[a + 2].as_number().unwrap();
+            let init = val_a.as_number().unwrap();
+            let step = val_a2.as_number().unwrap();
             let new_init = init - step;
-            frame.registers[a] = LuaValue::float(new_init);
-            frame.registers[a + 3] = LuaValue::float(new_init);
+            self.set_register(base_ptr, a, LuaValue::float(new_init));
+            self.set_register(base_ptr, a + 3, LuaValue::float(new_init));
         }
 
         // Jump forward to FORLOOP
+        let frame = self.current_frame_mut();
         frame.pc = (frame.pc as i32 + sbx) as usize;
         Ok(())
     }
@@ -1215,14 +1248,15 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let sbx = Instruction::get_sbx(instr);
 
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // SAFETY: Compiler guarantees a, a+1, a+2, a+3 are within register bounds
         // Ultra-fast path: direct tag checking (no kind() overhead)
         unsafe {
-            let idx_val = frame.registers.get_unchecked(a);
-            let limit_val = frame.registers.get_unchecked(a + 1);
-            let step_val = frame.registers.get_unchecked(a + 2);
+            let idx_val = self.register_stack.get_unchecked(base_ptr + a);
+            let limit_val = self.register_stack.get_unchecked(base_ptr + a + 1);
+            let step_val = self.register_stack.get_unchecked(base_ptr + a + 2);
 
             let idx_tag = idx_val.primary();
             let limit_tag = limit_val.primary();
@@ -1248,12 +1282,13 @@ impl LuaVM {
                 };
 
                 // Update index register
-                *frame.registers.get_unchecked_mut(a) = LuaValue::integer(new_idx);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(new_idx);
 
                 if continue_loop {
                     // Update loop variable: R(A+3) = new_idx
-                    *frame.registers.get_unchecked_mut(a + 3) = LuaValue::integer(new_idx);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a + 3) = LuaValue::integer(new_idx);
                     // Jump back to loop body
+                    let frame = self.current_frame_mut();
                     frame.pc = (frame.pc as i32 + sbx) as usize;
                 }
                 return Ok(());
@@ -1276,10 +1311,11 @@ impl LuaVM {
                     new_idx >= limit
                 };
 
-                *frame.registers.get_unchecked_mut(a) = LuaValue::float(new_idx);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(new_idx);
 
                 if continue_loop {
-                    *frame.registers.get_unchecked_mut(a + 3) = LuaValue::float(new_idx);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a + 3) = LuaValue::float(new_idx);
+                    let frame = self.current_frame_mut();
                     frame.pc = (frame.pc as i32 + sbx) as usize;
                 }
                 return Ok(());
@@ -1308,10 +1344,11 @@ impl LuaVM {
                     new_idx >= limit
                 };
 
-                *frame.registers.get_unchecked_mut(a) = LuaValue::float(new_idx);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(new_idx);
 
                 if continue_loop {
-                    *frame.registers.get_unchecked_mut(a + 3) = LuaValue::float(new_idx);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a + 3) = LuaValue::float(new_idx);
+                    let frame = self.current_frame_mut();
                     frame.pc = (frame.pc as i32 + sbx) as usize;
                 }
                 return Ok(());
@@ -1324,9 +1361,11 @@ impl LuaVM {
     fn op_test(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let c = Instruction::get_c(instr);
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
-        let is_true = frame.registers[a].is_truthy();
+        let is_true = self.get_register(base_ptr, a).is_truthy();
+        let frame = self.current_frame_mut();
         if (is_true as u32) != c {
             frame.pc += 1;
         }
@@ -1337,12 +1376,15 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr);
-        let frame = self.current_frame_mut();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
-        let is_true = frame.registers[b].is_truthy();
+        let val_b = self.get_register(base_ptr, b);
+        let is_true = val_b.is_truthy();
         if (is_true as u32) == c {
-            frame.registers[a] = frame.registers[b].clone();
+            self.set_register(base_ptr, a, val_b);
         } else {
+            let frame = self.current_frame_mut();
             frame.pc += 1;
         }
         Ok(())
@@ -1354,7 +1396,8 @@ impl LuaVM {
         let c = Instruction::get_c(instr) as usize;
 
         let frame = self.current_frame();
-        let func = frame.registers[a].clone();
+        let base_ptr = frame.base_ptr;
+        let func = self.get_register(base_ptr, a);
 
         // Check for __call metamethod on non-functions (tables, userdata)
         if !func.is_function() && !func.is_cfunction() {
@@ -1369,27 +1412,27 @@ impl LuaVM {
                     // But we need to pass the original value as the first argument
                     // This means shifting all arguments: (func, arg1, arg2) -> (call_func, func, arg1, arg2)
 
-                    let current_frame = self.current_frame_mut();
-
-                    // Shift arguments right by one position
-                    // We need to be careful about register allocation
-                    let original_func = func.clone();
+                    let original_func = func;
                     let call_function = call_func.clone();
 
-                    // Create new register layout: [call_func, original_func, arg1, arg2, ...]
-                    current_frame.registers[a] = call_function;
+                    let frame = self.current_frame();
+                    let base_ptr = frame.base_ptr;
+                    let top = frame.top;
 
-                    // Shift existing arguments
+                    // Create new register layout: [call_func, original_func, arg1, arg2, ...]
+                    self.set_register(base_ptr, a, call_function);
+
+                    // Shift existing arguments right by one position
                     for i in (1..b).rev() {
-                        if a + i + 1 < current_frame.registers.len() {
-                            current_frame.registers[a + i + 1] =
-                                current_frame.registers[a + i].clone();
+                        if a + i + 1 < top {
+                            let val = self.get_register(base_ptr, a + i);
+                            self.set_register(base_ptr, a + i + 1, val);
                         }
                     }
 
                     // Place original func as first argument
-                    if a + 1 < current_frame.registers.len() {
-                        current_frame.registers[a + 1] = original_func;
+                    if a + 1 < top {
+                        self.set_register(base_ptr, a + 1, original_func);
                     }
 
                     // Adjust b to include the extra argument
@@ -1408,14 +1451,18 @@ impl LuaVM {
         // Check for CFunction (native Rust function)
         if let Some(cfunc) = func.as_cfunction() {
             // Optimize: pre-allocate exact capacity needed
-            let arg_count = if b == 0 { frame.registers.len() - a } else { b };
+            let frame = self.current_frame();
+            let base_ptr = frame.base_ptr;
+            let top = frame.top;
+            
+            let arg_count = if b == 0 { top - a } else { b };
             let mut arg_registers = Vec::with_capacity(arg_count);
             arg_registers.push(func); // Register 0 is the function itself (Copy, no clone)
 
             // Copy arguments to registers (using Copy trait, no clone overhead)
             for i in 1..b {
-                if a + i < frame.registers.len() {
-                    arg_registers.push(frame.registers[a + i]);
+                if a + i < top {
+                    arg_registers.push(self.get_register(base_ptr, a + i));
                 } else {
                     arg_registers.push(LuaValue::nil());
                 }
@@ -1425,18 +1472,19 @@ impl LuaVM {
             let frame_id = self.next_frame_id;
             self.next_frame_id += 1;
 
-            let temp_frame = LuaCallFrame {
+            let cfunc_base = self.register_stack.len();
+            self.ensure_stack_capacity(cfunc_base + arg_registers.len());
+            for (i, val) in arg_registers.iter().enumerate() {
+                self.register_stack[cfunc_base + i] = *val;
+            }
+
+            let temp_frame = LuaCallFrame::new_c_function(
                 frame_id,
-                function: self.current_frame().function.clone(),
-                pc: self.current_frame().pc,
-                registers: arg_registers,
-                base: self.frames.len(),
-                result_reg: 0,
-                num_results: 0,
-                func_name: Some("[C]".to_string()),
-                source: Some("[C]".to_string()),
-                is_protected: false,
-            };
+                self.current_frame().function.clone(),
+                self.current_frame().pc,
+                cfunc_base,
+                arg_registers.len(),  // Pass the number of arguments
+            );
 
             self.frames.push(temp_frame);
 
@@ -1466,17 +1514,20 @@ impl LuaVM {
             let num_expected = if c == 0 { num_returns } else { c - 1 };
 
             // Store them in registers
-            let current_frame = self.current_frame_mut();
+            let frame = self.current_frame();
+            let base_ptr = frame.base_ptr;
+            let top = frame.top;
+            
             for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
-                if a + i < current_frame.registers.len() {
-                    current_frame.registers[a + i] = value;
+                if a + i < top {
+                    self.set_register(base_ptr, a + i, value);
                 }
             }
 
             // Fill remaining expected registers with nil
             for i in num_returns..num_expected {
-                if a + i < current_frame.registers.len() {
-                    current_frame.registers[a + i] = LuaValue::nil();
+                if a + i < top {
+                    self.set_register(base_ptr, a + i, LuaValue::nil());
                 }
             }
 
@@ -1489,14 +1540,19 @@ impl LuaVM {
                 // Get max_stack_size before borrowing
                 let max_stack_size = lua_func.chunk.max_stack_size;
                 
-                // Use register pool to get a pre-allocated Vec
-                let mut new_registers = self.register_pool.get(max_stack_size);
+                // Allocate new register window in the global stack
+                let new_base = self.register_stack.len();
+                self.ensure_stack_capacity(new_base + max_stack_size);
 
-                // Copy arguments (using Copy trait) - need to re-borrow frame
+                // Copy arguments - need to re-borrow frame
                 let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                let top = frame.top;
+                
                 for i in 1..b {
-                    if a + i < frame.registers.len() && i - 1 < new_registers.len() {
-                        new_registers[i - 1] = frame.registers[a + i];
+                    if a + i < top {
+                        let arg = self.get_register(base_ptr, a + i);
+                        self.register_stack[new_base + i - 1] = arg;
                     }
                 }
 
@@ -1511,8 +1567,8 @@ impl LuaVM {
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     func_rc_clone,
-                    new_registers,
-                    self.frames.len(),
+                    new_base,
+                    max_stack_size,
                     a,
                     if c == 0 { usize::MAX } else { c - 1 },
                 );
@@ -1538,7 +1594,7 @@ impl LuaVM {
         let num_returns = if b == 0 {
             // Return all values from A to top of stack
             let frame = self.current_frame();
-            frame.registers.len().saturating_sub(a)
+            frame.top.saturating_sub(a)
         } else {
             b - 1
         };
@@ -1546,9 +1602,12 @@ impl LuaVM {
         let mut values = Vec::new();
         if num_returns > 0 {
             let frame = self.current_frame();
+            let base_ptr = frame.base_ptr;
+            let top = frame.top;
+            
             for i in 0..num_returns {
-                if a + i < frame.registers.len() {
-                    values.push(frame.registers[a + i].clone());
+                if a + i < top {
+                    values.push(self.get_register(base_ptr, a + i));
                 } else {
                     values.push(LuaValue::nil());
                 }
@@ -1563,30 +1622,30 @@ impl LuaVM {
         // Close upvalues for the exiting frame
         self.close_upvalues(exiting_frame_id);
 
-        // Pop frame and recycle its registers to pool
-        if let Some(frame) = self.frames.pop() {
-            self.register_pool.recycle(frame.registers);
-        }
+        // Pop frame (no need to recycle registers - using global stack)
+        self.frames.pop();
 
         // Store return values
         self.return_values = values.clone();
 
         // If there's a caller frame, copy return values to its registers
         if !self.frames.is_empty() {
-            let frame = self.current_frame_mut();
+            let frame = self.current_frame();
+            let base_ptr = frame.base_ptr;
+            let top = frame.top;
             let num_to_copy = caller_num_results.min(values.len());
 
             for (i, val) in values.iter().take(num_to_copy).enumerate() {
-                if caller_result_reg + i < frame.registers.len() {
-                    frame.registers[caller_result_reg + i] = val.clone();
+                if caller_result_reg + i < top {
+                    self.set_register(base_ptr, caller_result_reg + i, *val);
                 }
             }
 
             // Fill remaining expected results with nil
             if caller_num_results != usize::MAX {
                 for i in num_to_copy..caller_num_results {
-                    if caller_result_reg + i < frame.registers.len() {
-                        frame.registers[caller_result_reg + i] = LuaValue::nil();
+                    if caller_result_reg + i < top {
+                        self.set_register(base_ptr, caller_result_reg + i, LuaValue::nil());
                     }
                 }
             }
@@ -1608,9 +1667,11 @@ impl LuaVM {
             frame.function.upvalues[b].clone()
         };
 
-        // Get value from upvalue
-        let value = upvalue.get_value(&self.frames);
-        self.current_frame_mut().registers[a] = value;
+        // Get value from upvalue with access to register_stack
+        let value = upvalue.get_value(&self.frames, &self.register_stack);
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        self.set_register(base_ptr, a, value);
 
         Ok(())
     }
@@ -1619,7 +1680,9 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
 
-        let value = self.current_frame().registers[a].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let value = self.get_register(base_ptr, a);
 
         let upvalue = {
             let frame = self.current_frame();
@@ -1629,8 +1692,8 @@ impl LuaVM {
             frame.function.upvalues[b].clone()
         };
 
-        // Set value to upvalue
-        upvalue.set_value(&mut self.frames, value);
+        // Set value to upvalue with access to register_stack
+        upvalue.set_value(&mut self.frames, &mut self.register_stack, value);
 
         Ok(())
     }
@@ -1691,8 +1754,9 @@ impl LuaVM {
         // Create new function (closure)
         let func = self.create_function(proto, upvalues);
 
-        let frame = self.current_frame_mut();
-        frame.registers[a] = LuaValue::from_function_rc(func);
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        self.set_register(base_ptr, a, LuaValue::from_function_rc(func));
 
         Ok(())
     }
@@ -1705,7 +1769,8 @@ impl LuaVM {
         // Binary concat with metamethod support
         let (left, right) = {
             let frame = self.current_frame();
-            (frame.registers[b], frame.registers[c])
+            let base_ptr = frame.base_ptr;
+            (self.get_register(base_ptr, b), self.get_register(base_ptr, c))
         };
 
         // Try direct concatenation - use String capacity for efficiency
@@ -1739,8 +1804,9 @@ impl LuaVM {
 
         if success {
             let string = self.create_string(result);
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::from_string_rc(string);
+            let frame = self.current_frame();
+            let base_ptr = frame.base_ptr;
+            self.set_register(base_ptr, a, LuaValue::from_string_rc(string));
             return Ok(());
         }
 
@@ -1764,8 +1830,9 @@ impl LuaVM {
                 let name = name_str.as_str();
                 let value = self.get_global(name).unwrap_or(LuaValue::nil());
 
-                let frame = self.current_frame_mut();
-                frame.registers[a] = value;
+                let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                self.set_register(base_ptr, a, value);
                 Ok(())
             } else {
                 Err("Invalid global name".to_string())
@@ -1778,8 +1845,9 @@ impl LuaVM {
         let bx = Instruction::get_bx(instr) as usize;
 
         let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
         let name_val = frame.function.chunk.constants[bx].clone();
-        let value = frame.registers[a].clone();
+        let value = self.get_register(base_ptr, a);
 
         unsafe {
             if let Some(name_str) = name_val.as_string() {
@@ -2030,12 +2098,19 @@ impl LuaVM {
                     upvalues: Vec::new(),
                 });
 
+                let base_ptr = self.register_stack.len();
+                let num_args = registers.len();
+                self.ensure_stack_capacity(base_ptr + num_args);
+                for (i, val) in registers.into_iter().enumerate() {
+                    self.register_stack[base_ptr + i] = val;
+                }
+
                 let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
                     dummy_func.clone(),
                     0,
-                    registers,
-                    self.frames.len(),
+                    base_ptr,
+                    num_args,
                 );
 
                 self.frames.push(temp_frame);
@@ -2061,20 +2136,27 @@ impl LuaVM {
                 self.next_frame_id += 1;
 
                 // Create a new call frame
-                let mut registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
+                let base_ptr = self.register_stack.len();
+                let max_stack_size = lua_func.chunk.max_stack_size;
+                self.ensure_stack_capacity(base_ptr + max_stack_size);
+
+                // Initialize with nil
+                for i in 0..max_stack_size {
+                    self.register_stack[base_ptr + i] = LuaValue::nil();
+                }
 
                 // Copy arguments to registers (starting from register 0)
                 for (i, arg) in args.iter().enumerate() {
-                    if i < registers.len() {
-                        registers[i] = arg.clone();
+                    if i < max_stack_size {
+                        self.register_stack[base_ptr + i] = arg.clone();
                     }
                 }
 
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     lua_func,
-                    registers,
-                    self.frames.len(),
+                    base_ptr,
+                    max_stack_size,
                     0,
                     0, // Don't write back to caller's registers
                 );
@@ -2202,15 +2284,13 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let (left, right) = {
-            let frame = self.current_frame();
-            (frame.registers[b].clone(), frame.registers[c].clone())
-        };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         let result = !self.values_equal(&left, &right);
-        let frame = self.current_frame_mut();
-        // Store boolean result in register A
-        frame.registers[a] = LuaValue::boolean(result);
+        self.set_register(base_ptr, a, LuaValue::boolean(result));
         Ok(())
     }
 
@@ -2219,16 +2299,17 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b]
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b)
             .as_number()
             .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c]
+        let right = self.get_register(base_ptr, c)
             .as_number()
             .ok_or("Comparison on non-number")?;
 
         // Store boolean result in register A
-        frame.registers[a] = LuaValue::boolean(left > right);
+        self.set_register(base_ptr, a, LuaValue::boolean(left > right));
         Ok(())
     }
 
@@ -2237,16 +2318,17 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b]
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b)
             .as_number()
             .ok_or("Comparison on non-number")?;
-        let right = frame.registers[c]
+        let right = self.get_register(base_ptr, c)
             .as_number()
             .ok_or("Comparison on non-number")?;
 
         // Store boolean result in register A
-        frame.registers[a] = LuaValue::boolean(left >= right);
+        self.set_register(base_ptr, a, LuaValue::boolean(left >= right));
         Ok(())
     }
 
@@ -2255,15 +2337,18 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        let frame = self.current_frame_mut();
+        
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // Lua's 'and' returns first false value or last value
-        let left = frame.registers[b].clone();
-        frame.registers[a] = if !left.is_truthy() {
+        let left = self.get_register(base_ptr, b);
+        let result = if !left.is_truthy() {
             left
         } else {
-            frame.registers[c].clone()
+            self.get_register(base_ptr, c)
         };
+        self.set_register(base_ptr, a, result);
         Ok(())
     }
 
@@ -2271,15 +2356,18 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
-        let frame = self.current_frame_mut();
+        
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
 
         // Lua's 'or' returns first true value or last value
-        let left = frame.registers[b].clone();
-        frame.registers[a] = if left.is_truthy() {
+        let left = self.get_register(base_ptr, b);
+        let result = if left.is_truthy() {
             left
         } else {
-            frame.registers[c].clone()
+            self.get_register(base_ptr, c)
         };
+        self.set_register(base_ptr, a, result);
         Ok(())
     }
 
@@ -2289,13 +2377,13 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::integer(l & r);
+            self.set_register(base_ptr, a, LuaValue::integer(l & r));
             Ok(())
         } else if self.call_binop_metamethod(&left, &right, "__band", a)? {
             Ok(())
@@ -2309,13 +2397,13 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::integer(l | r);
+            self.set_register(base_ptr, a, LuaValue::integer(l | r));
             Ok(())
         } else if self.call_binop_metamethod(&left, &right, "__bor", a)? {
             Ok(())
@@ -2329,13 +2417,13 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::integer(l ^ r);
+            self.set_register(base_ptr, a, LuaValue::integer(l ^ r));
             Ok(())
         } else if self.call_binop_metamethod(&left, &right, "__bxor", a)? {
             Ok(())
@@ -2349,13 +2437,13 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::integer(l << (r as u32));
+            self.set_register(base_ptr, a, LuaValue::integer(l << (r as u32)));
             Ok(())
         } else if self.call_binop_metamethod(&left, &right, "__shl", a)? {
             Ok(())
@@ -2369,13 +2457,13 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let left = frame.registers[b].clone();
-        let right = frame.registers[c].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let left = self.get_register(base_ptr, b);
+        let right = self.get_register(base_ptr, c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::integer(l >> (r as u32));
+            self.set_register(base_ptr, a, LuaValue::integer(l >> (r as u32)));
             Ok(())
         } else if self.call_binop_metamethod(&left, &right, "__shr", a)? {
             Ok(())
@@ -2388,12 +2476,12 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
 
-        let frame = self.current_frame_mut();
-        let value = frame.registers[b].clone();
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let value = self.get_register(base_ptr, b);
 
         if let Some(i) = value.as_integer() {
-            let frame = self.current_frame_mut();
-            frame.registers[a] = LuaValue::integer(!i);
+            self.set_register(base_ptr, a, LuaValue::integer(!i));
             Ok(())
         } else if self.call_unop_metamethod(&value, "__bnot", a)? {
             Ok(())
@@ -2414,7 +2502,7 @@ impl LuaVM {
             .filter(|uv| {
                 if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
                     // Check if any open upvalue points to this frame
-                    for reg_idx in 0..frame.registers.len() {
+                    for reg_idx in 0..frame.top {
                         if uv.points_to(frame_id, reg_idx) {
                             return true;
                         }
@@ -2428,7 +2516,7 @@ impl LuaVM {
         // Close each upvalue
         for upvalue in upvalues_to_close.iter() {
             // Get the value from the stack before closing
-            let value = upvalue.get_value(&self.frames);
+            let value = upvalue.get_value(&self.frames, &self.register_stack);
             upvalue.close(value);
         }
 
@@ -2559,8 +2647,10 @@ impl LuaVM {
 
         // Add all frame registers as roots
         for frame in &self.frames {
-            for value in &frame.registers {
-                roots.push(value.clone());
+            let base_ptr = frame.base_ptr;
+            let top = frame.top;
+            for i in 0..top {
+                roots.push(self.register_stack[base_ptr + i]);
             }
         }
 
@@ -2674,16 +2764,15 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                // In Lua calling convention:
-                // Register 0: the function being called
-                // Register 1+: arguments
-                let mut registers = vec![LuaValue::nil(); f.chunk.max_stack_size];
-                // Don't put function in register[0], it's handled by the function itself
-                // Parameters start at local variable positions
-                // For a function with N parameters, they are in registers[0..N]
+                // Allocate registers in global stack
+                let max_stack_size = f.chunk.max_stack_size;
+                let new_base = self.register_stack.len();
+                self.ensure_stack_capacity(new_base + max_stack_size);
+
+                // Copy arguments to new frame's registers
                 for (i, arg) in args.iter().enumerate() {
-                    if i < registers.len() {
-                        registers[i] = arg.clone();
+                    if i < max_stack_size {
+                        self.register_stack[new_base + i] = *arg;
                     }
                 }
 
@@ -2693,12 +2782,13 @@ impl LuaVM {
                 let f_rc_clone = f_rc.clone();
                 std::mem::forget(f_rc); // Don't drop the Rc
 
-                let temp_frame = LuaCallFrame::new_c_function(
+                let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     f_rc_clone,
-                    0,
-                    registers,
-                    self.frames.len(),
+                    new_base,
+                    max_stack_size,
+                    result_reg,
+                    1,  // expect 1 result
                 );
 
                 self.frames.push(temp_frame);
@@ -2708,8 +2798,9 @@ impl LuaVM {
 
                 // Store result in the target register
                 if !self.frames.is_empty() {
-                    let frame = self.current_frame_mut();
-                    frame.registers[result_reg] = result;
+                    let frame = self.current_frame();
+                    let base_ptr = frame.base_ptr;
+                    self.set_register(base_ptr, result_reg, result);
                 }
 
                 Ok(true)
@@ -2720,10 +2811,13 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                let mut registers = vec![LuaValue::nil(); 10];
-                registers[0] = LuaValue::cfunction(cf);
+                let arg_count = args.len() + 1; // +1 for function itself
+                let new_base = self.register_stack.len();
+                self.ensure_stack_capacity(new_base + arg_count);
+
+                self.register_stack[new_base] = LuaValue::cfunction(cf);
                 for (i, arg) in args.iter().enumerate() {
-                    registers[i + 1] = arg.clone();
+                    self.register_stack[new_base + i + 1] = *arg;
                 }
 
                 let parent_func = self.current_frame().function.clone();
@@ -2732,8 +2826,8 @@ impl LuaVM {
                     frame_id,
                     parent_func,
                     parent_pc,
-                    registers,
-                    self.frames.len(),
+                    new_base,
+                    arg_count,
                 );
 
                 self.frames.push(temp_frame);
@@ -2747,8 +2841,9 @@ impl LuaVM {
                 // Store result
                 let values = multi_result.all_values();
                 let result = values.first().cloned().unwrap_or(LuaValue::nil());
-                let frame = self.current_frame_mut();
-                frame.registers[result_reg] = result;
+                let frame = self.current_frame();
+                let base_ptr = frame.base_ptr;
+                self.set_register(base_ptr, result_reg, result);
 
                 Ok(true)
             }
@@ -2919,9 +3014,17 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                let mut registers = vec![func.clone()];
-                registers.extend(args);
-                registers.resize(16, LuaValue::nil());
+                // Allocate registers in global stack
+                let new_base = self.register_stack.len();
+                let stack_size = 16;  // enough for most cfunc calls
+                self.ensure_stack_capacity(new_base + stack_size);
+
+                self.register_stack[new_base] = func;
+                for (i, arg) in args.iter().enumerate() {
+                    if i + 1 < stack_size {
+                        self.register_stack[new_base + i + 1] = arg.clone();
+                    }
+                }
 
                 let dummy_func = Rc::new(LuaFunction {
                     chunk: Rc::new(Chunk {
@@ -2930,7 +3033,7 @@ impl LuaVM {
                         locals: Vec::new(),
                         upvalue_count: 0,
                         param_count: 0,
-                        max_stack_size: 16,
+                        max_stack_size: stack_size,
                         child_protos: Vec::new(),
                         upvalue_descs: Vec::new(),
                         source_name: Some("[direct_call]".to_string()),
@@ -2942,8 +3045,8 @@ impl LuaVM {
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     dummy_func,
-                    registers,
-                    self.frames.len(),
+                    new_base,
+                    stack_size,
                     0,
                     0,
                 );
@@ -2969,10 +3072,13 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                let mut registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
+                let max_stack_size = lua_func.chunk.max_stack_size;
+                let new_base = self.register_stack.len();
+                self.ensure_stack_capacity(new_base + max_stack_size);
+
                 for (i, arg) in args.iter().enumerate() {
-                    if i < registers.len() {
-                        registers[i] = arg.clone();
+                    if i < max_stack_size {
+                        self.register_stack[new_base + i] = arg.clone();
                     }
                 }
 
@@ -2985,8 +3091,8 @@ impl LuaVM {
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     f_rc_clone,
-                    registers,
-                    self.frames.len(),
+                    new_base,
+                    max_stack_size,
                     0,
                     0,
                 );

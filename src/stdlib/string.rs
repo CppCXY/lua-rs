@@ -715,12 +715,8 @@ fn gmatch_iterator_optimized(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 
     // For __call metamethod, register 1 is self (the userdata)
-    let frame = vm.frames.last().unwrap();
-    if frame.registers.len() < 2 {
-        return Err("gmatch iterator: insufficient arguments".to_string());
-    }
-
-    let state_val = &frame.registers[1];
+    use crate::lib_registry::get_arg;
+    let state_val = get_arg(vm, 1).ok_or("gmatch iterator: insufficient arguments")?;
 
     // Extract state pointer from userdata
     let state_ptr = unsafe {
@@ -784,12 +780,8 @@ fn gmatch_gc_optimized(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 
     // For __gc metamethod, register 0 is self (the userdata)
-    let frame = vm.frames.last().unwrap();
-    if frame.registers.is_empty() {
-        return Ok(MultiValue::empty());
-    }
-
-    let state_val = &frame.registers[0];
+    use crate::lib_registry::get_arg;
+    let state_val = get_arg(vm, 0).ok_or("gmatch gc: no userdata")?;
 
     // Extract state pointer from userdata and free it
     unsafe {
