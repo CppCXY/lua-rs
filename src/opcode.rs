@@ -116,9 +116,27 @@ impl Instruction {
 
     // Encode ABC format
     pub fn encode_abc(op: OpCode, a: u32, b: u32, c: u32) -> u32 {
-        assert!(a <= Self::MAX_A, "Instruction {:?}: A={} exceeds MAX_A={}", op, a, Self::MAX_A);
-        assert!(b <= Self::MAX_B, "Instruction {:?}: B={} exceeds MAX_B={}", op, b, Self::MAX_B);
-        assert!(c <= Self::MAX_C, "Instruction {:?}: C={} exceeds MAX_C={}", op, c, Self::MAX_C);
+        assert!(
+            a <= Self::MAX_A,
+            "Instruction {:?}: A={} exceeds MAX_A={}",
+            op,
+            a,
+            Self::MAX_A
+        );
+        assert!(
+            b <= Self::MAX_B,
+            "Instruction {:?}: B={} exceeds MAX_B={}",
+            op,
+            b,
+            Self::MAX_B
+        );
+        assert!(
+            c <= Self::MAX_C,
+            "Instruction {:?}: C={} exceeds MAX_C={}",
+            op,
+            c,
+            Self::MAX_C
+        );
 
         (op as u32) | (a << Self::A_OFFSET) | (b << Self::B_OFFSET) | (c << Self::C_OFFSET)
     }

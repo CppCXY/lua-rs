@@ -309,12 +309,12 @@ pub fn compile_call_expr_with_returns(
     // This is needed to ensure we don't allocate func_reg in a way that would
     // cause return values to overwrite argument source registers
     let mut arg_src_regs = Vec::new();
-    
+
     // Add self register if method call
     if let Some(self_reg) = self_reg_opt {
         arg_src_regs.push(self_reg);
     }
-    
+
     // Compile arguments to get their source registers
     for arg_expr in actual_args.iter() {
         let arg_reg = compile_expr(c, arg_expr)?;
@@ -323,16 +323,16 @@ pub fn compile_call_expr_with_returns(
 
     // Find the maximum argument source register
     let max_arg_src_reg = arg_src_regs.iter().max().copied().unwrap_or(0);
-    
+
     // Ensure func_reg is allocated after all argument source registers and
     // after func_src_reg to avoid conflicts with return values overwriting arguments
     let min_safe_reg = max_arg_src_reg.max(func_src_reg) + 1;
-    
+
     // Allocate registers up to min_safe_reg if needed
     while c.next_register < min_safe_reg {
         alloc_register(c);
     }
-    
+
     // Now allocate func_reg (which will be at least min_safe_reg)
     let func_reg = alloc_register(c);
 
@@ -712,7 +712,11 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
     }
 }
 
-pub fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, is_method: bool) -> Result<u32, String> {
+pub fn compile_closure_expr(
+    c: &mut Compiler,
+    closure: &LuaClosureExpr,
+    is_method: bool,
+) -> Result<u32, String> {
     compile_closure_expr_to(c, closure, None, is_method)
 }
 
@@ -817,7 +821,7 @@ pub fn compile_closure_expr_to(
         c.next_register += 1;
         r
     });
-    
+
     // Ensure max_stack_size accounts for this register
     if (dest_reg + 1) as usize > c.chunk.max_stack_size {
         c.chunk.max_stack_size = (dest_reg + 1) as usize;

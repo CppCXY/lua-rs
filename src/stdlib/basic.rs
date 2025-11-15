@@ -244,32 +244,25 @@ fn lua_pairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = LuaValue::from_table_rc(table);
     let nil_val = LuaValue::nil();
 
-    Ok(MultiValue::multiple(vec![
-        next_func,
-        table_val,
-        nil_val,
-    ]))
+    Ok(MultiValue::multiple(vec![next_func, table_val, nil_val]))
 }
 
 /// next(table [, index]) - Return next key-value pair
 fn lua_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "next")?;
-    
-    let table = table_val.as_table()
+
+    let table = table_val
+        .as_table()
         .ok_or_else(|| "bad argument #1 to 'next' (table expected)".to_string())?;
-    
+
     let index_val = get_arg(vm, 1).unwrap_or(LuaValue::nil());
-    
+
     // Use the table's built-in next() method which maintains proper iteration order
     let result = table.borrow().next(&index_val);
-    
+
     match result {
-        Some((key, value)) => {
-            Ok(MultiValue::multiple(vec![key, value]))
-        }
-        None => {
-            Ok(MultiValue::single(LuaValue::nil()))
-        }
+        Some((key, value)) => Ok(MultiValue::multiple(vec![key, value])),
+        None => Ok(MultiValue::single(LuaValue::nil())),
     }
 }
 
@@ -301,13 +294,13 @@ fn lua_pcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
 fn lua_xpcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // xpcall(f, msgh, arg1, arg2, ...) -> status, result or error
-    
+
     // Get the function to call (argument 0)
     let func = require_arg(vm, 0, "xpcall")?;
-    
+
     // Get the error handler (argument 1)
     let err_handler = require_arg(vm, 1, "xpcall")?;
-    
+
     // Get all arguments after the function and error handler
     let all_args = get_args(vm);
     let args: Vec<LuaValue> = if all_args.len() > 2 {
@@ -315,14 +308,14 @@ fn lua_xpcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
     } else {
         Vec::new()
     };
-    
+
     // Use protected_call_with_handler from VM
     let (success, results) = vm.protected_call_with_handler(func, args, err_handler);
-    
+
     // Return status and results
     let mut return_values = vec![LuaValue::boolean(success)];
     return_values.extend(results);
-    
+
     Ok(MultiValue::multiple(return_values))
 }
 
@@ -523,17 +516,23 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let modname = get_arg(vm, 0)
         .and_then(|v| v.as_string())
         .ok_or("require: module name must be a string")?;
-    
+
     let modname_str = modname.as_str();
-    
+
     // Check if module is already loaded in package.loaded
     if let Some(package_table) = vm.get_global("package") {
         if let Some(package_rc) = package_table.as_table() {
             let loaded_key = vm.create_string("loaded".to_string());
-            if let Some(loaded_table) = package_rc.borrow().raw_get(&LuaValue::from_string_rc(loaded_key)) {
+            if let Some(loaded_table) = package_rc
+                .borrow()
+                .raw_get(&LuaValue::from_string_rc(loaded_key))
+            {
                 if let Some(loaded_rc) = loaded_table.as_table() {
                     let mod_key = vm.create_string(modname_str.to_string());
-                    if let Some(module_value) = loaded_rc.borrow().raw_get(&LuaValue::from_string_rc(mod_key)) {
+                    if let Some(module_value) = loaded_rc
+                        .borrow()
+                        .raw_get(&LuaValue::from_string_rc(mod_key))
+                    {
                         if !module_value.is_nil() {
                             return Ok(MultiValue::single(module_value));
                         }
@@ -542,7 +541,7 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
             }
         }
     }
-    
+
     // Try to load the module from file
     let possible_paths = vec![
         format!("{}.lua", modname_str),
@@ -550,7 +549,7 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
         format!("./{}.lua", modname_str),
         format!("./{}/init.lua", modname_str),
     ];
-    
+
     for path in possible_paths {
         if let Ok(code) = std::fs::read_to_string(&path) {
             // Compile the module
@@ -561,47 +560,54 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
                         chunk: std::rc::Rc::new(chunk),
                         upvalues: vec![],
                     }));
-                    
+
                     // Call the module loader using protected_call
                     let (success, results) = vm.protected_call(func, vec![]);
-                    
+
                     if !success {
-                        let error_msg = results.first()
+                        let error_msg = results
+                            .first()
                             .and_then(|v| v.as_string())
                             .map(|s| s.as_str().to_string())
                             .unwrap_or_else(|| "unknown error".to_string());
-                        return Err(format!("error loading module '{}': {}", modname_str, error_msg));
+                        return Err(format!(
+                            "error loading module '{}': {}",
+                            modname_str, error_msg
+                        ));
                     }
-                    
+
                     // Get the result value
                     let module_value = if results.is_empty() || results[0].is_nil() {
                         LuaValue::boolean(true)
                     } else {
                         results[0].clone()
                     };
-                    
+
                     // Store the result in package.loaded
                     if let Some(package_table) = vm.get_global("package") {
                         if let Some(package_rc) = package_table.as_table() {
                             let loaded_key = vm.create_string("loaded".to_string());
-                            if let Some(loaded_table) = package_rc.borrow().raw_get(&LuaValue::from_string_rc(loaded_key)) {
+                            if let Some(loaded_table) = package_rc
+                                .borrow()
+                                .raw_get(&LuaValue::from_string_rc(loaded_key))
+                            {
                                 if let Some(loaded_rc) = loaded_table.as_table() {
                                     let mod_key = vm.create_string(modname_str.to_string());
                                     loaded_rc.borrow_mut().raw_set(
                                         LuaValue::from_string_rc(mod_key),
-                                        module_value.clone()
+                                        module_value.clone(),
                                     );
                                 }
                             }
                         }
                     }
-                    
+
                     return Ok(MultiValue::single(module_value));
                 }
                 Err(e) => return Err(format!("error compiling module '{}': {}", modname_str, e)),
             }
         }
     }
-    
+
     Err(format!("module '{}' not found", modname_str))
 }

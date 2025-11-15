@@ -2,8 +2,8 @@
 // Provides a clean way to register Rust functions as Lua libraries
 
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::stdlib;
 use crate::lua_vm::LuaVM;
+use crate::stdlib;
 use std::collections::HashMap;
 
 /// Type for native functions that can be called from Lua
@@ -38,7 +38,7 @@ impl LibraryModule {
         self.entries.push((name, LibraryEntry::Function(func)));
         self
     }
-    
+
     /// Add a value to this library
     pub fn with_value(mut self, name: &'static str, value_init: ValueInitializer) -> Self {
         self.entries.push((name, LibraryEntry::Value(value_init)));
@@ -75,11 +75,11 @@ macro_rules! lib_module_ex {
         )*
         module
     }};
-    
+
     (@entry function, $func:expr) => {
         $crate::lib_registry::LibraryEntry::Function($func)
     };
-    
+
     (@entry value, $value_init:expr) => {
         $crate::lib_registry::LibraryEntry::Value($value_init)
     };

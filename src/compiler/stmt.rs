@@ -66,12 +66,12 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                 if remaining_vars > 1 {
                     // Use compile_call_expr_with_returns to handle multi-return
                     let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
-                    
+
                     // Ensure next_register is past all return registers
                     while c.next_register < base_reg + remaining_vars as u32 {
                         alloc_register(c);
                     }
-                    
+
                     // Add all return registers
                     for i in 0..remaining_vars {
                         regs.push(base_reg + i as u32);
@@ -190,12 +190,12 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     // Allocate consecutive registers for all return values
     let base_reg = alloc_register(c);
     let num_exprs = exprs.len();
-    
+
     // Reserve registers for all return values
     for _ in 1..num_exprs {
         alloc_register(c);
     }
-    
+
     // Compile all expressions into consecutive registers
     for (i, expr) in exprs.iter().enumerate() {
         let target_reg = base_reg + i as u32;
@@ -207,7 +207,10 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 
     // Emit return: B = num_values + 1
     // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1
-    emit(c, Instruction::encode_abc(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0));
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0),
+    );
 
     Ok(())
 }

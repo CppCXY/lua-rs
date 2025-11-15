@@ -2672,7 +2672,7 @@ impl LuaVM {
                 // Error: clean up frames and return false with error message
                 // Simply clear all open upvalues to avoid dangling references
                 self.open_upvalues.clear();
-                
+
                 // Now pop the frames
                 while self.frames.len() > initial_frame_count {
                     self.frames.pop();
@@ -2711,7 +2711,7 @@ impl LuaVM {
             Err(err_msg) => {
                 // 清空所有 open upvalues
                 self.open_upvalues.clear();
-                
+
                 // 回滚栈
                 while self.frames.len() > initial_frame_count {
                     self.frames.pop();
@@ -2777,7 +2777,7 @@ impl LuaVM {
                 );
 
                 self.frames.push(temp_frame);
-                
+
                 // Call CFunction - ensure frame is always popped even on error
                 let result = match cfunc(self) {
                     Ok(r) => r,
@@ -2786,7 +2786,7 @@ impl LuaVM {
                         return Err(e);
                     }
                 };
-                
+
                 self.frames.pop();
 
                 Ok(result.all_values())

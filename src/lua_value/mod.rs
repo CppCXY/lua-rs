@@ -11,11 +11,11 @@ use std::fmt;
 use std::rc::Rc;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
+pub use lua_table::LuaTable;
 pub use lua_value::{
     LuaValue, LuaValueKind, NAN_BASE, TAG_BOOLEAN, TAG_CFUNCTION, TAG_FUNCTION, TAG_INTEGER,
     TAG_NIL, TAG_STRING, TAG_TABLE, TAG_USERDATA,
 };
-pub use lua_table::LuaTable;
 /// Multi-return values from Lua functions
 #[derive(Debug, Clone)]
 pub struct MultiValue {

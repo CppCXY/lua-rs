@@ -592,7 +592,7 @@ impl Clone for LuaValue {
     fn clone(&self) -> Self {
         // Ultra-fast clone: For pointers, just increment refcount
         // For values (nil/bool/int/float/cfunc), just copy bits
-        
+
         // Fast path: most common case is non-pointer values
         // Check if it's a pointer type (has bits set in specific pattern)
         if self.primary >= TAG_STRING && self.primary <= TAG_USERDATA {
@@ -704,7 +704,7 @@ impl std::hash::Hash for LuaValue {
                 return;
             }
         }
-        
+
         // For other types, hash the raw bits
         self.primary.hash(state);
         self.secondary.hash(state);

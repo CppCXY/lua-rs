@@ -1,4 +1,4 @@
-use lua_rs::{Compiler, LuaValue, LuaVM};
+use lua_rs::{Compiler, LuaVM, LuaValue};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
