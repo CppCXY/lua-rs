@@ -1365,13 +1365,15 @@ impl LuaVM {
 
         // Check for CFunction (native Rust function)
         if let Some(cfunc) = func.as_cfunction() {
-            // Create a temporary call frame with arguments in registers
-            let mut arg_registers = vec![func.clone()]; // Register 0 is the function itself
+            // Optimize: pre-allocate exact capacity needed
+            let arg_count = if b == 0 { frame.registers.len() - a } else { b };
+            let mut arg_registers = Vec::with_capacity(arg_count);
+            arg_registers.push(func); // Register 0 is the function itself (Copy, no clone)
 
-            // Copy arguments to registers
+            // Copy arguments to registers (using Copy trait, no clone overhead)
             for i in 1..b {
                 if a + i < frame.registers.len() {
-                    arg_registers.push(frame.registers[a + i].clone());
+                    arg_registers.push(frame.registers[a + i]);
                 } else {
                     arg_registers.push(LuaValue::nil());
                 }
@@ -1442,13 +1444,22 @@ impl LuaVM {
         // Regular Lua function call
         unsafe {
             if let Some(lua_func) = func.as_function() {
-                let mut new_registers = vec![LuaValue::nil(); lua_func.chunk.max_stack_size];
+                // Optimize: start with smaller size, grow as needed
+                let arg_count = if b == 0 { frame.registers.len() - a - 1 } else { b - 1 };
+                let initial_size = arg_count.max(8).min(lua_func.chunk.max_stack_size);
+                let mut new_registers = Vec::with_capacity(lua_func.chunk.max_stack_size);
+                new_registers.resize(initial_size, LuaValue::nil());
 
-                // Copy arguments
+                // Copy arguments (using Copy trait)
                 for i in 1..b {
-                    if a + i < frame.registers.len() {
-                        new_registers[i - 1] = frame.registers[a + i].clone();
+                    if a + i < frame.registers.len() && i - 1 < new_registers.len() {
+                        new_registers[i - 1] = frame.registers[a + i];
                     }
+                }
+
+                // Ensure register capacity matches max_stack_size
+                if new_registers.len() < lua_func.chunk.max_stack_size {
+                    new_registers.resize(lua_func.chunk.max_stack_size, LuaValue::nil());
                 }
 
                 let frame_id = self.next_frame_id;

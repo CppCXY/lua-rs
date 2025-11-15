@@ -732,7 +732,8 @@ pub fn compile_closure_expr_to(
 
     let params = params_list.get_params().collect::<Vec<_>>();
 
-    let body = closure.get_block().ok_or("closure missing body")?;
+    // Handle empty function body (e.g., function noop() end)
+    let has_body = closure.get_block().is_some();
 
     // Create a new compiler for the function body with parent scope chain
     // No need to sync anymore - scope_chain is already current
@@ -779,8 +780,11 @@ pub fn compile_closure_expr_to(
     func_compiler.chunk.param_count = params.len() + param_offset;
     func_compiler.next_register = (params.len() + param_offset) as u32;
 
-    // Compile function body
-    compile_block(&mut func_compiler, &body)?;
+    // Compile function body (skip if empty)
+    if has_body {
+        let body = closure.get_block().unwrap();
+        compile_block(&mut func_compiler, &body)?;
+    }
 
     // Add implicit return if needed
     if func_compiler.chunk.code.is_empty()
