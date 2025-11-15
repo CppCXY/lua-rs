@@ -251,11 +251,26 @@ fn lua_pairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     ]))
 }
 
-/// next(table [, index]) - Return next key-value pair  
-fn lua_next(_vm: &mut LuaVM) -> Result<MultiValue, String> {
-    eprintln!("[DEBUG] next called");
-    // Test: return nil
-    Ok(MultiValue::single(LuaValue::nil()))
+/// next(table [, index]) - Return next key-value pair
+fn lua_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let table_val = require_arg(vm, 0, "next")?;
+    
+    let table = table_val.as_table()
+        .ok_or_else(|| "bad argument #1 to 'next' (table expected)".to_string())?;
+    
+    let index_val = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    
+    // Use the table's built-in next() method which maintains proper iteration order
+    let result = table.borrow().next(&index_val);
+    
+    match result {
+        Some((key, value)) => {
+            Ok(MultiValue::multiple(vec![key, value]))
+        }
+        None => {
+            Ok(MultiValue::single(LuaValue::nil()))
+        }
+    }
 }
 
 /// pcall(f [, arg1, ...]) - Protected call

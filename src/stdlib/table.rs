@@ -220,40 +220,48 @@ fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let comp = get_arg(vm, 1);
 
-    let mut table_ref = table.borrow_mut();
+    // Get array length and extract values
+    let len = {
+        let table_ref = table.borrow();
+        table_ref.len()
+    };
 
-    // Extract sortable values
-    let values = table_ref
-        .get_array_part()
-        .ok_or("table.sort: table does not have an array part")?;
-
-    let len = values.len();
     if len <= 1 {
         return Ok(MultiValue::empty());
+    }
+
+    // Extract values from array part [1..len]
+    let mut values = Vec::with_capacity(len);
+    {
+        let table_ref = table.borrow();
+        for i in 1..=len {
+            if let Some(val) = table_ref.get_int(i as i64) {
+                values.push(val);
+            } else {
+                values.push(LuaValue::nil());
+            }
+        }
     }
 
     // If no comparison function, use default ordering
     if comp.is_none() || comp.as_ref().map(|v| v.is_nil()).unwrap_or(true) {
         values.sort();
+        // Write back sorted values
+        let mut table_ref = table.borrow_mut();
+        for (i, val) in values.into_iter().enumerate() {
+            table_ref.set_int((i + 1) as i64, val);
+        }
         return Ok(MultiValue::empty());
     }
 
     let comp_func = comp.unwrap();
 
-    // Clone values for sorting (we need to modify the table during comparison calls)
-    let mut sorted_values: Vec<LuaValue> = values.iter().cloned().collect();
-
-    // Drop the mutable borrow before we start calling the comparison function
-    drop(table_ref);
-
-    // Custom comparison using Lua function
-    // We need to use a comparison that calls the Lua function
-    // Since we can't borrow vm mutably during sort, we'll do a simple insertion sort
-    for i in 1..sorted_values.len() {
+    // Custom comparison using Lua function - insertion sort
+    for i in 1..values.len() {
         let mut j = i;
         while j > 0 {
             // Call comparison function: comp(a, b) should return true if a < b
-            let args = vec![sorted_values[j].clone(), sorted_values[j - 1].clone()];
+            let args = vec![values[j].clone(), values[j - 1].clone()];
             let result = match vm.call_metamethod(&comp_func, &args) {
                 Ok(Some(val)) => val.is_truthy(),
                 Ok(None) => false,
@@ -261,7 +269,7 @@ fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
             };
 
             if result {
-                sorted_values.swap(j, j - 1);
+                values.swap(j, j - 1);
                 j -= 1;
             } else {
                 break;
@@ -271,10 +279,8 @@ fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Write back the sorted values
     let mut table_ref = table.borrow_mut();
-    if let Some(array) = table_ref.get_array_part() {
-        for (i, val) in sorted_values.into_iter().enumerate() {
-            array[i] = val;
-        }
+    for (i, val) in values.into_iter().enumerate() {
+        table_ref.set_int((i + 1) as i64, val);
     }
 
     Ok(MultiValue::empty())

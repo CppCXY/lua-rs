@@ -184,14 +184,8 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let frame = self.current_frame_mut();
-        // SAFETY: Compiler guarantees a,b are within max_stack_size and a != b
-        // Use direct memory copy for maximum speed
-        unsafe {
-            let regs_ptr = frame.registers.as_mut_ptr();
-            let src = regs_ptr.add(b);
-            let dst = regs_ptr.add(a);
-            std::ptr::copy_nonoverlapping(src, dst, 1);
-        }
+        // Clone the value to properly manage Rc refcounts
+        frame.registers[a] = frame.registers[b].clone();
         Ok(())
     }
 

@@ -64,17 +64,13 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             // Check if last expression is a function call (which might return multiple values)
             if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
-                    eprintln!("Before compile_call_expr_with_returns: next_register={}", c.next_register);
                     // Use compile_call_expr_with_returns to handle multi-return
                     let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
-                    eprintln!("After compile_call_expr_with_returns: base_reg={}, next_register={}", base_reg, c.next_register);
                     
                     // Ensure next_register is past all return registers
                     while c.next_register < base_reg + remaining_vars as u32 {
-                        eprintln!("Allocating register to reach base_reg + remaining_vars: {} + {} = {}", base_reg, remaining_vars, base_reg + remaining_vars as u32);
                         alloc_register(c);
                     }
-                    eprintln!("Final next_register={}", c.next_register);
                     
                     // Add all return registers
                     for i in 0..remaining_vars {

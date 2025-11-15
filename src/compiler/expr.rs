@@ -305,7 +305,35 @@ pub fn compile_call_expr_with_returns(
         actual_args.len()
     };
 
-    // Allocate a new register for the call (to avoid overwriting source)
+    // First, compile all argument expressions to find their source registers
+    // This is needed to ensure we don't allocate func_reg in a way that would
+    // cause return values to overwrite argument source registers
+    let mut arg_src_regs = Vec::new();
+    
+    // Add self register if method call
+    if let Some(self_reg) = self_reg_opt {
+        arg_src_regs.push(self_reg);
+    }
+    
+    // Compile arguments to get their source registers
+    for arg_expr in actual_args.iter() {
+        let arg_reg = compile_expr(c, arg_expr)?;
+        arg_src_regs.push(arg_reg);
+    }
+
+    // Find the maximum argument source register
+    let max_arg_src_reg = arg_src_regs.iter().max().copied().unwrap_or(0);
+    
+    // Ensure func_reg is allocated after all argument source registers and
+    // after func_src_reg to avoid conflicts with return values overwriting arguments
+    let min_safe_reg = max_arg_src_reg.max(func_src_reg) + 1;
+    
+    // Allocate registers up to min_safe_reg if needed
+    while c.next_register < min_safe_reg {
+        alloc_register(c);
+    }
+    
+    // Now allocate func_reg (which will be at least min_safe_reg)
     let func_reg = alloc_register(c);
 
     // Copy function to call register if different
@@ -321,26 +349,12 @@ pub fn compile_call_expr_with_returns(
         alloc_register(c);
     }
 
-    // For method calls, place self as the first argument
-    let mut current_arg_pos = 0;
-    if let Some(self_reg) = self_reg_opt {
-        let target_reg = args_start;
-        if self_reg != target_reg {
-            emit_move(c, target_reg, self_reg);
+    // Move arguments to their target positions
+    for (i, &arg_src_reg) in arg_src_regs.iter().enumerate() {
+        let target_reg = args_start + i as u32;
+        if arg_src_reg != target_reg {
+            emit_move(c, target_reg, arg_src_reg);
         }
-        current_arg_pos = 1;
-    }
-
-    // Compile remaining arguments into consecutive registers after self (if method call)
-    for i in 0..actual_args.len() {
-        let target_reg = args_start + current_arg_pos as u32;
-        let arg_reg = compile_expr(c, &actual_args[i])?;
-
-        // If expression compiled to different register, move it
-        if arg_reg != target_reg {
-            emit_move(c, target_reg, arg_reg);
-        }
-        current_arg_pos += 1;
     }
 
     // Emit call instruction
