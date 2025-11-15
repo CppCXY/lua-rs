@@ -251,65 +251,11 @@ fn lua_pairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     ]))
 }
 
-/// next(table [, index]) - Return next key-value pair
-fn lua_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    // Get arguments using the proper API
-    let table_val = require_arg(vm, 0, "next")?;
-    
-    // Verify table is still valid
-    let table = table_val.as_table()
-        .ok_or_else(|| "bad argument #1 to 'next' (table expected)".to_string())?;
-    
-    let index_val = get_arg(vm, 1).unwrap_or(LuaValue::nil());
-    
-    // Try to access table - if this crashes, table is corrupted
-    let table_len = {
-        let tref = table.borrow();
-        tref.len()
-    };
-    
-    eprintln!("[DEBUG next] Called with table (len={}), index={:?}", table_len, index_val.kind());
-
-    // Collect all key-value pairs into a Vec to avoid holding borrow
-    let pairs: Vec<(LuaValue, LuaValue)> = {
-        let table_ref = table.borrow();
-        let mut result = Vec::new();
-        for (k, v) in table_ref.iter_all() {
-            result.push((k, v));
-        }
-        result
-    };
-    
-    eprintln!("[DEBUG next] Collected {} pairs", pairs.len());
-
-    if pairs.is_empty() {
-        return Ok(MultiValue::single(LuaValue::nil()));
-    }
-
-    // If index is nil, return first key-value pair
-    if index_val.is_nil() {
-        let (k, v) = &pairs[0];
-        eprintln!("[DEBUG next] Returning first pair");
-        return Ok(MultiValue::multiple(vec![k.clone(), v.clone()]));
-    }
-
-    // Find current key and return next
-    for (i, (key, _value)) in pairs.iter().enumerate() {
-        if key == &index_val {
-            if i + 1 < pairs.len() {
-                let (next_k, next_v) = &pairs[i + 1];
-                eprintln!("[DEBUG next] Returning next pair at index {}", i + 1);
-                return Ok(MultiValue::multiple(vec![next_k.clone(), next_v.clone()]));
-            } else {
-                // No more keys
-                eprintln!("[DEBUG next] No more pairs");
-                return Ok(MultiValue::single(LuaValue::nil()));
-            }
-        }
-    }
-
-    eprintln!("[DEBUG next] Key not found");
-    Err("invalid key to 'next'".to_string())
+/// next(table [, index]) - Return next key-value pair  
+fn lua_next(_vm: &mut LuaVM) -> Result<MultiValue, String> {
+    eprintln!("[DEBUG] next called");
+    // Test: return nil
+    Ok(MultiValue::single(LuaValue::nil()))
 }
 
 /// pcall(f [, arg1, ...]) - Protected call
