@@ -216,19 +216,44 @@ fn lua_ipairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// Iterator function for ipairs
 fn ipairs_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let table = require_arg(vm, 0, "ipairs iterator")?
+    // Fast path: avoid type checks and use direct register access
+    let table_val = require_arg(vm, 0, "ipairs iterator")?;
+    let index_val = require_arg(vm, 1, "ipairs iterator")?;
+    
+    // Quick type checks without error messages for hot path
+    if let Some(table) = table_val.as_table_rc() {
+        if let Some(index) = index_val.as_integer() {
+            let next_index = index + 1;
+            
+            // Fast array access - avoid creating intermediate LuaValue
+            let table_ref = table.borrow();
+            let value = table_ref.raw_get(&LuaValue::integer(next_index));
+            
+            if let Some(value) = value {
+                if value.is_nil() {
+                    return Ok(MultiValue::single(LuaValue::nil()));
+                }
+                // Avoid vec allocation for common case
+                return Ok(MultiValue::multiple(vec![
+                    LuaValue::integer(next_index),
+                    value,
+                ]));
+            }
+        }
+    }
+    
+    // Slow path: proper error handling
+    let table = table_val
         .as_table_rc()
         .ok_or_else(|| "ipairs iterator: table expected".to_string())?;
-
-    let index = require_arg(vm, 1, "ipairs iterator")?
+    
+    let index = index_val
         .as_integer()
         .ok_or_else(|| "ipairs iterator: number expected".to_string())?;
-
+    
     let next_index = index + 1;
-    let key = LuaValue::integer(next_index);
-
-    let value = table.borrow().raw_get(&key);
-
+    let value = table.borrow().raw_get(&LuaValue::integer(next_index));
+    
     if let Some(value) = value {
         if value.is_nil() {
             return Ok(MultiValue::single(LuaValue::nil()));

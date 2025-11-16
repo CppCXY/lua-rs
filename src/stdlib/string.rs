@@ -534,40 +534,66 @@ fn string_find(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #2 to 'string.find' (string expected)".to_string())?;
 
     let init = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
-
     let plain = get_arg(vm, 3).map(|v| v.is_truthy()).unwrap_or(false);
-
     let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
+
+    // Cache string references to avoid repeated RC derefs
+    let s_str = s.as_str();
+    let pattern = pattern_str.as_str();
 
     if plain {
         // Plain string search (no pattern matching)
-        if let Some(pos) = s.as_str()[start_pos..].find(pattern_str.as_str()) {
+        if start_pos > s_str.len() {
+            return Ok(MultiValue::single(LuaValue::nil()));
+        }
+        
+        if let Some(pos) = s_str[start_pos..].find(pattern) {
             let actual_pos = start_pos + pos;
+            let end_pos = actual_pos + pattern.len();
             Ok(MultiValue::multiple(vec![
                 LuaValue::integer((actual_pos + 1) as i64),
-                LuaValue::integer((actual_pos + pattern_str.as_str().len()) as i64),
+                LuaValue::integer(end_pos as i64),
             ]))
         } else {
             Ok(MultiValue::single(LuaValue::nil()))
         }
     } else {
-        // Pattern matching
-        match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
-            Ok(pattern) => {
-                if let Some((start, end, captures)) =
-                    crate::lua_pattern::find(s.as_str(), &pattern, start_pos)
-                {
-                    let mut results = vec![
-                        LuaValue::integer((start + 1) as i64),
-                        LuaValue::integer(end as i64),
-                    ];
-                    // Add captures
-                    for cap in captures {
-                        results.push(LuaValue::from_string_rc(vm.create_string(cap)));
+        // Pattern matching - parse and check if it's a simple literal
+        match crate::lua_pattern::parse_pattern(pattern) {
+            Ok(parsed_pattern) => {
+                // Fast path: if pattern is just a literal string, use plain search
+                if let Some(literal) = parsed_pattern.as_literal_string() {
+                    if start_pos > s_str.len() {
+                        return Ok(MultiValue::single(LuaValue::nil()));
                     }
-                    Ok(MultiValue::multiple(results))
+                    
+                    if let Some(pos) = s_str[start_pos..].find(&literal) {
+                        let actual_pos = start_pos + pos;
+                        let end_pos = actual_pos + literal.len();
+                        Ok(MultiValue::multiple(vec![
+                            LuaValue::integer((actual_pos + 1) as i64),
+                            LuaValue::integer(end_pos as i64),
+                        ]))
+                    } else {
+                        Ok(MultiValue::single(LuaValue::nil()))
+                    }
                 } else {
-                    Ok(MultiValue::single(LuaValue::nil()))
+                    // Complex pattern - use full pattern matcher
+                    if let Some((start, end, captures)) =
+                        crate::lua_pattern::find(s_str, &parsed_pattern, start_pos)
+                    {
+                        let mut results = vec![
+                            LuaValue::integer((start + 1) as i64),
+                            LuaValue::integer(end as i64),
+                        ];
+                        // Add captures
+                        for cap in captures {
+                            results.push(LuaValue::from_string_rc(vm.create_string(cap)));
+                        }
+                        Ok(MultiValue::multiple(results))
+                    } else {
+                        Ok(MultiValue::single(LuaValue::nil()))
+                    }
                 }
             }
             Err(e) => Err(format!("invalid pattern: {}", e)),

@@ -73,6 +73,27 @@ impl CharClass {
     }
 }
 
+impl Pattern {
+    /// Check if pattern is a simple literal string (no special characters)
+    /// Returns Some(string) if it's a simple literal, None otherwise
+    pub fn as_literal_string(&self) -> Option<String> {
+        match self {
+            Pattern::Char(c) => Some(c.to_string()),
+            Pattern::Seq(patterns) => {
+                let mut result = String::new();
+                for pat in patterns {
+                    match pat.as_literal_string() {
+                        Some(s) => result.push_str(&s),
+                        None => return None,
+                    }
+                }
+                Some(result)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Parse a Lua pattern string
 pub fn parse_pattern(pattern: &str) -> Result<Pattern, String> {
     let chars: Vec<char> = pattern.chars().collect();

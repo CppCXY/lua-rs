@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
+use std::hash::Hasher;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
@@ -47,19 +48,51 @@ impl MultiValue {
 /// C Function type - Rust function callable from Lua
 pub type CFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
 
-/// Lua string (immutable, interned)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Lua string (immutable, interned with cached hash)
+#[derive(Debug, Clone)]
 pub struct LuaString {
     data: String,
+    hash: u64,
 }
 
 impl LuaString {
     pub fn new(s: String) -> Self {
-        LuaString { data: s }
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        let hash = hasher.finish();
+        
+        LuaString { data: s, hash }
     }
 
     pub fn as_str(&self) -> &str {
         &self.data
+    }
+    
+    #[inline]
+    pub fn cached_hash(&self) -> u64 {
+        self.hash
+    }
+}
+
+impl PartialEq for LuaString {
+    fn eq(&self, other: &Self) -> bool {
+        // Fast path: compare hashes first
+        if self.hash != other.hash {
+            return false;
+        }
+        self.data == other.data
+    }
+}
+
+impl Eq for LuaString {}
+
+impl std::hash::Hash for LuaString {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Use cached hash
+        state.write_u64(self.hash);
     }
 }
 

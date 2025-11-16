@@ -781,13 +781,13 @@ impl Eq for LuaValue {}
 
 impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // For strings, hash the content, not the pointer
+        // For strings, use cached hash for performance
         if self.is_string() {
             unsafe {
                 if let Some(s) = self.as_string() {
-                    // Use a discriminator to ensure strings don't collide with other types
+                    // Use discriminator + cached hash
                     0u8.hash(state);
-                    s.as_str().hash(state);
+                    state.write_u64(s.cached_hash());
                     return;
                 }
             }
