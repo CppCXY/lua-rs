@@ -10,7 +10,8 @@ pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 use crate::opcode::{Instruction, OpCode};
 use crate::{Compiler, lib_registry};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::collections::HashMap;
 
 /// Coroutine status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +80,13 @@ pub struct LuaVM {
 
     // String metatable (shared by all strings)
     string_metatable: Option<Rc<RefCell<LuaTable>>>,
+
+    // String interning table (for short strings ≤64 bytes)
+    // Maps hash -> Weak<LuaString> for global string deduplication
+    string_table: HashMap<u64, Weak<LuaString>>,
+
+    // Maximum length for interned strings (like Lua's LUAI_MAXSHORTLEN)
+    max_short_string_len: usize,
 }
 
 impl LuaVM {
@@ -98,6 +106,8 @@ impl LuaVM {
             main_thread_value: None,  // Will be initialized lazily
             yielding: false,
             string_metatable: None,
+            string_table: HashMap::with_capacity(2048),
+            max_short_string_len: 64,  // Like Lua's LUAI_MAXSHORTLEN
         };
 
         // Set _G to point to the global table itself
@@ -3008,11 +3018,47 @@ impl LuaVM {
     }
 
     /// Create a string and register it with GC
+    /// For short strings (≤64 bytes), use interning (global deduplication)
     pub fn create_string(&mut self, s: String) -> Rc<LuaString> {
-        let string = Rc::new(LuaString::new(s));
-        let ptr = Rc::as_ptr(&string) as usize;
-        self.gc.register_object(ptr, GcObjectType::String);
-        string
+        let len = s.len();
+        
+        // Short strings are interned for global uniqueness
+        if len <= self.max_short_string_len {
+            // Create temporary string to get hash
+            let temp_string = LuaString::new(s.clone());
+            let hash = temp_string.cached_hash();
+            
+            // Check if already exists in string table
+            if let Some(weak_ref) = self.string_table.get(&hash) {
+                if let Some(existing) = weak_ref.upgrade() {
+                    // Verify content match (hash collision check)
+                    if existing.as_str() == s.as_str() {
+                        return existing;
+                    }
+                }
+            }
+            
+            // Not found or dead reference, create new string
+            let string = Rc::new(temp_string);
+            let ptr = Rc::as_ptr(&string) as usize;
+            self.gc.register_object(ptr, GcObjectType::String);
+            
+            // Store weak reference in string table
+            self.string_table.insert(hash, Rc::downgrade(&string));
+            
+            // Clean up dead entries periodically
+            if self.string_table.len() > 4096 && self.string_table.len() % 512 == 0 {
+                self.string_table.retain(|_, weak| weak.strong_count() > 0);
+            }
+            
+            string
+        } else {
+            // Long strings are not interned
+            let string = Rc::new(LuaString::new(s));
+            let ptr = Rc::as_ptr(&string) as usize;
+            self.gc.register_object(ptr, GcObjectType::String);
+            string
+        }
     }
 
     /// Create a string for builtin function returns (lighter weight, no immediate GC check)
