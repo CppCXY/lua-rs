@@ -920,7 +920,9 @@ fn string_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
     
-    let packed = String::from_utf8_lossy(&result).to_string();
+    // Create a string directly from bytes without UTF-8 validation
+    // Lua strings can contain arbitrary binary data
+    let packed = unsafe { String::from_utf8_unchecked(result) };
     Ok(MultiValue::single(LuaValue::from_string_rc(vm.create_string(packed))))
 }
 

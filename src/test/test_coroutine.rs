@@ -82,6 +82,9 @@ fn test_coroutine_running() {
         coroutine.resume(co)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

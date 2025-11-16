@@ -541,8 +541,15 @@ fn compile_table_expr_to(
                 }
                 LuaIndexKey::Integer(number_token) => {
                     // key is a numeric literal
-                    let num_value = number_token.get_float_value();
-                    let const_idx = add_constant(c, LuaValue::number(num_value));
+                    let const_idx = if number_token.is_float() {
+                        let num_value = number_token.get_float_value();
+                        add_constant(c, LuaValue::number(num_value))
+                    } else {
+                        let int_value = number_token.get_int_value();
+                        let num_value = LuaValue::integer(int_value);
+                        add_constant(c, num_value)
+                    };
+
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, const_idx);
                     key_reg

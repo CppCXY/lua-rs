@@ -478,7 +478,8 @@ mod tests {
         let mut gc = GC::new();
         assert!(!gc.should_collect());
 
-        gc.record_allocation(2 * 1024 * 1024);
+        // GC threshold is 8MB by default
+        gc.record_allocation(9 * 1024 * 1024); // 9MB > 8MB threshold
         assert!(gc.should_collect());
     }
 

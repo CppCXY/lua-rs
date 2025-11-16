@@ -188,6 +188,9 @@ fn test_vararg() {
         assert(sum(1, 2, 3, 4, 5) == 15)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

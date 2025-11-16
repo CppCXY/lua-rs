@@ -173,6 +173,9 @@ fn test_string_pack_unpack() {
         assert(i == 2147483647)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

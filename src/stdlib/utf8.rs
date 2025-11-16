@@ -231,7 +231,10 @@ fn utf8_offset(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let mut count = n;
     
     if n >= 0 {
-        // Forward
+        // Forward: find the n-th character from position i
+        // When n=1, we want the position of the 1st character starting from i
+        // So we move (n-1) characters forward
+        count -= 1; // Adjust: we want to arrive at the n-th char, not move n chars
         while count > 0 && pos < bytes.len() {
             let remaining = &s.as_str()[pos..];
             if let Some(ch) = remaining.chars().next() {

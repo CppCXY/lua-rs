@@ -76,6 +76,9 @@ fn test_utf8_offset() {
         assert(utf8.offset(s, -1) == 5)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 
