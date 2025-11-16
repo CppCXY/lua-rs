@@ -136,21 +136,10 @@ fn coroutine_running(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// coroutine.wrap(f) - Create a wrapped coroutine
-fn coroutine_wrap(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let func = crate::lib_registry::get_arg(vm, 0)
-        .ok_or_else(|| "coroutine.wrap requires a function argument".to_string())?;
-
-    if !func.is_function() && !func.is_cfunction() {
-        return Err("coroutine.wrap requires a function argument".to_string());
-    }
-
-    let thread_rc = vm.create_thread(func);
-
-    // Create a wrapper function
-    // For now, return the thread directly (simplified)
-    let thread_val = LuaValue::thread_ptr(Rc::into_raw(thread_rc));
-
-    Ok(MultiValue::single(thread_val))
+/// This is a placeholder - the actual implementation is done in Lua
+/// and registered in LuaVM::open_libs()
+fn coroutine_wrap(_vm: &mut LuaVM) -> Result<MultiValue, String> {
+    Err("coroutine.wrap should have been overridden in open_libs".to_string())
 }
 
 /// coroutine.isyieldable() - Check if current position can yield

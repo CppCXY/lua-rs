@@ -128,6 +128,26 @@ impl LuaVM {
 
     pub fn open_libs(&mut self) {
         let _ = lib_registry::create_standard_registry().load_all(self);
+        
+        // Override coroutine.wrap with a Lua implementation
+        // because it needs to return a closure that captures the thread
+        let wrap_impl = r#"
+            local _create = coroutine.create
+            local _resume = coroutine.resume
+            coroutine.wrap = function(f)
+                local co = _create(f)
+                return function(...)
+                    local success, result = _resume(co, ...)
+                    if not success then
+                        error(result, 2)
+                    end
+                    return result
+                end
+            end
+        "#;
+        if let Err(e) = self.execute_string(wrap_impl) {
+            eprintln!("Warning: Failed to override coroutine.wrap: {}", e);
+        }
     }
 
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> Result<LuaValue, String> {

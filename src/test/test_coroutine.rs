@@ -115,6 +115,9 @@ fn test_coroutine_wrap() {
     "#,
     );
 
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 
