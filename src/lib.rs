@@ -1,6 +1,9 @@
 // Lua Runtime
 // A compact Lua VM implementation with bytecode compiler and GC
 
+#[cfg(test)]
+mod test;
+
 pub mod compiler;
 pub mod ffi;
 pub mod gc;
@@ -27,40 +30,15 @@ pub fn execute(source: &str) -> Result<LuaValue, String> {
 
     // Create VM and execute
     let mut vm = LuaVM::new();
+    vm.open_libs();
     vm.execute(Rc::new(chunk))
 }
 
 /// Execute Lua code with custom VM instance
 pub fn execute_with_vm(vm: &mut LuaVM, source: &str) -> Result<LuaValue, String> {
     let chunk = Compiler::compile(source)?;
+    vm.open_libs();
     vm.execute(Rc::new(chunk))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_basic_arithmetic() {
-        let result = execute("local x = 10 + 20; return x");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_local_variables() {
-        let result = execute("local x = 42; local y = x; return y");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_table_creation() {
-        let result = execute("local t = {}; return t");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_boolean_logic() {
-        let result = execute("local x = true; local y = not x; return y");
-        assert!(result.is_ok());
-    }
-}

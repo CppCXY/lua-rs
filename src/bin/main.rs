@@ -13,6 +13,7 @@ fn main() {
         match fs::read_to_string(filename) {
             Ok(code) => {
                 let mut vm = LuaVM::new();
+                vm.open_libs();
                 match Compiler::compile(&code) {
                     Ok(chunk) => match vm.execute(Rc::new(chunk)) {
                         Ok(result) => {
