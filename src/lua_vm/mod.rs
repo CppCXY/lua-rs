@@ -68,6 +68,12 @@ pub struct LuaVM {
     // Current running thread (for coroutine.running())
     pub current_thread: Option<Rc<RefCell<LuaThread>>>,
 
+    // Current thread as LuaValue (for comparison in coroutine.running())
+    pub current_thread_value: Option<LuaValue>,
+
+    // Main thread representation (for coroutine.running() in main thread)
+    pub main_thread_value: Option<LuaValue>,
+
     // Yield flag: set when a coroutine yields
     yielding: bool,
 
@@ -88,6 +94,8 @@ impl LuaVM {
             error_handler: None,
             ffi_state: crate::ffi::FFIState::new(),
             current_thread: None,
+            current_thread_value: None,
+            main_thread_value: None,  // Will be initialized lazily
             yielding: false,
             string_metatable: None,
         };
@@ -2089,9 +2097,21 @@ impl LuaVM {
     /// Resume a coroutine
     pub fn resume_thread(
         &mut self,
-        thread_rc: Rc<RefCell<LuaThread>>,
+        thread_val: LuaValue,
         args: Vec<LuaValue>,
     ) -> Result<(bool, Vec<LuaValue>), String> {
+        // Extract Rc from LuaValue
+        let thread_rc = unsafe {
+            let ptr = thread_val.as_thread_ptr().ok_or("invalid thread")?;
+            if ptr.is_null() {
+                return Err("invalid thread".to_string());
+            }
+            let rc = Rc::from_raw(ptr);
+            let cloned = rc.clone();
+            std::mem::forget(rc); // Don't drop
+            cloned
+        };
+
         let status = thread_rc.borrow().status;
 
         match status {
@@ -2143,6 +2163,7 @@ impl LuaVM {
         }
 
         self.current_thread = Some(thread_rc.clone());
+        self.current_thread_value = Some(thread_val.clone());
 
         // Execute
         let result = if is_first_resume {
@@ -2196,14 +2217,15 @@ impl LuaVM {
             self.run().map(|v| vec![v])
         };
 
-        // Check if thread yielded
+        // Check if thread yielded (use yielding flag, not yield_values)
+        let did_yield = self.yielding;
         let yield_values = {
             let thread = thread_rc.borrow();
             thread.yield_values.clone()
         };
 
         // Save thread state back
-        let final_result = if !yield_values.is_empty() {
+        let final_result = if did_yield {
             // Thread yielded - save state and return yield values
             let mut thread = thread_rc.borrow_mut();
             thread.frames = std::mem::take(&mut self.frames);
@@ -2245,6 +2267,7 @@ impl LuaVM {
         self.open_upvalues = saved_upvalues;
         self.next_frame_id = saved_frame_id;
         self.current_thread = saved_thread;
+        self.current_thread_value = None;  // Clear after resume completes
         self.yielding = saved_yielding;
 
         final_result

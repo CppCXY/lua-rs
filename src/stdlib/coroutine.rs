@@ -43,19 +43,6 @@ fn coroutine_resume(vm: &mut LuaVM) -> Result<MultiValue, String> {
         return Err("coroutine.resume requires a thread argument".to_string());
     }
 
-    // Get thread from value
-    let thread_rc = unsafe {
-        let ptr = thread_val.as_thread_ptr().ok_or("invalid thread")?;
-        if ptr.is_null() {
-            return Err("invalid thread".to_string());
-        }
-        Rc::from_raw(ptr)
-    };
-
-    // Clone for resumption (we'll forget the original Rc)
-    let thread_clone = thread_rc.clone();
-    std::mem::forget(thread_rc); // Don't drop the original
-
     // Get arguments
     let all_args = crate::lib_registry::get_args(vm);
     let args: Vec<LuaValue> = if all_args.len() > 1 {
@@ -64,8 +51,8 @@ fn coroutine_resume(vm: &mut LuaVM) -> Result<MultiValue, String> {
         Vec::new()
     };
 
-    // Resume the thread
-    let (success, results) = vm.resume_thread(thread_clone, args)?;
+    // Resume the thread (pass LuaValue directly)
+    let (success, results) = vm.resume_thread(thread_val, args)?;
 
     // Return success status and results
     let mut return_values = vec![LuaValue::boolean(success)];
@@ -126,18 +113,23 @@ fn coroutine_status(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// coroutine.running() - Get currently running coroutine
 fn coroutine_running(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    if let Some(thread_rc) = &vm.current_thread {
-        let thread_ptr = Rc::into_raw(thread_rc.clone());
-        let thread_val = LuaValue::thread_ptr(thread_ptr);
-        std::mem::forget(unsafe { Rc::from_raw(thread_ptr) }); // Don't drop
+    if let Some(thread_val) = &vm.current_thread_value {
+        // Return the stored thread value for proper comparison
         Ok(MultiValue::multiple(vec![
-            thread_val,
+            thread_val.clone(),
             LuaValue::boolean(false),
         ]))
     } else {
-        // Main thread
+        // Main thread - create a dummy thread representation if not exists
+        if vm.main_thread_value.is_none() {
+            // Create a dummy thread for main thread representation
+            let dummy_func = LuaValue::nil();
+            let main_thread_rc = vm.create_thread(dummy_func);
+            vm.main_thread_value = Some(LuaValue::thread_ptr(Rc::into_raw(main_thread_rc)));
+        }
+        
         Ok(MultiValue::multiple(vec![
-            LuaValue::nil(),
+            vm.main_thread_value.as_ref().unwrap().clone(),
             LuaValue::boolean(true),
         ]))
     }

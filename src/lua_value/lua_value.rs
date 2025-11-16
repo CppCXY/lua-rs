@@ -768,6 +768,9 @@ impl PartialEq for LuaValue {
         } else if self.is_userdata() && other.is_userdata() {
             // Userdata compared by pointer
             self.secondary() == other.secondary()
+        } else if self.is_thread() && other.is_thread() {
+            // Threads compared by pointer
+            self.secondary() == other.secondary()
         } else {
             false
         }
