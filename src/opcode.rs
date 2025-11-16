@@ -82,11 +82,17 @@ pub enum OpCode {
     // Global
     GetGlobal, // R(A) := Gbl[K(Bx)]
     SetGlobal, // Gbl[K(Bx)] := R(A)
+
+    // Variable arguments
+    VarArg, // R(A), R(A+1), ..., R(A+B-2) = vararg (B=0 means all varargs)
+
+    // Table list initialization
+    SetList, // table[base_index + i] = R(A + i) for i = 1..B (B=0 means use all remaining registers)
 }
 
 impl OpCode {
     pub fn from_u8(byte: u8) -> Option<Self> {
-        if byte <= OpCode::SetGlobal as u8 {
+        if byte <= OpCode::SetList as u8 {
             Some(unsafe { std::mem::transmute(byte) })
         } else {
             None
