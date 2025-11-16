@@ -32,6 +32,9 @@ pub struct LuaThread {
     pub error_handler: Option<LuaValue>,
     pub yield_values: Vec<LuaValue>,  // Values yielded from coroutine
     pub resume_values: Vec<LuaValue>, // Values passed to resume() that yield should return
+    // For yield: store CALL instruction info to properly restore return values on resume
+    pub yield_call_reg: Option<usize>, // Register where return values should be stored (A param of CALL)
+    pub yield_call_nret: Option<usize>, // Number of expected return values (C-1 param of CALL)
 }
 
 /// Pool for reusing register Vecs to avoid allocations
@@ -101,6 +104,9 @@ pub struct LuaVM {
     
     // Current running thread (for coroutine.running())
     pub current_thread: Option<Rc<RefCell<LuaThread>>>,
+    
+    // Yield flag: set when a coroutine yields
+    yielding: bool,
 }
 
 impl LuaVM {
@@ -117,6 +123,7 @@ impl LuaVM {
             error_handler: None,
             ffi_state: crate::ffi::FFIState::new(),
             current_thread: None,
+            yielding: false,
         };
 
         // Register built-in functions
@@ -194,6 +201,11 @@ impl LuaVM {
     fn run(&mut self) -> Result<LuaValue, String> {
         let mut instruction_count = 0;
         loop {
+            // Check if coroutine is yielding
+            if self.yielding {
+                return Ok(LuaValue::nil());
+            }
+            
             if self.frames.is_empty() {
                 return Ok(LuaValue::nil());
             }
@@ -274,6 +286,11 @@ impl LuaVM {
                 OpCode::Concat => self.op_concat(instr)?,
                 OpCode::GetGlobal => self.op_getglobal(instr)?,
                 OpCode::SetGlobal => self.op_setglobal(instr)?,
+            }
+            
+            // Check if yielding after executing instruction
+            if self.yielding {
+                return Ok(LuaValue::nil());
             }
         }
     }
@@ -1531,7 +1548,20 @@ impl LuaVM {
                     }
                 };
 
+                // Pop CFunction frame
                 self.frames.pop();
+
+                // Check if yielding - if so, don't store return values yet
+                // They will be stored when resume() is called with new values
+                // Save CALL instruction info for later
+                if self.yielding {
+                    if let Some(thread_rc) = &self.current_thread {
+                        let mut thread = thread_rc.borrow_mut();
+                        thread.yield_call_reg = Some(a);
+                        thread.yield_call_nret = Some(if c == 0 { usize::MAX } else { c - 1 });
+                    }
+                    return Ok(());
+                }
 
                 // Store return values
                 let all_returns = multi_result.all_values();
@@ -1938,6 +1968,8 @@ impl LuaVM {
             error_handler: None,
             yield_values: Vec::new(),
             resume_values: Vec::new(),
+            yield_call_reg: None,
+            yield_call_nret: None,
         };
         
         let thread_rc = Rc::new(RefCell::new(thread));
@@ -1977,6 +2009,10 @@ impl LuaVM {
         let saved_upvalues = std::mem::take(&mut self.open_upvalues);
         let saved_frame_id = self.next_frame_id;
         let saved_thread = self.current_thread.take();
+        let saved_yielding = self.yielding;
+        
+        // Reset yielding flag
+        self.yielding = false;
         
         let is_first_resume = {
             let thread = thread_rc.borrow();
@@ -2002,12 +2038,41 @@ impl LuaVM {
             let func = self.register_stack.get(0).cloned().unwrap_or(LuaValue::nil());
             self.call_function_internal(func, args)
         } else {
-            // Resumed from yield: set resume_values for this thread
-            {
-                let mut thread = thread_rc.borrow_mut();
-                thread.resume_values = args;
+            // Resumed from yield: 
+            // Use saved CALL instruction info to properly store return values
+            let (call_reg, call_nret) = {
+                let thread = thread_rc.borrow();
+                (thread.yield_call_reg, thread.yield_call_nret)
+            };
+            
+                if let (Some(a), Some(num_expected)) = (call_reg, call_nret) {
+                let frame = &self.frames[self.frames.len() - 1];
+                let base_ptr = frame.base_ptr;
+                let top = frame.top;
+                
+                // Store resume args as return values of the yield call
+                let num_returns = args.len();
+                let n = if num_expected == usize::MAX { num_returns } else { num_expected.min(num_returns) };
+                
+                for (i, value) in args.iter().take(n).enumerate() {
+                    if base_ptr + a + i < self.register_stack.len() && a + i < top {
+                        self.register_stack[base_ptr + a + i] = value.clone();
+                    }
+                }                // Fill remaining expected registers with nil
+                for i in num_returns..num_expected.min(top - a) {
+                    if base_ptr + a + i < self.register_stack.len() {
+                        self.register_stack[base_ptr + a + i] = LuaValue::nil();
+                    }
+                }
+                
+                // Clear the saved info
+                thread_rc.borrow_mut().yield_call_reg = None;
+                thread_rc.borrow_mut().yield_call_nret = None;
             }
-            // 继续执行，yield 会返回 resume_values
+            
+            self.return_values = args;
+            
+            // Continue execution from where it yielded
             self.run().map(|v| vec![v])
         };
         
@@ -2060,20 +2125,20 @@ impl LuaVM {
         self.open_upvalues = saved_upvalues;
         self.next_frame_id = saved_frame_id;
         self.current_thread = saved_thread;
+        self.yielding = saved_yielding;
         
         final_result
     }
     
     /// Yield from current coroutine
-    pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> Result<Vec<LuaValue>, String> {
+    pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> Result<(), String> {
         if let Some(thread_rc) = &self.current_thread {
             // Store yield values in the thread
             thread_rc.borrow_mut().yield_values = values;
             thread_rc.borrow_mut().status = CoroutineStatus::Suspended;
-            // 返回 resume_values 作为 yield 的返回值
-            let resume_vals = thread_rc.borrow_mut().resume_values.clone();
-            thread_rc.borrow_mut().resume_values.clear();
-            Ok(resume_vals)
+            // Set yielding flag to interrupt execution
+            self.yielding = true;
+            Ok(())
         } else {
             Err("attempt to yield from outside a coroutine".to_string())
         }
@@ -3378,6 +3443,8 @@ impl LuaVM {
                         OpCode::Shr => self.op_shr(instr),
                         OpCode::BNot => self.op_bnot(instr),
                         OpCode::IDiv => self.op_idiv(instr),
+                        OpCode::ForPrep => self.op_forprep(instr),
+                        OpCode::ForLoop => self.op_forloop(instr),
                         OpCode::Test => self.op_test(instr),
                         OpCode::TestSet => self.op_testset(instr),
                         OpCode::Closure => self.op_closure(instr),
@@ -3392,6 +3459,11 @@ impl LuaVM {
                             self.frames.pop();
                         }
                         break Err(e);
+                    }
+                    
+                    // Check if yielding
+                    if self.yielding {
+                        break Ok(());
                     }
                 };
 

@@ -83,10 +83,12 @@ fn coroutine_yield(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
     
     // Yield with values - this will store the values and mark as suspended
-    let resume_values = vm.yield_thread(args)?;
+    vm.yield_thread(args)?;
     
-    // Return the resume values (what was passed to resume after yield)
-    Ok(MultiValue::multiple(resume_values))
+    // When yielding for the first time, we don't return anything here
+    // The return values will be set when resume() is called with new values
+    // For now, return empty (but this won't actually be used due to yielding flag)
+    Ok(MultiValue::multiple(vm.return_values.clone()))
 }
 
 /// coroutine.status(co) - Get coroutine status

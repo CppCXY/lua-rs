@@ -21,7 +21,7 @@ pub fn create_string_lib() -> LibraryModule {
         "find" => string_find,
         "match" => string_match,
         "gsub" => string_gsub,
-        // "gmatch" => string_gmatch,
+        "gmatch" => string_gmatch,
     })
 }
 
@@ -644,115 +644,113 @@ fn string_gsub(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     //         Err(e) => Err(format!("invalid pattern: {}", e)),
     //     }
     // }
-
-    // /// need improve
-    // /// string.gmatch(s, pattern) - Iterator for pattern matches
-    // fn string_gmatch(vm: &mut VM) -> Result<MultiValue, String> {
-    //     let s = require_arg(vm, 0, "string.gmatch")?
-    //         .as_string()
-    //         .ok_or_else(|| "bad argument #1 to 'string.gmatch' (string expected)".to_string())?;
-
-    //     let pattern_str = require_arg(vm, 1, "string.gmatch")?
-    //         .as_string()
-    //         .ok_or_else(|| "bad argument #2 to 'string.gmatch' (string expected)".to_string())?;
-
-    //     // Parse and validate pattern
-    //     let _pattern = match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
-    //         Ok(p) => p,
-    //         Err(e) => return Err(format!("invalid pattern: {}", e)),
-    //     };
-
-    //     // Create a state structure to store in userdata
-    //     #[allow(dead_code)]
-    //     #[derive(Clone)]
-    //     struct GmatchState {
-    //         string: String,
-    //         pattern: String,
-    //         position: usize,
-    //     }
-
-    //     let state = GmatchState {
-    //         string: s.as_str().to_string(),
-    //         pattern: pattern_str.as_str().to_string(),
-    //         position: 0,
-    //     };
-
-    //     // Store state directly in userdata using Box for stable pointer
-    //     use std::cell::RefCell;
-    //     use std::rc::Rc;
-    //     let state_box = Box::new(RefCell::new(state));
-    //     let state_ptr = Box::into_raw(state_box) as usize;
-
-    //     let userdata = LuaValue::from_userdata_rc(state_box);
-
-    //     // Create metatable with __call and __gc
-    //     if let Some(ref ud) = userdata.as_userdata() {
-    //         let mt = Rc::new(RefCell::new(LuaTable::new()));
-    //         mt.borrow_mut().raw_set(
-    //             LuaValue::from_string_rc(vm.create_string("__call".to_string())),
-    //             LuaValue::cfunction(gmatch_iterator_optimized),
-    //         );
-    //         mt.borrow_mut().raw_set(
-    //             LuaValue::from_string_rc(vm.create_string("__gc".to_string())),
-    //             LuaValue::cfunction(gmatch_gc_optimized),
-    //         );
-
-    //         ud.set_metatable(Some(mt));
-    //     }
-
-    //     Ok(MultiValue::single(userdata))
-    todo!()
+    todo!("string.gsub not yet implemented")
 }
 
-/// Optimized iterator that stores state directly in userdata
-fn gmatch_iterator_optimized(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    #[allow(dead_code)]
-    #[derive(Clone)]
-    struct GmatchState {
-        string: String,
-        pattern: String,
-        position: usize,
-    }
+/// string.gmatch(s, pattern) - Returns an iterator function
+/// Usage: for capture in string.gmatch(s, pattern) do ... end
+fn string_gmatch(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    use crate::lua_value::LuaTable;
 
-    // For __call metamethod, register 1 is self (the userdata)
-    use crate::lib_registry::get_arg;
-    let state_val = get_arg(vm, 1).ok_or("gmatch iterator: insufficient arguments")?;
-
-    // Extract state pointer from userdata
-    let state_ptr = unsafe {
-        if let Some(ud) = state_val.as_userdata() {
-            let data = ud.get_data();
-            let data_ref = data.borrow();
-            if let Some(&ptr) = data_ref.downcast_ref::<usize>() {
-                ptr
-            } else {
-                return Err("gmatch iterator: invalid state type".to_string());
-            }
-        } else {
-            return Err("gmatch iterator: expected userdata".to_string());
-        }
+    let arg0 = require_arg(vm, 0, "string.gmatch")?;
+    let s = unsafe {
+        arg0.as_string()
+            .ok_or_else(|| "bad argument #1 to 'string.gmatch' (string expected)".to_string())?
     };
 
-    // SAFETY: We created this pointer in string_gmatch and it's managed by the GC
-    let state_box = unsafe { &mut *(state_ptr as *mut std::cell::RefCell<GmatchState>) };
-    let mut state = state_box.borrow_mut();
+    let arg1 = require_arg(vm, 1, "string.gmatch")?;
+    let pattern_str = unsafe {
+        arg1.as_string()
+            .ok_or_else(|| "bad argument #2 to 'string.gmatch' (string expected)".to_string())?
+    };
+
+    // Validate pattern early
+    let _pattern = match lua_pattern::parse_pattern(pattern_str.as_str()) {
+        Ok(p) => p,
+        Err(e) => return Err(format!("invalid pattern: {}", e)),
+    };
+
+    // Create state table: {string = s, pattern = p, position = 0}
+    let state_table = Rc::new(RefCell::new(LuaTable::new()));
+    state_table.borrow_mut().raw_set(
+        LuaValue::from_string_rc(vm.create_string("string".to_string())),
+        LuaValue::from_string_rc(vm.create_string(s.as_str().to_string())),
+    );
+    state_table.borrow_mut().raw_set(
+        LuaValue::from_string_rc(vm.create_string("pattern".to_string())),
+        LuaValue::from_string_rc(vm.create_string(pattern_str.as_str().to_string())),
+    );
+    state_table.borrow_mut().raw_set(
+        LuaValue::from_string_rc(vm.create_string("position".to_string())),
+        LuaValue::integer(0),
+    );
+
+    // Return: iterator function, state table, nil (initial control variable)
+    Ok(MultiValue::multiple(vec![
+        LuaValue::cfunction(gmatch_iterator),
+        LuaValue::from_table_rc(state_table),
+        LuaValue::nil(),
+    ]))
+}
+
+/// Iterator function for string.gmatch
+/// Called as: f(state, control_var)
+fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    // Arg 0: state table
+    // Arg 1: control variable (unused, we use state.position)
+    let state_table = require_arg(vm, 0, "gmatch iterator")?
+        .as_table_rc()
+        .ok_or_else(|| "gmatch iterator: state table expected".to_string())?;
+
+    // Extract string, pattern, and position from state
+    let string_key = LuaValue::from_string_rc(vm.create_string("string".to_string()));
+    let pattern_key = LuaValue::from_string_rc(vm.create_string("pattern".to_string()));
+    let position_key = LuaValue::from_string_rc(vm.create_string("position".to_string()));
+
+    let s_val = state_table
+        .borrow()
+        .raw_get(&string_key)
+        .ok_or_else(|| "gmatch iterator: string not found in state".to_string())?;
+    let s = unsafe {
+        s_val.as_string()
+            .ok_or_else(|| "gmatch iterator: string invalid".to_string())?
+    };
+
+    let pattern_val = state_table
+        .borrow()
+        .raw_get(&pattern_key)
+        .ok_or_else(|| "gmatch iterator: pattern not found in state".to_string())?;
+    let pattern_str = unsafe {
+        pattern_val.as_string()
+            .ok_or_else(|| "gmatch iterator: pattern invalid".to_string())?
+    };
+
+    let position = state_table
+        .borrow()
+        .raw_get(&position_key)
+        .and_then(|v| v.as_integer())
+        .ok_or_else(|| "gmatch iterator: position not found in state".to_string())? as usize;
 
     // Parse pattern
-    let pattern = match crate::lua_pattern::parse_pattern(&state.pattern) {
+    let pattern = match lua_pattern::parse_pattern(pattern_str.as_str()) {
         Ok(p) => p,
         Err(e) => return Err(format!("invalid pattern: {}", e)),
     };
 
     // Find next match
-    if let Some((start, end, captures)) =
-        crate::lua_pattern::find(&state.string, &pattern, state.position)
-    {
+    if let Some((start, end, captures)) = lua_pattern::find(s.as_str(), &pattern, position) {
         // Update position for next iteration
-        state.position = if end > start { end } else { end + 1 };
+        let next_pos = if end > start { end } else { end + 1 };
+        state_table.borrow_mut().raw_set(
+            position_key,
+            LuaValue::integer(next_pos as i64),
+        );
 
         // Return captures if any, otherwise return the matched string
         if captures.is_empty() {
-            let matched = &state.string[start..end];
+            let matched = &s.as_str()[start..end];
             Ok(MultiValue::single(LuaValue::from_string_rc(
                 vm.create_string(matched.to_string()),
             )))
@@ -764,37 +762,7 @@ fn gmatch_iterator_optimized(vm: &mut LuaVM) -> Result<MultiValue, String> {
             Ok(MultiValue::multiple(results))
         }
     } else {
-        // No more matches, return nil
+        // No more matches
         Ok(MultiValue::single(LuaValue::nil()))
     }
-}
-
-/// Optimized cleanup function
-fn gmatch_gc_optimized(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    #[allow(dead_code)]
-    #[derive(Clone)]
-    struct GmatchState {
-        string: String,
-        pattern: String,
-        position: usize,
-    }
-
-    // For __gc metamethod, register 0 is self (the userdata)
-    use crate::lib_registry::get_arg;
-    let state_val = get_arg(vm, 0).ok_or("gmatch gc: no userdata")?;
-
-    // Extract state pointer from userdata and free it
-    unsafe {
-        if let Some(ud) = state_val.as_userdata() {
-            let data = ud.get_data();
-            let data_ref = data.borrow();
-            if let Some(&state_ptr) = data_ref.downcast_ref::<usize>() {
-                // SAFETY: We own this pointer and are cleaning it up
-                let _ = Box::from_raw(state_ptr as *mut std::cell::RefCell<GmatchState>);
-                // Box will be dropped here, freeing the memory
-            }
-        }
-    }
-
-    Ok(MultiValue::empty())
 }
