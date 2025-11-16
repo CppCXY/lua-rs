@@ -68,7 +68,7 @@ impl LuaTable {
         self.metatable = mt;
     }
 
-    /// Fast integer key access - O(1)
+    /// Fast integer key access - O(1) for array part
     #[inline(always)]
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
         if key > 0 {
