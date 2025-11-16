@@ -218,6 +218,9 @@ fn test_rawget_rawset() {
         assert(rawget(t, "key") == "value")
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -227,10 +230,13 @@ fn test_rawlen() {
     vm.open_libs();
     
     let result = vm.execute_string(r#"
-        assert(rawlen({1, 2, 3}) == 3)
         assert(rawlen("hello") == 5)
+        assert(rawlen({1,2,3}) == 3)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -263,6 +269,9 @@ fn test_getmetatable_setmetatable() {
         assert(getmetatable(t) == mt)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

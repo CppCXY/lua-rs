@@ -70,6 +70,9 @@ pub struct LuaVM {
 
     // Yield flag: set when a coroutine yields
     yielding: bool,
+
+    // String metatable (shared by all strings)
+    string_metatable: Option<Rc<RefCell<LuaTable>>>,
 }
 
 impl LuaVM {
@@ -86,6 +89,7 @@ impl LuaVM {
             ffi_state: crate::ffi::FFIState::new(),
             current_thread: None,
             yielding: false,
+            string_metatable: None,
         };
 
         // Set _G to point to the global table itself
@@ -364,6 +368,11 @@ impl LuaVM {
         } else if let Some(ud) = table.as_userdata_rc() {
             // Handle userdata __index metamethod
             let value = self.userdata_get(ud, &key).unwrap_or(LuaValue::nil());
+            self.set_register(base_ptr, a, value);
+            Ok(())
+        } else if table.is_string() {
+            // Handle string indexing (uses string metatable)
+            let value = self.string_get(&table, &key).unwrap_or(LuaValue::nil());
             self.set_register(base_ptr, a, value);
             Ok(())
         } else {
@@ -1915,6 +1924,24 @@ impl LuaVM {
         self.globals.borrow_mut().set_str(key, value);
     }
 
+    /// Set the metatable for all strings
+    /// In Lua, all strings share a metatable with __index pointing to the string library
+    pub fn set_string_metatable(&mut self, string_lib: LuaValue) {
+        // Create the metatable
+        let metatable = self.create_table();
+        
+        // Set __index to the string library table
+        let index_key = self.create_string("__index".to_string());
+        metatable.borrow_mut().raw_set(LuaValue::from_string_rc(index_key), string_lib);
+        
+        self.string_metatable = Some(metatable);
+    }
+
+    /// Get the shared string metatable
+    pub fn get_string_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
+        self.string_metatable.clone()
+    }
+
     /// Get FFI state (immutable)
     pub fn get_ffi_state(&self) -> &crate::ffi::FFIState {
         &self.ffi_state
@@ -2220,6 +2247,47 @@ impl LuaVM {
                     LuaValueKind::CFunction | LuaValueKind::Function => {
                         let self_value = LuaValue::from_userdata_rc(userdata);
                         let args = vec![self_value, key.clone()];
+
+                        match self.call_metamethod(&index_val, &args) {
+                            Ok(result) => return result,
+                            Err(_) => return None,
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get value from string with metatable support
+    /// Handles __index metamethod for strings
+    pub fn string_get(&mut self, string_val: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        // Check for __index metamethod in string metatable
+        if let Some(mt) = &self.string_metatable {
+            let index_key =
+                LuaValue::from_string_rc(Rc::new(LuaString::new("__index".to_string())));
+
+            let index_value = {
+                let mt_borrowed = mt.borrow();
+                mt_borrowed.raw_get(&index_key)
+            };
+
+            if let Some(index_val) = index_value {
+                match index_val.kind() {
+                    // __index is a table - look up in that table (this is the common case for strings)
+                    LuaValueKind::Table => unsafe {
+                        if let Some(t) = index_val.as_table() {
+                            let t_rc = Rc::from_raw(t as *const RefCell<LuaTable>);
+                            let t_rc_clone = t_rc.clone();
+                            std::mem::forget(t_rc);
+                            return self.table_get(t_rc_clone, key);
+                        }
+                    },
+                    // __index is a function - call it with (string, key)
+                    LuaValueKind::CFunction | LuaValueKind::Function => {
+                        let args = vec![string_val.clone(), key.clone()];
 
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
@@ -2959,7 +3027,16 @@ impl LuaVM {
                     None
                 }
             },
-            // TODO: Support metatables for other types (strings, userdata)
+            LuaValueKind::String => {
+                // All strings share a metatable
+                if let Some(mt) = &self.string_metatable {
+                    let key = LuaValue::from_string_rc(Rc::new(LuaString::new(event.to_string())));
+                    mt.borrow().raw_get(&key)
+                } else {
+                    None
+                }
+            },
+            // TODO: Support metatables for userdata
             _ => None,
         }
     }

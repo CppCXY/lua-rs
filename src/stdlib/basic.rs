@@ -342,7 +342,7 @@ fn lua_xpcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
     
-    let value = get_arg(vm, 1).ok_or("getmetatable() requires 1 argument")?;
+    let value = get_arg(vm, 0).ok_or("getmetatable() requires 1 argument")?;
 
     match value.kind() {
         LuaValueKind::Table => {
@@ -413,8 +413,8 @@ fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
     
-    let table = get_arg(vm, 1).ok_or("rawget() requires 2 arguments")?;
-    let key = get_arg(vm, 2).ok_or("rawget() requires 2 arguments")?;
+    let table = get_arg(vm, 0).ok_or("rawget() requires 2 arguments")?;
+    let key = get_arg(vm, 1).ok_or("rawget() requires 2 arguments")?;
 
     unsafe {
         if let Some(t) = table.as_table() {
@@ -430,9 +430,9 @@ fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
     
-    let table = get_arg(vm, 1).ok_or("rawset() requires 3 arguments")?;
-    let key = get_arg(vm, 2).ok_or("rawset() requires 3 arguments")?;
-    let value = get_arg(vm, 3).ok_or("rawset() requires 3 arguments")?;
+    let table = get_arg(vm, 0).ok_or("rawset() requires 3 arguments")?;
+    let key = get_arg(vm, 1).ok_or("rawset() requires 3 arguments")?;
+    let value = get_arg(vm, 2).ok_or("rawset() requires 3 arguments")?;
 
     unsafe {
         if let Some(t) = table.as_table() {
@@ -452,7 +452,7 @@ fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn lua_rawlen(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
     
-    let value = get_arg(vm, 1).ok_or("rawlen() requires 1 argument")?;
+    let value = get_arg(vm, 0).ok_or("rawlen() requires 1 argument")?;
 
     let len = unsafe {
         match value.kind() {

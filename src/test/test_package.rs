@@ -75,6 +75,9 @@ fn test_package_config() {
         assert(lines == 5)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

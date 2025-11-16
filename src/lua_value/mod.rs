@@ -386,7 +386,7 @@ mod value_tests {
 
         assert!(int_val.is_integer());
         assert!(!int_val.is_float());
-        assert!(float_val.is_integer());
+        assert!(!float_val.is_integer());  // 42.0 is a float, not an integer
         assert!(float_val.is_float());
 
         // Both are numbers

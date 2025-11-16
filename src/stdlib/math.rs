@@ -237,6 +237,21 @@ fn math_tointeger(vm: &mut LuaVM) -> Result<MultiValue, String> {
         } else {
             LuaValue::nil()
         }
+    } else if let Some(s) = val.as_string_rc() {
+        // Try to parse string as integer
+        let s_str = s.as_str().trim();
+        if let Ok(i) = s_str.parse::<i64>() {
+            LuaValue::integer(i)
+        } else if let Ok(f) = s_str.parse::<f64>() {
+            // String is a float, check if it's a whole number
+            if f.fract() == 0.0 && f.is_finite() {
+                LuaValue::integer(f as i64)
+            } else {
+                LuaValue::nil()
+            }
+        } else {
+            LuaValue::nil()
+        }
     } else {
         LuaValue::nil()
     };

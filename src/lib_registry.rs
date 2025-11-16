@@ -139,8 +139,15 @@ impl LibraryRegistry {
             }
         } else {
             // For module libraries, set the table as global
-            let lib_value = LuaValue::from_table_rc(lib_table);
+            let lib_value = LuaValue::from_table_rc(lib_table.clone());
             vm.set_global(module.name, lib_value.clone());
+            
+            // Special handling for string library: set string metatable
+            if module.name == "string" {
+                // In Lua, all strings share a metatable where __index points to the string library
+                // This allows using string methods with : syntax (e.g., str:upper())
+                vm.set_string_metatable(lib_value.clone());
+            }
             
             // Also register in package.loaded (if package exists)
             // This allows require() to find standard libraries
