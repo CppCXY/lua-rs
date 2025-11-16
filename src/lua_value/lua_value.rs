@@ -105,9 +105,12 @@ impl LuaValue {
     #[inline(always)]
     pub fn float(f: f64) -> Self {
         let bits = f.to_bits();
-        // If it's a NaN, canonicalize to avoid collision with our tags
-        let primary = if bits >= NAN_BASE {
-            f64::NAN.to_bits()
+        // If it's actually a NaN (not just a negative number), canonicalize it
+        // We need to check if it's a real NaN using f.is_nan(), not just bits >= NAN_BASE
+        // because negative numbers have their sign bit set and will have bits >= NAN_BASE
+        let primary = if f.is_nan() {
+            // Canonicalize NaN to exactly NAN_BASE to distinguish from tagged values
+            NAN_BASE
         } else {
             bits
         };
@@ -201,7 +204,21 @@ impl LuaValue {
 
     #[inline(always)]
     pub const fn is_float(&self) -> bool {
-        self.primary < NAN_BASE
+        // A value is a float if:
+        // 1. primary == NAN_BASE (canonicalized NaN)
+        // 2. OR primary is not a tagged value (i.e., not matching any TAG_* constants)
+        // Note: Negative floats have high bit set, but we store them directly as bits
+        self.primary == NAN_BASE ||
+        (self.primary != VALUE_NIL &&
+         self.primary != VALUE_TRUE &&
+         self.primary != VALUE_FALSE &&
+         self.primary != TAG_INTEGER &&
+         self.primary != TAG_STRING &&
+         self.primary != TAG_TABLE &&
+         self.primary != TAG_FUNCTION &&
+         self.primary != TAG_USERDATA &&
+         self.primary != TAG_THREAD &&
+         self.primary != TAG_CFUNCTION)
     }
 
     #[inline(always)]
@@ -629,14 +646,13 @@ impl LuaValue {
             VALUE_NIL => LuaValueKind::Nil,
             VALUE_TRUE | VALUE_FALSE => LuaValueKind::Boolean,
             TAG_INTEGER => LuaValueKind::Integer,
-            p if p < NAN_BASE => LuaValueKind::Float,
             TAG_STRING => LuaValueKind::String,
             TAG_TABLE => LuaValueKind::Table,
             TAG_FUNCTION => LuaValueKind::Function,
             TAG_USERDATA => LuaValueKind::Userdata,
             TAG_THREAD => LuaValueKind::Thread,
             TAG_CFUNCTION => LuaValueKind::CFunction,
-            _ => unreachable!("Invalid LuaValue primary tag"),
+            _ => LuaValueKind::Float,  // Everything else is a float (including NaN and negative floats)
         }
     }
 }

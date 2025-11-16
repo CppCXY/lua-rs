@@ -28,6 +28,9 @@ fn test_math_abs() {
         assert(math.abs(-3.14) == 3.14)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -175,6 +178,9 @@ fn test_math_tointeger() {
         assert(math.tointeger("10") == 10)
     "#);
     
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 
