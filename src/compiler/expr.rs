@@ -325,7 +325,7 @@ pub fn compile_call_expr_with_returns(
     }
 
     // Compile arguments to get their source registers
-    for arg_expr in actual_args.iter() {
+    for (_idx, arg_expr) in actual_args.iter().enumerate() {
         let arg_reg = compile_expr(c, arg_expr)?;
         arg_src_regs.push(arg_reg);
     }
@@ -339,7 +339,7 @@ pub fn compile_call_expr_with_returns(
 
     // Allocate registers up to min_safe_reg if needed
     while c.next_register < min_safe_reg {
-        alloc_register(c);
+        let _allocated = alloc_register(c);
     }
 
     // Now allocate func_reg (which will be at least min_safe_reg)
@@ -355,7 +355,7 @@ pub fn compile_call_expr_with_returns(
 
     // Reserve registers for all arguments
     while c.next_register < args_start + arg_count as u32 {
-        alloc_register(c);
+        let _allocated = alloc_register(c);
     }
 
     // Move arguments to their target positions

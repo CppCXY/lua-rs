@@ -148,15 +148,6 @@ impl Compiler {
             .collect();
         compiler.chunk.child_protos = child_protos;
 
-        // Print string pool statistics (for debugging)
-        let (string_count, total_bytes) = compiler.string_pool.borrow().stats();
-        if string_count > 0 {
-            eprintln!(
-                "[StringPool] Interned {} unique strings, {} bytes total",
-                string_count, total_bytes
-            );
-        }
-
         Ok(compiler.chunk)
     }
 }

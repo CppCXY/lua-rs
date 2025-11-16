@@ -1532,7 +1532,8 @@ impl LuaVM {
                 // Copy arguments to registers
                 for i in 1..b {
                     if a + i < top {
-                        arg_registers.push(self.register_stack[base_ptr + a + i]);
+                        let val = self.register_stack[base_ptr + a + i];
+                        arg_registers.push(val);
                     } else {
                         arg_registers.push(LuaValue::nil());
                     }
@@ -1958,8 +1959,12 @@ impl LuaVM {
                 self.set_register(base_ptr, a + i, vararg_value);
             }
             // Update frame top to reflect loaded varargs (for SetList with B=0)
+            // Only increase top if needed, never decrease it
             let frame = self.current_frame_mut();
-            frame.top = a + vararg_count;
+            let new_top = a + vararg_count;
+            if new_top > frame.top {
+                frame.top = new_top;
+            }
         } else {
             // Load (b-1) varargs
             let count = b - 1;
@@ -1987,6 +1992,7 @@ impl LuaVM {
 
         // Get the table
         let table_val = self.get_register(base_ptr, a);
+        
         if !table_val.is_table() {
             return Err(format!("SetList: not a table, got {:?}", table_val));
         }
@@ -2690,6 +2696,8 @@ impl LuaVM {
                         OpCode::Closure => self.op_closure(instr),
                         OpCode::GetUpval => self.op_getupval(instr),
                         OpCode::SetUpval => self.op_setupval(instr),
+                        OpCode::VarArg => self.op_vararg(instr),
+                        OpCode::SetList => self.op_setlist(instr),
                         _ => Err(format!("Unimplemented opcode: {:?}", opcode)),
                     };
 
@@ -3641,6 +3649,8 @@ impl LuaVM {
                         OpCode::Closure => self.op_closure(instr),
                         OpCode::GetUpval => self.op_getupval(instr),
                         OpCode::SetUpval => self.op_setupval(instr),
+                        OpCode::VarArg => self.op_vararg(instr),
+                        OpCode::SetList => self.op_setlist(instr),
                         _ => Err(format!("Unimplemented opcode: {:?}", opcode)),
                     };
 
