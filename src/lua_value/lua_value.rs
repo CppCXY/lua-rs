@@ -42,6 +42,7 @@ pub const TAG_STRING: u64 = 0xFFFE_0000_0000_0001;
 pub const TAG_TABLE: u64 = 0xFFFE_0000_0000_0002;
 pub const TAG_FUNCTION: u64 = 0xFFFE_0000_0000_0003;
 pub const TAG_USERDATA: u64 = 0xFFFE_0000_0000_0004;
+pub const TAG_THREAD: u64 = 0xFFFE_0000_0000_0005;
 pub const TAG_BOOLEAN: u64 = 0xFFFD_0000_0000_0000;
 pub const TAG_NIL: u64 = 0xFFFC_0000_0000_0000;
 pub const TAG_CFUNCTION: u64 = 0xFFFB_0000_0000_0001;
@@ -162,6 +163,16 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub(crate) fn thread_ptr(ptr: *const RefCell<crate::lua_vm::LuaThread>) -> Self {
+        let addr = ptr as u64;
+        debug_assert!(addr < (1u64 << 48), "Pointer too large");
+        LuaValue {
+            primary: TAG_THREAD,
+            secondary: addr & POINTER_MASK,
+        }
+    }
+
+    #[inline(always)]
     pub fn cfunction(f: CFunction) -> Self {
         let addr = f as usize as u64;
         debug_assert!(addr < (1u64 << 48), "Function pointer too large");
@@ -221,6 +232,11 @@ impl LuaValue {
     #[inline(always)]
     pub const fn is_cfunction(&self) -> bool {
         self.primary == TAG_CFUNCTION
+    }
+
+    #[inline(always)]
+    pub const fn is_thread(&self) -> bool {
+        self.primary == TAG_THREAD
     }
 
     // ============ Value Extraction ============
@@ -320,6 +336,15 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
+    pub(crate) unsafe fn as_thread_ptr(&self) -> Option<*const RefCell<crate::lua_vm::LuaThread>> {
+        if self.is_thread() {
+            Some((self.secondary & POINTER_MASK) as *const RefCell<crate::lua_vm::LuaThread>)
+        } else {
+            None
+        }
+    }
+
     // ============ Raw Access ============
 
     #[inline(always)]
@@ -358,6 +383,7 @@ impl LuaValue {
             LuaValueKind::Table => "table",
             LuaValueKind::Function => "function",
             LuaValueKind::Userdata => "userdata",
+            LuaValueKind::Thread => "thread",
             LuaValueKind::CFunction => "function",
         }
     }
@@ -572,6 +598,7 @@ impl LuaValue {
             LuaValueKind::Table => format!("table: {:x}", self.secondary()),
             LuaValueKind::Function => format!("function: {:x}", self.secondary()),
             LuaValueKind::Userdata => format!("userdata: {:x}", self.secondary()),
+            LuaValueKind::Thread => format!("thread: {:x}", self.secondary()),
             LuaValueKind::CFunction => "cfunction".to_string(),
         }
     }
@@ -607,6 +634,7 @@ impl LuaValue {
             TAG_TABLE => LuaValueKind::Table,
             TAG_FUNCTION => LuaValueKind::Function,
             TAG_USERDATA => LuaValueKind::Userdata,
+            TAG_THREAD => LuaValueKind::Thread,
             TAG_CFUNCTION => LuaValueKind::CFunction,
             _ => unreachable!("Invalid LuaValue primary tag"),
         }
@@ -651,6 +679,7 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
             LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
             LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.secondary()),
+            LuaValueKind::Thread => write!(f, "thread: {:x}", self.secondary()),
             LuaValueKind::CFunction => write!(f, "cfunction"),
         }
     }
@@ -659,6 +688,36 @@ impl std::fmt::Debug for LuaValue {
 impl Default for LuaValue {
     fn default() -> Self {
         Self::nil()
+    }
+}
+
+impl std::fmt::Display for LuaValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind() {
+            LuaValueKind::Nil => write!(f, "nil"),
+            LuaValueKind::Boolean => write!(f, "{}", self.as_bool().unwrap()),
+            LuaValueKind::Integer => write!(f, "{}", self.as_integer().unwrap()),
+            LuaValueKind::Float => {
+                let n = self.as_float().unwrap();
+                if n.floor() == n && n.abs() < 1e14 {
+                    write!(f, "{:.0}", n)
+                } else {
+                    write!(f, "{}", n)
+                }
+            }
+            LuaValueKind::String => unsafe {
+                if let Some(s) = self.as_string() {
+                    write!(f, "{}", s.as_str())
+                } else {
+                    write!(f, "")
+                }
+            },
+            LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
+            LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
+            LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.secondary()),
+            LuaValueKind::Thread => write!(f, "thread: {:x}", self.secondary()),
+            LuaValueKind::CFunction => write!(f, "function: {:x}", self.secondary()),
+        }
     }
 }
 
@@ -739,6 +798,7 @@ impl PartialOrd for LuaValue {
                 LuaValueKind::Table
                 | LuaValueKind::Function
                 | LuaValueKind::Userdata
+                | LuaValueKind::Thread
                 | LuaValueKind::CFunction => self.secondary().partial_cmp(&other.secondary()),
             },
             ord => Some(ord),
@@ -763,5 +823,6 @@ pub enum LuaValueKind {
     Table,
     Function,
     Userdata,
+    Thread,
     CFunction,
 }

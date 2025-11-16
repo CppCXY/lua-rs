@@ -63,6 +63,7 @@ fn lua_type(vm: &mut LuaVM) -> Result<MultiValue, String> {
         LuaValueKind::Table => "table",
         LuaValueKind::Function | LuaValueKind::CFunction => "function",
         LuaValueKind::Userdata => "userdata",
+        LuaValueKind::Thread => "thread",
     };
 
     let result = vm.create_string(type_name.to_string());

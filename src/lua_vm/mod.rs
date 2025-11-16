@@ -12,6 +12,28 @@ use crate::opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Coroutine status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoroutineStatus {
+    Suspended,  // Created or yielded
+    Running,    // Currently executing
+    Normal,     // Resumed another coroutine
+    Dead,       // Finished or error
+}
+
+/// Lua Thread (coroutine)
+pub struct LuaThread {
+    pub status: CoroutineStatus,
+    pub frames: Vec<LuaCallFrame>,
+    pub register_stack: Vec<LuaValue>,
+    pub return_values: Vec<LuaValue>,
+    pub open_upvalues: Vec<Rc<LuaUpvalue>>,
+    pub next_frame_id: usize,
+    pub error_handler: Option<LuaValue>,
+    pub yield_values: Vec<LuaValue>,  // Values yielded from coroutine
+    pub resume_values: Vec<LuaValue>, // Values passed to resume() that yield should return
+}
+
 /// Pool for reusing register Vecs to avoid allocations
 struct RegisterPool {
     pool: Vec<Vec<LuaValue>>,
@@ -76,6 +98,9 @@ pub struct LuaVM {
     
     // FFI state
     ffi_state: crate::ffi::FFIState,
+    
+    // Current running thread (for coroutine.running())
+    pub current_thread: Option<Rc<RefCell<LuaThread>>>,
 }
 
 impl LuaVM {
@@ -91,6 +116,7 @@ impl LuaVM {
             next_frame_id: 0,
             error_handler: None,
             ffi_state: crate::ffi::FFIState::new(),
+            current_thread: None,
         };
 
         // Register built-in functions
@@ -1896,6 +1922,161 @@ impl LuaVM {
     /// Get FFI state (mutable)
     pub fn get_ffi_state_mut(&mut self) -> &mut crate::ffi::FFIState {
         &mut self.ffi_state
+    }
+
+    // ============ Coroutine Support ============
+    
+    /// Create a new thread (coroutine)
+    pub fn create_thread(&mut self, func: LuaValue) -> Rc<RefCell<LuaThread>> {
+        let thread = LuaThread {
+            status: CoroutineStatus::Suspended,
+            frames: Vec::new(),
+            register_stack: Vec::with_capacity(256),
+            return_values: Vec::new(),
+            open_upvalues: Vec::new(),
+            next_frame_id: 0,
+            error_handler: None,
+            yield_values: Vec::new(),
+            resume_values: Vec::new(),
+        };
+        
+        let thread_rc = Rc::new(RefCell::new(thread));
+        
+        // Store the function in the thread's first register
+        thread_rc.borrow_mut().register_stack.push(func);
+        
+        thread_rc
+    }
+    
+    /// Resume a coroutine
+    pub fn resume_thread(
+        &mut self,
+        thread_rc: Rc<RefCell<LuaThread>>,
+        args: Vec<LuaValue>,
+    ) -> Result<(bool, Vec<LuaValue>), String> {
+        let status = thread_rc.borrow().status;
+        
+        match status {
+            CoroutineStatus::Dead => {
+                return Ok((false, vec![LuaValue::from_string_rc(
+                    self.create_string("cannot resume dead coroutine".to_string())
+                )]));
+            }
+            CoroutineStatus::Running => {
+                return Ok((false, vec![LuaValue::from_string_rc(
+                    self.create_string("cannot resume running coroutine".to_string())
+                )]));
+            }
+            _ => {}
+        }
+        
+        // Save current VM state
+        let saved_frames = std::mem::take(&mut self.frames);
+        let saved_stack = std::mem::take(&mut self.register_stack);
+        let saved_returns = std::mem::take(&mut self.return_values);
+        let saved_upvalues = std::mem::take(&mut self.open_upvalues);
+        let saved_frame_id = self.next_frame_id;
+        let saved_thread = self.current_thread.take();
+        
+        let is_first_resume = {
+            let thread = thread_rc.borrow();
+            thread.frames.is_empty()
+        };
+        
+        // Load thread state
+        {
+            let mut thread = thread_rc.borrow_mut();
+            thread.status = CoroutineStatus::Running;
+            self.frames = std::mem::take(&mut thread.frames);
+            self.register_stack = std::mem::take(&mut thread.register_stack);
+            self.return_values = std::mem::take(&mut thread.return_values);
+            self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
+            self.next_frame_id = thread.next_frame_id;
+        }
+        
+        self.current_thread = Some(thread_rc.clone());
+        
+        // Execute
+        let result = if is_first_resume {
+            // First resume: call the function
+            let func = self.register_stack.get(0).cloned().unwrap_or(LuaValue::nil());
+            self.call_function_internal(func, args)
+        } else {
+            // Resumed from yield: set resume_values for this thread
+            {
+                let mut thread = thread_rc.borrow_mut();
+                thread.resume_values = args;
+            }
+            // 继续执行，yield 会返回 resume_values
+            self.run().map(|v| vec![v])
+        };
+        
+        // Check if thread yielded
+        let yield_values = {
+            let thread = thread_rc.borrow();
+            thread.yield_values.clone()
+        };
+        
+        // Save thread state back
+        let final_result = if !yield_values.is_empty() {
+            // Thread yielded - save state and return yield values
+            let mut thread = thread_rc.borrow_mut();
+            thread.frames = std::mem::take(&mut self.frames);
+            thread.register_stack = std::mem::take(&mut self.register_stack);
+            thread.return_values = std::mem::take(&mut self.return_values);
+            thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
+            thread.next_frame_id = self.next_frame_id;
+            thread.status = CoroutineStatus::Suspended;
+            
+            let values = thread.yield_values.clone();
+            thread.yield_values.clear();
+            
+            Ok((true, values))
+        } else {
+            // Thread completed or error
+            let mut thread = thread_rc.borrow_mut();
+            thread.frames = std::mem::take(&mut self.frames);
+            thread.register_stack = std::mem::take(&mut self.register_stack);
+            thread.return_values = std::mem::take(&mut self.return_values);
+            thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
+            thread.next_frame_id = self.next_frame_id;
+            
+            match result {
+                Ok(values) => {
+                    thread.status = CoroutineStatus::Dead;
+                    Ok((true, values))
+                }
+                Err(e) => {
+                    thread.status = CoroutineStatus::Dead;
+                    Ok((false, vec![LuaValue::from_string_rc(self.create_string(e))]))
+                }
+            }
+        };
+        
+        // Restore VM state
+        self.frames = saved_frames;
+        self.register_stack = saved_stack;
+        self.return_values = saved_returns;
+        self.open_upvalues = saved_upvalues;
+        self.next_frame_id = saved_frame_id;
+        self.current_thread = saved_thread;
+        
+        final_result
+    }
+    
+    /// Yield from current coroutine
+    pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> Result<Vec<LuaValue>, String> {
+        if let Some(thread_rc) = &self.current_thread {
+            // Store yield values in the thread
+            thread_rc.borrow_mut().yield_values = values;
+            thread_rc.borrow_mut().status = CoroutineStatus::Suspended;
+            // 返回 resume_values 作为 yield 的返回值
+            let resume_vals = thread_rc.borrow_mut().resume_values.clone();
+            thread_rc.borrow_mut().resume_values.clear();
+            Ok(resume_vals)
+        } else {
+            Err("attempt to yield from outside a coroutine".to_string())
+        }
     }
 
     /// Get value from table with metatable support
