@@ -6,35 +6,55 @@ use super::ctype::{CType, CTypeKind};
 pub fn parse_c_declaration(decl: &str) -> Result<Vec<(String, CType)>, String> {
     let mut results = Vec::new();
     
-    // Simple line-by-line parsing
-    for line in decl.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
+    // Multi-line parsing for structs
+    let cleaned = decl.lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    
+    let mut pos = 0;
+    while pos < cleaned.len() {
+        let remaining = &cleaned[pos..];
         
         // Parse typedef
-        if line.starts_with("typedef ") {
-            let typedef = parse_typedef(line)?;
-            if let Some((name, ctype)) = typedef {
-                results.push((name, ctype));
+        if remaining.starts_with("typedef ") {
+            if let Some(end) = remaining.find(';') {
+                let typedef_str = &remaining[..=end];
+                if let Some((name, ctype)) = parse_typedef(typedef_str)? {
+                    results.push((name, ctype));
+                }
+                pos += end + 1;
+                continue;
             }
-            continue;
         }
         
         // Parse struct definition
-        if line.starts_with("struct ") {
-            // For now, skip - need multiline parsing
-            continue;
+        if remaining.starts_with("struct ") {
+            if let Some((struct_def, consumed)) = parse_struct_definition(remaining)? {
+                results.push(struct_def);
+                pos += consumed;
+                continue;
+            }
         }
         
         // Parse function declaration
-        if line.contains('(') && line.contains(')') && line.ends_with(';') {
-            let func_decl = parse_function_declaration(line)?;
-            if let Some((name, ctype)) = func_decl {
-                results.push((name, ctype));
+        if let Some(semi) = remaining.find(';') {
+            let decl_str = &remaining[..=semi];
+            if decl_str.contains('(') && decl_str.contains(')') {
+                if let Some((name, ctype)) = parse_function_declaration(decl_str)? {
+                    results.push((name, ctype));
+                }
+                pos += semi + 1;
+                continue;
             }
-            continue;
+        }
+        
+        // Skip unrecognized content
+        if let Some(semi) = remaining.find(';') {
+            pos += semi + 1;
+        } else {
+            break;
         }
     }
     
@@ -181,6 +201,110 @@ pub fn parse_base_type(type_str: &str) -> Result<CType, String> {
         "uint64_t" => Ok(CType::new(CTypeKind::UInt64, 8, 8)),
         _ => Err(format!("Unknown type: {}", type_str)),
     }
+}
+
+/// Parse struct definition
+/// Returns (name, ctype) and number of characters consumed
+fn parse_struct_definition(input: &str) -> Result<Option<((String, CType), usize)>, String> {
+    use super::ctype::StructField;
+    use std::collections::HashMap;
+    
+    // struct Name { ... };
+    if !input.starts_with("struct ") {
+        return Ok(None);
+    }
+    
+    let input = input.trim_start_matches("struct ").trim();
+    
+    // Find struct name
+    let name_end = input.find(|c: char| c.is_whitespace() || c == '{')
+        .ok_or("Invalid struct definition")?;
+    let struct_name = input[..name_end].trim().to_string();
+    
+    let remaining = input[name_end..].trim();
+    
+    // Find the opening brace
+    if !remaining.starts_with('{') {
+        return Ok(None);
+    }
+    
+    // Find matching closing brace
+    let mut brace_count = 0;
+    let mut end_pos = 0;
+    for (i, ch) in remaining.chars().enumerate() {
+        if ch == '{' {
+            brace_count += 1;
+        } else if ch == '}' {
+            brace_count -= 1;
+            if brace_count == 0 {
+                end_pos = i;
+                break;
+            }
+        }
+    }
+    
+    if end_pos == 0 {
+        return Err("Unclosed struct definition".to_string());
+    }
+    
+    let body = &remaining[1..end_pos].trim();
+    
+    // Parse fields
+    let mut fields = HashMap::new();
+    let mut current_offset = 0;
+    
+    for field_decl in body.split(';') {
+        let field_decl = field_decl.trim();
+        if field_decl.is_empty() {
+            continue;
+        }
+        
+        // Parse field: type name
+        let parts: Vec<&str> = field_decl.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        
+        // Handle pointer types
+        let is_pointer = field_decl.contains('*');
+        let type_part = parts[0].trim_end_matches('*');
+        let field_name = parts.last().unwrap().trim_start_matches('*');
+        
+        let mut field_type = parse_base_type(type_part)?;
+        if is_pointer {
+            field_type = CType::pointer(field_type);
+        }
+        
+        // Calculate alignment and offset
+        let field_align = field_type.alignment;
+        let aligned_offset = (current_offset + field_align - 1) / field_align * field_align;
+        
+        fields.insert(
+            field_name.to_string(),
+            StructField {
+                ctype: field_type.clone(),
+                offset: aligned_offset,
+            },
+        );
+        
+        current_offset = aligned_offset + field_type.size;
+    }
+    
+    // Calculate total size with final padding
+    let max_align = fields.values()
+        .map(|f| f.ctype.alignment)
+        .max()
+        .unwrap_or(1);
+    let total_size = (current_offset + max_align - 1) / max_align * max_align;
+    
+    let mut struct_type = CType::new(CTypeKind::Struct, total_size, max_align);
+    struct_type.name = Some(struct_name.clone());
+    struct_type.fields = Some(fields);
+    
+    // Calculate total consumed characters
+    let consumed = "struct ".len() + name_end + end_pos + 2; // +2 for closing } and ;
+    
+    Ok(Some(((struct_name, struct_type), consumed)))
 }
 
 #[cfg(test)]

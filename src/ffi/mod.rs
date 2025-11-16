@@ -346,19 +346,54 @@ pub fn ffi_new(vm: &mut LuaVM) -> Result<MultiValue, String> {
     
     // Create CData
     let cdata = if init_value.is_nil() {
-        CData::new(ctype)
+        CData::new(ctype.clone())
     } else {
-        CData::from_lua_value(ctype, init_value)?
+        CData::from_lua_value(ctype.clone(), init_value)?
     };
     
-    // For now, return a table with the value (simplified)
-    // In a full implementation, this should be a userdata with proper metamethods
+    // For struct types, create a table with __index and __newindex metamethods
     let table = vm.create_table();
-    let value_key = vm.create_string("_value".to_string());
-    table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(value_key),
-        cdata.to_lua_value()
-    );
+    
+    if matches!(ctype.kind, CTypeKind::Struct) {
+        // Store the struct data
+        let data_key = vm.create_string("__cdata".to_string());
+        table.borrow_mut().raw_set(
+            LuaValue::from_string_rc(data_key),
+            cdata.to_lua_value()
+        );
+        
+        // Store the type info
+        let type_key = vm.create_string("__ctype".to_string());
+        let type_name_rc = vm.create_string(type_name.clone());
+        table.borrow_mut().raw_set(
+            LuaValue::from_string_rc(type_key),
+            LuaValue::from_string_rc(type_name_rc)
+        );
+        
+        // Set metamethods for field access
+        let metatable = vm.create_table();
+        
+        let index_key = vm.create_string("__index".to_string());
+        metatable.borrow_mut().raw_set(
+            LuaValue::from_string_rc(index_key),
+            LuaValue::cfunction(ffi_struct_index)
+        );
+        
+        let newindex_key = vm.create_string("__newindex".to_string());
+        metatable.borrow_mut().raw_set(
+            LuaValue::from_string_rc(newindex_key),
+            LuaValue::cfunction(ffi_struct_newindex)
+        );
+        
+        table.borrow_mut().set_metatable(Some(metatable));
+    } else {
+        // For non-struct types, just store the value
+        let value_key = vm.create_string("_value".to_string());
+        table.borrow_mut().raw_set(
+            LuaValue::from_string_rc(value_key),
+            cdata.to_lua_value()
+        );
+    }
     
     Ok(MultiValue::single(LuaValue::from_table_rc(table)))
 }
@@ -602,5 +637,169 @@ pub fn ffi_fill(vm: &mut LuaVM) -> Result<MultiValue, String> {
         Ok(MultiValue::empty())
     } else {
         Err("ffi.fill() requires pointer argument".to_string())
+    }
+}
+
+/// __index metamethod for struct field access
+pub fn ffi_struct_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let args = crate::lib_registry::get_args(vm);
+    if args.len() < 2 {
+        return Err("struct __index requires 2 arguments".to_string());
+    }
+    
+    let struct_table = &args[0];
+    let field_name_val = &args[1];
+    
+    let field_name = unsafe {
+        if let Some(s) = field_name_val.as_string_ptr() {
+            (*s).as_str().to_string()
+        } else {
+            return Err("struct field name must be string".to_string());
+        }
+    };
+    
+    // Create all string keys upfront
+    let type_key = LuaValue::from_string_rc(vm.create_string("__ctype".to_string()));
+    let fields_key = LuaValue::from_string_rc(vm.create_string("__fields".to_string()));
+    let field_key = LuaValue::from_string_rc(vm.create_string(field_name.clone()));
+    
+    // Get the struct type
+    unsafe {
+        let table = struct_table.as_table()
+            .ok_or("invalid struct object")?;
+        
+        let type_name_val = table.borrow().raw_get(&type_key);
+        
+        let type_name = if let Some(tn) = type_name_val {
+            if let Some(s) = tn.as_string_ptr() {
+                (*s).as_str().to_string()
+            } else {
+                return Err("invalid struct type".to_string());
+            }
+        } else {
+            return Err("struct type not found".to_string());
+        };
+        
+        // Get the ctype
+        let ffi_state = vm.get_ffi_state();
+        let ctype = ffi_state.get_type(&type_name)
+            .ok_or_else(|| format!("Unknown type: {}", type_name))?;
+        
+        // Get field info
+        let fields = ctype.fields.as_ref()
+            .ok_or("not a struct type")?;
+        let field = fields.get(&field_name)
+            .ok_or_else(|| format!("Field '{}' not found", field_name))?;
+        
+        // Get stored field values
+        let fields_table_val = table.borrow().raw_get(&fields_key);
+        
+        if let Some(ft) = fields_table_val {
+            if let Some(fields_tbl) = ft.as_table() {
+                let field_val = fields_tbl.borrow().raw_get(&field_key);
+                if let Some(fv) = field_val {
+                    return Ok(MultiValue::single(fv));
+                }
+            }
+        }
+        
+        // Return default value based on type
+        match field.ctype.kind {
+            CTypeKind::Int8 | CTypeKind::Int16 | CTypeKind::Int32 | CTypeKind::Int64 |
+            CTypeKind::UInt8 | CTypeKind::UInt16 | CTypeKind::UInt32 | CTypeKind::UInt64 => {
+                Ok(MultiValue::single(LuaValue::integer(0)))
+            }
+            CTypeKind::Float | CTypeKind::Double => {
+                Ok(MultiValue::single(LuaValue::number(0.0)))
+            }
+            CTypeKind::Pointer => {
+                Ok(MultiValue::single(LuaValue::integer(0)))
+            }
+            _ => Ok(MultiValue::single(LuaValue::nil()))
+        }
+    }
+}
+
+/// __newindex metamethod for struct field assignment
+pub fn ffi_struct_newindex(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let args = crate::lib_registry::get_args(vm);
+    if args.len() < 3 {
+        return Err("struct __newindex requires 3 arguments".to_string());
+    }
+    
+    let struct_table = &args[0];
+    let field_name_val = &args[1];
+    let value = &args[2];
+    
+    let field_name = unsafe {
+        if let Some(s) = field_name_val.as_string_ptr() {
+            (*s).as_str()
+        } else {
+            return Err("struct field name must be string".to_string());
+        }
+    };
+    
+    // Get the struct type and validate field exists
+    unsafe {
+        let table = struct_table.as_table()
+            .ok_or("invalid struct object")?;
+        
+        let type_key = LuaValue::from_string_rc(vm.create_string("__ctype".to_string()));
+        let type_name_val = table.borrow().raw_get(&type_key);
+        
+        let type_name = if let Some(tn) = type_name_val {
+            if let Some(s) = tn.as_string_ptr() {
+                (*s).as_str().to_string()
+            } else {
+                return Err("invalid struct type".to_string());
+            }
+        } else {
+            return Err("struct type not found".to_string());
+        };
+        
+        // Validate field exists
+        let ffi_state = vm.get_ffi_state();
+        let ctype = ffi_state.get_type(&type_name)
+            .ok_or_else(|| format!("Unknown type: {}", type_name))?;
+        
+        let fields = ctype.fields.as_ref()
+            .ok_or("not a struct type")?;
+        
+        if !fields.contains_key(field_name) {
+            return Err(format!("Field '{}' not found", field_name));
+        }
+        
+        // Get or create __fields table
+        let fields_key_rc = vm.create_string("__fields".to_string());
+        let fields_key = LuaValue::from_string_rc(fields_key_rc.clone());
+        let fields_table_val = table.borrow().raw_get(&fields_key);
+        
+        let fields_table = if let Some(ft) = fields_table_val {
+            if let Some(fields_tbl) = ft.as_table() {
+                let ft_rc = std::rc::Rc::from_raw(fields_tbl as *const std::cell::RefCell<crate::lua_value::LuaTable>);
+                let ft_clone = ft_rc.clone();
+                std::mem::forget(ft_rc);
+                ft_clone
+            } else {
+                return Err("invalid fields table".to_string());
+            }
+        } else {
+            // Create fields table
+            let new_fields = vm.create_table();
+            table.borrow_mut().raw_set(
+                LuaValue::from_string_rc(fields_key_rc),
+                LuaValue::from_table_rc(new_fields.clone())
+            );
+            new_fields
+        };
+        
+        // Set the field value
+        let field_key = LuaValue::from_string_rc(vm.create_string(field_name.to_string()));
+        fields_table.borrow_mut().raw_set(
+            field_key,
+            value.clone()
+        );
+        
+        Ok(MultiValue::empty())
     }
 }
