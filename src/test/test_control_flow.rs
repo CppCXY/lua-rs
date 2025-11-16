@@ -5,8 +5,9 @@ use crate::*;
 fn test_if_else() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local x = 10
         local result = ""
         
@@ -17,8 +18,9 @@ fn test_if_else() {
         end
         
         assert(result == "greater")
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -26,8 +28,9 @@ fn test_if_else() {
 fn test_if_elseif_else() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local function classify(x)
             if x > 0 then
                 return "positive"
@@ -41,8 +44,9 @@ fn test_if_elseif_else() {
         assert(classify(5) == "positive")
         assert(classify(-5) == "negative")
         assert(classify(0) == "zero")
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -50,8 +54,9 @@ fn test_if_elseif_else() {
 fn test_while_loop() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local i = 0
         local sum = 0
         
@@ -62,8 +67,9 @@ fn test_while_loop() {
         
         assert(i == 5)
         assert(sum == 15)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -71,8 +77,9 @@ fn test_while_loop() {
 fn test_repeat_until() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local i = 0
         
         repeat
@@ -80,8 +87,9 @@ fn test_repeat_until() {
         until i >= 5
         
         assert(i == 5)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -89,8 +97,9 @@ fn test_repeat_until() {
 fn test_numeric_for() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local sum = 0
         for i = 1, 10 do
             sum = sum + i
@@ -102,8 +111,9 @@ fn test_numeric_for() {
             sum2 = sum2 + i
         end
         assert(sum2 == 25)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -111,8 +121,9 @@ fn test_numeric_for() {
 fn test_generic_for() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local t = {10, 20, 30}
         local sum = 0
         
@@ -121,8 +132,9 @@ fn test_generic_for() {
         end
         
         assert(sum == 60)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -130,8 +142,9 @@ fn test_generic_for() {
 fn test_break() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local i = 0
         while true do
             i = i + 1
@@ -141,8 +154,9 @@ fn test_break() {
         end
         
         assert(i == 5)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -150,8 +164,9 @@ fn test_break() {
 fn test_nested_loops() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local count = 0
         
         for i = 1, 3 do
@@ -161,8 +176,9 @@ fn test_nested_loops() {
         end
         
         assert(count == 9)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -170,8 +186,9 @@ fn test_nested_loops() {
 fn test_goto() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local x = 0
         ::start::
         x = x + 1
@@ -179,8 +196,9 @@ fn test_goto() {
             goto start
         end
         assert(x == 5)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -188,16 +206,18 @@ fn test_goto() {
 fn test_do_block() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local x = 10
         do
             local x = 20
             assert(x == 20)
         end
         assert(x == 10)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -205,15 +225,17 @@ fn test_do_block() {
 fn test_conditional_expressions() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local function ternary(cond, a, b)
             if cond then return a else return b end
         end
         
         assert(ternary(true, "yes", "no") == "yes")
         assert(ternary(false, "yes", "no") == "no")
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }

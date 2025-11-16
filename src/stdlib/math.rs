@@ -33,13 +33,13 @@ pub fn create_math_lib() -> LibraryModule {
         "type" => math_type,
         "ult" => math_ult,
     });
-    
+
     // Add constants using with_value
     module = module.with_value("pi", |_vm| LuaValue::float(std::f64::consts::PI));
     module = module.with_value("huge", |_vm| LuaValue::float(f64::INFINITY));
     module = module.with_value("maxinteger", |_vm| LuaValue::integer(i64::MAX));
     module = module.with_value("mininteger", |_vm| LuaValue::integer(i64::MIN));
-    
+
     module
 }
 

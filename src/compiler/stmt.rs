@@ -63,26 +63,36 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
             // Check if last expression is ... (varargs) which should expand
             let is_dots = if let LuaExpr::LiteralExpr(lit_expr) = last_expr {
-                matches!(lit_expr.get_literal(), Some(emmylua_parser::LuaLiteralToken::Dots(_)))
+                matches!(
+                    lit_expr.get_literal(),
+                    Some(emmylua_parser::LuaLiteralToken::Dots(_))
+                )
             } else {
                 false
             };
-            
+
             if is_dots && remaining_vars > 0 {
                 // Varargs expansion: generate VarArg instruction with B=0 (all varargs)
                 // or B=remaining_vars+1 (specific number)
                 let base_reg = alloc_register(c);
-                
+
                 // Allocate registers for all remaining variables
                 for _i in 1..remaining_vars {
                     alloc_register(c);
                 }
-                
+
                 // VarArg instruction: R(base_reg)..R(base_reg+remaining_vars-1) = ...
                 // B = remaining_vars + 1 (or 0 for all)
-                let b_value = if remaining_vars == 1 { 2 } else { (remaining_vars + 1) as u32 };
-                emit(c, Instruction::encode_abc(OpCode::VarArg, base_reg, b_value, 0));
-                
+                let b_value = if remaining_vars == 1 {
+                    2
+                } else {
+                    (remaining_vars + 1) as u32
+                };
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::VarArg, base_reg, b_value, 0),
+                );
+
                 // Add all registers
                 for i in 0..remaining_vars {
                     regs.push(base_reg + i as u32);

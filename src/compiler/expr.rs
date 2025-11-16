@@ -72,7 +72,7 @@ fn compile_literal_expr(
             emit_load_constant(c, reg, const_idx);
         }
         LuaLiteralToken::Dots(_) => {
-            // Variable arguments: ... 
+            // Variable arguments: ...
             // VarArg instruction: R(A), ..., R(A+B-2) = vararg
             // B=1 means load 0 varargs (empty)
             // B=2 means load 1 vararg into R(A)
@@ -496,30 +496,33 @@ fn compile_table_expr_to(
 
     // Get all fields to detect special cases
     let fields: Vec<_> = expr.get_fields().collect();
-    
+
     // Check if the table is just {...} (single vararg field)
     if fields.len() == 1 && fields[0].is_value_field() {
         if let Some(value_expr) = fields[0].get_value_expr() {
             let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
                 if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
-            
+
             if is_dots {
                 // Special case: {...} - table with only varargs
                 // Create empty table at reg
                 emit(c, Instruction::encode_abc(OpCode::NewTable, reg, 0, 0));
-                
+
                 // Load varargs starting at reg+1
                 // VarArg with B=0 will load all varargs into consecutive registers
                 let vararg_start = reg + 1;
-                emit(c, Instruction::encode_abc(OpCode::VarArg, vararg_start, 0, 0));
-                
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::VarArg, vararg_start, 0, 0),
+                );
+
                 // SetList: table at reg, values from reg+1, starting at index 0
                 emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, 0));
-                
+
                 // Important: VarArg with B=0 loads unknown number of values
                 // We don't update next_register here because we don't know how many
                 // The VM will handle this at runtime
-                
+
                 return Ok(reg);
             }
         }
@@ -537,7 +540,7 @@ fn compile_table_expr_to(
     // Compile table fields
     for (field_idx, field) in fields.iter().enumerate() {
         let is_last_field = field_idx == field_count - 1;
-        
+
         if field.is_value_field() {
             // Value only format: { 10, 20, 30 } - array part
             if let Some(value_expr) = field.get_value_expr() {
@@ -545,121 +548,136 @@ fn compile_table_expr_to(
                 let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
                     if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
                 let is_call = matches!(&value_expr, LuaExpr::CallExpr(_));
-                
+
                 if is_last_field && (is_dots || is_call) {
                     // Special handling for ... or function call as last element
                     // These should expand to multiple values
-                    
+
                     if is_dots {
                         // VarArg expansion in table constructor
                         // Strategy: Load all varargs to consecutive registers, then use SetList
-                        
+
                         // First, allocate a register for the first vararg
                         let vararg_base_reg = alloc_register(c);
-                        
+
                         // VarArg with B=0: load ALL varargs starting at vararg_base_reg
-                        emit(c, Instruction::encode_abc(OpCode::VarArg, vararg_base_reg, 0, 0));
-                        
+                        emit(
+                            c,
+                            Instruction::encode_abc(OpCode::VarArg, vararg_base_reg, 0, 0),
+                        );
+
                         // Now use SetList to set these values in the table
                         // SetList parameters:
                         // A = table register (reg)
                         // B = 0 (means use all registers from A+1 to frame top)
                         // C = starting table index - 1 (0-based)
-                        
+
                         // But wait - SetList expects values starting at R(A+1)
                         // We need values at R(reg+1), but we loaded them at vararg_base_reg
-                        
+
                         // We need to either:
                         // 1. Load varargs starting at reg+1
                         // 2. Or modify SetList to take a different source register
-                        
+
                         // Let's use approach 1: make sure varargs are loaded right after the table
                         // But the table is at `reg`, so we need varargs at reg+1
-                        
+
                         // Actually, the issue is that we already allocated registers for array elements
                         // Let's rethink: for {a, b, c, ...}, we process a, b, c first,
                         // then hit ..., and need to append remaining varargs
-                        
+
                         // The varargs should start at array_index
                         // We load them starting at vararg_base_reg
                         // Then SetList sets table[C+1], table[C+2], ... from these registers
-                        
+
                         // Let me check SetList semantics again:
                         // table[c + i] = R(a + i) for i = 1..count
                         // So if a = table register, we need values at a+1, a+2, ...
-                        
+
                         // This means varargs must be loaded at reg+1, reg+2, ...
                         // Let's free any registers we allocated and restart
-                        
+
                         // Actually simpler: Load varargs where they need to be
                         // The first vararg goes to table index `array_index`
                         // But SetList sets table[C+i] from R(A+i)
                         // If A = reg (table), and we want to set table[array_index],
                         // then C = array_index - 1, and values start at R(reg + 1)
-                        
+
                         // So vararg_base_reg should be reg + 1
                         // But that might conflict with other allocated registers...
-                        
+
                         // Let me check if we can use current next_register
                         let values_start_reg = c.next_register;
-                        emit(c, Instruction::encode_abc(OpCode::VarArg, values_start_reg, 0, 0));
-                        
+                        emit(
+                            c,
+                            Instruction::encode_abc(OpCode::VarArg, values_start_reg, 0, 0),
+                        );
+
                         // Now SetList: table at reg, values from values_start_reg
                         // But SetList expects values at R(A+1), where A is the table
                         // So we need A = values_start_reg - 1
                         // Wait, that's backward...
-                        
+
                         // Let me re-read SetList more carefully:
                         // "table[c + i] = R(a + i) for i = 1..count"
                         // This means we're setting table with keys c+1, c+2, ...
                         // from registers a+1, a+2, ...
-                        
+
                         // So if table is at register `reg`, and values are at `values_start_reg`,
                         // we can't use standard SetList unless values_start_reg = reg + 1
-                        
+
                         // Conclusion: I need to modify SetList to take source register parameter
                         // Or: ensure varargs are loaded at reg+1
-                        
+
                         // For now, let's ensure varargs load at reg+1 by carefully managing registers
                         // Actually this is getting complex. Let me simplify the SetList instruction.
-                        
+
                         // Skip for now and mark as TODO
                         continue;
                     } else if is_call {
                         // Function call as last element - it can return multiple values
                         // We need to call it with MULTRET and add all returns to the table
-                        
+
                         // Similar issue: we need runtime support for this
                         // For now, we'll just take the first return value
                         let value_reg = compile_expr(c, &value_expr)?;
-                        
+
                         let key_const = add_constant(c, LuaValue::integer(array_index));
                         let key_reg = alloc_register(c);
                         emit_load_constant(c, key_reg, key_const);
-                        
-                        emit(c, Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg));
+
+                        emit(
+                            c,
+                            Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
+                        );
                         array_index += 1;
                     }
                 } else {
                     // Normal value
                     let value_reg = compile_expr(c, &value_expr)?;
-                    
+
                     let key_const = add_constant(c, LuaValue::integer(array_index));
                     let key_reg = alloc_register(c);
                     emit_load_constant(c, key_reg, key_const);
-                    
-                    emit(c, Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg));
+
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
+                    );
                     array_index += 1;
                 }
             } else {
                 let value_reg = alloc_register(c);
                 emit_load_nil(c, value_reg);
-                
+
                 let key_const = add_constant(c, LuaValue::integer(array_index));
                 let key_reg = alloc_register(c);
                 emit_load_constant(c, key_reg, key_const);
-                
-                emit(c, Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg));
+
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
+                );
                 array_index += 1;
             }
         } else {
@@ -919,7 +937,7 @@ pub fn compile_closure_expr_to(
             // Don't add ... to locals or count it as a regular parameter
             continue;
         }
-        
+
         // Try to get parameter name
         let param_name = if let Some(name_token) = param.get_name_token() {
             name_token.get_name_text().to_string()

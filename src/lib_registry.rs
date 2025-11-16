@@ -86,7 +86,7 @@ macro_rules! lib_module_ex {
 
 /// Registry for all Lua standard libraries
 pub struct LibraryRegistry {
-    modules: Vec<LibraryModule>,  // Use Vec to preserve insertion order
+    modules: Vec<LibraryModule>, // Use Vec to preserve insertion order
 }
 
 impl LibraryRegistry {
@@ -141,27 +141,29 @@ impl LibraryRegistry {
             // For module libraries, set the table as global
             let lib_value = LuaValue::from_table_rc(lib_table.clone());
             vm.set_global(module.name, lib_value.clone());
-            
+
             // Special handling for string library: set string metatable
             if module.name == "string" {
                 // In Lua, all strings share a metatable where __index points to the string library
                 // This allows using string methods with : syntax (e.g., str:upper())
                 vm.set_string_metatable(lib_value.clone());
             }
-            
+
             // Also register in package.loaded (if package exists)
             // This allows require() to find standard libraries
             if let Some(package_table) = vm.get_global("package") {
                 if let Some(package_rc) = package_table.as_table_rc() {
                     let loaded_key = vm.create_string("loaded".to_string());
-                    if let Some(loaded_table) = package_rc.borrow().raw_get(&LuaValue::from_string_rc(loaded_key)) {
+                    if let Some(loaded_table) = package_rc
+                        .borrow()
+                        .raw_get(&LuaValue::from_string_rc(loaded_key))
+                    {
                         unsafe {
                             if let Some(loaded_rc) = loaded_table.as_table() {
                                 let mod_key = vm.create_string(module.name.to_string());
-                                loaded_rc.borrow_mut().raw_set(
-                                    LuaValue::from_string_rc(mod_key),
-                                    lib_value,
-                                );
+                                loaded_rc
+                                    .borrow_mut()
+                                    .raw_set(LuaValue::from_string_rc(mod_key), lib_value);
                             }
                         }
                     }
@@ -191,7 +193,7 @@ pub fn create_standard_registry() -> LibraryRegistry {
     // Register package library FIRST so package.loaded exists
     // before other libraries try to register themselves
     registry.register(stdlib::package::create_package_lib());
-    
+
     // Register all other standard libraries
     registry.register(stdlib::basic::create_basic_lib());
     registry.register(stdlib::string::create_string_lib());
@@ -214,9 +216,7 @@ pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
     let top = frame.top;
 
     // Skip register 0 (the function itself), collect from 1 to top
-    (1..top)
-        .map(|i| vm.register_stack[base_ptr + i])
-        .collect()
+    (1..top).map(|i| vm.register_stack[base_ptr + i]).collect()
 }
 
 /// Helper to get a specific argument
@@ -229,7 +229,7 @@ pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
     // But register 0 is the function, so arg 0 is at register 1
     // get_arg(0) should return register[base_ptr + 1]
     // get_arg(1) should return register[base_ptr + 2]
-    let reg_offset = index + 1;  // +1 to skip the function at register 0
+    let reg_offset = index + 1; // +1 to skip the function at register 0
     if reg_offset < top {
         let reg_index = base_ptr + reg_offset;
         if reg_index < vm.register_stack.len() {

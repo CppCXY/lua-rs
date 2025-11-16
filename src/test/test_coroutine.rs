@@ -5,8 +5,9 @@ use crate::*;
 fn test_coroutine_create_resume() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local co = coroutine.create(function()
             return 42
         end)
@@ -15,8 +16,9 @@ fn test_coroutine_create_resume() {
         local ok, value = coroutine.resume(co)
         assert(ok == true)
         assert(value == 42)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -24,8 +26,9 @@ fn test_coroutine_create_resume() {
 fn test_coroutine_yield() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local co = coroutine.create(function()
             coroutine.yield(1)
             coroutine.yield(2)
@@ -40,8 +43,9 @@ fn test_coroutine_yield() {
         
         local ok3, v3 = coroutine.resume(co)
         assert(ok3 == true and v3 == 3)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -49,8 +53,9 @@ fn test_coroutine_yield() {
 fn test_coroutine_status() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local co = coroutine.create(function()
             coroutine.yield()
         end)
@@ -60,8 +65,9 @@ fn test_coroutine_status() {
         assert(coroutine.status(co) == "suspended")
         coroutine.resume(co)
         assert(coroutine.status(co) == "dead")
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -69,8 +75,9 @@ fn test_coroutine_status() {
 fn test_coroutine_running() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local main_co = coroutine.running()
         assert(main_co ~= nil)
         
@@ -80,8 +87,9 @@ fn test_coroutine_running() {
         end)
         
         coroutine.resume(co)
-    "#);
-    
+    "#,
+    );
+
     if let Err(e) = &result {
         eprintln!("Error: {}", e);
     }
@@ -92,8 +100,9 @@ fn test_coroutine_running() {
 fn test_coroutine_wrap() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local f = coroutine.wrap(function()
             coroutine.yield(1)
             coroutine.yield(2)
@@ -103,8 +112,9 @@ fn test_coroutine_wrap() {
         assert(f() == 1)
         assert(f() == 2)
         assert(f() == 3)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -112,15 +122,17 @@ fn test_coroutine_wrap() {
 fn test_coroutine_isyieldable() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local co = coroutine.create(function()
             assert(coroutine.isyieldable() == true)
         end)
         
         coroutine.resume(co)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -128,8 +140,9 @@ fn test_coroutine_isyieldable() {
 fn test_coroutine_close() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local co = coroutine.create(function()
             coroutine.yield(1)
             coroutine.yield(2)
@@ -140,8 +153,9 @@ fn test_coroutine_close() {
         
         coroutine.close(co)
         assert(coroutine.status(co) == "dead")
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -149,8 +163,9 @@ fn test_coroutine_close() {
 fn test_coroutine_with_loop() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local co = coroutine.create(function()
             for i = 1, 5 do
                 coroutine.yield(i * 2)
@@ -168,8 +183,9 @@ fn test_coroutine_with_loop() {
         assert(#results == 5)
         assert(results[1] == 2)
         assert(results[5] == 10)
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }
 
@@ -177,8 +193,9 @@ fn test_coroutine_with_loop() {
 fn test_coroutine_error_handling() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    
-    let result = vm.execute_string(r#"
+
+    let result = vm.execute_string(
+        r#"
         local co = coroutine.create(function()
             error("test error")
         end)
@@ -186,7 +203,8 @@ fn test_coroutine_error_handling() {
         local ok, err = coroutine.resume(co)
         assert(ok == false)
         assert(type(err) == "string")
-    "#);
-    
+    "#,
+    );
+
     assert!(result.is_ok());
 }

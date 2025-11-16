@@ -13,7 +13,7 @@ pub fn create_utf8_lib() -> LibraryModule {
         "codepoint" => utf8_codepoint,
         "offset" => utf8_offset,
     });
-    
+
     // Add charpattern constant
     module = module.with_value("charpattern", |vm| {
         // UTF-8 character pattern for pattern matching
@@ -21,7 +21,7 @@ pub fn create_utf8_lib() -> LibraryModule {
         let pattern = "[\\x00-\\x7F\\xC2-\\xF4][\\x80-\\xBF]*";
         LuaValue::from_string_rc(vm.create_string(pattern.to_string()))
     });
-    
+
     module
 }
 
@@ -33,25 +33,25 @@ fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let i = crate::lib_registry::get_arg(vm, 1)
         .and_then(|v| v.as_integer())
         .unwrap_or(1) as usize;
-    
+
     let j = crate::lib_registry::get_arg(vm, 2)
         .and_then(|v| v.as_integer())
         .map(|v| v as usize);
 
     let s_str = s.as_str();
     let bytes = s_str.as_bytes();
-    
+
     // Convert 1-based indices to 0-based byte positions
     let start_byte = if i > 0 { i - 1 } else { 0 };
     let end_byte = j.unwrap_or(bytes.len());
-    
+
     if start_byte > bytes.len() || end_byte > bytes.len() || start_byte > end_byte {
         return Ok(MultiValue::multiple(vec![
             LuaValue::nil(),
             LuaValue::integer(start_byte as i64 + 1),
         ]));
     }
-    
+
     // Count UTF-8 characters
     let slice = &s_str[start_byte..end_byte];
     match std::str::from_utf8(slice.as_bytes()) {
@@ -95,14 +95,14 @@ fn utf8_char(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// utf8.codes(s) - Returns an iterator for UTF-8 characters
 fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use std::rc::Rc;
-    use std::cell::RefCell;
     use crate::lua_value::LuaTable;
-    
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     let s = crate::lib_registry::require_arg(vm, 0, "utf8.codes")?
         .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'utf8.codes' (string expected)".to_string())?;
-    
+
     // Create state table: {string = s, position = 0}
     let state_table = Rc::new(RefCell::new(LuaTable::new()));
     state_table.borrow_mut().raw_set(
@@ -113,7 +113,7 @@ fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
         LuaValue::from_string_rc(vm.create_string("position".to_string())),
         LuaValue::integer(0),
     );
-    
+
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(utf8_codes_iterator),
         LuaValue::from_table_rc(state_table),
@@ -126,38 +126,43 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let state_table = crate::lib_registry::require_arg(vm, 0, "utf8.codes iterator")?
         .as_table_rc()
         .ok_or_else(|| "utf8.codes iterator: state table expected".to_string())?;
-    
+
     let string_key = LuaValue::from_string_rc(vm.create_string("string".to_string()));
     let position_key = LuaValue::from_string_rc(vm.create_string("position".to_string()));
-    
-    let s_val = state_table.borrow().raw_get(&string_key)
+
+    let s_val = state_table
+        .borrow()
+        .raw_get(&string_key)
         .ok_or_else(|| "utf8.codes iterator: string not found".to_string())?;
     let s = unsafe {
-        s_val.as_string()
+        s_val
+            .as_string()
             .ok_or_else(|| "utf8.codes iterator: invalid string".to_string())?
     };
-    
-    let pos = state_table.borrow().raw_get(&position_key)
+
+    let pos = state_table
+        .borrow()
+        .raw_get(&position_key)
         .and_then(|v| v.as_integer())
-        .ok_or_else(|| "utf8.codes iterator: position not found".to_string())? as usize;
-    
+        .ok_or_else(|| "utf8.codes iterator: position not found".to_string())?
+        as usize;
+
     let bytes = s.as_str().as_bytes();
     if pos >= bytes.len() {
         return Ok(MultiValue::single(LuaValue::nil()));
     }
-    
+
     // Decode next UTF-8 character
     let remaining = &s.as_str()[pos..];
     if let Some(ch) = remaining.chars().next() {
         let char_len = ch.len_utf8();
         let code_point = ch as u32;
-        
+
         // Update position
-        state_table.borrow_mut().raw_set(
-            position_key,
-            LuaValue::integer((pos + char_len) as i64),
-        );
-        
+        state_table
+            .borrow_mut()
+            .raw_set(position_key, LuaValue::integer((pos + char_len) as i64));
+
         Ok(MultiValue::multiple(vec![
             LuaValue::integer((pos + 1) as i64), // 1-based position
             LuaValue::integer(code_point as i64),
@@ -172,27 +177,27 @@ fn utf8_codepoint(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = crate::lib_registry::require_arg(vm, 0, "utf8.codepoint")?
         .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'utf8.codepoint' (string expected)".to_string())?;
-    
+
     let i = crate::lib_registry::get_arg(vm, 1)
         .and_then(|v| v.as_integer())
         .unwrap_or(1) as usize;
-    
+
     let j = crate::lib_registry::get_arg(vm, 2)
         .and_then(|v| v.as_integer())
         .map(|v| v as usize)
         .unwrap_or(i);
-    
+
     let bytes = s.as_str().as_bytes();
     let start_byte = if i > 0 { i - 1 } else { 0 };
     let end_byte = if j > 0 { j } else { bytes.len() };
-    
+
     if start_byte >= bytes.len() {
         return Err("bad argument #2 to 'utf8.codepoint' (out of range)".to_string());
     }
-    
+
     let mut results = Vec::new();
     let mut pos = start_byte;
-    
+
     while pos < end_byte && pos < bytes.len() {
         let remaining = &s.as_str()[pos..];
         if let Some(ch) = remaining.chars().next() {
@@ -202,7 +207,7 @@ fn utf8_codepoint(vm: &mut LuaVM) -> Result<MultiValue, String> {
             break;
         }
     }
-    
+
     Ok(MultiValue::multiple(results))
 }
 
@@ -211,25 +216,29 @@ fn utf8_offset(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s = crate::lib_registry::require_arg(vm, 0, "utf8.offset")?
         .as_string_rc()
         .ok_or_else(|| "bad argument #1 to 'utf8.offset' (string expected)".to_string())?;
-    
+
     let n = crate::lib_registry::require_arg(vm, 1, "utf8.offset")?
         .as_integer()
         .ok_or_else(|| "bad argument #2 to 'utf8.offset' (number expected)".to_string())?;
-    
+
     let i = crate::lib_registry::get_arg(vm, 2)
         .and_then(|v| v.as_integer())
-        .unwrap_or(if n >= 0 { 1 } else { (s.as_str().len() + 1) as i64 }) as usize;
-    
+        .unwrap_or(if n >= 0 {
+            1
+        } else {
+            (s.as_str().len() + 1) as i64
+        }) as usize;
+
     let bytes = s.as_str().as_bytes();
     let start_byte = if i > 0 { i - 1 } else { 0 };
-    
+
     if start_byte > bytes.len() {
         return Ok(MultiValue::single(LuaValue::nil()));
     }
-    
+
     let mut pos = start_byte;
     let mut count = n;
-    
+
     if n >= 0 {
         // Forward: find the n-th character from position i
         // When n=1, we want the position of the 1st character starting from i

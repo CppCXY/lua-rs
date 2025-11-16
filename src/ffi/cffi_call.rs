@@ -56,10 +56,8 @@ impl CFunctionCall {
 
                 // int function(const char*)
                 (CTypeKind::Int32, [param]) if matches!(param.kind, CTypeKind::Pointer) => {
-                    let arg_str = args[0].as_string_ptr()
-                        .ok_or("expected string argument")?;
-                    let c_str = CString::new((*arg_str).as_str())
-                        .map_err(|_| "invalid string")?;
+                    let arg_str = args[0].as_string_ptr().ok_or("expected string argument")?;
+                    let c_str = CString::new((*arg_str).as_str()).map_err(|_| "invalid string")?;
 
                     type FnType = unsafe extern "C" fn(*const i8) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -69,8 +67,7 @@ impl CFunctionCall {
 
                 // int function(int)
                 (CTypeKind::Int32, [param]) if matches!(param.kind, CTypeKind::Int32) => {
-                    let arg_int = args[0].as_integer()
-                        .ok_or("expected integer argument")?;
+                    let arg_int = args[0].as_integer().ok_or("expected integer argument")?;
 
                     type FnType = unsafe extern "C" fn(i32) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -80,7 +77,8 @@ impl CFunctionCall {
 
                 // int function(int, int)
                 (CTypeKind::Int32, [p1, p2])
-                    if matches!(p1.kind, CTypeKind::Int32) && matches!(p2.kind, CTypeKind::Int32) =>
+                    if matches!(p1.kind, CTypeKind::Int32)
+                        && matches!(p2.kind, CTypeKind::Int32) =>
                 {
                     let arg1 = args[0].as_integer().ok_or("expected integer argument 1")?;
                     let arg2 = args[1].as_integer().ok_or("expected integer argument 2")?;
@@ -92,9 +90,10 @@ impl CFunctionCall {
                 }
 
                 // void* function(size_t) - malloc-like
-                (CTypeKind::Pointer, [param]) if matches!(param.kind, CTypeKind::UInt64 | CTypeKind::UInt32) => {
-                    let size = args[0].as_integer()
-                        .ok_or("expected size argument")?;
+                (CTypeKind::Pointer, [param])
+                    if matches!(param.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
+                {
+                    let size = args[0].as_integer().ok_or("expected size argument")?;
 
                     type FnType = unsafe extern "C" fn(usize) -> *mut u8;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -105,7 +104,7 @@ impl CFunctionCall {
                 // void* function(size_t, size_t) - calloc-like
                 (CTypeKind::Pointer, [p1, p2])
                     if matches!(p1.kind, CTypeKind::UInt64 | CTypeKind::UInt32)
-                    && matches!(p2.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
+                        && matches!(p2.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
                     let nmemb = args[0].as_integer().ok_or("expected size argument 1")?;
                     let size = args[1].as_integer().ok_or("expected size argument 2")?;
@@ -119,7 +118,7 @@ impl CFunctionCall {
                 // void* function(void*, size_t) - realloc-like
                 (CTypeKind::Pointer, [p1, p2])
                     if matches!(p1.kind, CTypeKind::Pointer)
-                    && matches!(p2.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
+                        && matches!(p2.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
                     let ptr = args[0].as_integer().ok_or("expected pointer argument")?;
                     let size = args[1].as_integer().ok_or("expected size argument")?;
@@ -132,8 +131,7 @@ impl CFunctionCall {
 
                 // void function(void*) - free-like
                 (CTypeKind::Void, [param]) if matches!(param.kind, CTypeKind::Pointer) => {
-                    let ptr = args[0].as_integer()
-                        .ok_or("expected pointer argument")?;
+                    let ptr = args[0].as_integer().ok_or("expected pointer argument")?;
 
                     type FnType = unsafe extern "C" fn(*mut u8);
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -142,17 +140,20 @@ impl CFunctionCall {
                 }
 
                 // int function(const char*, const char*) - strcmp-like
-                (CTypeKind::Int32, [p1, p2]) 
-                    if matches!(p1.kind, CTypeKind::Pointer) && matches!(p2.kind, CTypeKind::Pointer) =>
+                (CTypeKind::Int32, [p1, p2])
+                    if matches!(p1.kind, CTypeKind::Pointer)
+                        && matches!(p2.kind, CTypeKind::Pointer) =>
                 {
-                    let arg1_str = args[0].as_string_ptr()
+                    let arg1_str = args[0]
+                        .as_string_ptr()
                         .ok_or("expected string argument 1")?;
-                    let arg2_str = args[1].as_string_ptr()
+                    let arg2_str = args[1]
+                        .as_string_ptr()
                         .ok_or("expected string argument 2")?;
-                    let c_str1 = CString::new((*arg1_str).as_str())
-                        .map_err(|_| "invalid string 1")?;
-                    let c_str2 = CString::new((*arg2_str).as_str())
-                        .map_err(|_| "invalid string 2")?;
+                    let c_str1 =
+                        CString::new((*arg1_str).as_str()).map_err(|_| "invalid string 1")?;
+                    let c_str2 =
+                        CString::new((*arg2_str).as_str()).map_err(|_| "invalid string 2")?;
 
                     type FnType = unsafe extern "C" fn(*const i8, *const i8) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -162,8 +163,7 @@ impl CFunctionCall {
 
                 // double function(double) - sqrt, sin, cos
                 (CTypeKind::Double, [param]) if matches!(param.kind, CTypeKind::Double) => {
-                    let arg = args[0].as_number()
-                        .ok_or("expected number argument")?;
+                    let arg = args[0].as_number().ok_or("expected number argument")?;
 
                     type FnType = unsafe extern "C" fn(f64) -> f64;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -173,7 +173,8 @@ impl CFunctionCall {
 
                 // double function(double, double) - pow, atan2
                 (CTypeKind::Double, [p1, p2])
-                    if matches!(p1.kind, CTypeKind::Double) && matches!(p2.kind, CTypeKind::Double) =>
+                    if matches!(p1.kind, CTypeKind::Double)
+                        && matches!(p2.kind, CTypeKind::Double) =>
                 {
                     let arg1 = args[0].as_number().ok_or("expected number argument 1")?;
                     let arg2 = args[1].as_number().ok_or("expected number argument 2")?;
@@ -186,9 +187,9 @@ impl CFunctionCall {
 
                 // void* function(void*, int, size_t) - memset-like
                 (CTypeKind::Pointer, [p1, p2, p3])
-                    if matches!(p1.kind, CTypeKind::Pointer) 
-                    && matches!(p2.kind, CTypeKind::Int32)
-                    && matches!(p3.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
+                    if matches!(p1.kind, CTypeKind::Pointer)
+                        && matches!(p2.kind, CTypeKind::Int32)
+                        && matches!(p3.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
                     let ptr = args[0].as_integer().ok_or("expected pointer argument")?;
                     let value = args[1].as_integer().ok_or("expected int argument")?;
@@ -202,9 +203,9 @@ impl CFunctionCall {
 
                 // void* function(void*, const void*, size_t) - memcpy-like
                 (CTypeKind::Pointer, [p1, p2, p3])
-                    if matches!(p1.kind, CTypeKind::Pointer) 
-                    && matches!(p2.kind, CTypeKind::Pointer)
-                    && matches!(p3.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
+                    if matches!(p1.kind, CTypeKind::Pointer)
+                        && matches!(p2.kind, CTypeKind::Pointer)
+                        && matches!(p3.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
                     let dst = args[0].as_integer().ok_or("expected pointer argument 1")?;
                     let src = args[1].as_integer().ok_or("expected pointer argument 2")?;
@@ -226,13 +227,14 @@ impl CFunctionCall {
 
                 // int function(int, const char*) - mixed params
                 (CTypeKind::Int32, [p1, p2])
-                    if matches!(p1.kind, CTypeKind::Int32) && matches!(p2.kind, CTypeKind::Pointer) =>
+                    if matches!(p1.kind, CTypeKind::Int32)
+                        && matches!(p2.kind, CTypeKind::Pointer) =>
                 {
                     let arg1 = args[0].as_integer().ok_or("expected integer argument 1")?;
-                    let arg2_str = args[1].as_string_ptr()
+                    let arg2_str = args[1]
+                        .as_string_ptr()
                         .ok_or("expected string argument 2")?;
-                    let c_str = CString::new((*arg2_str).as_str())
-                        .map_err(|_| "invalid string")?;
+                    let c_str = CString::new((*arg2_str).as_str()).map_err(|_| "invalid string")?;
 
                     type FnType = unsafe extern "C" fn(i32, *const i8) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -240,13 +242,11 @@ impl CFunctionCall {
                     Ok(LuaValue::integer(result as i64))
                 }
 
-                _ => {
-                    Err(format!(
-                        "unsupported C function signature (return: {:?}, params: {} args)",
-                        self.return_type.kind,
-                        self.param_types.len()
-                    ))
-                }
+                _ => Err(format!(
+                    "unsupported C function signature (return: {:?}, params: {} args)",
+                    self.return_type.kind,
+                    self.param_types.len()
+                )),
             }
         }
     }

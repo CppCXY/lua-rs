@@ -1,13 +1,13 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 
-use crate::{LuaString, LuaTable};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
+use crate::{LuaString, LuaTable};
+use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
 use std::rc::Rc;
-use std::cell::RefCell;
 
 mod file;
 pub use file::{LuaFile, create_file_metatable};
@@ -163,7 +163,7 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
             // Convert Rc to raw pointer for GC management
             let mt_ptr = &*file_mt as *const RefCell<LuaTable>;
-            
+
             // Create userdata with metatable (deprecated but works during migration)
             #[allow(deprecated)]
             let userdata = LuaValue::userdata_with_metatable(file, mt_ptr);

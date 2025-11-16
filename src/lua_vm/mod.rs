@@ -1437,7 +1437,7 @@ impl LuaVM {
                     let max_stack_size = lua_func.chunk.max_stack_size;
                     let param_count = lua_func.chunk.param_count;
                     let is_vararg = lua_func.chunk.is_vararg;
-                    
+
                     let frame = self.current_frame();
                     let src_base = frame.base_ptr + a;
                     let top = frame.top;
@@ -1445,9 +1445,13 @@ impl LuaVM {
                     let arg_count = if b == 0 { top - a - 1 } else { b - 1 };
 
                     let new_base = self.register_stack.len();
-                    
+
                     // For vararg functions, we need extra space for varargs after max_stack_size
-                    let vararg_count = if arg_count > param_count { arg_count - param_count } else { 0 };
+                    let vararg_count = if arg_count > param_count {
+                        arg_count - param_count
+                    } else {
+                        0
+                    };
                     let total_size = max_stack_size + vararg_count;
                     self.ensure_stack_capacity(new_base + total_size);
 
@@ -1933,12 +1937,12 @@ impl LuaVM {
     fn op_vararg(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
-        
+
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
-        let vararg_start = frame.vararg_start;  // This is an ABSOLUTE index into register_stack
+        let vararg_start = frame.vararg_start; // This is an ABSOLUTE index into register_stack
         let vararg_count = frame.vararg_count;
-        
+
         if b == 0 {
             // Load all varargs
             for i in 0..vararg_count {
@@ -1961,26 +1965,26 @@ impl LuaVM {
                 }
             }
         }
-        
+
         Ok(())
     }
 
     fn op_setlist(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;  // Table register
-        let b = Instruction::get_b(instr) as usize;  // Number of elements (0 = to stack top)
-        let c = Instruction::get_c(instr) as usize;  // Starting index in table (base)
-        
+        let a = Instruction::get_a(instr) as usize; // Table register
+        let b = Instruction::get_b(instr) as usize; // Number of elements (0 = to stack top)
+        let c = Instruction::get_c(instr) as usize; // Starting index in table (base)
+
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
-        
+
         // Get the table
         let table_val = self.get_register(base_ptr, a);
         if !table_val.is_table() {
             return Err(format!("SetList: not a table, got {:?}", table_val));
         }
-        
+
         let table_rc = table_val.as_table_rc().unwrap();
-        
+
         // Determine how many elements to set
         let count = if b == 0 {
             // Use all remaining registers in the frame
@@ -1989,15 +1993,15 @@ impl LuaVM {
         } else {
             b
         };
-        
+
         // Set table elements: table[c + i] = R(a + i) for i = 1..count
         for i in 0..count {
             let value_reg = a + 1 + i;
             let value = self.get_register(base_ptr, value_reg);
-            let key = LuaValue::integer((c + i + 1) as i64);  // Lua arrays are 1-indexed
+            let key = LuaValue::integer((c + i + 1) as i64); // Lua arrays are 1-indexed
             table_rc.borrow_mut().raw_set(key, value);
         }
-        
+
         Ok(())
     }
 
@@ -2031,11 +2035,13 @@ impl LuaVM {
     pub fn set_string_metatable(&mut self, string_lib: LuaValue) {
         // Create the metatable
         let metatable = self.create_table();
-        
+
         // Set __index to the string library table
         let index_key = self.create_string("__index".to_string());
-        metatable.borrow_mut().raw_set(LuaValue::from_string_rc(index_key), string_lib);
-        
+        metatable
+            .borrow_mut()
+            .raw_set(LuaValue::from_string_rc(index_key), string_lib);
+
         self.string_metatable = Some(metatable);
     }
 
@@ -3138,7 +3144,7 @@ impl LuaVM {
                 } else {
                     None
                 }
-            },
+            }
             // TODO: Support metatables for userdata
             _ => None,
         }

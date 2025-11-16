@@ -119,7 +119,11 @@ impl LuaUpvalue {
     }
 
     /// Get the value (requires VM to read from stack if open)
-    pub fn get_value(&self, frames: &[crate::lua_vm::LuaCallFrame], register_stack: &[LuaValue]) -> LuaValue {
+    pub fn get_value(
+        &self,
+        frames: &[crate::lua_vm::LuaCallFrame],
+        register_stack: &[LuaValue],
+    ) -> LuaValue {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { frame_id, register } => {
@@ -141,7 +145,12 @@ impl LuaUpvalue {
     }
 
     /// Set the value (requires VM to write to stack if open)
-    pub fn set_value(&self, frames: &mut [crate::lua_vm::LuaCallFrame], register_stack: &mut [LuaValue], value: LuaValue) {
+    pub fn set_value(
+        &self,
+        frames: &mut [crate::lua_vm::LuaCallFrame],
+        register_stack: &mut [LuaValue],
+        value: LuaValue,
+    ) {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { frame_id, register } => {
@@ -248,7 +257,7 @@ pub struct Chunk {
     pub locals: Vec<String>,
     pub upvalue_count: usize,
     pub param_count: usize,
-    pub is_vararg: bool,               // Whether function uses ... (varargs)
+    pub is_vararg: bool, // Whether function uses ... (varargs)
     pub max_stack_size: usize,
     pub child_protos: Vec<Rc<Chunk>>, // Nested function prototypes
     pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
@@ -388,7 +397,7 @@ mod value_tests {
 
         assert!(int_val.is_integer());
         assert!(!int_val.is_float());
-        assert!(!float_val.is_integer());  // 42.0 is a float, not an integer
+        assert!(!float_val.is_integer()); // 42.0 is a float, not an integer
         assert!(float_val.is_float());
 
         // Both are numbers

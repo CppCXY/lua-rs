@@ -1,7 +1,7 @@
 // FFI library for Lua
 
 use crate::ffi;
-use crate::lib_registry::{LibraryModule, LibraryEntry};
+use crate::lib_registry::{LibraryEntry, LibraryModule};
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
 
@@ -29,15 +29,15 @@ pub fn create_ffi_lib() -> LibraryModule {
 // Create ffi.C namespace table
 fn create_ffi_c_namespace(vm: &mut LuaVM) -> LuaValue {
     let table = vm.create_table();
-    
+
     // Set __index metamethod for lazy symbol loading
     let meta = vm.create_table();
     let index_key = vm.create_string("__index".to_string());
     meta.borrow_mut().raw_set(
         LuaValue::from_string_rc(index_key),
-        LuaValue::cfunction(ffi_c_index_wrapper)
+        LuaValue::cfunction(ffi_c_index_wrapper),
     );
-    
+
     table.borrow_mut().set_metatable(Some(meta));
     LuaValue::from_table_rc(table)
 }

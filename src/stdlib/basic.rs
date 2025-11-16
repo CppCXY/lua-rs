@@ -3,12 +3,12 @@
 // select, ipairs, pairs, next, pcall, xpcall, getmetatable, setmetatable,
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
 
-use crate::{LuaString, LuaTable};
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::LuaVM;
-use std::rc::Rc;
+use crate::{LuaString, LuaTable};
 use std::cell::RefCell;
+use std::rc::Rc;
 
 pub fn create_basic_lib() -> LibraryModule {
     crate::lib_module!("_G", {
@@ -341,23 +341,21 @@ fn lua_xpcall(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// getmetatable(object) - Get metatable
 fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
-    
+
     let value = get_arg(vm, 0).ok_or("getmetatable() requires 1 argument")?;
 
     match value.kind() {
-        LuaValueKind::Table => {
-            unsafe {
-                if let Some(t) = value.as_table() {
-                    if let Some(mt) = t.borrow().get_metatable() {
-                        Ok(MultiValue::single(LuaValue::from_table_rc(mt)))
-                    } else {
-                        Ok(MultiValue::single(LuaValue::nil()))
-                    }
+        LuaValueKind::Table => unsafe {
+            if let Some(t) = value.as_table() {
+                if let Some(mt) = t.borrow().get_metatable() {
+                    Ok(MultiValue::single(LuaValue::from_table_rc(mt)))
                 } else {
                     Ok(MultiValue::single(LuaValue::nil()))
                 }
+            } else {
+                Ok(MultiValue::single(LuaValue::nil()))
             }
-        }
+        },
         // TODO: Support metatables for other types (userdata, strings, etc.)
         _ => Ok(MultiValue::single(LuaValue::nil())),
     }
@@ -366,7 +364,7 @@ fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// setmetatable(table, metatable) - Set metatable
 fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
-    
+
     let table = get_arg(vm, 0).ok_or("setmetatable() requires 2 arguments")?;
     let metatable = get_arg(vm, 1).ok_or("setmetatable() requires 2 arguments")?;
 
@@ -412,7 +410,7 @@ fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// rawget(table, index) - Get without metamethods
 fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
-    
+
     let table = get_arg(vm, 0).ok_or("rawget() requires 2 arguments")?;
     let key = get_arg(vm, 1).ok_or("rawget() requires 2 arguments")?;
 
@@ -429,7 +427,7 @@ fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// rawset(table, index, value) - Set without metamethods
 fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
-    
+
     let table = get_arg(vm, 0).ok_or("rawset() requires 3 arguments")?;
     let key = get_arg(vm, 1).ok_or("rawset() requires 3 arguments")?;
     let value = get_arg(vm, 2).ok_or("rawset() requires 3 arguments")?;
@@ -451,7 +449,7 @@ fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// rawlen(v) - Length without metamethods
 fn lua_rawlen(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
-    
+
     let value = get_arg(vm, 0).ok_or("rawlen() requires 1 argument")?;
 
     let len = unsafe {
@@ -553,38 +551,44 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Try each searcher in package.searchers
     let mut error_messages = Vec::new();
-    
+
     unsafe {
-        let package_table = vm.get_global("package")
+        let package_table = vm
+            .get_global("package")
             .ok_or_else(|| "package table not found".to_string())?;
-        
-        let package_rc = package_table.as_table()
+
+        let package_rc = package_table
+            .as_table()
             .ok_or_else(|| "package is not a table".to_string())?;
-        
-        let searchers_val = package_rc.borrow().raw_get(&LuaValue::from_string_rc(
-            vm.create_string("searchers".to_string())
-        )).unwrap_or(LuaValue::nil());
-        
-        let searchers_table = searchers_val.as_table()
+
+        let searchers_val = package_rc
+            .borrow()
+            .raw_get(&LuaValue::from_string_rc(
+                vm.create_string("searchers".to_string()),
+            ))
+            .unwrap_or(LuaValue::nil());
+
+        let searchers_table = searchers_val
+            .as_table()
             .ok_or_else(|| "package.searchers is not a table".to_string())?;
-        
+
         // Try each searcher (1-based indexing)
         let mut i = 1;
         loop {
             let searcher_key = LuaValue::integer(i);
-            let searcher = searchers_table.borrow().raw_get(&searcher_key).unwrap_or(LuaValue::nil());
-            
+            let searcher = searchers_table
+                .borrow()
+                .raw_get(&searcher_key)
+                .unwrap_or(LuaValue::nil());
+
             if searcher.is_nil() {
                 break; // No more searchers
             }
-            
+
             // Call searcher with module name
             let modname_val = LuaValue::from_string_rc(vm.create_string(modname_str.to_string()));
-            let (success, results) = vm.protected_call(
-                searcher.clone(),
-                vec![modname_val]
-            );
-            
+            let (success, results) = vm.protected_call(searcher.clone(), vec![modname_val]);
+
             if !success {
                 let error_msg = results
                     .first()
@@ -593,39 +597,44 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
                     .unwrap_or_else(|| "unknown error in searcher".to_string());
                 return Err(format!("error calling searcher: {}", error_msg));
             }
-            
+
             // Check result
             if !results.is_empty() {
                 let first_result = &results[0];
-                
+
                 // If it's a function, this is the loader
                 if first_result.is_function() || first_result.is_cfunction() {
                     // Call the loader
-                    let modname_arg = LuaValue::from_string_rc(vm.create_string(modname_str.to_string()));
+                    let modname_arg =
+                        LuaValue::from_string_rc(vm.create_string(modname_str.to_string()));
                     let loader_args = if results.len() > 1 {
                         vec![modname_arg, results[1].clone()]
                     } else {
                         vec![modname_arg]
                     };
-                    
-                    let (load_success, load_results) = vm.protected_call(first_result.clone(), loader_args);
-                    
+
+                    let (load_success, load_results) =
+                        vm.protected_call(first_result.clone(), loader_args);
+
                     if !load_success {
                         let error_msg = load_results
                             .first()
                             .and_then(|v| v.as_string())
                             .map(|s| s.as_str().to_string())
                             .unwrap_or_else(|| "unknown error".to_string());
-                        return Err(format!("error loading module '{}': {}", modname_str, error_msg));
+                        return Err(format!(
+                            "error loading module '{}': {}",
+                            modname_str, error_msg
+                        ));
                     }
-                    
+
                     // Get the module value
                     let module_value = if load_results.is_empty() || load_results[0].is_nil() {
                         LuaValue::boolean(true)
                     } else {
                         load_results[0].clone()
                     };
-                    
+
                     // Store in package.loaded
                     let loaded_key = vm.create_string("loaded".to_string());
                     if let Some(loaded_table) = package_rc
@@ -634,57 +643,61 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
                     {
                         if let Some(loaded_rc) = loaded_table.as_table() {
                             let mod_key = vm.create_string(modname_str.to_string());
-                            loaded_rc.borrow_mut().raw_set(
-                                LuaValue::from_string_rc(mod_key),
-                                module_value.clone(),
-                            );
+                            loaded_rc
+                                .borrow_mut()
+                                .raw_set(LuaValue::from_string_rc(mod_key), module_value.clone());
                         }
                     }
-                    
+
                     return Ok(MultiValue::single(module_value));
                 } else if let Some(err_str) = first_result.as_string() {
                     // It's an error message
                     error_messages.push(err_str.as_str().to_string());
                 }
             }
-            
+
             i += 1;
         }
     }
-    
+
     // All searchers failed
     if error_messages.is_empty() {
         Err(format!("module '{}' not found", modname_str))
     } else {
-        Err(format!("module '{}' not found:{}", modname_str, error_messages.join("")))
+        Err(format!(
+            "module '{}' not found:{}",
+            modname_str,
+            error_messages.join("")
+        ))
     }
 }
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
 fn lua_load(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let chunk_val = require_arg(vm, 0, "load")?;
-    
+
     // Get the chunk string
     let code = unsafe {
-        chunk_val.as_string()
+        chunk_val
+            .as_string()
             .ok_or_else(|| "bad argument #1 to 'load' (string expected)".to_string())?
             .as_str()
             .to_string()
     };
-    
+
     // Optional chunk name for error messages
     let _chunkname = get_arg(vm, 1)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
         .unwrap_or_else(|| "=(load)".to_string());
-    
+
     // Optional mode ("b", "t", or "bt") - we only support "t" (text)
     let _mode = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
         .unwrap_or_else(|| "bt".to_string());
-    
+
     // Optional environment table
     let _env = get_arg(vm, 3);
-    
+
     // Compile the code
     match crate::Compiler::compile(&code) {
         Ok(chunk) => {
@@ -707,9 +720,9 @@ fn lua_load(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// loadfile([filename [, mode [, env]]]) - Load a file as a chunk
 fn lua_loadfile(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let filename = get_arg(vm, 0)
-        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
-    
+    let filename =
+        get_arg(vm, 0).and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
+
     let code = if let Some(fname) = filename {
         // Load from specified file
         match std::fs::read_to_string(&fname) {
@@ -730,7 +743,7 @@ fn lua_loadfile(vm: &mut LuaVM) -> Result<MultiValue, String> {
             LuaValue::from_string_rc(err_msg),
         ]));
     };
-    
+
     // Compile the code
     match crate::Compiler::compile(&code) {
         Ok(chunk) => {
@@ -752,9 +765,9 @@ fn lua_loadfile(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// dofile([filename]) - Execute a file
 fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let filename = get_arg(vm, 0)
-        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
-    
+    let filename =
+        get_arg(vm, 0).and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
+
     let code = if let Some(fname) = filename {
         // Load from specified file
         match std::fs::read_to_string(&fname) {
@@ -765,7 +778,7 @@ fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
         // Load from stdin (simplified: return error for now)
         return Err("stdin loading not implemented".to_string());
     };
-    
+
     // Compile and execute
     match crate::Compiler::compile(&code) {
         Ok(chunk) => {
@@ -773,10 +786,10 @@ fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 chunk: std::rc::Rc::new(chunk),
                 upvalues: vec![],
             }));
-            
+
             // Call the function
             let (success, results) = vm.protected_call(func, vec![]);
-            
+
             if success {
                 Ok(MultiValue::multiple(results))
             } else {
@@ -797,12 +810,12 @@ fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// warn(msg1, ...) - Emit a warning
 fn lua_warn(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = get_args(_vm);
-    
+
     let messages: Vec<String> = args.iter().map(|v| v.to_string_repr()).collect();
     let message = messages.join("");
-    
+
     // Emit warning to stderr
     eprintln!("Lua warning: {}", message);
-    
+
     Ok(MultiValue::empty())
 }

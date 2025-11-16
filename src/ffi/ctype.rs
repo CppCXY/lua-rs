@@ -33,14 +33,14 @@ pub struct CType {
     pub size: usize,
     pub alignment: usize,
     pub name: Option<String>,
-    
+
     // For pointer/array types
     pub element_type: Option<Box<CType>>,
     pub array_size: Option<usize>,
-    
+
     // For struct/union types
     pub fields: Option<HashMap<String, StructField>>,
-    
+
     // For function types
     pub return_type: Option<Box<CType>>,
     pub param_types: Option<Vec<CType>>,
@@ -105,15 +105,15 @@ impl CType {
         // Calculate struct size and alignment
         let mut size = 0;
         let mut alignment = 1;
-        
+
         for field in fields.values() {
             alignment = alignment.max(field.ctype.alignment);
             size = size.max(field.offset + field.ctype.size);
         }
-        
+
         // Add padding at the end
         size = (size + alignment - 1) & !(alignment - 1);
-        
+
         CType {
             kind: CTypeKind::Struct,
             size,
@@ -130,7 +130,8 @@ impl CType {
 
     pub fn get_field_offset(&self, field_name: &str) -> Result<usize, String> {
         if let Some(fields) = &self.fields {
-            fields.get(field_name)
+            fields
+                .get(field_name)
                 .map(|f| f.offset)
                 .ok_or_else(|| format!("Field '{}' not found", field_name))
         } else {
@@ -170,7 +171,7 @@ impl CData {
 
     pub fn from_lua_value(ctype: CType, value: LuaValue) -> Result<Self, String> {
         let mut cdata = CData::new(ctype.clone());
-        
+
         match ctype.kind {
             CTypeKind::Int8 | CTypeKind::Int16 | CTypeKind::Int32 | CTypeKind::Int64 => {
                 if let Some(i) = value.as_integer() {
@@ -219,7 +220,7 @@ impl CData {
                 return Err(format!("Unsupported conversion for type {:?}", ctype.kind));
             }
         }
-        
+
         Ok(cdata)
     }
 
@@ -296,15 +297,27 @@ impl CData {
 
     fn read_i64(&self) -> i64 {
         i64::from_ne_bytes([
-            self.data[0], self.data[1], self.data[2], self.data[3],
-            self.data[4], self.data[5], self.data[6], self.data[7],
+            self.data[0],
+            self.data[1],
+            self.data[2],
+            self.data[3],
+            self.data[4],
+            self.data[5],
+            self.data[6],
+            self.data[7],
         ])
     }
 
     fn read_u64(&self) -> u64 {
         u64::from_ne_bytes([
-            self.data[0], self.data[1], self.data[2], self.data[3],
-            self.data[4], self.data[5], self.data[6], self.data[7],
+            self.data[0],
+            self.data[1],
+            self.data[2],
+            self.data[3],
+            self.data[4],
+            self.data[5],
+            self.data[6],
+            self.data[7],
         ])
     }
 
@@ -314,8 +327,14 @@ impl CData {
 
     fn read_f64(&self) -> f64 {
         f64::from_ne_bytes([
-            self.data[0], self.data[1], self.data[2], self.data[3],
-            self.data[4], self.data[5], self.data[6], self.data[7],
+            self.data[0],
+            self.data[1],
+            self.data[2],
+            self.data[3],
+            self.data[4],
+            self.data[5],
+            self.data[6],
+            self.data[7],
         ])
     }
 }

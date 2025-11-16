@@ -208,17 +208,17 @@ impl LuaValue {
         // 1. primary == NAN_BASE (canonicalized NaN)
         // 2. OR primary is not a tagged value (i.e., not matching any TAG_* constants)
         // Note: Negative floats have high bit set, but we store them directly as bits
-        self.primary == NAN_BASE ||
-        (self.primary != VALUE_NIL &&
-         self.primary != VALUE_TRUE &&
-         self.primary != VALUE_FALSE &&
-         self.primary != TAG_INTEGER &&
-         self.primary != TAG_STRING &&
-         self.primary != TAG_TABLE &&
-         self.primary != TAG_FUNCTION &&
-         self.primary != TAG_USERDATA &&
-         self.primary != TAG_THREAD &&
-         self.primary != TAG_CFUNCTION)
+        self.primary == NAN_BASE
+            || (self.primary != VALUE_NIL
+                && self.primary != VALUE_TRUE
+                && self.primary != VALUE_FALSE
+                && self.primary != TAG_INTEGER
+                && self.primary != TAG_STRING
+                && self.primary != TAG_TABLE
+                && self.primary != TAG_FUNCTION
+                && self.primary != TAG_USERDATA
+                && self.primary != TAG_THREAD
+                && self.primary != TAG_CFUNCTION)
     }
 
     #[inline(always)]
@@ -438,7 +438,7 @@ impl LuaValue {
 
     // ============ Additional Compatibility Constructors ============
     // Note: These are now deprecated - use VM::alloc_string/table/function instead
-    
+
     /// Create string value (allocates on heap, NOT registered with GC!)
     /// WARNING: Use VM::alloc_string() instead to ensure GC tracking
     #[deprecated(note = "Use VM::alloc_string() to ensure GC tracking")]
@@ -481,7 +481,7 @@ impl LuaValue {
     }
 
     // ============ GC-based accessors (return references, not Rc) ============
-    
+
     /// Get string reference (unsafe - must ensure GC has not collected it)
     #[inline]
     pub unsafe fn as_string(&self) -> Option<&LuaString> {
@@ -539,7 +539,7 @@ impl LuaValue {
 
     // ============ Legacy Rc-based accessors (for compatibility) ============
     // These create temporary Rc references - use sparingly
-    
+
     /// Get string as Rc (creates temporary Rc without proper GC tracking)
     /// Use only for compatibility during migration
     #[inline]
@@ -610,7 +610,9 @@ impl LuaValue {
             LuaValueKind::Integer => self.as_integer().unwrap().to_string(),
             LuaValueKind::Float => self.as_float().unwrap().to_string(),
             LuaValueKind::String => unsafe {
-                self.as_string().map(|s| s.as_str().to_string()).unwrap_or_else(|| "".to_string())
+                self.as_string()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_else(|| "".to_string())
             },
             LuaValueKind::Table => format!("table: {:x}", self.secondary()),
             LuaValueKind::Function => format!("function: {:x}", self.secondary()),
@@ -652,7 +654,7 @@ impl LuaValue {
             TAG_USERDATA => LuaValueKind::Userdata,
             TAG_THREAD => LuaValueKind::Thread,
             TAG_CFUNCTION => LuaValueKind::CFunction,
-            _ => LuaValueKind::Float,  // Everything else is a float (including NaN and negative floats)
+            _ => LuaValueKind::Float, // Everything else is a float (including NaN and negative floats)
         }
     }
 }
@@ -691,7 +693,7 @@ impl std::fmt::Debug for LuaValue {
                 } else {
                     write!(f, "<invalid string>")
                 }
-            }
+            },
             LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
             LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
             LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.secondary()),

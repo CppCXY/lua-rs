@@ -40,5 +40,3 @@ pub fn execute_with_vm(vm: &mut LuaVM, source: &str) -> Result<LuaValue, String>
     vm.open_libs();
     vm.execute(Rc::new(chunk))
 }
-
-
