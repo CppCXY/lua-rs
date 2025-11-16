@@ -13,6 +13,8 @@ pub struct LuaCallFrame {
     pub func_name: Option<String>, // Function name for debugging
     pub source: Option<String>,   // Source file/chunk name
     pub is_protected: bool,       // Is this a pcall frame?
+    pub vararg_start: usize,      // Start index of variable arguments (relative to base_ptr)
+    pub vararg_count: usize,      // Number of variable arguments
 }
 
 impl LuaCallFrame {
@@ -35,6 +37,8 @@ impl LuaCallFrame {
             func_name: None,
             source: function.chunk.source_name.clone(),
             is_protected: false,
+            vararg_start: 0,
+            vararg_count: 0,
         }
     }
 
@@ -56,6 +60,8 @@ impl LuaCallFrame {
             func_name: Some("[C]".to_string()),
             source: Some("[C]".to_string()),
             is_protected: false,
+            vararg_start: 0,
+            vararg_count: 0,
         }
     }
 }

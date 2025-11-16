@@ -255,6 +255,8 @@ impl LuaVM {
                 OpCode::Concat => self.op_concat(instr)?,
                 OpCode::GetGlobal => self.op_getglobal(instr)?,
                 OpCode::SetGlobal => self.op_setglobal(instr)?,
+                OpCode::VarArg => self.op_vararg(instr)?,
+                OpCode::SetList => self.op_setlist(instr)?,
             }
 
             // Check if yielding after executing instruction
@@ -1433,24 +1435,46 @@ impl LuaVM {
             unsafe {
                 if let Some(lua_func) = func.as_function() {
                     let max_stack_size = lua_func.chunk.max_stack_size;
-                    let new_base = self.register_stack.len();
-                    self.ensure_stack_capacity(new_base + max_stack_size);
-
-                    // Fast copy arguments directly without function calls
+                    let param_count = lua_func.chunk.param_count;
+                    let is_vararg = lua_func.chunk.is_vararg;
+                    
                     let frame = self.current_frame();
                     let src_base = frame.base_ptr + a;
                     let top = frame.top;
                     let frame_base = frame.base_ptr;
                     let arg_count = if b == 0 { top - a - 1 } else { b - 1 };
 
-                    // Batch copy arguments
-                    for i in 0..arg_count {
+                    let new_base = self.register_stack.len();
+                    
+                    // For vararg functions, we need extra space for varargs after max_stack_size
+                    let vararg_count = if arg_count > param_count { arg_count - param_count } else { 0 };
+                    let total_size = max_stack_size + vararg_count;
+                    self.ensure_stack_capacity(new_base + total_size);
+
+                    // Copy only the regular parameters (not varargs)
+                    let params_to_copy = arg_count.min(param_count);
+                    for i in 0..params_to_copy {
                         let src_idx = src_base + 1 + i;
                         if src_idx < frame_base + top {
                             let val = self.register_stack[src_idx];
                             self.register_stack[new_base + i] = val;
                         }
                     }
+
+                    // If vararg function, copy extra args to the end of the frame
+                    let vararg_base = if is_vararg && vararg_count > 0 {
+                        let vararg_start_in_stack = new_base + max_stack_size;
+                        for i in 0..vararg_count {
+                            let src_idx = src_base + 1 + param_count + i;
+                            if src_idx < frame_base + top {
+                                let val = self.register_stack[src_idx];
+                                self.register_stack[vararg_start_in_stack + i] = val;
+                            }
+                        }
+                        Some(vararg_start_in_stack)
+                    } else {
+                        None
+                    };
 
                     let frame_id = self.next_frame_id;
                     self.next_frame_id += 1;
@@ -1460,7 +1484,7 @@ impl LuaVM {
                     let func_rc_clone = func_rc.clone();
                     std::mem::forget(func_rc);
 
-                    let new_frame = LuaCallFrame::new_lua_function(
+                    let mut new_frame = LuaCallFrame::new_lua_function(
                         frame_id,
                         func_rc_clone,
                         new_base,
@@ -1468,6 +1492,13 @@ impl LuaVM {
                         a,
                         if c == 0 { usize::MAX } else { c - 1 },
                     );
+
+                    // Set up vararg information if function uses ...
+                    if is_vararg && vararg_count > 0 {
+                        // vararg_start is now an ABSOLUTE index into register_stack
+                        new_frame.vararg_start = vararg_base.unwrap();
+                        new_frame.vararg_count = vararg_count;
+                    }
 
                     self.frames.push(new_frame);
                     return Ok(());
@@ -1897,6 +1928,77 @@ impl LuaVM {
                 Err("Invalid global name".to_string())
             }
         }
+    }
+
+    fn op_vararg(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let vararg_start = frame.vararg_start;  // This is an ABSOLUTE index into register_stack
+        let vararg_count = frame.vararg_count;
+        
+        if b == 0 {
+            // Load all varargs
+            for i in 0..vararg_count {
+                let vararg_value = self.register_stack[vararg_start + i];
+                self.set_register(base_ptr, a + i, vararg_value);
+            }
+            // Update frame top to reflect loaded varargs (for SetList with B=0)
+            let frame = self.current_frame_mut();
+            frame.top = a + vararg_count;
+        } else {
+            // Load (b-1) varargs
+            let count = b - 1;
+            for i in 0..count {
+                if i < vararg_count {
+                    let vararg_value = self.register_stack[vararg_start + i];
+                    self.set_register(base_ptr, a + i, vararg_value);
+                } else {
+                    // Pad with nil if not enough varargs
+                    self.set_register(base_ptr, a + i, LuaValue::nil());
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    fn op_setlist(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;  // Table register
+        let b = Instruction::get_b(instr) as usize;  // Number of elements (0 = to stack top)
+        let c = Instruction::get_c(instr) as usize;  // Starting index in table (base)
+        
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        // Get the table
+        let table_val = self.get_register(base_ptr, a);
+        if !table_val.is_table() {
+            return Err(format!("SetList: not a table, got {:?}", table_val));
+        }
+        
+        let table_rc = table_val.as_table_rc().unwrap();
+        
+        // Determine how many elements to set
+        let count = if b == 0 {
+            // Use all remaining registers in the frame
+            let top = self.current_frame().top;
+            top - a - 1
+        } else {
+            b
+        };
+        
+        // Set table elements: table[c + i] = R(a + i) for i = 1..count
+        for i in 0..count {
+            let value_reg = a + 1 + i;
+            let value = self.get_register(base_ptr, value_reg);
+            let key = LuaValue::integer((c + i + 1) as i64);  // Lua arrays are 1-indexed
+            table_rc.borrow_mut().raw_set(key, value);
+        }
+        
+        Ok(())
     }
 
     // Helper methods
@@ -2397,6 +2499,7 @@ impl LuaVM {
                         locals: Vec::new(),
                         upvalue_count: 0,
                         param_count: 0,
+                        is_vararg: false,
                         max_stack_size: 16,
                         child_protos: Vec::new(),
                         upvalue_descs: Vec::new(),
@@ -3358,6 +3461,7 @@ impl LuaVM {
                         locals: Vec::new(),
                         upvalue_count: 0,
                         param_count: 0,
+                        is_vararg: false,
                         max_stack_size: stack_size,
                         child_protos: Vec::new(),
                         upvalue_descs: Vec::new(),

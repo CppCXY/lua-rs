@@ -248,6 +248,7 @@ pub struct Chunk {
     pub locals: Vec<String>,
     pub upvalue_count: usize,
     pub param_count: usize,
+    pub is_vararg: bool,               // Whether function uses ... (varargs)
     pub max_stack_size: usize,
     pub child_protos: Vec<Rc<Chunk>>, // Nested function prototypes
     pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
@@ -263,6 +264,7 @@ impl Chunk {
             locals: Vec::new(),
             upvalue_count: 0,
             param_count: 0,
+            is_vararg: false,
             max_stack_size: 0,
             child_protos: Vec::new(),
             upvalue_descs: Vec::new(),
