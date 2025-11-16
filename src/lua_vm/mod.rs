@@ -37,40 +37,6 @@ pub struct LuaThread {
     pub yield_call_nret: Option<usize>, // Number of expected return values (C-1 param of CALL)
 }
 
-/// Pool for reusing register Vecs to avoid allocations
-struct RegisterPool {
-    pool: Vec<Vec<LuaValue>>,
-}
-
-impl RegisterPool {
-    fn new() -> Self {
-        RegisterPool { pool: Vec::new() }
-    }
-
-    /// Get a Vec from pool or create new one
-    fn get(&mut self, size: usize) -> Vec<LuaValue> {
-        // Try to find a suitable Vec in pool
-        if let Some(mut regs) = self.pool.pop() {
-            regs.clear();
-            regs.resize(size, LuaValue::nil());
-            regs
-        } else {
-            // Create new Vec with exact capacity
-            let mut regs = Vec::with_capacity(size);
-            regs.resize(size, LuaValue::nil());
-            regs
-        }
-    }
-
-    /// Return Vec to pool for reuse
-    fn recycle(&mut self, mut regs: Vec<LuaValue>) {
-        if self.pool.len() < 16 {  // Max 16 cached Vecs
-            regs.clear();
-            self.pool.push(regs);
-        }
-    }
-}
-
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
     globals: Rc<RefCell<LuaTable>>,
@@ -80,9 +46,6 @@ pub struct LuaVM {
 
     // Global register stack (unified stack architecture, like Lua 5.4)
     pub register_stack: Vec<LuaValue>,
-
-    // Register pool for reusing Vec allocations (deprecated, will remove after full migration)
-    register_pool: RegisterPool,
 
     // Garbage collector
     gc: GC,
@@ -115,7 +78,6 @@ impl LuaVM {
             globals: Rc::new(RefCell::new(LuaTable::new())),
             frames: Vec::new(),
             register_stack: Vec::with_capacity(1024), // Pre-allocate for initial stack
-            register_pool: RegisterPool::new(),
             gc: GC::new(),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),

@@ -22,6 +22,9 @@ pub fn create_string_lib() -> LibraryModule {
         "match" => string_match,
         "gsub" => string_gsub,
         "gmatch" => string_gmatch,
+        "pack" => string_pack,
+        "packsize" => string_packsize,
+        "unpack" => string_unpack,
     })
 }
 
@@ -613,38 +616,42 @@ fn string_match(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// string.gsub(s, pattern, repl [, n]) - Global substitution
-fn string_gsub(_vm: &mut LuaVM) -> Result<MultiValue, String> {
-    //     let s = require_arg(vm, 0, "string.gsub")?
-    //         .as_string()
-    //         .ok_or_else(|| "bad argument #1 to 'string.gsub' (string expected)".to_string())?;
+fn string_gsub(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let arg0 = require_arg(vm, 0, "string.gsub")?;
+    let s = unsafe {
+        arg0.as_string()
+            .ok_or_else(|| "bad argument #1 to 'string.gsub' (string expected)".to_string())?
+    };
 
-    //     let pattern_str = require_arg(vm, 1, "string.gsub")?
-    //         .as_string()
-    //         .ok_or_else(|| "bad argument #2 to 'string.gsub' (string expected)".to_string())?;
+    let arg1 = require_arg(vm, 1, "string.gsub")?;
+    let pattern_str = unsafe {
+        arg1.as_string()
+            .ok_or_else(|| "bad argument #2 to 'string.gsub' (string expected)".to_string())?
+    };
 
-    //     let repl = require_arg(vm, 2, "string.gsub")?
-    //         .as_string()
-    //         .ok_or_else(|| "bad argument #3 to 'string.gsub' (string expected)".to_string())?;
+    let arg2 = require_arg(vm, 2, "string.gsub")?;
+    let repl = unsafe {
+        arg2.as_string()
+            .ok_or_else(|| "bad argument #3 to 'string.gsub' (string expected)".to_string())?
+    };
 
-    //     let max = get_arg(vm, 3)
-    //         .and_then(|v| v.as_integer())
-    //         .map(|n| n as usize);
+    let max = get_arg(vm, 3)
+        .and_then(|v| v.as_integer())
+        .map(|n| n as usize);
 
-    //     match crate::lua_pattern::parse_pattern(pattern_str.as_str()) {
-    //         Ok(pattern) => {
-    //             let (result_str, count) =
-    //                 crate::lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max);
+    match lua_pattern::parse_pattern(pattern_str.as_str()) {
+        Ok(pattern) => {
+            let (result_str, count) =
+                lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max);
 
-    //             let result = vm.create_string(result_str);
-    //             Ok(MultiValue::multiple(vec![
-    //                 LuaValue::from_string_rc(result),
-    //                 LuaValue::integer(count as i64),
-    //             ]))
-    //         }
-    //         Err(e) => Err(format!("invalid pattern: {}", e)),
-    //     }
-    // }
-    todo!("string.gsub not yet implemented")
+            let result = vm.create_string(result_str);
+            Ok(MultiValue::multiple(vec![
+                LuaValue::from_string_rc(result),
+                LuaValue::integer(count as i64),
+            ]))
+        }
+        Err(e) => Err(format!("invalid pattern: {}", e)),
+    }
 }
 
 /// string.gmatch(s, pattern) - Returns an iterator function
@@ -765,4 +772,327 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
         // No more matches
         Ok(MultiValue::single(LuaValue::nil()))
     }
+}
+
+/// string.pack(fmt, v1, v2, ...) - Pack values into binary string
+/// Simplified implementation supporting basic format codes
+fn string_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let fmt_arg = require_arg(vm, 0, "string.pack")?;
+    let fmt = unsafe {
+        fmt_arg.as_string()
+            .ok_or_else(|| "bad argument #1 to 'string.pack' (string expected)".to_string())?
+            .as_str()
+    };
+    
+    let args = crate::lib_registry::get_args(vm);
+    let values = &args[1..]; // Skip format string
+    
+    let mut result = Vec::new();
+    let mut value_idx = 0;
+    let mut chars = fmt.chars();
+    
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' | '\n' | '\r' => continue, // Skip whitespace
+            'b' => {
+                // signed byte
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_integer()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())?;
+                result.push((n & 0xFF) as u8);
+                value_idx += 1;
+            }
+            'B' => {
+                // unsigned byte
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_integer()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())?;
+                result.push((n & 0xFF) as u8);
+                value_idx += 1;
+            }
+            'h' => {
+                // signed short (2 bytes, little-endian)
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_integer()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())? as i16;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+            'H' => {
+                // unsigned short (2 bytes, little-endian)
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_integer()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())? as u16;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+            'i' | 'l' => {
+                // signed int (4 bytes, little-endian)
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_integer()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())? as i32;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+            'I' | 'L' => {
+                // unsigned int (4 bytes, little-endian)
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_integer()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())? as u32;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+            'f' => {
+                // float (4 bytes, little-endian)
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_number()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())? as f32;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+            'd' => {
+                // double (8 bytes, little-endian)
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let n = values[value_idx].as_number()
+                    .ok_or_else(|| "bad argument to 'string.pack' (number expected)".to_string())?;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+            'z' => {
+                // zero-terminated string
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let s = unsafe {
+                    values[value_idx].as_string()
+                        .ok_or_else(|| "bad argument to 'string.pack' (string expected)".to_string())?
+                };
+                result.extend_from_slice(s.as_str().as_bytes());
+                result.push(0); // null terminator
+                value_idx += 1;
+            }
+            'c' => {
+                // fixed-length string - need to read size
+                let mut size_str = String::new();
+                loop {
+                    match chars.next() {
+                        Some(digit) if digit.is_ascii_digit() => size_str.push(digit),
+                        _ => break,
+                    }
+                }
+                let size: usize = size_str.parse()
+                    .map_err(|_| "bad argument to 'string.pack' (invalid size)".to_string())?;;
+                    
+                if value_idx >= values.len() {
+                    return Err("bad argument to 'string.pack' (not enough values)".to_string());
+                }
+                let s = unsafe {
+                    values[value_idx].as_string()
+                        .ok_or_else(|| "bad argument to 'string.pack' (string expected)".to_string())?
+                };
+                let bytes = s.as_str().as_bytes();
+                result.extend_from_slice(&bytes[..size.min(bytes.len())]);
+                // Pad with zeros if needed
+                for _ in bytes.len()..size {
+                    result.push(0);
+                }
+                value_idx += 1;
+            }
+            _ => {
+                return Err(format!("bad argument to 'string.pack' (invalid format option '{}')", ch));
+            }
+        }
+    }
+    
+    let packed = String::from_utf8_lossy(&result).to_string();
+    Ok(MultiValue::single(LuaValue::from_string_rc(vm.create_string(packed))))
+}
+
+/// string.packsize(fmt) - Return size of packed data
+fn string_packsize(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let fmt_arg = require_arg(vm, 0, "string.packsize")?;
+    let fmt = unsafe {
+        fmt_arg.as_string()
+            .ok_or_else(|| "bad argument #1 to 'string.packsize' (string expected)".to_string())?
+            .as_str()
+    };
+    
+    let mut size = 0usize;
+    let mut chars = fmt.chars();
+    
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' | '\n' | '\r' => continue,
+            'b' | 'B' => size += 1,
+            'h' | 'H' => size += 2,
+            'i' | 'I' | 'l' | 'L' | 'f' => size += 4,
+            'd' => size += 8,
+            'z' => {
+                return Err("variable-length format in 'string.packsize'".to_string());
+            }
+            'c' => {
+                let mut size_str = String::new();
+                loop {
+                    match chars.next() {
+                        Some(digit) if digit.is_ascii_digit() => size_str.push(digit),
+                        _ => break,
+                    }
+                }
+                let n: usize = size_str.parse()
+                    .map_err(|_| "bad argument to 'string.packsize' (invalid size)".to_string())?;
+                size += n;
+            }
+            _ => {
+                return Err(format!("bad argument to 'string.packsize' (invalid format option '{}')", ch));
+            }
+        }
+    }
+    
+    Ok(MultiValue::single(LuaValue::integer(size as i64)))
+}
+
+/// string.unpack(fmt, s [, pos]) - Unpack binary string
+fn string_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let fmt_arg = require_arg(vm, 0, "string.unpack")?;
+    let fmt = unsafe {
+        fmt_arg.as_string()
+            .ok_or_else(|| "bad argument #1 to 'string.unpack' (string expected)".to_string())?
+            .as_str()
+    };
+    
+    let s_arg = require_arg(vm, 1, "string.unpack")?;
+    let s = unsafe {
+        s_arg.as_string()
+            .ok_or_else(|| "bad argument #2 to 'string.unpack' (string expected)".to_string())?
+    };
+    let bytes = s.as_str().as_bytes();
+    
+    let pos = get_arg(vm, 2)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(1) as usize - 1; // Convert to 0-based
+    
+    let mut results = Vec::new();
+    let mut idx = pos;
+    let mut chars = fmt.chars();
+    
+    while let Some(ch) = chars.next() {
+        match ch {
+            ' ' | '\t' | '\n' | '\r' => continue,
+            'b' => {
+                if idx >= bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                results.push(LuaValue::integer(bytes[idx] as i8 as i64));
+                idx += 1;
+            }
+            'B' => {
+                if idx >= bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                results.push(LuaValue::integer(bytes[idx] as i64));
+                idx += 1;
+            }
+            'h' => {
+                if idx + 2 > bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                let val = i16::from_le_bytes([bytes[idx], bytes[idx + 1]]);
+                results.push(LuaValue::integer(val as i64));
+                idx += 2;
+            }
+            'H' => {
+                if idx + 2 > bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                let val = u16::from_le_bytes([bytes[idx], bytes[idx + 1]]);
+                results.push(LuaValue::integer(val as i64));
+                idx += 2;
+            }
+            'i' | 'l' => {
+                if idx + 4 > bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                let val = i32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
+                results.push(LuaValue::integer(val as i64));
+                idx += 4;
+            }
+            'I' | 'L' => {
+                if idx + 4 > bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                let val = u32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
+                results.push(LuaValue::integer(val as i64));
+                idx += 4;
+            }
+            'f' => {
+                if idx + 4 > bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                let val = f32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
+                results.push(LuaValue::float(val as f64));
+                idx += 4;
+            }
+            'd' => {
+                if idx + 8 > bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes[idx..idx + 8]);
+                let val = f64::from_le_bytes(arr);
+                results.push(LuaValue::float(val));
+                idx += 8;
+            }
+            'z' => {
+                // Read null-terminated string
+                let start = idx;
+                while idx < bytes.len() && bytes[idx] != 0 {
+                    idx += 1;
+                }
+                let s = String::from_utf8_lossy(&bytes[start..idx]).to_string();
+                results.push(LuaValue::from_string_rc(vm.create_string(s)));
+                idx += 1; // Skip null terminator
+            }
+            'c' => {
+                let mut size_str = String::new();
+                loop {
+                    match chars.next() {
+                        Some(digit) if digit.is_ascii_digit() => size_str.push(digit),
+                        _ => break,
+                    }
+                }
+                let size: usize = size_str.parse()
+                    .map_err(|_| "bad argument to 'string.unpack' (invalid size)".to_string())?;
+                    
+                if idx + size > bytes.len() {
+                    return Err("data string too short".to_string());
+                }
+                let s = String::from_utf8_lossy(&bytes[idx..idx + size]).to_string();
+                results.push(LuaValue::from_string_rc(vm.create_string(s)));
+                idx += size;
+            }
+            _ => {
+                return Err(format!("bad argument to 'string.unpack' (invalid format option '{}')", ch));
+            }
+        }
+    }
+    
+    // Return unpacked values plus next position
+    results.push(LuaValue::integer((idx + 1) as i64)); // Convert back to 1-based
+    Ok(MultiValue::multiple(results))
 }

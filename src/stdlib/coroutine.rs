@@ -15,6 +15,7 @@ pub fn create_coroutine_lib() -> LibraryModule {
         "running" => coroutine_running,
         "wrap" => coroutine_wrap,
         "isyieldable" => coroutine_isyieldable,
+        "close" => coroutine_close,
     })
 }
 
@@ -158,4 +159,44 @@ fn coroutine_wrap(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn coroutine_isyieldable(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let can_yield = vm.current_thread.is_some();
     Ok(MultiValue::single(LuaValue::boolean(can_yield)))
+}
+
+/// coroutine.close(co) - Close a coroutine, marking it as dead
+fn coroutine_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let thread_val = crate::lib_registry::get_arg(vm, 0)
+        .ok_or_else(|| "coroutine.close requires a thread argument".to_string())?;
+    
+    if !thread_val.is_thread() {
+        return Err("coroutine.close requires a thread argument".to_string());
+    }
+    
+    // Get thread from value
+    unsafe {
+        let ptr = thread_val.as_thread_ptr().ok_or("invalid thread")?;
+        if ptr.is_null() {
+            return Err("cannot close dead coroutine".to_string());
+        }
+        
+        let thread_rc = Rc::from_raw(ptr);
+        
+        // Check if already dead
+        let status = thread_rc.borrow().status;
+        if matches!(status, CoroutineStatus::Dead) {
+            std::mem::forget(thread_rc);
+            return Err("cannot close dead coroutine".to_string());
+        }
+        
+        // Check if running
+        if matches!(status, CoroutineStatus::Running) {
+            std::mem::forget(thread_rc);
+            return Err("cannot close running coroutine".to_string());
+        }
+        
+        // Mark as dead
+        thread_rc.borrow_mut().status = CoroutineStatus::Dead;
+        
+        std::mem::forget(thread_rc);
+    }
+    
+    Ok(MultiValue::multiple(vec![LuaValue::boolean(true)]))
 }

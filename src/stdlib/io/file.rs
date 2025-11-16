@@ -201,6 +201,24 @@ pub fn create_file_metatable(vm: &mut LuaVM) -> Rc<RefCell<LuaTable>> {
         LuaValue::cfunction(file_close),
     );
 
+    // file:lines([formats])
+    index_table.borrow_mut().raw_set(
+        LuaValue::from_string_rc(vm.create_string("lines".to_string())),
+        LuaValue::cfunction(file_lines),
+    );
+
+    // file:seek([whence [, offset]])
+    index_table.borrow_mut().raw_set(
+        LuaValue::from_string_rc(vm.create_string("seek".to_string())),
+        LuaValue::cfunction(file_seek),
+    );
+
+    // file:setvbuf(mode [, size])
+    index_table.borrow_mut().raw_set(
+        LuaValue::from_string_rc(vm.create_string("setvbuf".to_string())),
+        LuaValue::cfunction(file_setvbuf),
+    );
+
     // Set __index to the index table
     mt.borrow_mut().raw_set(
         LuaValue::from_string_rc(vm.create_string("__index".to_string())),
@@ -374,4 +392,127 @@ fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 
     Err("expected file handle".to_string())
+}
+
+/// file:lines([formats]) - Returns an iterator for reading lines
+fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    use crate::lib_registry::get_arg;
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    use crate::lua_value::LuaTable;
+    
+    // Get file handle from self
+    let file_val = get_arg(vm, 1).ok_or("file:lines requires self parameter")?;
+    
+    // For now, return a simple iterator that reads lines
+    // Create state table with file handle
+    let state_table = Rc::new(RefCell::new(LuaTable::new()));
+    state_table.borrow_mut().raw_set(
+        LuaValue::from_string_rc(vm.create_string("file".to_string())),
+        file_val.clone(),
+    );
+    
+    Ok(MultiValue::multiple(vec![
+        LuaValue::cfunction(file_lines_iterator),
+        LuaValue::from_table_rc(state_table),
+        LuaValue::nil(),
+    ]))
+}
+
+/// Iterator function for file:lines()
+fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    use crate::lib_registry::get_arg;
+    
+    let state_table = get_arg(vm, 0).ok_or("iterator requires state")?
+        .as_table_rc()
+        .ok_or("invalid iterator state")?;
+    
+    let file_key = LuaValue::from_string_rc(vm.create_string("file".to_string()));
+    let file_val = state_table.borrow().raw_get(&file_key)
+        .ok_or("file not found in state")?;
+    
+    // Read next line
+    unsafe {
+        if let Some(ud) = file_val.as_userdata() {
+            let data = ud.get_data();
+            let mut data_ref = data.borrow_mut();
+            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+                match lua_file.read_line() {
+                    Ok(Some(line)) => {
+                        return Ok(MultiValue::single(LuaValue::from_string_rc(
+                            vm.create_string(line),
+                        )));
+                    }
+                    Ok(None) => return Ok(MultiValue::single(LuaValue::nil())),
+                    Err(e) => return Err(format!("read error: {}", e)),
+                }
+            }
+        }
+    }
+    
+    Err("expected file handle".to_string())
+}
+
+/// file:seek([whence [, offset]]) - Sets and gets the file position
+fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    use crate::lib_registry::get_arg;
+    use std::io::Seek;
+    
+    let file_val = get_arg(vm, 1).ok_or("file:seek requires self parameter")?;
+    
+    let whence = get_arg(vm, 2)
+        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
+        .unwrap_or_else(|| "cur".to_string());
+    
+    let offset = get_arg(vm, 3)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0);
+    
+    unsafe {
+        if let Some(ud) = file_val.as_userdata() {
+            let data = ud.get_data();
+            let mut data_ref = data.borrow_mut();
+            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+                let seek_from = match whence.as_str() {
+                    "set" => std::io::SeekFrom::Start(offset.max(0) as u64),
+                    "cur" => std::io::SeekFrom::Current(offset),
+                    "end" => std::io::SeekFrom::End(offset),
+                    _ => return Err(format!("invalid whence: {}", whence)),
+                };
+                
+                let pos = match &mut lua_file.inner {
+                    FileInner::Read(reader) => reader.seek(seek_from),
+                    FileInner::Write(_) => {
+                        return Err("cannot seek on write-only file".to_string());
+                    }
+                    FileInner::ReadWrite(file) => file.seek(seek_from),
+                    FileInner::Closed => return Err("file is closed".to_string()),
+                };
+                
+                match pos {
+                    Ok(position) => return Ok(MultiValue::single(LuaValue::integer(position as i64))),
+                    Err(e) => return Err(format!("seek error: {}", e)),
+                }
+            }
+        }
+    }
+    
+    Err("expected file handle".to_string())
+}
+
+/// file:setvbuf(mode [, size]) - Sets the buffering mode
+fn file_setvbuf(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    use crate::lib_registry::get_arg;
+    
+    let file_val = get_arg(vm, 1).ok_or("file:setvbuf requires self parameter")?;
+    
+    let _mode = get_arg(vm, 2)
+        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
+        .unwrap_or_else(|| "full".to_string());
+    
+    let _size = get_arg(vm, 3).and_then(|v| v.as_integer());
+    
+    // Simplified implementation - just return success
+    // In a full implementation, this would adjust buffering behavior
+    Ok(MultiValue::single(file_val.clone()))
 }

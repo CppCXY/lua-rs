@@ -8,7 +8,7 @@ use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::LuaVM;
 
 pub fn create_math_lib() -> LibraryModule {
-    crate::lib_module!("math", {
+    let mut module = crate::lib_module!("math", {
         "abs" => math_abs,
         "acos" => math_acos,
         "asin" => math_asin,
@@ -32,7 +32,15 @@ pub fn create_math_lib() -> LibraryModule {
         "tointeger" => math_tointeger,
         "type" => math_type,
         "ult" => math_ult,
-    })
+    });
+    
+    // Add constants using with_value
+    module = module.with_value("pi", |_vm| LuaValue::float(std::f64::consts::PI));
+    module = module.with_value("huge", |_vm| LuaValue::float(f64::INFINITY));
+    module = module.with_value("maxinteger", |_vm| LuaValue::integer(i64::MAX));
+    module = module.with_value("mininteger", |_vm| LuaValue::integer(i64::MIN));
+    
+    module
 }
 
 fn get_number(vm: &LuaVM, idx: usize, func_name: &str) -> Result<f64, String> {

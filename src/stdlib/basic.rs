@@ -33,6 +33,10 @@ pub fn create_basic_lib() -> LibraryModule {
         "collectgarbage" => lua_collectgarbage,
         "_VERSION" => lua_version,
         "require" => lua_require,
+        "load" => lua_load,
+        "loadfile" => lua_loadfile,
+        "dofile" => lua_dofile,
+        "warn" => lua_warn,
     })
 }
 
@@ -547,135 +551,258 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
 
-    // Try to load from package.preload first
+    // Try each searcher in package.searchers
+    let mut error_messages = Vec::new();
+    
     unsafe {
-        if let Some(package_table) = vm.get_global("package") {
-            if let Some(package_rc) = package_table.as_table() {
-                let preload_key = vm.create_string("preload".to_string());
-                if let Some(preload_table) = package_rc
-                    .borrow()
-                    .raw_get(&LuaValue::from_string_rc(preload_key))
-                {
-                    if let Some(preload_rc) = preload_table.as_table() {
-                        let mod_key = vm.create_string(modname_str.to_string());
-                        if let Some(loader) = preload_rc
-                            .borrow()
-                            .raw_get(&LuaValue::from_string_rc(mod_key))
-                        {
-                            if !loader.is_nil() {
-                                // Call the loader function (either CFunction or Lua function)
-                                let (success, results) = vm.protected_call(loader.clone(), vec![LuaValue::from_string_rc(modname.clone())]);
-                                
-                                if !success {
-                                    let error_msg = results
-                                        .first()
-                                        .and_then(|v| v.as_string())
-                                        .map(|s| s.as_str().to_string())
-                                        .unwrap_or_else(|| "unknown error".to_string());
-                                    return Err(format!("error loading module '{}': {}", modname_str, error_msg));
-                                }
-                                
-                                // Get module return value - use true if nothing returned
-                                let module_value = if !results.is_empty() && !results[0].is_nil() {
-                                    results[0].clone()
-                                } else {
-                                    LuaValue::boolean(true)
-                                };
-                                
-                                // Store in package.loaded
-                                let loaded_key = vm.create_string("loaded".to_string());
-                                if let Some(loaded_table) = package_rc
-                                    .borrow()
-                                    .raw_get(&LuaValue::from_string_rc(loaded_key))
-                                {
-                                    if let Some(loaded_rc) = loaded_table.as_table() {
-                                        let mod_key = vm.create_string(modname_str.to_string());
-                                        loaded_rc.borrow_mut().raw_set(
-                                            LuaValue::from_string_rc(mod_key),
-                                            module_value.clone(),
-                                        );
-                                    }
-                                }
-                                
-                                return Ok(MultiValue::single(module_value));
-                            }
-                        }
-                    }
-                }
+        let package_table = vm.get_global("package")
+            .ok_or_else(|| "package table not found".to_string())?;
+        
+        let package_rc = package_table.as_table()
+            .ok_or_else(|| "package is not a table".to_string())?;
+        
+        let searchers_val = package_rc.borrow().raw_get(&LuaValue::from_string_rc(
+            vm.create_string("searchers".to_string())
+        )).unwrap_or(LuaValue::nil());
+        
+        let searchers_table = searchers_val.as_table()
+            .ok_or_else(|| "package.searchers is not a table".to_string())?;
+        
+        // Try each searcher (1-based indexing)
+        let mut i = 1;
+        loop {
+            let searcher_key = LuaValue::integer(i);
+            let searcher = searchers_table.borrow().raw_get(&searcher_key).unwrap_or(LuaValue::nil());
+            
+            if searcher.is_nil() {
+                break; // No more searchers
             }
-        }
-    }
-
-    // Try to load the module from file
-    let possible_paths = vec![
-        format!("{}.lua", modname_str),
-        format!("{}/init.lua", modname_str),
-        format!("./{}.lua", modname_str),
-        format!("./{}/init.lua", modname_str),
-    ];
-
-    for path in possible_paths {
-        if let Ok(code) = std::fs::read_to_string(&path) {
-            // Compile the module
-            match crate::Compiler::compile(&code) {
-                Ok(chunk) => {
-                    // Create a closure from the chunk
-                    let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
-                        chunk: std::rc::Rc::new(chunk),
-                        upvalues: vec![],
-                    }));
-
-                    // Call the module loader using protected_call
-                    let (success, results) = vm.protected_call(func, vec![]);
-
-                    if !success {
-                        let error_msg = unsafe {
-                            results
-                                .first()
-                                .and_then(|v| v.as_string())
-                                .map(|s| s.as_str().to_string())
-                                .unwrap_or_else(|| "unknown error".to_string())
-                        };
-                        return Err(format!(
-                            "error loading module '{}': {}",
-                            modname_str, error_msg
-                        ));
+            
+            // Call searcher with module name
+            let modname_val = LuaValue::from_string_rc(vm.create_string(modname_str.to_string()));
+            let (success, results) = vm.protected_call(
+                searcher.clone(),
+                vec![modname_val]
+            );
+            
+            if !success {
+                let error_msg = results
+                    .first()
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_else(|| "unknown error in searcher".to_string());
+                return Err(format!("error calling searcher: {}", error_msg));
+            }
+            
+            // Check result
+            if !results.is_empty() {
+                let first_result = &results[0];
+                
+                // If it's a function, this is the loader
+                if first_result.is_function() || first_result.is_cfunction() {
+                    // Call the loader
+                    let modname_arg = LuaValue::from_string_rc(vm.create_string(modname_str.to_string()));
+                    let loader_args = if results.len() > 1 {
+                        vec![modname_arg, results[1].clone()]
+                    } else {
+                        vec![modname_arg]
+                    };
+                    
+                    let (load_success, load_results) = vm.protected_call(first_result.clone(), loader_args);
+                    
+                    if !load_success {
+                        let error_msg = load_results
+                            .first()
+                            .and_then(|v| v.as_string())
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_else(|| "unknown error".to_string());
+                        return Err(format!("error loading module '{}': {}", modname_str, error_msg));
                     }
-
-                    // Get the result value
-                    let module_value = if results.is_empty() || results[0].is_nil() {
+                    
+                    // Get the module value
+                    let module_value = if load_results.is_empty() || load_results[0].is_nil() {
                         LuaValue::boolean(true)
                     } else {
-                        results[0].clone()
+                        load_results[0].clone()
                     };
-
-                    // Store the result in package.loaded
-                    unsafe {
-                        if let Some(package_table) = vm.get_global("package") {
-                            if let Some(package_rc) = package_table.as_table() {
-                                let loaded_key = vm.create_string("loaded".to_string());
-                                if let Some(loaded_table) = package_rc
-                                    .borrow()
-                                    .raw_get(&LuaValue::from_string_rc(loaded_key))
-                                {
-                                    if let Some(loaded_rc) = loaded_table.as_table() {
-                                        let mod_key = vm.create_string(modname_str.to_string());
-                                        loaded_rc.borrow_mut().raw_set(
-                                            LuaValue::from_string_rc(mod_key),
-                                            module_value.clone(),
-                                        );
-                                    }
-                                }
-                            }
+                    
+                    // Store in package.loaded
+                    let loaded_key = vm.create_string("loaded".to_string());
+                    if let Some(loaded_table) = package_rc
+                        .borrow()
+                        .raw_get(&LuaValue::from_string_rc(loaded_key))
+                    {
+                        if let Some(loaded_rc) = loaded_table.as_table() {
+                            let mod_key = vm.create_string(modname_str.to_string());
+                            loaded_rc.borrow_mut().raw_set(
+                                LuaValue::from_string_rc(mod_key),
+                                module_value.clone(),
+                            );
                         }
                     }
-
+                    
                     return Ok(MultiValue::single(module_value));
+                } else if let Some(err_str) = first_result.as_string() {
+                    // It's an error message
+                    error_messages.push(err_str.as_str().to_string());
                 }
-                Err(e) => return Err(format!("error compiling module '{}': {}", modname_str, e)),
             }
+            
+            i += 1;
         }
     }
+    
+    // All searchers failed
+    if error_messages.is_empty() {
+        Err(format!("module '{}' not found", modname_str))
+    } else {
+        Err(format!("module '{}' not found:{}", modname_str, error_messages.join("")))
+    }
+}
 
-    Err(format!("module '{}' not found", modname_str))
+/// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
+fn lua_load(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let chunk_val = require_arg(vm, 0, "load")?;
+    
+    // Get the chunk string
+    let code = unsafe {
+        chunk_val.as_string()
+            .ok_or_else(|| "bad argument #1 to 'load' (string expected)".to_string())?
+            .as_str()
+            .to_string()
+    };
+    
+    // Optional chunk name for error messages
+    let _chunkname = get_arg(vm, 1)
+        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
+        .unwrap_or_else(|| "=(load)".to_string());
+    
+    // Optional mode ("b", "t", or "bt") - we only support "t" (text)
+    let _mode = get_arg(vm, 2)
+        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
+        .unwrap_or_else(|| "bt".to_string());
+    
+    // Optional environment table
+    let _env = get_arg(vm, 3);
+    
+    // Compile the code
+    match crate::Compiler::compile(&code) {
+        Ok(chunk) => {
+            let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
+                chunk: std::rc::Rc::new(chunk),
+                upvalues: vec![],
+            }));
+            Ok(MultiValue::single(func))
+        }
+        Err(e) => {
+            // Return nil and error message
+            let err_msg = vm.create_string(format!("load error: {}", e));
+            Ok(MultiValue::multiple(vec![
+                LuaValue::nil(),
+                LuaValue::from_string_rc(err_msg),
+            ]))
+        }
+    }
+}
+
+/// loadfile([filename [, mode [, env]]]) - Load a file as a chunk
+fn lua_loadfile(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let filename = get_arg(vm, 0)
+        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
+    
+    let code = if let Some(fname) = filename {
+        // Load from specified file
+        match std::fs::read_to_string(&fname) {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = vm.create_string(format!("cannot open {}: {}", fname, e));
+                return Ok(MultiValue::multiple(vec![
+                    LuaValue::nil(),
+                    LuaValue::from_string_rc(err_msg),
+                ]));
+            }
+        }
+    } else {
+        // Load from stdin (simplified: return nil for now)
+        let err_msg = vm.create_string("stdin loading not implemented".to_string());
+        return Ok(MultiValue::multiple(vec![
+            LuaValue::nil(),
+            LuaValue::from_string_rc(err_msg),
+        ]));
+    };
+    
+    // Compile the code
+    match crate::Compiler::compile(&code) {
+        Ok(chunk) => {
+            let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
+                chunk: std::rc::Rc::new(chunk),
+                upvalues: vec![],
+            }));
+            Ok(MultiValue::single(func))
+        }
+        Err(e) => {
+            let err_msg = vm.create_string(format!("load error: {}", e));
+            Ok(MultiValue::multiple(vec![
+                LuaValue::nil(),
+                LuaValue::from_string_rc(err_msg),
+            ]))
+        }
+    }
+}
+
+/// dofile([filename]) - Execute a file
+fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let filename = get_arg(vm, 0)
+        .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
+    
+    let code = if let Some(fname) = filename {
+        // Load from specified file
+        match std::fs::read_to_string(&fname) {
+            Ok(c) => c,
+            Err(e) => return Err(format!("cannot open {}: {}", fname, e)),
+        }
+    } else {
+        // Load from stdin (simplified: return error for now)
+        return Err("stdin loading not implemented".to_string());
+    };
+    
+    // Compile and execute
+    match crate::Compiler::compile(&code) {
+        Ok(chunk) => {
+            let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
+                chunk: std::rc::Rc::new(chunk),
+                upvalues: vec![],
+            }));
+            
+            // Call the function
+            let (success, results) = vm.protected_call(func, vec![]);
+            
+            if success {
+                Ok(MultiValue::multiple(results))
+            } else {
+                let error_msg = unsafe {
+                    results
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_else(|| "unknown error".to_string())
+                };
+                Err(error_msg)
+            }
+        }
+        Err(e) => Err(format!("load error: {}", e)),
+    }
+}
+
+/// warn(msg1, ...) - Emit a warning
+fn lua_warn(_vm: &mut LuaVM) -> Result<MultiValue, String> {
+    let args = get_args(_vm);
+    
+    let messages: Vec<String> = args.iter().map(|v| v.to_string_repr()).collect();
+    let message = messages.join("");
+    
+    // Emit warning to stderr
+    eprintln!("Lua warning: {}", message);
+    
+    Ok(MultiValue::empty())
 }
