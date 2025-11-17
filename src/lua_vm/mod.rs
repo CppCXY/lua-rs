@@ -942,11 +942,9 @@ impl LuaVM {
         let value = self.get_register(base_ptr, b);
 
         // Strings have raw length
-        unsafe {
-            if let Some(s) = value.as_string() {
-                self.set_register(base_ptr, a, LuaValue::integer(s.as_str().len() as i64));
-                return Ok(());
-            }
+        if let Some(s) = self.get_string(&value) {
+            self.set_register(base_ptr, a, LuaValue::integer(s.as_str().len() as i64));
+            return Ok(());
         }
 
         // Try __len metamethod for tables
@@ -1095,13 +1093,11 @@ impl LuaVM {
         let left = val_b;
         let right = val_c;
 
-        unsafe {
-            if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
-                let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
-                self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() < r.as_str()));
-                return Ok(());
-            }
+        if let (Some(l), Some(r)) = (self.get_string(&left), self.get_string(&right)) {
+            let frame = self.current_frame();
+            let base_ptr = frame.base_ptr;
+            self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() < r.as_str()));
+            return Ok(());
         }
 
         if self.call_binop_metamethod(&left, &right, "__lt", a)? {
@@ -1156,13 +1152,11 @@ impl LuaVM {
         let left = val_b;
         let right = val_c;
 
-        unsafe {
-            if let (Some(l), Some(r)) = (left.as_string(), right.as_string()) {
-                let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
-                self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() <= r.as_str()));
-                return Ok(());
-            }
+        if let (Some(l), Some(r)) = (self.get_string(&left), self.get_string(&right)) {
+            let frame = self.current_frame();
+            let base_ptr = frame.base_ptr;
+            self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() <= r.as_str()));
+            return Ok(());
         }
 
         if self.call_binop_metamethod(&left, &right, "__le", a)? {
@@ -1777,34 +1771,32 @@ impl LuaVM {
         let mut result = String::new();
         let mut success = false;
 
-        unsafe {
-            if let Some(s) = left.as_string() {
+        if let Some(s) = self.get_string(&left) {
+            result.push_str(s.as_str());
+            success = true;
+        } else if let Some(n) = left.as_number() {
+            result.push_str(&n.to_string());
+            success = true;
+        } else if let Some(val) = self.call_tostring_metamethod(&left)? {
+            if let Some(s) = self.get_string(&val) {
                 result.push_str(s.as_str());
                 success = true;
-            } else if let Some(n) = left.as_number() {
-                result.push_str(&n.to_string());
-                success = true;
-            } else if let Some(val) = self.call_tostring_metamethod(&left)? {
-                if let Some(s) = val.as_string() {
-                    result.push_str(s.as_str());
-                    success = true;
-                }
             }
+        }
 
-            if success {
-                if let Some(s) = right.as_string() {
+        if success {
+            if let Some(s) = self.get_string(&right) {
+                result.push_str(s.as_str());
+            } else if let Some(n) = right.as_number() {
+                result.push_str(&n.to_string());
+            } else if let Some(val) = self.call_tostring_metamethod(&right)? {
+                if let Some(s) = self.get_string(&val) {
                     result.push_str(s.as_str());
-                } else if let Some(n) = right.as_number() {
-                    result.push_str(&n.to_string());
-                } else if let Some(val) = self.call_tostring_metamethod(&right)? {
-                    if let Some(s) = val.as_string() {
-                        result.push_str(s.as_str());
-                    } else {
-                        success = false;
-                    }
                 } else {
                     success = false;
                 }
+            } else {
+                success = false;
             }
         }
 
@@ -1854,14 +1846,12 @@ impl LuaVM {
         let base_ptr = self.current_frame().base_ptr;
         let value = self.get_register(base_ptr, a);
 
-        unsafe {
-            if let Some(name_str) = name_val.as_string() {
-                let name = name_str.as_str();
-                self.set_global(name, value);
-                Ok(())
-            } else {
-                Err("Invalid global name".to_string())
-            }
+        if let Some(name_str) = self.get_string(&name_val) {
+            let name = name_str.as_str().to_string(); // Clone the string to avoid borrow issues
+            self.set_global(&name, value);
+            Ok(())
+        } else {
+            Err("Invalid global name".to_string())
         }
     }
 
@@ -3342,8 +3332,15 @@ impl LuaVM {
 
     /// Convert a value to string, calling __tostring metamethod if present
     pub fn value_to_string(&mut self, value: &LuaValue) -> Result<String, String> {
+        // Handle string values directly
+        if value.is_string() {
+            if let Some(s) = self.get_string(value) {
+                return Ok(s.as_str().to_string());
+            }
+        }
+        
         if let Some(s) = self.call_tostring_metamethod(value)? {
-            if let Some(str) = s.as_lua_string() {
+            if let Some(str) = self.get_string(&s) {
                 Ok(str.as_str().to_string())
             } else {
                 Err("`__tostring` metamethod did not return a string".to_string())

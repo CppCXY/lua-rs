@@ -52,8 +52,8 @@ pub type CFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
 /// Lua string (immutable, interned with cached hash)
 #[derive(Debug, Clone)]
 pub struct LuaString {
+    hash: u64, // Keep hash first for alignment
     data: String,
-    hash: u64,
 }
 
 impl LuaString {

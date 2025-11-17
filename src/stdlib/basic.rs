@@ -41,7 +41,9 @@ pub fn create_basic_lib() -> LibraryModule {
 fn lua_print(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = get_args(vm);
 
-    let output: Vec<String> = args.iter().map(|v| v.to_string_repr()).collect();
+    let output: Vec<String> = args.iter().map(|v| {
+        vm.value_to_string(v).unwrap_or_else(|_| v.to_string_repr())
+    }).collect();
 
     if !output.is_empty() {
         println!("{}", output.join("\t"));
@@ -77,7 +79,7 @@ fn lua_assert(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     if !condition.is_truthy() {
         let message = get_arg(vm, 1)
-            .and_then(|v| v.to_str().map(str::to_string))
+            .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
             .unwrap_or_else(|| "assertion failed!".to_string());
         return Err(message);
     }
@@ -89,7 +91,7 @@ fn lua_assert(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// error(message [, level]) - Raise an error
 fn lua_error(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let message = get_arg(vm, 0)
-        .map(|v| v.to_string_repr())
+        .map(|v| vm.value_to_string(&v).unwrap_or_else(|_| v.to_string_repr()))
         .unwrap_or_else(|| "error".to_string());
 
     // Optional level parameter (default = 1)
@@ -471,7 +473,7 @@ fn lua_rawequal(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// collectgarbage([opt [, arg]]) - Garbage collector control
 fn lua_collectgarbage(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let opt = get_arg(vm, 0)
-        .and_then(|v| v.to_str().map(str::to_string))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "=(load)".to_string());
 
     match opt.as_str() {
@@ -571,7 +573,7 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
         if !success {
             let error_msg = results
                 .first()
-                .and_then(|v| v.as_lua_string())
+                .and_then(|v| vm.get_string(v))
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_else(|| "unknown error in searcher".to_string());
             return Err(format!("error calling searcher: {}", error_msg));
@@ -596,7 +598,7 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 if !load_success {
                     let error_msg = load_results
                         .first()
-                        .and_then(|v| v.as_lua_string())
+                        .and_then(|v| vm.get_string(v))
                         .map(|s| s.as_str().to_string())
                         .unwrap_or_else(|| "unknown error".to_string());
                     return Err(format!(
@@ -628,7 +630,7 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 }
 
                 return Ok(MultiValue::single(module_value));
-            } else if let Some(err_str) = first_result.as_lua_string() {
+            } else if let Some(err_str) = vm.get_string(first_result) {
                 // It's an error message
                 error_messages.push(err_str.as_str().to_string());
             }
@@ -767,7 +769,9 @@ fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn lua_warn(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = get_args(_vm);
 
-    let messages: Vec<String> = args.iter().map(|v| v.to_string_repr()).collect();
+    let messages: Vec<String> = args.iter().map(|v| {
+        _vm.value_to_string(v).unwrap_or_else(|_| v.to_string_repr())
+    }).collect();
     let message = messages.join("");
 
     // Emit warning to stderr

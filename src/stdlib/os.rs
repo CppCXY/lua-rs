@@ -79,7 +79,7 @@ fn os_execute(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use std::process::Command;
 
     let cmd = get_arg(vm, 0)
-        .and_then(|v| v.to_str().map(str::to_string))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .ok_or("execute: argument 1 must be a string")?;
 
     let output = Command::new("sh").arg("-c").arg(cmd.as_str()).output();
@@ -99,7 +99,7 @@ fn os_execute(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 fn os_getenv(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let varname = get_arg(vm, 0)
-        .and_then(|v| v.to_str().map(str::to_string))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .ok_or("getenv: argument 1 must be a string")?;
 
     match std::env::var(varname.as_str()) {
@@ -113,7 +113,7 @@ fn os_getenv(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 fn os_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let filename = get_arg(vm, 0)
-        .and_then(|v| v.to_str().map(str::to_string))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .ok_or("remove: argument 1 must be a string")?;
 
     match std::fs::remove_file(filename.as_str()) {
@@ -127,10 +127,10 @@ fn os_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 fn os_rename(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let oldname = get_arg(vm, 0)
-        .and_then(|v| v.to_str().map(str::to_string))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .ok_or("rename: argument 1 must be a string")?;
     let newname = get_arg(vm, 1)
-        .and_then(|v| v.to_str().map(str::to_string))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .ok_or("rename: argument 2 must be a string")?;
 
     match std::fs::rename(oldname.as_str(), newname.as_str()) {
@@ -145,7 +145,7 @@ fn os_rename(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn os_setlocale(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Stub implementation - just return the requested locale or "C"
     let locale = get_arg(vm, 0)
-        .and_then(|v| v.to_str().map(str::to_string))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| "C".to_string());
 

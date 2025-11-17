@@ -23,8 +23,7 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let sep_value = get_arg(vm, 2);
     let sep = match sep_value {
-        Some(v) => v
-            .as_lua_string()
+        Some(v) => vm.get_string(&v)
             .ok_or_else(|| "bad argument #3 to 'string.rep' (string expected)".to_string())?
             .as_str()
             .to_string(),

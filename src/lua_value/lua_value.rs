@@ -470,10 +470,10 @@ impl LuaValue {
             LuaValueKind::Boolean => self.as_bool().unwrap().to_string(),
             LuaValueKind::Integer => self.as_integer().unwrap().to_string(),
             LuaValueKind::Float => self.as_float().unwrap().to_string(),
-            LuaValueKind::String => unsafe {
-                self.as_string()
-                    .map(|s| s.as_str().to_string())
-                    .unwrap_or_else(|| "".to_string())
+            LuaValueKind::String => {
+                // In ID architecture, we can't dereference without ObjectPool
+                // Return a placeholder - caller should use vm.value_to_string() for proper string representation
+                format!("string: {}", self.secondary())
             },
             LuaValueKind::Table => format!("table: {:x}", self.secondary()),
             LuaValueKind::Function => format!("function: {:x}", self.secondary()),
@@ -535,12 +535,9 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Boolean => write!(f, "{}", self.as_bool().unwrap()),
             LuaValueKind::Integer => write!(f, "{}", self.as_integer().unwrap()),
             LuaValueKind::Float => write!(f, "{}", self.as_float().unwrap()),
-            LuaValueKind::String => unsafe {
-                if let Some(s) = self.as_string() {
-                    write!(f, "\"{}\"", s.as_str())
-                } else {
-                    write!(f, "<invalid string>")
-                }
+            LuaValueKind::String => {
+                // In ID architecture, can't dereference without ObjectPool
+                write!(f, "\"<string:{}>\"", self.secondary())
             },
             LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
             LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
@@ -571,12 +568,10 @@ impl std::fmt::Display for LuaValue {
                     write!(f, "{}", n)
                 }
             }
-            LuaValueKind::String => unsafe {
-                if let Some(s) = self.as_string() {
-                    write!(f, "{}", s.as_str())
-                } else {
-                    write!(f, "")
-                }
+            LuaValueKind::String => {
+                // In ID architecture, can't dereference without ObjectPool
+                // Caller should use vm.value_to_string() instead
+                write!(f, "<string:{}>", self.secondary())
             },
             LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
             LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
@@ -591,37 +586,14 @@ impl std::fmt::Display for LuaValue {
 
 impl PartialEq for LuaValue {
     fn eq(&self, other: &Self) -> bool {
-        // Fast path: exact bit match
+        // Fast path: exact bit match (works for all types including string IDs)
         if self.primary() == other.primary() && self.secondary() == other.secondary() {
             return true;
         }
 
-        // Type-specific comparison
-        if self.is_string() && other.is_string() {
-            unsafe {
-                match (self.as_string(), other.as_string()) {
-                    (Some(a), Some(b)) => {
-                        // String content comparison
-                        a.as_str() == b.as_str()
-                    }
-                    _ => false,
-                }
-            }
-        } else if self.is_table() && other.is_table() {
-            // Tables compared by pointer
-            self.secondary() == other.secondary()
-        } else if self.is_function() && other.is_function() {
-            // Functions compared by pointer
-            self.secondary() == other.secondary()
-        } else if self.is_userdata() && other.is_userdata() {
-            // Userdata compared by pointer
-            self.secondary() == other.secondary()
-        } else if self.is_thread() && other.is_thread() {
-            // Threads compared by pointer
-            self.secondary() == other.secondary()
-        } else {
-            false
-        }
+        // For ID-based architecture, same ID means same object
+        // No need for deep comparison
+        false
     }
 }
 
@@ -629,16 +601,12 @@ impl Eq for LuaValue {}
 
 impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // For strings, use cached hash for performance
+        // For strings in ID-based architecture, hash the ID
+        // The ObjectPool ensures same string = same ID
         if self.is_string() {
-            unsafe {
-                if let Some(s) = self.as_string() {
-                    // Use discriminator + cached hash
-                    0u8.hash(state);
-                    state.write_u64(s.cached_hash());
-                    return;
-                }
-            }
+            0u8.hash(state); // Type discriminator
+            self.secondary.hash(state); // Hash the ID directly
+            return;
         }
 
         // For other types, hash the raw bits
@@ -652,17 +620,16 @@ impl PartialOrd for LuaValue {
         let kind_a = self.kind();
         let kind_b = other.kind();
 
-        match kind_a.cmp(&kind_b) {
+            match kind_a.cmp(&kind_b) {
             Ordering::Equal => match kind_a {
                 LuaValueKind::Nil => Some(Ordering::Equal),
                 LuaValueKind::Boolean => self.as_bool().partial_cmp(&other.as_bool()),
                 LuaValueKind::Integer => self.as_integer().partial_cmp(&other.as_integer()),
                 LuaValueKind::Float => self.as_float().partial_cmp(&other.as_float()),
-                LuaValueKind::String => unsafe {
-                    match (self.as_string(), other.as_string()) {
-                        (Some(a), Some(b)) => a.as_str().partial_cmp(b.as_str()),
-                        _ => None,
-                    }
+                LuaValueKind::String => {
+                    // In ID architecture, compare IDs directly
+                    // Same ID = same string content (guaranteed by ObjectPool interning)
+                    self.secondary().partial_cmp(&other.secondary())
                 },
                 LuaValueKind::Table
                 | LuaValueKind::Function

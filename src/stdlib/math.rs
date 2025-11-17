@@ -237,7 +237,7 @@ fn math_tointeger(vm: &mut LuaVM) -> Result<MultiValue, String> {
         } else {
             LuaValue::nil()
         }
-    } else if let Some(s) = val.as_lua_string() {
+    } else if let Some(s) = vm.get_string(&val) {
         // Try to parse string as integer
         let s_str = s.as_str().trim();
         if let Ok(i) = s_str.parse::<i64>() {
