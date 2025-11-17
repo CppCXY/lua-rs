@@ -5,10 +5,10 @@ use crate::lua_value::LuaValue;
 use crate::opcode::{Instruction, OpCode};
 
 /// Create a string value using VM's string pool
-/// This ensures proper string interning and GC tracking
-pub fn create_string_value(c: &Compiler, s: String) -> LuaValue {
-    // Call VM's create_string through the callback
-    c.string_creator.borrow_mut()(&s)
+pub fn create_string_value(c: &mut Compiler, s: String) -> LuaValue {
+    unsafe {
+        (*c.vm_ptr).create_string(&s)
+    }
 }
 
 /// Emit an instruction and return its position

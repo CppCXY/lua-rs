@@ -909,7 +909,7 @@ pub fn compile_closure_expr_to(
 
     // Create a new compiler for the function body with parent scope chain
     // No need to sync anymore - scope_chain is already current
-    let mut func_compiler = Compiler::new_with_parent(c.scope_chain.clone(), c.string_creator.clone());
+    let mut func_compiler = Compiler::new_with_parent(c.scope_chain.clone(), c.vm_ptr);
 
     // For methods (function defined with colon syntax), add implicit 'self' parameter
     let mut param_offset = 0;

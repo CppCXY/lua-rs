@@ -5,6 +5,7 @@ mod helpers;
 mod stmt;
 
 use crate::lua_value::Chunk;
+use crate::lua_vm::LuaVM;
 use crate::opcode::{Instruction, OpCode};
 use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
 use helpers::*;
@@ -40,14 +41,8 @@ impl ScopeChain {
     }
 }
 
-use crate::lua_value::LuaValue;
-
-/// String creator callback: takes &str, returns LuaValue
-/// VM provides this to ensure strings are interned and GC-tracked
-pub type StringCreator = Rc<RefCell<dyn FnMut(&str) -> LuaValue>>;
-
 /// Compiler state
-pub struct Compiler {
+pub struct Compiler<'a> {
     pub(crate) chunk: Chunk,
     pub(crate) scope_depth: usize,
     pub(crate) next_register: u32,
@@ -56,7 +51,8 @@ pub struct Compiler {
     pub(crate) gotos: Vec<GotoInfo>,     // Pending goto statements
     pub(crate) child_chunks: Vec<Chunk>, // Nested function chunks
     pub(crate) scope_chain: Rc<RefCell<ScopeChain>>, // Scope chain for variable resolution
-    pub(crate) string_creator: StringCreator, // Callback to VM's create_string
+    pub(crate) vm_ptr: *mut LuaVM,       // VM pointer for string pool access
+    pub(crate) _phantom: std::marker::PhantomData<&'a mut LuaVM>,
 }
 
 /// Upvalue information
@@ -95,8 +91,8 @@ pub(crate) struct GotoInfo {
     pub scope_depth: usize, // Scope depth at goto statement
 }
 
-impl Compiler {
-    pub fn new(string_creator: StringCreator) -> Self {
+impl<'a> Compiler<'a> {
+    pub fn new(vm: &'a mut LuaVM) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
@@ -106,14 +102,15 @@ impl Compiler {
             gotos: Vec::new(),
             child_chunks: Vec::new(),
             scope_chain: ScopeChain::new(),
-            string_creator,
+            vm_ptr: vm as *mut LuaVM,
+            _phantom: std::marker::PhantomData,
         }
     }
 
     /// Create a new compiler with a parent scope chain
     pub fn new_with_parent(
         parent_scope: Rc<RefCell<ScopeChain>>,
-        string_creator: StringCreator,
+        vm_ptr: *mut LuaVM,
     ) -> Self {
         Compiler {
             chunk: Chunk::new(),
@@ -124,14 +121,15 @@ impl Compiler {
             gotos: Vec::new(),
             child_chunks: Vec::new(),
             scope_chain: ScopeChain::new_with_parent(parent_scope),
-            string_creator,
+            vm_ptr,
+            _phantom: std::marker::PhantomData,
         }
     }
 
     /// Compile Lua source code to bytecode
-    /// Takes a string_creator callback from VM to ensure proper string interning and GC tracking
-    pub fn compile(source: &str, string_creator: StringCreator) -> Result<Chunk, String> {
-        let mut compiler = Compiler::new(string_creator);
+    /// Creates raw Box strings - VM must call register_chunk_constants() to intern them
+    pub fn compile(vm: &mut LuaVM, source: &str) -> Result<Chunk, String> {
+        let mut compiler = Compiler::new(vm);
 
         let tree = LuaParser::parse(source, ParserConfig::with_level(LuaLanguageLevel::Lua54));
         let _line_index = LineIndex::parse(source);

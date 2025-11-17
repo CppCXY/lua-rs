@@ -407,14 +407,6 @@ impl LuaValue {
 
     // ============ Additional Compatibility Constructors ============
     // Note: These increment refcount, so caller loses ownership of the Rc
-
-    /// Create from Rc<LuaString> (takes ownership, increments refcount)
-    #[inline(always)]
-    pub fn from_string_rc(s: Rc<LuaString>) -> Self {
-        let ptr = Rc::into_raw(s); // Transfer ownership to LuaValue
-        Self::string_ptr(ptr)
-    }
-
     /// Create from Rc<RefCell<LuaTable>> (takes ownership)
     #[inline(always)]
     pub fn from_table_rc(t: Rc<RefCell<LuaTable>>) -> Self {

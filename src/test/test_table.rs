@@ -56,6 +56,9 @@ fn test_table_concat() {
     "#,
     );
 
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

@@ -281,7 +281,7 @@ pub struct UpvalueDesc {
 }
 
 /// Compiled chunk (bytecode + metadata)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Chunk {
     pub code: Vec<u32>,
     pub constants: Vec<LuaValue>,

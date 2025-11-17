@@ -4,8 +4,6 @@ use crate::LuaFunction;
 
 // Common debug string constants (static lifetime, zero allocation)
 pub const DEBUG_C_MARKER: &str = "[C]";
-pub const DEBUG_UNKNOWN: &str = "?";
-pub const DEBUG_DIRECT_CALL: &str = "[direct_call]";
 
 pub struct LuaCallFrame {
     pub frame_id: usize, // Unique ID for this frame

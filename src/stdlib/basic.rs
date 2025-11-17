@@ -3,10 +3,10 @@
 // select, ipairs, pairs, next, pcall, xpcall, getmetatable, setmetatable,
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
 
+use crate::LuaTable;
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::LuaVM;
-use crate::{LuaString, LuaTable};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -389,9 +389,7 @@ fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
         if let Some(t) = table.as_table() {
             // Check if current metatable has __metatable field (protected)
             if let Some(mt) = t.borrow().get_metatable() {
-                let metatable_key = LuaValue::from_string_rc(std::rc::Rc::new(LuaString::new(
-                    "__metatable".to_string(),
-                )));
+                let metatable_key = vm.create_string("__metatable");
                 if mt.borrow().raw_get(&metatable_key).is_some() {
                     return Err("cannot change a protected metatable".to_string());
                 }

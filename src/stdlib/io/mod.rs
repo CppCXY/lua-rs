@@ -1,12 +1,10 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 
-use crate::LuaString;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
 use std::io::{self, BufRead, Write};
-use std::rc::Rc;
 
 mod file;
 pub use file::{LuaFile, create_file_metatable};
@@ -68,9 +66,7 @@ fn io_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
                             line.pop();
                         }
                     }
-                    Ok(MultiValue::single(LuaValue::from_string_rc(Rc::new(
-                        LuaString::new(line),
-                    ))))
+                    Ok(MultiValue::single(vm.create_string(&line)))
                 }
                 Err(e) => Err(format!("read error: {}", e)),
             }
@@ -79,9 +75,7 @@ fn io_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
             // Read all
             let mut content = String::new();
             match io::Read::read_to_string(&mut handle, &mut content) {
-                Ok(_) => Ok(MultiValue::single(LuaValue::from_string_rc(Rc::new(
-                    LuaString::new(content),
-                )))),
+                Ok(_) => Ok(MultiValue::single(vm.create_string(&content))),
                 Err(e) => Err(format!("read error: {}", e)),
             }
         }
@@ -111,9 +105,9 @@ fn io_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
                     Ok(0) => Ok(MultiValue::single(LuaValue::nil())), // EOF
                     Ok(bytes_read) => {
                         buffer.truncate(bytes_read);
-                        Ok(MultiValue::single(LuaValue::from_string_rc(Rc::new(
-                            LuaString::new(String::from_utf8_lossy(&buffer).to_string()),
-                        ))))
+                        Ok(MultiValue::single(
+                            vm.create_string(&String::from_utf8_lossy(&buffer)),
+                        ))
                     }
                     Err(e) => Err(format!("read error: {}", e)),
                 }

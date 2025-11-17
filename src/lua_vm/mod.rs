@@ -3,12 +3,12 @@
 mod lua_call_frame;
 
 use crate::gc::{GC, GcObjectType};
+use crate::lib_registry;
 use crate::lua_value::{
     Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind,
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 use crate::opcode::{Instruction, OpCode};
-use crate::lib_registry;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -205,20 +205,12 @@ impl LuaVM {
     }
 
     /// Compile source code using VM's string pool
-    /// This ensures all strings created during compilation are properly interned and GC-tracked
     pub fn compile(&mut self, source: &str) -> Result<Chunk, String> {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        use crate::compiler::{Compiler, StringCreator};
+        use crate::compiler::Compiler;
 
-        // Create a closure that captures &mut self for string creation
-        // We use unsafe pointer to work around borrow checker limitations
-        let vm_ptr = self as *mut LuaVM;
-        let string_creator: StringCreator = Rc::new(RefCell::new(move |s: &str| {
-            unsafe { (*vm_ptr).create_string(s) }
-        }));
+        let chunk = Compiler::compile(self, source)?;
 
-        Compiler::compile(source, string_creator)
+        Ok(chunk)
     }
 
     fn run(&mut self) -> Result<LuaValue, String> {
@@ -2291,9 +2283,7 @@ impl LuaVM {
         };
 
         if let Some(mt) = metatable {
-            let index_key =
-                LuaValue::from_string_rc(Rc::new(LuaString::new("__index".to_string())));
-
+            let index_key = self.create_string("__index");
             let index_value = {
                 let mt_borrowed = mt.borrow();
                 mt_borrowed.raw_get(&index_key)
@@ -2331,8 +2321,7 @@ impl LuaVM {
         let metatable = userdata.get_metatable();
 
         if let Some(mt) = metatable {
-            let index_key =
-                LuaValue::from_string_rc(Rc::new(LuaString::new("__index".to_string())));
+            let index_key = self.create_string("__index");
 
             let index_value = {
                 let mt_borrowed = mt.borrow();
@@ -2363,11 +2352,9 @@ impl LuaVM {
     /// Get value from string with metatable support
     /// Handles __index metamethod for strings
     pub fn string_get(&mut self, string_val: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        let index_key = self.create_string("__index");
         // Check for __index metamethod in string metatable
         if let Some(mt) = &self.string_metatable {
-            let index_key =
-                LuaValue::from_string_rc(Rc::new(LuaString::new("__index".to_string())));
-
             let index_value = {
                 let mt_borrowed = mt.borrow();
                 mt_borrowed.raw_get(&index_key)
@@ -2420,8 +2407,7 @@ impl LuaVM {
         };
 
         if let Some(mt) = metatable {
-            let newindex_key =
-                LuaValue::from_string_rc(Rc::new(LuaString::new("__newindex".to_string())));
+            let newindex_key = self.create_string("__newindex");
 
             let newindex_value = {
                 let mt_borrowed = mt.borrow();
@@ -2945,7 +2931,7 @@ impl LuaVM {
     /// For short strings (≤64 bytes), use interning (global deduplication)
     /// Create a string value with automatic interning for short strings
     /// Returns LuaValue directly with ZERO allocation overhead for interned strings
-    /// 
+    ///
     /// Performance characteristics:
     /// - Cache hit (interned): O(1) hash lookup, 0 allocations, 0 atomic ops
     /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
@@ -2977,7 +2963,7 @@ impl LuaVM {
             let lua_string = LuaString::new(s.to_string());
             let ptr = Box::into_raw(Box::new(lua_string));
             let addr = ptr as usize;
-            
+
             // Register with GC for lifetime management
             self.gc.register_object(addr, GcObjectType::String);
 
@@ -3144,13 +3130,12 @@ impl LuaVM {
     }
 
     /// Try to get a metamethod from a value
-    fn get_metamethod(&self, value: &LuaValue, event: &str) -> Option<LuaValue> {
+    fn get_metamethod(&mut self, value: &LuaValue, event: &str) -> Option<LuaValue> {
         match value.kind() {
             LuaValueKind::Table => {
                 if let Some(t) = value.as_table() {
                     if let Some(mt) = t.borrow().get_metatable() {
-                        let key =
-                            LuaValue::from_string_rc(Rc::new(LuaString::new(event.to_string())));
+                        let key = self.create_string(event);
                         mt.borrow().raw_get(&key)
                     } else {
                         None
@@ -3160,9 +3145,9 @@ impl LuaVM {
                 }
             }
             LuaValueKind::String => {
+                let key = self.create_string(event);
                 // All strings share a metatable
                 if let Some(mt) = &self.string_metatable {
-                    let key = LuaValue::from_string_rc(Rc::new(LuaString::new(event.to_string())));
                     mt.borrow().raw_get(&key)
                 } else {
                     None
