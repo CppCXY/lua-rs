@@ -227,35 +227,38 @@ impl LuaVM {
                 return Ok(LuaValue::nil());
             }
 
-            // Resolve function and cache chunk reference for this iteration
+            // Resolve function and get instruction (optimized: use cached function_id)
             let frame = self.current_frame();
             let pc = frame.pc;
-            let function_value = frame.function_value;
+            let cached_func_id = frame.cached_function_id;
 
-            // Get chunk from function (fast path for hot loop)
-            let chunk = if let Some(func_id) = function_value.as_function_id() {
+            // Get instruction directly without cloning chunk, using cached function ID
+            let instr = if let Some(func_id) = cached_func_id {
                 let func_ref = self
                     .object_pool
                     .get_function(func_id)
                     .ok_or("Invalid function ID")?;
-                func_ref.borrow().chunk.clone()
+                let func_borrowed = func_ref.borrow();
+                
+                // Check bounds and get instruction
+                if pc >= func_borrowed.chunk.code.len() {
+                    drop(func_borrowed);
+                    self.frames.pop();
+                    continue;
+                }
+                
+                func_borrowed.chunk.code[pc]
             } else {
                 return Err("Frame function is not a Lua function".to_string());
             };
 
-            if pc >= chunk.code.len() {
-                self.frames.pop();
-                continue;
-            }
-
-            let instr = chunk.code[pc];
             self.frames.last_mut().unwrap().pc += 1;
 
             let opcode = Instruction::get_opcode(instr);
 
-            // Periodic GC check (every 1000 instructions)
+            // Periodic GC check (every 10000 instructions for better performance)
             instruction_count += 1;
-            if instruction_count >= 1000 {
+            if instruction_count >= 10000 {
                 instruction_count = 0;
                 if self.gc.should_collect() {
                     self.collect_garbage();

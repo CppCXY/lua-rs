@@ -6,6 +6,7 @@ pub const DEBUG_C_MARKER: &str = "[C]";
 pub struct LuaCallFrame {
     pub frame_id: usize,                 // Unique ID for this frame
     pub function_value: LuaValue,        // Function value (contains FunctionId or CFunction)
+    pub cached_function_id: Option<crate::object_pool::FunctionId>, // Cached function ID for fast access
     pub pc: usize,                       // Program counter
     pub base_ptr: usize,                 // Index into global register_stack (register window start)
     pub top: usize,                      // Top of stack for this frame (relative to base_ptr)
@@ -27,9 +28,11 @@ impl LuaCallFrame {
         result_reg: usize,
         num_results: usize,
     ) -> Self {
+        let cached_function_id = function_value.as_function_id();
         LuaCallFrame {
             frame_id,
             function_value,
+            cached_function_id,
             pc: 0,
             base_ptr,
             top: max_stack_size,
@@ -53,6 +56,7 @@ impl LuaCallFrame {
         LuaCallFrame {
             frame_id,
             function_value: parent_function_value,
+            cached_function_id: None,
             pc: parent_pc,
             base_ptr,
             top: num_args,
