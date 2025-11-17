@@ -227,29 +227,55 @@ impl LuaVM {
                 return Ok(LuaValue::nil());
             }
 
-            // Resolve function and get instruction (optimized: use cached function_id)
+            // Ultra-optimized instruction fetch: use cached code pointer to avoid HashMap + RefCell overhead
             let frame = self.current_frame();
             let pc = frame.pc;
-            let cached_func_id = frame.cached_function_id;
-
-            // Get instruction directly without cloning chunk, using cached function ID
-            let instr = if let Some(func_id) = cached_func_id {
-                let func_ref = self
-                    .object_pool
-                    .get_function(func_id)
-                    .ok_or("Invalid function ID")?;
-                let func_borrowed = func_ref.borrow();
-                
-                // Check bounds and get instruction
-                if pc >= func_borrowed.chunk.code.len() {
-                    drop(func_borrowed);
-                    self.frames.pop();
-                    continue;
+            
+            // Fast path: use cached code pointer if available
+            let instr = if let Some(code_ptr) = frame.cached_code_ptr {
+                unsafe {
+                    // SAFETY: code_ptr points to chunk.code owned by ObjectPool
+                    // Function lifetime is guaranteed by VM maintaining references
+                    if pc >= frame.cached_code_len {
+                        self.frames.pop();
+                        continue;
+                    }
+                    let code_vec = &*code_ptr;
+                    code_vec[pc]
                 }
-                
-                func_borrowed.chunk.code[pc]
             } else {
-                return Err("Frame function is not a Lua function".to_string());
+                // Slow path: first time access, cache the pointer
+                let cached_func_id = frame.cached_function_id;
+                if let Some(func_id) = cached_func_id {
+                    let func_ref = self
+                        .object_pool
+                        .get_function(func_id)
+                        .ok_or("Invalid function ID")?;
+                    let func_borrowed = func_ref.borrow();
+                    
+                    // Cache the code pointer for future iterations
+                    let code_ptr = &func_borrowed.chunk.code as *const Vec<u32>;
+                    let code_len = func_borrowed.chunk.code.len();
+                    
+                    if pc >= code_len {
+                        drop(func_borrowed);
+                        self.frames.pop();
+                        continue;
+                    }
+                    
+                    let instr = func_borrowed.chunk.code[pc];
+                    drop(func_borrowed);
+                    
+                    // Update frame cache
+                    if let Some(frame) = self.frames.last_mut() {
+                        frame.cached_code_ptr = Some(code_ptr);
+                        frame.cached_code_len = code_len;
+                    }
+                    
+                    instr
+                } else {
+                    return Err("Frame function is not a Lua function".to_string());
+                }
             };
 
             self.frames.last_mut().unwrap().pc += 1;
