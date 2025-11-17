@@ -3142,8 +3142,8 @@ impl LuaVM {
             }
         }
 
-        // Run GC
-        self.gc.collect(&roots);
+        // Run GC with mutable object pool reference
+        self.gc.collect(&roots, &mut self.object_pool);
     }
 
     /// Get GC statistics

@@ -17,14 +17,14 @@ pub enum Generation {
 /// Object metadata for GC tracking
 #[derive(Debug, Clone)]
 pub struct GcObject {
-    pub id: usize,
+    pub obj_id: u32,          // The actual object ID (StringId, TableId, etc.)
     pub generation: Generation,
     pub age: u8,
     pub marked: bool,
     pub obj_type: GcObjectType,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GcObjectType {
     String,
     Table,
@@ -32,9 +32,9 @@ pub enum GcObjectType {
 }
 
 impl GcObject {
-    pub fn new(id: usize, obj_type: GcObjectType) -> Self {
+    pub fn new(obj_id: u32, obj_type: GcObjectType) -> Self {
         GcObject {
-            id,
+            obj_id,
             generation: Generation::Young,
             age: 0,
             marked: false,
@@ -67,9 +67,9 @@ impl GcObject {
 
 /// Garbage collector state
 pub struct GC {
-    // Object tracking for generational GC
-    objects: HashMap<usize, GcObject>,
-    next_id: usize,
+    // Object tracking for generational GC - key is (type, id)
+    objects: HashMap<(GcObjectType, u32), GcObject>,
+    next_gc_id: usize,  // Internal GC tracking ID
 
     // GC triggers
     allocations_since_minor_gc: usize,
@@ -105,7 +105,7 @@ impl GC {
     pub fn new() -> Self {
         GC {
             objects: HashMap::new(),
-            next_id: 1,
+            next_gc_id: 1,
             allocations_since_minor_gc: 0,
             minor_gc_count: 0,
             minor_gc_threshold: 10000,
@@ -118,12 +118,12 @@ impl GC {
     }
 
     /// Register a new object for GC tracking
-    pub fn register_object(&mut self, ptr: usize, obj_type: GcObjectType) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
+    pub fn register_object(&mut self, obj_id: u32, obj_type: GcObjectType) -> usize {
+        let gc_id = self.next_gc_id;
+        self.next_gc_id += 1;
 
-        let obj = GcObject::new(id, obj_type);
-        self.objects.insert(ptr, obj);
+        let obj = GcObject::new(obj_id, obj_type);
+        self.objects.insert((obj_type, obj_id), obj);
         self.allocations_since_minor_gc += 1;
 
         let size = match obj_type {
@@ -133,12 +133,12 @@ impl GC {
         };
         self.record_allocation(size);
 
-        id
+        gc_id
     }
 
-    /// Unregister an object (when Rc drops to 0)
-    pub fn unregister_object(&mut self, ptr: usize) {
-        if let Some(obj) = self.objects.remove(&ptr) {
+    /// Unregister an object (when explicitly deleted)
+    pub fn unregister_object(&mut self, obj_id: u32, obj_type: GcObjectType) {
+        if let Some(obj) = self.objects.remove(&(obj_type, obj_id)) {
             let size = match obj.obj_type {
                 GcObjectType::String => 64,
                 GcObjectType::Table => 256,
@@ -163,36 +163,36 @@ impl GC {
 
     /// Perform garbage collection (chooses minor or major)
     /// Takes root set (stack, globals, etc.) and marks reachable objects
-    pub fn collect(&mut self, roots: &[LuaValue]) -> usize {
+    pub fn collect(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) -> usize {
         if self.should_collect_old() {
-            self.major_collect(roots)
+            self.major_collect(roots, object_pool)
         } else {
-            self.minor_collect(roots)
+            self.minor_collect(roots, object_pool)
         }
     }
 
     /// Minor GC - collect young generation only
-    fn minor_collect(&mut self, roots: &[LuaValue]) -> usize {
+    fn minor_collect(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) -> usize {
         self.collection_count += 1;
         self.stats.minor_collections += 1;
 
-        let reachable = self.mark(roots);
+        let reachable = self.mark(roots, object_pool);
 
         let mut collected = 0;
         let mut promoted = 0;
         let mut survivors = Vec::new();
 
-        // Get all young generation object pointers
-        let young_ptrs: Vec<usize> = self
+        // Get all young generation objects
+        let young_objs: Vec<(GcObjectType, u32)> = self
             .objects
             .iter()
             .filter(|(_, obj)| obj.generation == Generation::Young)
-            .map(|(ptr, _)| *ptr)
+            .map(|(key, _)| *key)
             .collect();
 
-        for ptr in young_ptrs {
-            if let Some(mut obj) = self.objects.remove(&ptr) {
-                if reachable.contains(&obj.id) {
+        for key @ (obj_type, obj_id) in young_objs {
+            if let Some(mut obj) = self.objects.remove(&key) {
+                if reachable.contains(&key) {
                     // Object survived
                     obj.unmark();
 
@@ -201,30 +201,29 @@ impl GC {
                         promoted += 1;
                     }
 
-                    survivors.push((ptr, obj));
+                    survivors.push((key, obj));
                 } else {
-                    // Collect garbage - actually free the memory!
+                    // Collect garbage - remove from object pool!
                     collected += 1;
-                    let size = match obj.obj_type {
+                    match obj_type {
                         GcObjectType::String => {
-                            unsafe {
-                                // Reconstruct Box and drop it
-                                let _ = Box::from_raw(ptr as *mut crate::LuaString);
-                            }
-                            64
+                            let string_id = crate::object_pool::StringId(obj_id);
+                            object_pool.remove_string(string_id);
                         }
                         GcObjectType::Table => {
-                            unsafe {
-                                let _ = Box::from_raw(ptr as *mut std::cell::RefCell<crate::LuaTable>);
-                            }
-                            256
+                            let table_id = crate::object_pool::TableId(obj_id);
+                            object_pool.remove_table(table_id);
                         }
                         GcObjectType::Function => {
-                            unsafe {
-                                let _ = Box::from_raw(ptr as *mut crate::LuaFunction);
-                            }
-                            128
+                            let func_id = crate::object_pool::FunctionId(obj_id);
+                            object_pool.remove_function(func_id);
                         }
+                    }
+                    
+                    let size = match obj_type {
+                        GcObjectType::String => 64,
+                        GcObjectType::Table => 256,
+                        GcObjectType::Function => 128,
                     };
                     self.record_deallocation(size);
                 }
@@ -232,8 +231,8 @@ impl GC {
         }
 
         // Re-insert survivors
-        for (ptr, obj) in survivors {
-            self.objects.insert(ptr, obj);
+        for (key, obj) in survivors {
+            self.objects.insert(key, obj);
         }
 
         self.stats.objects_collected += collected;
@@ -246,43 +245,42 @@ impl GC {
         collected
     }
 
-    /// Major GC - collect both generations
-    fn major_collect(&mut self, roots: &[LuaValue]) -> usize {
+    /// Major GC - collect all generations
+    fn major_collect(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) -> usize {
         self.collection_count += 1;
         self.stats.major_collections += 1;
 
-        let reachable = self.mark(roots);
+        let reachable = self.mark(roots, object_pool);
 
         let mut collected = 0;
-        let ptrs: Vec<usize> = self.objects.keys().copied().collect();
+        let keys: Vec<(GcObjectType, u32)> = self.objects.keys().copied().collect();
 
-        for ptr in ptrs {
-            if let Some(obj) = self.objects.get(&ptr) {
-                if !reachable.contains(&obj.id) {
-                    let obj_type = obj.obj_type;
-                    self.objects.remove(&ptr);
+        for key @ (obj_type, obj_id) in keys {
+            if let Some(obj) = self.objects.get(&key) {
+                if !reachable.contains(&key) {
+                    self.objects.remove(&key);
                     collected += 1;
 
-                    // Actually free the memory!
-                    let size = match obj_type {
+                    // Remove from object pool!
+                    match obj_type {
                         GcObjectType::String => {
-                            unsafe {
-                                let _ = Box::from_raw(ptr as *mut crate::LuaString);
-                            }
-                            64
+                            let string_id = crate::object_pool::StringId(obj_id);
+                            object_pool.remove_string(string_id);
                         }
                         GcObjectType::Table => {
-                            unsafe {
-                                let _ = Box::from_raw(ptr as *mut std::cell::RefCell<crate::LuaTable>);
-                            }
-                            256
+                            let table_id = crate::object_pool::TableId(obj_id);
+                            object_pool.remove_table(table_id);
                         }
                         GcObjectType::Function => {
-                            unsafe {
-                                let _ = Box::from_raw(ptr as *mut crate::LuaFunction);
-                            }
-                            128
+                            let func_id = crate::object_pool::FunctionId(obj_id);
+                            object_pool.remove_function(func_id);
                         }
+                    }
+                    
+                    let size = match obj_type {
+                        GcObjectType::String => 64,
+                        GcObjectType::Table => 256,
+                        GcObjectType::Function => 128,
                     };
                     self.record_deallocation(size);
                 }
@@ -305,32 +303,51 @@ impl GC {
     }
 
     /// Mark phase: traverse object graph from roots
-    fn mark(&mut self, roots: &[LuaValue]) -> HashSet<usize> {
+    fn mark(&mut self, roots: &[LuaValue], object_pool: &crate::object_pool::ObjectPool) -> HashSet<(GcObjectType, u32)> {
         let mut marked = HashSet::new();
         let mut worklist: Vec<LuaValue> = roots.to_vec();
 
         while let Some(value) = worklist.pop() {
-            let obj_id = self.get_value_obj_id(&value);
+            // Get object key (type, id)
+            let key = match value.kind() {
+                crate::lua_value::LuaValueKind::String => {
+                    value.as_string_id().map(|id| (GcObjectType::String, id.0))
+                }
+                crate::lua_value::LuaValueKind::Table => {
+                    value.as_table_id().map(|id| (GcObjectType::Table, id.0))
+                }
+                crate::lua_value::LuaValueKind::Function => {
+                    value.as_function_id().map(|id| (GcObjectType::Function, id.0))
+                }
+                _ => None,
+            };
 
-            if obj_id == 0 || marked.contains(&obj_id) {
-                continue;
-            }
+            if let Some(key) = key {
+                if marked.contains(&key) {
+                    continue;
+                }
 
-            marked.insert(obj_id);
+                marked.insert(key);
 
-            // Mark the object
-            if let Some(ptr) = self.get_value_ptr(&value) {
-                if let Some(obj) = self.objects.get_mut(&ptr) {
+                // Mark the object
+                if let Some(obj) = self.objects.get_mut(&key) {
                     obj.mark();
                 }
-            }
 
-            // Mark children
-
-            if let Some(table) = value.as_table_id() {
-                self.mark_table(&table.borrow(), &mut worklist);
-            } else if let Some(func) = value.as_function() {
-                self.mark_function(&func, &mut worklist);
+                // Mark children
+                match key.0 {
+                    GcObjectType::Table => {
+                        if let Some(table_ref) = object_pool.get_table(crate::object_pool::TableId(key.1)) {
+                            self.mark_table(&table_ref.borrow(), &mut worklist);
+                        }
+                    }
+                    GcObjectType::Function => {
+                        if let Some(func_ref) = object_pool.get_function(crate::object_pool::FunctionId(key.1)) {
+                            self.mark_function(&func_ref.borrow(), &mut worklist);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -354,19 +371,6 @@ impl GC {
                 worklist.push(val);
             }
         }
-    }
-
-    /// Get object ID for a value
-    fn get_value_obj_id(&self, value: &LuaValue) -> usize {
-        if let Some(ptr) = self.get_value_ptr(value) {
-            self.objects.get(&ptr).map(|obj| obj.id).unwrap_or(0)
-        } else {
-            0
-        }
-    }
-
-    fn get_value_ptr(&self, value: &LuaValue) -> Option<usize> {
-        todo!()
     }
 
     /// Update generation size statistics

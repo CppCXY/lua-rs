@@ -156,11 +156,13 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
             // Create userdata with VM (proper GC tracking)
             use crate::lua_value::LuaUserdata;
-            let userdata = vm.alloc_userdata(LuaUserdata::new(file));
+            let userdata = vm.create_userdata(LuaUserdata::new(file));
 
             // Set metatable
-            if let Some(ud) = userdata.as_userdata() {
-                ud.set_metatable(Some(file_mt));
+            if let Some(ud_id) = userdata.as_userdata_id() {
+                if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
+                    ud.set_metatable(file_mt);
+                }
             }
 
             Ok(MultiValue::single(userdata))

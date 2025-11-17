@@ -25,14 +25,12 @@ pub fn create_package_lib() -> LibraryModule {
 
 // Create the package.loaded table
 fn create_loaded_table(vm: &mut LuaVM) -> LuaValue {
-    let loaded = vm.create_table();
-    LuaValue::from_table_rc(loaded)
+    vm.create_table()
 }
 
 // Create the package.preload table
 fn create_preload_table(vm: &mut LuaVM) -> LuaValue {
-    let preload = vm.create_table();
-    LuaValue::from_table_rc(preload)
+    vm.create_table()
 }
 
 // Create package.path string
@@ -60,21 +58,22 @@ fn create_config_string(vm: &mut LuaVM) -> LuaValue {
 // Create package.searchers table with 4 standard searchers
 fn create_searchers_table(vm: &mut LuaVM) -> LuaValue {
     let searchers = vm.create_table();
+    let searchers_ref = vm.get_table(&searchers).unwrap();
 
-    searchers
+    searchers_ref
         .borrow_mut()
         .raw_set(LuaValue::integer(1), LuaValue::cfunction(searcher_preload));
-    searchers
+    searchers_ref
         .borrow_mut()
         .raw_set(LuaValue::integer(2), LuaValue::cfunction(searcher_lua));
-    searchers
+    searchers_ref
         .borrow_mut()
         .raw_set(LuaValue::integer(3), LuaValue::cfunction(searcher_c));
-    searchers
+    searchers_ref
         .borrow_mut()
         .raw_set(LuaValue::integer(4), LuaValue::cfunction(searcher_allinone));
 
-    LuaValue::from_table_rc(searchers)
+    searchers
 }
 
 // Searcher 1: Check package.preload

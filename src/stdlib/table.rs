@@ -46,7 +46,7 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let mut parts = Vec::new();
     for idx in i..=j {
         let key = LuaValue::integer(idx);
-        let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
+        let value = table_ref.borrow().raw_get(&key).unwrap_or(LuaValue::nil());
 
         unsafe {
             if let Some(s) = value.as_string() {

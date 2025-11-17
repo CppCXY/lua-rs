@@ -171,52 +171,62 @@ impl LuaFile {
 }
 
 /// Create file metatable with methods
-pub fn create_file_metatable(vm: &mut LuaVM) -> Rc<RefCell<LuaTable>> {
-    let mt = Rc::new(RefCell::new(LuaTable::new()));
+pub fn create_file_metatable(vm: &mut LuaVM) -> LuaValue {
+    let mt = vm.create_table();
 
     // Create __index table with methods
-    let index_table = Rc::new(RefCell::new(LuaTable::new()));
+    let index_table = vm.create_table();
+    let index_ref = vm.get_table(&index_table).unwrap();
 
     // file:read([format])
-    index_table
+    let read_key = vm.create_string("read");
+    index_ref
         .borrow_mut()
-        .raw_set(vm.create_string("read"), LuaValue::cfunction(file_read));
+        .raw_set(read_key, LuaValue::cfunction(file_read));
 
     // file:write(...)
-    index_table
+    let write_key = vm.create_string("write");
+    index_ref
         .borrow_mut()
-        .raw_set(vm.create_string("write"), LuaValue::cfunction(file_write));
+        .raw_set(write_key, LuaValue::cfunction(file_write));
 
     // file:flush()
-    index_table
+    let flush_key = vm.create_string("flush");
+    index_ref
         .borrow_mut()
-        .raw_set(vm.create_string("flush"), LuaValue::cfunction(file_flush));
+        .raw_set(flush_key, LuaValue::cfunction(file_flush));
 
     // file:close()
-    index_table
+    let close_key = vm.create_string("close");
+    index_ref
         .borrow_mut()
-        .raw_set(vm.create_string("close"), LuaValue::cfunction(file_close));
+        .raw_set(close_key, LuaValue::cfunction(file_close));
 
     // file:lines([formats])
-    index_table
+    let lines_key = vm.create_string("lines");
+    index_ref
         .borrow_mut()
-        .raw_set(vm.create_string("lines"), LuaValue::cfunction(file_lines));
+        .raw_set(lines_key, LuaValue::cfunction(file_lines));
 
     // file:seek([whence [, offset]])
-    index_table
+    let seek_key = vm.create_string("seek");
+    index_ref
         .borrow_mut()
-        .raw_set(vm.create_string("seek"), LuaValue::cfunction(file_seek));
+        .raw_set(seek_key, LuaValue::cfunction(file_seek));
 
     // file:setvbuf(mode [, size])
-    index_table.borrow_mut().raw_set(
-        vm.create_string("setvbuf"),
+    let setvbuf_key = vm.create_string("setvbuf");
+    index_ref.borrow_mut().raw_set(
+        setvbuf_key,
         LuaValue::cfunction(file_setvbuf),
     );
 
     // Set __index to the index table
-    mt.borrow_mut().raw_set(
-        vm.create_string("__index"),
-        LuaValue::from_table_rc(index_table),
+    let mt_ref = vm.get_table(&mt).unwrap();
+    let index_key = vm.create_string("__index");
+    mt_ref.borrow_mut().raw_set(
+        index_key,
+        index_table,
     );
 
     mt
@@ -387,23 +397,22 @@ fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// file:lines([formats]) - Returns an iterator for reading lines
 fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
-    use crate::lua_value::LuaTable;
-    use std::cell::RefCell;
-    use std::rc::Rc;
 
     // Get file handle from self
     let file_val = get_arg(vm, 1).ok_or("file:lines requires self parameter")?;
 
     // For now, return a simple iterator that reads lines
     // Create state table with file handle
-    let state_table = Rc::new(RefCell::new(LuaTable::new()));
-    state_table
+    let state_table = vm.create_table();
+    let file_key = vm.create_string("file");
+    let state_ref = vm.get_table(&state_table).ok_or("Invalid state table")?;
+    state_ref
         .borrow_mut()
-        .raw_set(vm.create_string("file"), file_val.clone());
+        .raw_set(file_key, file_val.clone());
 
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(file_lines_iterator),
-        LuaValue::from_table_rc(state_table),
+        state_table,
         LuaValue::nil(),
     ]))
 }

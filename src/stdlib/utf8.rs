@@ -131,16 +131,19 @@ fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Create state table: {string = s, position = 0}
     let state_table = vm.create_table();
-    state_table
+    let string_key = vm.create_string("string");
+    let position_key = vm.create_string("position");
+    let state_ref = vm.get_table(&state_table).ok_or("Invalid state table")?;
+    state_ref
         .borrow_mut()
-        .raw_set(vm.create_string("string"), s_value);
-    state_table
+        .raw_set(string_key, s_value);
+    state_ref
         .borrow_mut()
-        .raw_set(vm.create_string("position"), LuaValue::integer(0));
+        .raw_set(position_key, LuaValue::integer(0));
 
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(utf8_codes_iterator),
-        LuaValue::from_table_rc(state_table),
+        state_table,
         LuaValue::nil(),
     ]))
 }

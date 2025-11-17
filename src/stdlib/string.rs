@@ -484,8 +484,8 @@ fn string_format(vm: &mut LuaVM) -> Result<MultiValue, String> {
                                 n.to_string()
                             } else {
                                 // Try __tostring metamethod
-                                match vm.call_tostring_metamethod(&val) {
-                                    Ok(Some(s)) => s.as_str().to_string(),
+                                match vm.call_tostring_metamethod(&val) {  
+                                    Ok(Some(s)) => s.as_string().map(|st| unsafe { st.as_str().to_string() }).unwrap_or_else(|| s.to_string_repr()),
                                     Ok(None) => val.to_string_repr(),
                                     Err(e) => return Err(e),
                                 }
@@ -719,22 +719,27 @@ fn string_gmatch(vm: &mut LuaVM) -> Result<MultiValue, String> {
     };
 
     // Create state table: {string = s, pattern = p, position = 0}
-    let state_table = Rc::new(RefCell::new(LuaTable::new()));
-    state_table
+    let state_table = vm.create_table();
+    let string_key = vm.create_string("string");
+    let pattern_key = vm.create_string("pattern");
+    let position_key = vm.create_string("position");
+    
+    let state_ref = vm.get_table(&state_table).ok_or("Invalid state table")?;
+    state_ref
         .borrow_mut()
-        .raw_set(vm.create_string("string"), vm.create_string(s.as_str()));
-    state_table.borrow_mut().raw_set(
-        vm.create_string("pattern"),
+        .raw_set(string_key, vm.create_string(s.as_str()));
+    state_ref.borrow_mut().raw_set(
+        pattern_key,
         vm.create_string(pattern_str.as_str()),
     );
-    state_table
+    state_ref
         .borrow_mut()
-        .raw_set(vm.create_string("position"), LuaValue::integer(0));
+        .raw_set(position_key, LuaValue::integer(0));
 
     // Return: iterator function, state table, nil (initial control variable)
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(gmatch_iterator),
-        LuaValue::from_table_rc(state_table),
+        state_table,
         LuaValue::nil(),
     ]))
 }
