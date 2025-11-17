@@ -2966,7 +2966,11 @@ impl LuaVM {
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let id = self.object_pool.create_string(s);
-        LuaValue::string_id(id)
+        // Get pointer from object pool for direct access
+        let ptr = self.object_pool.get_string(id)
+            .map(|s| s as *const LuaString)
+            .unwrap_or(std::ptr::null());
+        LuaValue::string_id_ptr(id, ptr)
     }
 
     /// Get string by LuaValue (resolves ID from object pool)
@@ -2981,7 +2985,11 @@ impl LuaVM {
     /// Create a new table in object pool
     pub fn create_table(&mut self) -> LuaValue {
         let id = self.object_pool.create_table();
-        LuaValue::table_id(id)
+        // Get pointer from object pool for direct access
+        let ptr = self.object_pool.get_table(id)
+            .map(|t| t.as_ptr() as *const std::cell::RefCell<LuaTable>)
+            .unwrap_or(std::ptr::null());
+        LuaValue::table_id_ptr(id, ptr)
     }
 
     /// Get table by LuaValue (resolves ID from object pool)
@@ -3028,7 +3036,11 @@ impl LuaVM {
     /// Create new userdata in object pool
     pub fn create_userdata(&mut self, data: crate::lua_value::LuaUserdata) -> LuaValue {
         let id = self.object_pool.create_userdata(data);
-        LuaValue::userdata_id(id)
+        // Get pointer from object pool for direct access
+        let ptr = self.object_pool.get_userdata(id)
+            .map(|u| u as *const crate::lua_value::LuaUserdata)
+            .unwrap_or(std::ptr::null());
+        LuaValue::userdata_id_ptr(id, ptr)
     }
 
     /// Get userdata by LuaValue (resolves ID from object pool)
@@ -3044,7 +3056,11 @@ impl LuaVM {
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<Rc<LuaUpvalue>>) -> LuaValue {
         let func = LuaFunction { chunk, upvalues };
         let id = self.object_pool.create_function(func);
-        LuaValue::function_id(id)
+        // Get pointer from object pool for direct access
+        let ptr = self.object_pool.get_function(id)
+            .map(|f| f.as_ptr() as *const std::cell::RefCell<LuaFunction>)
+            .unwrap_or(std::ptr::null());
+        LuaValue::function_id_ptr(id, ptr)
     }
 
     /// Get function by LuaValue (resolves ID from object pool)

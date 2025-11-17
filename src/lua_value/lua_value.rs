@@ -1,32 +1,27 @@
-// Hybrid NaN-Boxing + Full Int64 Value Representation
-// Inspired by V8's Smi + HeapNumber design, adapted for Lua 5.4
+// Optimized Hybrid NaN-Boxing: Type in Primary + Value/Pointer in Secondary
+// Eliminates ObjectPool lookups for hot paths!
 //
 // 128-bit representation (2x u64):
 // [primary: u64][secondary: u64]
 //
-// Primary word encoding:
+// Primary word encoding (type tag + ID for GC):
 // - 0x0000_0000_0000_0000 - 0x7FF7_FFFF_FFFF_FFFF: Float (IEEE 754, secondary unused)
-// - 0x7FF8_0000_0000_0000 - 0xFFFF_FFFF_FFFF_FFFF: Tagged types (use secondary for data)
-//
-// Tagged types (primary >= NAN_BASE):
-// Primary                              Secondary
-// 0xFFFF_0000_0000_0001                full i64 value        Integer
-// 0xFFFE_0000_0000_0001                48-bit pointer        String
-// 0xFFFE_0000_0000_0002                48-bit pointer        Table
-// 0xFFFE_0000_0000_0003                48-bit pointer        Function
-// 0xFFFE_0000_0000_0004                48-bit pointer        Userdata
-// 0xFFFD_0000_0000_0001                unused                Boolean (true)
-// 0xFFFD_0000_0000_0000                unused                Boolean (false)
-// 0xFFFC_0000_0000_0000                unused                Nil
-// 0xFFFB_0000_0000_0001                48-bit fn pointer     CFunction
+// - 0x7FF8_0000_0000_xxxx: Integer (low 32-bit unused, secondary = i64 value)
+// - 0x7FF9_0000_xxxx_xxxx: String (low 32-bit = StringId, secondary = *const LuaString)
+// - 0x7FFA_0000_xxxx_xxxx: Table (low 32-bit = TableId, secondary = *const RefCell<LuaTable>)
+// - 0x7FFB_0000_xxxx_xxxx: Function (low 32-bit = FunctionId, secondary = *const RefCell<LuaFunction>)
+// - 0x7FFC_0000_xxxx_xxxx: Userdata (low 32-bit = UserdataId, secondary = *const RefCell<LuaUserdata>)
+// - 0x7FFD_0000_0000_0001: Boolean (true) (secondary unused)
+// - 0x7FFD_0000_0000_0000: Boolean (false) (secondary unused)
+// - 0x7FFE_0000_0000_0000: Nil (secondary unused)
+// - 0x7FFF_0000_0000_xxxx: CFunction (low 32-bit unused, secondary = fn pointer)
 //
 // Benefits:
-// - Full 64-bit integer support (Lua 5.4 compatible)
-// - 16 bytes like enum, but MUCH faster
-// - Float is pure IEEE 754 (no encoding overhead)
-// - Integer ops are direct i64 arithmetic
-// - Type check is single comparison
-// - No pattern matching overhead
+// - Integer ops: ZERO lookups - direct access to secondary!
+// - String/Table ops: ONE dereference - no HashMap lookup!
+// - GC can scan: primary has ID, secondary has pointer
+// - Type check: single comparison (primary & TAG_MASK)
+// - Full 64-bit integer + IEEE 754 float support
 
 use std::cell::RefCell;
 
@@ -35,16 +30,16 @@ use crate::{
 };
 use std::cmp::Ordering;
 
-// Primary word tags (public for VM fast paths)
-pub const TAG_INTEGER: u64 = 0xFFFF_0000_0000_0001;
-pub const TAG_STRING: u64 = 0xFFFE_0000_0000_0001;
-pub const TAG_TABLE: u64 = 0xFFFE_0000_0000_0002;
-pub const TAG_FUNCTION: u64 = 0xFFFE_0000_0000_0003;
-pub const TAG_USERDATA: u64 = 0xFFFE_0000_0000_0004;
-pub const TAG_THREAD: u64 = 0xFFFE_0000_0000_0005;
-pub const TAG_BOOLEAN: u64 = 0xFFFD_0000_0000_0000;
-pub const TAG_NIL: u64 = 0xFFFC_0000_0000_0000;
-pub const TAG_CFUNCTION: u64 = 0xFFFB_0000_0000_0001;
+// Primary word tags (high 16 bits for type, low 32 bits for ID)
+pub const TAG_INTEGER: u64 = 0x7FF8_0000_0000_0000;
+pub const TAG_STRING: u64 = 0x7FF9_0000_0000_0000;
+pub const TAG_TABLE: u64 = 0x7FFA_0000_0000_0000;
+pub const TAG_FUNCTION: u64 = 0x7FFB_0000_0000_0000;
+pub const TAG_USERDATA: u64 = 0x7FFC_0000_0000_0000;
+pub const TAG_BOOLEAN: u64 = 0x7FFD_0000_0000_0000;
+pub const TAG_NIL: u64 = 0x7FFE_0000_0000_0000;
+pub const TAG_CFUNCTION: u64 = 0x7FFF_0000_0000_0000;
+pub const TAG_THREAD: u64 = 0x7FFD_0000_0000_0002; // Threads not yet common
 
 // Special values
 pub const VALUE_TRUE: u64 = TAG_BOOLEAN | 1;
@@ -54,8 +49,12 @@ pub const VALUE_NIL: u64 = TAG_NIL;
 // NaN detection (any value >= this is a tagged type)
 pub const NAN_BASE: u64 = 0x7FF8_0000_0000_0000;
 
-// Masks for pointer extraction
-pub(crate) const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+// Masks for ID extraction (low 32 bits)
+pub const ID_MASK: u64 = 0x0000_0000_FFFF_FFFF;
+pub const TYPE_MASK: u64 = 0xFFFF_0000_0000_0000; // High 16 bits for type
+
+// Masks for pointer (all 64 bits of secondary)
+pub(crate) const POINTER_MASK: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 /// Hybrid NaN-boxed Lua value - 16 bytes (same as enum, but 3-6x faster)
 ///
@@ -134,39 +133,75 @@ impl LuaValue {
         }
     }
 
-    /// Create string from ID (new object pool architecture)
+    /// Create string from ID + pointer (optimized: stores pointer in secondary)
+    #[inline(always)]
+    pub fn string_id_ptr(id: StringId, ptr: *const LuaString) -> Self {
+        LuaValue {
+            primary: TAG_STRING | (id.0 as u64),  // ID in low 32 bits
+            secondary: ptr as u64,                  // Pointer in secondary
+        }
+    }
+
+    /// Create string from ID only (slower path, will need lookup)
     #[inline(always)]
     pub fn string_id(id: StringId) -> Self {
         LuaValue {
-            primary: TAG_STRING,
-            secondary: id.0 as u64,
+            primary: TAG_STRING | (id.0 as u64),
+            secondary: 0, // No pointer yet, will be resolved on first access
         }
     }
 
-    /// Create table from ID (new object pool architecture)
+    /// Create table from ID + pointer
+    #[inline(always)]
+    pub fn table_id_ptr(id: TableId, ptr: *const std::cell::RefCell<crate::lua_value::LuaTable>) -> Self {
+        LuaValue {
+            primary: TAG_TABLE | (id.0 as u64),
+            secondary: ptr as u64,
+        }
+    }
+
+    /// Create table from ID (slower path)
     #[inline(always)]
     pub fn table_id(id: TableId) -> Self {
         LuaValue {
-            primary: TAG_TABLE,
-            secondary: id.0 as u64,
+            primary: TAG_TABLE | (id.0 as u64),
+            secondary: 0,
         }
     }
 
-    /// Create userdata from ID (new object pool architecture)
+    /// Create userdata from ID + pointer
+    #[inline(always)]
+    pub fn userdata_id_ptr(id: UserdataId, ptr: *const crate::lua_value::LuaUserdata) -> Self {
+        LuaValue {
+            primary: TAG_USERDATA | (id.0 as u64),
+            secondary: ptr as u64,
+        }
+    }
+
+    /// Create userdata from ID (slower path)
     #[inline(always)]
     pub fn userdata_id(id: UserdataId) -> Self {
         LuaValue {
-            primary: TAG_USERDATA,
-            secondary: id.0 as u64,
+            primary: TAG_USERDATA | (id.0 as u64),
+            secondary: 0,
         }
     }
 
-    /// Create function from ID (new object pool architecture)
+    /// Create function from ID + pointer
+    #[inline(always)]
+    pub fn function_id_ptr(id: FunctionId, ptr: *const std::cell::RefCell<crate::lua_value::LuaFunction>) -> Self {
+        LuaValue {
+            primary: TAG_FUNCTION | (id.0 as u64),
+            secondary: ptr as u64,
+        }
+    }
+
+    /// Create function from ID (slower path)
     #[inline(always)]
     pub fn function_id(id: FunctionId) -> Self {
         LuaValue {
-            primary: TAG_FUNCTION,
-            secondary: id.0 as u64,
+            primary: TAG_FUNCTION | (id.0 as u64),
+            secondary: 0,
         }
     }
 
@@ -204,26 +239,29 @@ impl LuaValue {
 
     #[inline(always)]
     pub const fn is_integer(&self) -> bool {
-        self.primary == TAG_INTEGER
+        (self.primary & TYPE_MASK) == TAG_INTEGER
     }
 
     #[inline(always)]
     pub const fn is_float(&self) -> bool {
-        // A value is a float if:
-        // 1. primary == NAN_BASE (canonicalized NaN)
-        // 2. OR primary is not a tagged value (i.e., not matching any TAG_* constants)
-        // Note: Negative floats have high bit set, but we store them directly as bits
-        self.primary == NAN_BASE
-            || (self.primary != VALUE_NIL
-                && self.primary != VALUE_TRUE
-                && self.primary != VALUE_FALSE
-                && self.primary != TAG_INTEGER
-                && self.primary != TAG_STRING
-                && self.primary != TAG_TABLE
-                && self.primary != TAG_FUNCTION
-                && self.primary != TAG_USERDATA
-                && self.primary != TAG_THREAD
-                && self.primary != TAG_CFUNCTION)
+        // Float if NOT nil, bool, or any tagged type
+        // Special values: nil (0xFFFF_FFFF_FFFF_FFFF), true/false (0xFFFF...)
+        // Tagged types: 0x7FF8 to 0x7FFF in high 16 bits
+        
+        // Fast path: if primary < NAN_BASE, definitely a float
+        if self.primary < NAN_BASE {
+            return true;
+        }
+        
+        // Check if it's a negative float (0x8000... to 0xFFF7...)
+        // Negative floats: sign bit = 1, exponent != all 1's
+        // This excludes negative NaN (0xFFF8... to 0xFFFF...)
+        let high_bits = self.primary >> 48;  // Top 16 bits
+        if high_bits >= 0x8000 && high_bits < 0xFFF8 {
+            return true;  // Negative float
+        }
+        
+        false
     }
 
     #[inline(always)]
@@ -233,32 +271,32 @@ impl LuaValue {
 
     #[inline(always)]
     pub const fn is_string(&self) -> bool {
-        self.primary == TAG_STRING
+        (self.primary & TYPE_MASK) == TAG_STRING
     }
 
     #[inline(always)]
     pub const fn is_table(&self) -> bool {
-        self.primary == TAG_TABLE
+        (self.primary & TYPE_MASK) == TAG_TABLE
     }
 
     #[inline(always)]
     pub const fn is_function(&self) -> bool {
-        self.primary == TAG_FUNCTION
+        (self.primary & TYPE_MASK) == TAG_FUNCTION
     }
 
     #[inline(always)]
     pub const fn is_userdata(&self) -> bool {
-        self.primary == TAG_USERDATA
+        (self.primary & TYPE_MASK) == TAG_USERDATA
     }
 
     #[inline(always)]
     pub const fn is_cfunction(&self) -> bool {
-        self.primary == TAG_CFUNCTION
+        (self.primary & TYPE_MASK) == TAG_CFUNCTION
     }
 
     #[inline(always)]
     pub const fn is_thread(&self) -> bool {
-        self.primary == TAG_THREAD
+        (self.primary & TYPE_MASK) == TAG_THREAD
     }
 
     // ============ Value Extraction ============
@@ -315,7 +353,17 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_table_id(&self) -> Option<TableId> {
         if self.is_table() {
-            Some(TableId(self.secondary as u32))
+            Some(TableId((self.primary & ID_MASK) as u32))
+        } else {
+            None
+        }
+    }
+
+    /// Get table pointer directly (ZERO lookups!)
+    #[inline(always)]
+    pub fn as_table_ptr(&self) -> Option<*const std::cell::RefCell<crate::lua_value::LuaTable>> {
+        if self.is_table() && self.secondary != 0 {
+            Some(self.secondary as *const std::cell::RefCell<crate::lua_value::LuaTable>)
         } else {
             None
         }
@@ -334,7 +382,17 @@ impl LuaValue {
     #[inline]
     pub fn as_string_id(&self) -> Option<StringId> {
         if self.is_string() {
-            Some(StringId(self.secondary as u32))
+            Some(StringId((self.primary & ID_MASK) as u32))
+        } else {
+            None
+        }
+    }
+
+    /// Get string pointer directly (ZERO lookups!)
+    #[inline(always)]
+    pub fn as_string_ptr_direct(&self) -> Option<*const LuaString> {
+        if self.is_string() && self.secondary != 0 {
+            Some(self.secondary as *const LuaString)
         } else {
             None
         }
@@ -344,7 +402,7 @@ impl LuaValue {
     #[inline]
     pub fn as_userdata_id(&self) -> Option<UserdataId> {
         if self.is_userdata() {
-            Some(UserdataId(self.secondary as u32))
+            Some(UserdataId((self.primary & ID_MASK) as u32))
         } else {
             None
         }
@@ -354,7 +412,17 @@ impl LuaValue {
     #[inline]
     pub fn as_function_id(&self) -> Option<FunctionId> {
         if self.is_function() {
-            Some(FunctionId(self.secondary as u32))
+            Some(FunctionId((self.primary & ID_MASK) as u32))
+        } else {
+            None
+        }
+    }
+
+    /// Get function pointer directly (ZERO lookups!)
+    #[inline(always)]
+    pub fn as_function_ptr(&self) -> Option<*const std::cell::RefCell<crate::lua_value::LuaFunction>> {
+        if self.is_function() && self.secondary != 0 {
+            Some(self.secondary as *const std::cell::RefCell<crate::lua_value::LuaFunction>)
         } else {
             None
         }
@@ -416,10 +484,10 @@ impl LuaValue {
     // ============ Safe public accessors ============
     // Safe because VM is single-threaded and GC only runs at safe points
 
-    /// Get string reference safely
+    /// Get string reference safely (ZERO lookups if pointer cached!)
     #[inline]
     pub fn to_str(&self) -> Option<&str> {
-        if self.primary == TAG_STRING {
+        if self.is_string() && self.secondary != 0 {
             unsafe {
                 let ptr = self.secondary as *const LuaString;
                 Some((*ptr).as_str())
@@ -429,10 +497,10 @@ impl LuaValue {
         }
     }
 
-    /// Get string as LuaString reference
+    /// Get string as LuaString reference (ZERO lookups if pointer cached!)
     #[inline]
     pub fn as_lua_string(&self) -> Option<&LuaString> {
-        if self.primary == TAG_STRING {
+        if self.is_string() && self.secondary != 0 {
             unsafe {
                 let ptr = self.secondary as *const LuaString;
                 Some(&*ptr)
@@ -492,9 +560,21 @@ impl LuaValue {
     /// Use this to check types instead of pattern matching
     #[inline(always)]
     pub fn kind(&self) -> LuaValueKind {
-        match self.primary {
-            VALUE_NIL => LuaValueKind::Nil,
-            VALUE_TRUE | VALUE_FALSE => LuaValueKind::Boolean,
+        // Fast path: check special values first
+        if self.primary == VALUE_NIL {
+            return LuaValueKind::Nil;
+        }
+        if self.primary == VALUE_TRUE || self.primary == VALUE_FALSE {
+            return LuaValueKind::Boolean;
+        }
+        
+        // Check if it's a float (primary < NAN_BASE)
+        if self.primary < NAN_BASE {
+            return LuaValueKind::Float;
+        }
+        
+        // Check tagged types by masking
+        match self.primary & TYPE_MASK {
             TAG_INTEGER => LuaValueKind::Integer,
             TAG_STRING => LuaValueKind::String,
             TAG_TABLE => LuaValueKind::Table,
@@ -502,7 +582,7 @@ impl LuaValue {
             TAG_USERDATA => LuaValueKind::Userdata,
             TAG_THREAD => LuaValueKind::Thread,
             TAG_CFUNCTION => LuaValueKind::CFunction,
-            _ => LuaValueKind::Float, // Everything else is a float (including NaN and negative floats)
+            _ => LuaValueKind::Float, // Fallback
         }
     }
 }
