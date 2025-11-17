@@ -243,7 +243,8 @@ pub fn ffi_c_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
     vm.table_set_raw(&wrapper, ptr_key, LuaValue::integer(symbol_ptr as i64));
 
     let name_key = vm.create_string("_name");
-    vm.table_set_raw(&wrapper, name_key, vm.create_string(&name));
+    let value = vm.create_string(&name);
+    vm.table_set_raw(&wrapper, name_key, value);
 
     // If we have signature info, store it
     if let Some(sig) = signature {
@@ -252,7 +253,11 @@ pub fn ffi_c_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
         let sig_table = vm.create_table();
 
         let ret_key = vm.create_string("return");
-        vm.table_set_raw(&sig_table, ret_key, LuaValue::integer(sig.return_type.kind as i64));
+        vm.table_set_raw(
+            &sig_table,
+            ret_key,
+            LuaValue::integer(sig.return_type.kind as i64),
+        );
 
         let params_key = vm.create_string("params");
         let params_table = vm.create_table();
@@ -291,10 +296,6 @@ pub fn ffi_call_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Extract function pointer and signature
     unsafe {
-        let wrapper_table = wrapper
-            .as_table_id()
-            .ok_or("ffi call: invalid wrapper object")?;
-
         let ptr_key = vm.create_string("_ptr");
         let wrapper_ref_cell = vm.get_table(&wrapper).ok_or("Invalid wrapper table")?;
         let ptr_val = wrapper_ref_cell.borrow().raw_get(&ptr_key);
@@ -307,8 +308,7 @@ pub fn ffi_call_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
         } as *mut u8;
 
         let name_key = vm.create_string("_name");
-        let name_val = wrapper_ref_cell.borrow().raw_get(&name_key);
-        let name = if let Some(name_value) = name_val {
+        let name = if let Some(name_value) = vm.table_get(wrapper, &name_key) {
             let name_str_ptr = name_value
                 .as_string_ptr()
                 .ok_or("ffi call: invalid function name")?;
@@ -392,7 +392,11 @@ pub fn ffi_new(vm: &mut LuaVM) -> Result<MultiValue, String> {
         vm.table_set_raw(&metatable, index_key, LuaValue::cfunction(ffi_struct_index));
 
         let newindex_key = vm.create_string("__newindex");
-        vm.table_set_raw(&metatable, newindex_key, LuaValue::cfunction(ffi_struct_newindex));
+        vm.table_set_raw(
+            &metatable,
+            newindex_key,
+            LuaValue::cfunction(ffi_struct_newindex),
+        );
 
         vm.table_set_metatable(&table, Some(metatable));
     } else {
@@ -659,8 +663,6 @@ pub fn ffi_struct_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Get the struct type
     unsafe {
-        let table = struct_table.as_table_id().ok_or("invalid struct object")?;
-
         let table_ref_cell = vm.get_table(&struct_table).ok_or("Invalid struct table")?;
         let type_name_val = table_ref_cell.borrow().raw_get(&type_key);
 
@@ -690,7 +692,7 @@ pub fn ffi_struct_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
         let fields_table_val = table_ref_cell.borrow().raw_get(&fields_key);
 
         if let Some(ft) = fields_table_val {
-            if let Some(fields_tbl_id) = ft.as_table_id() {
+            if ft.is_table() {
                 let fields_ref_cell = vm.get_table(&ft).ok_or("Invalid fields table")?;
                 let field_val = fields_ref_cell.borrow().raw_get(&field_key);
                 if let Some(fv) = field_val {
@@ -737,11 +739,8 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Get the struct type and validate field exists
     unsafe {
-        let table = struct_table.as_table_id().ok_or("invalid struct object")?;
-
-        let table_ref_cell = vm.get_table(&struct_table).ok_or("Invalid struct table")?;
         let type_key = vm.create_string("__ctype");
-        let type_name_val = table_ref_cell.borrow().raw_get(&type_key);
+        let type_name_val = vm.table_get(struct_table, &type_key);
 
         let type_name = if let Some(tn) = type_name_val {
             if let Some(s) = tn.as_string_ptr() {
@@ -767,7 +766,7 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
         // Get or create __fields table
         let fields_key = vm.create_string("__fields");
-        let fields_table_val = table_ref_cell.borrow().raw_get(&fields_key);
+        let fields_table_val = vm.table_get(struct_table, &fields_key);
 
         let fields_table_value = if let Some(ft) = fields_table_val {
             if ft.as_table_id().is_some() {
@@ -778,15 +777,15 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> Result<MultiValue, String> {
         } else {
             // Create fields table
             let new_fields = vm.create_table();
-            table_ref_cell
-                .borrow_mut()
-                .raw_set(fields_key, new_fields.clone());
+            vm.table_set_raw(struct_table, fields_key, new_fields.clone());
             new_fields
         };
 
         // Set the field value
         let field_key = vm.create_string(field_name);
-        let fields_ref = vm.get_table(&fields_table_value).ok_or("Invalid fields table")?;
+        let fields_ref = vm
+            .get_table(&fields_table_value)
+            .ok_or("Invalid fields table")?;
         fields_ref.borrow_mut().raw_set(field_key, value.clone());
 
         Ok(MultiValue::empty())

@@ -1,13 +1,12 @@
 // File userdata implementation
 // Provides file handles for IO operations
 
-use std::cell::RefCell;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::rc::Rc;
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 
 use crate::LuaVM;
-use crate::lua_value::{LuaTable, LuaValue, LuaValueKind, MultiValue};
+use crate::lib_registry::{get_arg, get_args};
+use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 
 /// File handle wrapper
 pub struct LuaFile {
@@ -176,72 +175,48 @@ pub fn create_file_metatable(vm: &mut LuaVM) -> LuaValue {
 
     // Create __index table with methods
     let index_table = vm.create_table();
-    let index_ref = vm.get_table(&index_table).unwrap();
 
     // file:read([format])
     let read_key = vm.create_string("read");
-    index_ref
-        .borrow_mut()
-        .raw_set(read_key, LuaValue::cfunction(file_read));
+    vm.table_set(index_table, read_key, LuaValue::cfunction(file_read));
 
     // file:write(...)
     let write_key = vm.create_string("write");
-    index_ref
-        .borrow_mut()
-        .raw_set(write_key, LuaValue::cfunction(file_write));
+    vm.table_set(index_table, write_key, LuaValue::cfunction(file_write));
 
     // file:flush()
     let flush_key = vm.create_string("flush");
-    index_ref
-        .borrow_mut()
-        .raw_set(flush_key, LuaValue::cfunction(file_flush));
-
+    vm.table_set(index_table, flush_key, LuaValue::cfunction(file_flush));
     // file:close()
     let close_key = vm.create_string("close");
-    index_ref
-        .borrow_mut()
-        .raw_set(close_key, LuaValue::cfunction(file_close));
+    vm.table_set(index_table, close_key, LuaValue::cfunction(file_close));
 
     // file:lines([formats])
     let lines_key = vm.create_string("lines");
-    index_ref
-        .borrow_mut()
-        .raw_set(lines_key, LuaValue::cfunction(file_lines));
+    vm.table_set(index_table, lines_key, LuaValue::cfunction(file_lines));
 
     // file:seek([whence [, offset]])
     let seek_key = vm.create_string("seek");
-    index_ref
-        .borrow_mut()
-        .raw_set(seek_key, LuaValue::cfunction(file_seek));
+    vm.table_set(index_table, seek_key, LuaValue::cfunction(file_seek));
 
     // file:setvbuf(mode [, size])
     let setvbuf_key = vm.create_string("setvbuf");
-    index_ref.borrow_mut().raw_set(
-        setvbuf_key,
-        LuaValue::cfunction(file_setvbuf),
-    );
+    vm.table_set(index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf));
 
-    // Set __index to the index table
-    let mt_ref = vm.get_table(&mt).unwrap();
     let index_key = vm.create_string("__index");
-    mt_ref.borrow_mut().raw_set(
-        index_key,
-        index_table,
-    );
+    vm.table_set(mt, index_key, index_table);
 
     mt
 }
 
 /// file:read([format])
 fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::get_arg;
-
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = get_arg(vm, 1).ok_or("file:read requires self parameter")?;
+    let file_val = get_arg(vm, 0).ok_or("file:read requires self parameter")?;
 
     // Extract LuaFile from userdata
     unsafe {
-        if let Some(ud) = file_val.as_userdata() {
+        if let Some(ud) = vm.get_userdata(&file_val) {
             let data = ud.get_data();
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -272,7 +247,7 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
                         if let Ok(n) = format.parse::<usize>() {
                             match lua_file.read_bytes(n) {
                                 Ok(bytes) => {
-                                    let s = String::from_utf8_lossy(&bytes).to_string();
+                                    let s = String::from_utf8_lossy(&bytes);
                                     vm.create_string(&s)
                                 }
                                 Err(e) => return Err(format!("read error: {}", e)),
@@ -293,20 +268,18 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:write(...)
 fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::{get_arg, get_args};
-
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = get_arg(vm, 1).ok_or("file:write requires self parameter")?;
+    let file_val = get_arg(vm, 0).ok_or("file:write requires self parameter")?;
 
     // Extract LuaFile from userdata
     unsafe {
-        if let Some(ud) = file_val.as_userdata() {
+        if let Some(ud) = vm.get_userdata(&file_val) {
             let data = ud.get_data();
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
                 // Write all arguments (starting from register 2)
                 let args = get_args(vm);
-                for i in 2..args.len() {
+                for i in 1..args.len() {
                     let val = &args[i];
                     if val.is_nil() {
                         break;
@@ -352,13 +325,11 @@ fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:flush()
 fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::get_arg;
-
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = get_arg(vm, 1).ok_or("file:flush requires self parameter")?;
+    let file_val = get_arg(vm, 0).ok_or("file:flush requires self parameter")?;
 
     // Extract LuaFile from userdata
-    if let Some(ud) = file_val.as_userdata() {
+    if let Some(ud) = vm.get_userdata(&file_val) {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -380,7 +351,7 @@ fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let file_val = get_arg(vm, 1).ok_or("file:close requires self parameter")?;
 
     // Extract LuaFile from userdata
-    if let Some(ud) = file_val.as_userdata() {
+    if let Some(ud) = vm.get_userdata(&file_val) {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -396,19 +367,15 @@ fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:lines([formats]) - Returns an iterator for reading lines
 fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::get_arg;
-
     // Get file handle from self
-    let file_val = get_arg(vm, 1).ok_or("file:lines requires self parameter")?;
+    let file_val = get_arg(vm, 0).ok_or("file:lines requires self parameter")?;
 
     // For now, return a simple iterator that reads lines
     // Create state table with file handle
     let state_table = vm.create_table();
     let file_key = vm.create_string("file");
     let state_ref = vm.get_table(&state_table).ok_or("Invalid state table")?;
-    state_ref
-        .borrow_mut()
-        .raw_set(file_key, file_val.clone());
+    state_ref.borrow_mut().raw_set(file_key, file_val.clone());
 
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(file_lines_iterator),
@@ -419,11 +386,7 @@ fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// Iterator function for file:lines()
 fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::get_arg;
-
     let state_val = get_arg(vm, 0).ok_or("iterator requires state")?;
-    let state_table = state_val.as_table_id().ok_or("invalid iterator state")?;
-
     let file_key = vm.create_string("file");
     let state_ref_cell = vm.get_table(&state_val).ok_or("Invalid state table")?;
     let file_val = state_ref_cell
@@ -432,7 +395,7 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or("file not found in state")?;
 
     // Read next line
-    if let Some(ud) = file_val.as_userdata() {
+    if let Some(ud) = vm.get_userdata(&file_val) {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -451,10 +414,7 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:seek([whence [, offset]]) - Sets and gets the file position
 fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::get_arg;
-    use std::io::Seek;
-
-    let file_val = get_arg(vm, 1).ok_or("file:seek requires self parameter")?;
+    let file_val = get_arg(vm, 0).ok_or("file:seek requires self parameter")?;
 
     let whence = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
@@ -462,7 +422,7 @@ fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let offset = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(0);
 
-    if let Some(ud) = file_val.as_userdata() {
+    if let Some(ud) = vm.get_userdata(&file_val) {
         let data = ud.get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -496,9 +456,7 @@ fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// file:setvbuf(mode [, size]) - Sets the buffering mode
 fn file_setvbuf(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::get_arg;
-
-    let file_val = get_arg(vm, 1).ok_or("file:setvbuf requires self parameter")?;
+    let file_val = get_arg(vm, 0).ok_or("file:setvbuf requires self parameter")?;
 
     let _mode = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })

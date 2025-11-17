@@ -6,9 +6,7 @@ use crate::opcode::{Instruction, OpCode};
 
 /// Create a string value using VM's string pool
 pub fn create_string_value(c: &mut Compiler, s: String) -> LuaValue {
-    unsafe {
-        (*c.vm_ptr).create_string(&s)
-    }
+    unsafe { (*c.vm_ptr).create_string(&s) }
 }
 
 /// Emit an instruction and return its position

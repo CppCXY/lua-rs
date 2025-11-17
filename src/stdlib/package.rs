@@ -92,7 +92,9 @@ fn searcher_preload(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "package table not found".to_string())?;
 
     let preload_key = vm.create_string("preload");
-    let package_ref_cell = vm.get_table(&package_table).ok_or("Invalid package table")?;
+    let package_ref_cell = vm
+        .get_table(&package_table)
+        .ok_or("Invalid package table")?;
     let preload_val = package_ref_cell
         .borrow()
         .raw_get(&preload_key)
@@ -135,7 +137,9 @@ fn searcher_lua(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .ok_or_else(|| "package table not found".to_string())?;
 
         let path_key = vm.create_string("path");
-        let package_ref_cell = vm.get_table(&package_table).ok_or("Invalid package table")?;
+        let package_ref_cell = vm
+            .get_table(&package_table)
+            .ok_or("Invalid package table")?;
         let path_val = package_ref_cell
             .borrow()
             .raw_get(&path_key)
@@ -187,7 +191,8 @@ fn lua_file_loader(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .map_err(|e| format!("cannot read file '{}': {}", filepath, e))?;
 
     // Compile it using VM's string pool
-    let chunk = vm.compile(&source)
+    let chunk = vm
+        .compile(&source)
         .map_err(|e| format!("error loading module '{}': {}", filepath, e))?;
 
     // Create a function from the chunk
@@ -237,7 +242,9 @@ fn searcher_c(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .ok_or_else(|| "package table not found".to_string())?;
 
         let cpath_key = vm.create_string("cpath");
-        let package_ref_cell = vm.get_table(&package_table).ok_or("Invalid package table")?;
+        let package_ref_cell = vm
+            .get_table(&package_table)
+            .ok_or("Invalid package table")?;
         let cpath_val = package_ref_cell
             .borrow()
             .raw_get(&cpath_key)

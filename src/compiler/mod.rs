@@ -108,10 +108,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Create a new compiler with a parent scope chain
-    pub fn new_with_parent(
-        parent_scope: Rc<RefCell<ScopeChain>>,
-        vm_ptr: *mut LuaVM,
-    ) -> Self {
+    pub fn new_with_parent(parent_scope: Rc<RefCell<ScopeChain>>, vm_ptr: *mut LuaVM) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,

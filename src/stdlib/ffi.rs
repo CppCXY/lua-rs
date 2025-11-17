@@ -34,7 +34,8 @@ fn create_ffi_c_namespace(vm: &mut LuaVM) -> LuaValue {
     let meta = vm.create_table();
     let index_key = vm.create_string("__index");
     let meta_ref = vm.get_table(&meta).ok_or("Invalid meta table").unwrap();
-    meta_ref.borrow_mut()
+    meta_ref
+        .borrow_mut()
         .raw_set(index_key, LuaValue::cfunction(ffi_c_index_wrapper));
 
     let table_ref = vm.get_table(&table).ok_or("Invalid table").unwrap();

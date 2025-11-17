@@ -151,8 +151,9 @@ impl LibraryRegistry {
             if let Some(package_table) = vm.get_global("package") {
                 if package_table.is_table() {
                     let loaded_key = vm.create_string("loaded");
-                    if let Some(loaded_table) = vm.table_get(&package_table,&loaded_key)
-                    && loaded_table.is_table() {
+                    if let Some(loaded_table) = vm.table_get(&package_table, &loaded_key)
+                        && loaded_table.is_table()
+                    {
                         let mod_key = vm.create_string(module.name);
                         vm.table_set(loaded_table, mod_key, lib_table.clone());
                     }

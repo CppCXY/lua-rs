@@ -30,7 +30,9 @@
 
 use std::cell::RefCell;
 
-use crate::{lua_value::CFunction, object_pool::TableId, FunctionId, LuaString, StringId, UserdataId};
+use crate::{
+    FunctionId, LuaString, StringId, UserdataId, lua_value::CFunction, object_pool::TableId,
+};
 use std::cmp::Ordering;
 
 // Primary word tags (public for VM fast paths)

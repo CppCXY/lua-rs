@@ -134,9 +134,7 @@ fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let string_key = vm.create_string("string");
     let position_key = vm.create_string("position");
     let state_ref = vm.get_table(&state_table).ok_or("Invalid state table")?;
-    state_ref
-        .borrow_mut()
-        .raw_set(string_key, s_value);
+    state_ref.borrow_mut().raw_set(string_key, s_value);
     state_ref
         .borrow_mut()
         .raw_set(position_key, LuaValue::integer(0));

@@ -484,8 +484,11 @@ fn string_format(vm: &mut LuaVM) -> Result<MultiValue, String> {
                                 n.to_string()
                             } else {
                                 // Try __tostring metamethod
-                                match vm.call_tostring_metamethod(&val) {  
-                                    Ok(Some(s)) => s.as_string().map(|st| unsafe { st.as_str().to_string() }).unwrap_or_else(|| s.to_string_repr()),
+                                match vm.call_tostring_metamethod(&val) {
+                                    Ok(Some(s)) => s
+                                        .as_string()
+                                        .map(|st| st.as_str().to_string())
+                                        .unwrap_or_else(|| s.to_string_repr()),
                                     Ok(None) => val.to_string_repr(),
                                     Err(e) => return Err(e),
                                 }
@@ -696,10 +699,6 @@ fn string_gsub(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// string.gmatch(s, pattern) - Returns an iterator function
 /// Usage: for capture in string.gmatch(s, pattern) do ... end
 fn string_gmatch(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lua_value::LuaTable;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
     let arg0 = require_arg(vm, 0, "string.gmatch")?;
     let s = unsafe {
         arg0.as_string()
@@ -723,15 +722,12 @@ fn string_gmatch(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let string_key = vm.create_string("string");
     let pattern_key = vm.create_string("pattern");
     let position_key = vm.create_string("position");
-    
+    let s_value = vm.create_string(s.as_str());
+    let pattern_value = vm.create_string(pattern_str.as_str());
+
     let state_ref = vm.get_table(&state_table).ok_or("Invalid state table")?;
-    state_ref
-        .borrow_mut()
-        .raw_set(string_key, vm.create_string(s.as_str()));
-    state_ref.borrow_mut().raw_set(
-        pattern_key,
-        vm.create_string(pattern_str.as_str()),
-    );
+    state_ref.borrow_mut().raw_set(string_key, s_value);
+    state_ref.borrow_mut().raw_set(pattern_key, pattern_value);
     state_ref
         .borrow_mut()
         .raw_set(position_key, LuaValue::integer(0));
@@ -750,16 +746,15 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Arg 0: state table
     // Arg 1: control variable (unused, we use state.position)
     let state_table_value = require_arg(vm, 0, "gmatch iterator")?;
-    let state_table = state_table_value
-        .as_table_id()
-        .ok_or_else(|| "gmatch iterator: state table expected".to_string())?;
 
     // Extract string, pattern, and position from state
     let string_key = vm.create_string("string");
     let pattern_key = vm.create_string("pattern");
     let position_key = vm.create_string("position");
 
-    let state_ref_cell = vm.get_table(&state_table_value).ok_or("Invalid state table")?;
+    let state_ref_cell = vm
+        .get_table(&state_table_value)
+        .ok_or("Invalid state table")?;
     let s_val = state_ref_cell
         .borrow()
         .raw_get(&string_key)

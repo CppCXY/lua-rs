@@ -21,8 +21,8 @@ pub use gc::GC;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
 pub use lua_vm::LuaVM;
-pub use opcode::{Instruction, OpCode};
 pub use object_pool::*;
+pub use opcode::{Instruction, OpCode};
 use std::rc::Rc;
 
 /// Main entry point for executing Lua code
@@ -30,7 +30,7 @@ pub fn execute(source: &str) -> Result<LuaValue, String> {
     // Create VM and compile using its string pool
     let mut vm = LuaVM::new();
     let chunk = vm.compile(source)?;
-    
+
     vm.open_libs();
     vm.execute(Rc::new(chunk))
 }

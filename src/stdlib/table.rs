@@ -20,9 +20,6 @@ pub fn create_table_lib() -> LibraryModule {
 /// table.concat(list [, sep [, i [, j]]]) - Concatenate table elements
 fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.concat")?;
-    let table = table_val
-        .as_table_id()
-        .ok_or_else(|| "bad argument #1 to 'table.concat' (table expected)".to_string())?;
 
     let sep_value = get_arg(vm, 2);
     let sep = match sep_value {
@@ -67,10 +64,6 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// table.insert(list, [pos,] value) - Insert element
 fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.insert")?;
-    let table = table_val
-        .as_table_id()
-        .ok_or_else(|| "bad argument #1 to 'table.insert' (table expected)".to_string())?;
-
     let argc = crate::lib_registry::arg_count(vm);
 
     let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
@@ -106,9 +99,6 @@ fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// table.remove(list [, pos]) - Remove element
 fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.remove")?;
-    let table = table_val
-        .as_table_id()
-        .ok_or_else(|| "bad argument #1 to 'table.remove' (table expected)".to_string())?;
 
     let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
     let mut table_ref = table_ref_cell.borrow_mut();
@@ -135,9 +125,6 @@ fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// table.move(a1, f, e, t [, a2]) - Move elements
 fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let src_val = require_arg(vm, 0, "table.move")?;
-    let src = src_val
-        .as_table_id()
-        .ok_or_else(|| "bad argument #1 to 'table.move' (table expected)".to_string())?;
 
     let f = require_arg(vm, 1, "table.move")?
         .as_integer()
@@ -152,9 +139,7 @@ fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #4 to 'table.move' (number expected)".to_string())?;
 
     let dst_value = get_arg(vm, 4).unwrap_or_else(|| src_val.clone());
-    let dst = dst_value
-        .as_table_id()
-        .ok_or_else(|| "bad argument #5 to 'table.move' (table expected)".to_string())?;
+
     // Copy elements
     let mut values = Vec::new();
     {
@@ -169,7 +154,9 @@ fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 
     {
-        let dst_ref_cell = vm.get_table(&dst_value).ok_or("Invalid destination table")?;
+        let dst_ref_cell = vm
+            .get_table(&dst_value)
+            .ok_or("Invalid destination table")?;
         let mut dst_ref = dst_ref_cell.borrow_mut();
         for (offset, val) in values.into_iter().enumerate() {
             dst_ref.raw_set(LuaValue::integer(t + offset as i64), val);
@@ -182,8 +169,9 @@ fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// table.pack(...) - Pack values into table
 fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = crate::lib_registry::get_args(vm);
-
     let table = vm.create_table();
+    // Set 'n' field
+    let n_key = vm.create_string("n");
     let table_ref_cell = vm.get_table(&table).ok_or("Invalid table")?;
     let mut table_ref = table_ref_cell.borrow_mut();
 
@@ -191,8 +179,6 @@ fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
         table_ref.raw_set(LuaValue::integer(i as i64 + 1), arg.clone());
     }
 
-    // Set 'n' field
-    let n_key = vm.create_string("n");
     table_ref.raw_set(n_key, LuaValue::integer(args.len() as i64));
 
     drop(table_ref);
@@ -230,10 +216,6 @@ fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// table.sort(list [, comp]) - Sort table in place
 fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.sort")?;
-    let table = table_val
-        .as_table_id()
-        .ok_or_else(|| "bad argument #1 to 'table.sort' (table expected)".to_string())?;
-
     let comp = get_arg(vm, 1);
 
     // Get array length and extract values

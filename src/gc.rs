@@ -17,7 +17,7 @@ pub enum Generation {
 /// Object metadata for GC tracking
 #[derive(Debug, Clone)]
 pub struct GcObject {
-    pub obj_id: u32,          // The actual object ID (StringId, TableId, etc.)
+    pub obj_id: u32, // The actual object ID (StringId, TableId, etc.)
     pub generation: Generation,
     pub age: u8,
     pub marked: bool,
@@ -69,7 +69,7 @@ impl GcObject {
 pub struct GC {
     // Object tracking for generational GC - key is (type, id)
     objects: HashMap<(GcObjectType, u32), GcObject>,
-    next_gc_id: usize,  // Internal GC tracking ID
+    next_gc_id: usize, // Internal GC tracking ID
 
     // GC triggers
     allocations_since_minor_gc: usize,
@@ -163,7 +163,11 @@ impl GC {
 
     /// Perform garbage collection (chooses minor or major)
     /// Takes root set (stack, globals, etc.) and marks reachable objects
-    pub fn collect(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) -> usize {
+    pub fn collect(
+        &mut self,
+        roots: &[LuaValue],
+        object_pool: &mut crate::object_pool::ObjectPool,
+    ) -> usize {
         if self.should_collect_old() {
             self.major_collect(roots, object_pool)
         } else {
@@ -172,7 +176,11 @@ impl GC {
     }
 
     /// Minor GC - collect young generation only
-    fn minor_collect(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) -> usize {
+    fn minor_collect(
+        &mut self,
+        roots: &[LuaValue],
+        object_pool: &mut crate::object_pool::ObjectPool,
+    ) -> usize {
         self.collection_count += 1;
         self.stats.minor_collections += 1;
 
@@ -219,7 +227,7 @@ impl GC {
                             object_pool.remove_function(func_id);
                         }
                     }
-                    
+
                     let size = match obj_type {
                         GcObjectType::String => 64,
                         GcObjectType::Table => 256,
@@ -246,7 +254,11 @@ impl GC {
     }
 
     /// Major GC - collect all generations
-    fn major_collect(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) -> usize {
+    fn major_collect(
+        &mut self,
+        roots: &[LuaValue],
+        object_pool: &mut crate::object_pool::ObjectPool,
+    ) -> usize {
         self.collection_count += 1;
         self.stats.major_collections += 1;
 
@@ -276,7 +288,7 @@ impl GC {
                             object_pool.remove_function(func_id);
                         }
                     }
-                    
+
                     let size = match obj_type {
                         GcObjectType::String => 64,
                         GcObjectType::Table => 256,
@@ -303,7 +315,11 @@ impl GC {
     }
 
     /// Mark phase: traverse object graph from roots
-    fn mark(&mut self, roots: &[LuaValue], object_pool: &crate::object_pool::ObjectPool) -> HashSet<(GcObjectType, u32)> {
+    fn mark(
+        &mut self,
+        roots: &[LuaValue],
+        object_pool: &crate::object_pool::ObjectPool,
+    ) -> HashSet<(GcObjectType, u32)> {
         let mut marked = HashSet::new();
         let mut worklist: Vec<LuaValue> = roots.to_vec();
 
@@ -316,9 +332,9 @@ impl GC {
                 crate::lua_value::LuaValueKind::Table => {
                     value.as_table_id().map(|id| (GcObjectType::Table, id.0))
                 }
-                crate::lua_value::LuaValueKind::Function => {
-                    value.as_function_id().map(|id| (GcObjectType::Function, id.0))
-                }
+                crate::lua_value::LuaValueKind::Function => value
+                    .as_function_id()
+                    .map(|id| (GcObjectType::Function, id.0)),
                 _ => None,
             };
 
@@ -337,12 +353,16 @@ impl GC {
                 // Mark children
                 match key.0 {
                     GcObjectType::Table => {
-                        if let Some(table_ref) = object_pool.get_table(crate::object_pool::TableId(key.1)) {
+                        if let Some(table_ref) =
+                            object_pool.get_table(crate::object_pool::TableId(key.1))
+                        {
                             self.mark_table(&table_ref.borrow(), &mut worklist);
                         }
                     }
                     GcObjectType::Function => {
-                        if let Some(func_ref) = object_pool.get_function(crate::object_pool::FunctionId(key.1)) {
+                        if let Some(func_ref) =
+                            object_pool.get_function(crate::object_pool::FunctionId(key.1))
+                        {
                             self.mark_function(&func_ref.borrow(), &mut worklist);
                         }
                     }

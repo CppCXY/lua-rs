@@ -4,18 +4,18 @@ use crate::LuaValue;
 pub const DEBUG_C_MARKER: &str = "[C]";
 
 pub struct LuaCallFrame {
-    pub frame_id: usize,         // Unique ID for this frame
-    pub function_value: LuaValue, // Function value (contains FunctionId or CFunction)
-    pub pc: usize,               // Program counter
-    pub base_ptr: usize,         // Index into global register_stack (register window start)
-    pub top: usize,              // Top of stack for this frame (relative to base_ptr)
-    pub result_reg: usize,       // Register to store return value in parent frame
-    pub num_results: usize,      // Number of expected return values
+    pub frame_id: usize,                 // Unique ID for this frame
+    pub function_value: LuaValue,        // Function value (contains FunctionId or CFunction)
+    pub pc: usize,                       // Program counter
+    pub base_ptr: usize,                 // Index into global register_stack (register window start)
+    pub top: usize,                      // Top of stack for this frame (relative to base_ptr)
+    pub result_reg: usize,               // Register to store return value in parent frame
+    pub num_results: usize,              // Number of expected return values
     pub func_name: Option<&'static str>, // Function name for debugging (static string)
     pub source: Option<&'static str>,    // Source file/chunk name (static string)
-    pub is_protected: bool,      // Is this a pcall frame?
-    pub vararg_start: usize,     // Start index of variable arguments (relative to base_ptr)
-    pub vararg_count: usize,     // Number of variable arguments
+    pub is_protected: bool,              // Is this a pcall frame?
+    pub vararg_start: usize,             // Start index of variable arguments (relative to base_ptr)
+    pub vararg_count: usize,             // Number of variable arguments
 }
 
 impl LuaCallFrame {
