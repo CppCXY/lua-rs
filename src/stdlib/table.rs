@@ -60,8 +60,8 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
 
-    let result = vm.create_string(parts.join(&sep));
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&parts.join(&sep));
+    Ok(MultiValue::single(result))
 }
 
 /// table.insert(list, [pos,] value) - Insert element
@@ -187,11 +187,8 @@ fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 
     // Set 'n' field
-    let n_key = vm.create_string("n".to_string());
-    table_ref.raw_set(
-        LuaValue::from_string_rc(n_key),
-        LuaValue::integer(args.len() as i64),
-    );
+    let n_key = vm.create_string("n");
+    table_ref.raw_set(n_key, LuaValue::integer(args.len() as i64));
 
     drop(table_ref);
     Ok(MultiValue::single(LuaValue::from_table_rc(table)))

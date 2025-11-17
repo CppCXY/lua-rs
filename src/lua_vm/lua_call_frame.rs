@@ -10,16 +10,16 @@ pub const DEBUG_DIRECT_CALL: &str = "[direct_call]";
 pub struct LuaCallFrame {
     pub frame_id: usize, // Unique ID for this frame
     pub function: Rc<LuaFunction>,
-    pub pc: usize,                 // Program counter
-    pub base_ptr: usize,           // Index into global register_stack (register window start)
-    pub top: usize,                // Top of stack for this frame (relative to base_ptr)
-    pub result_reg: usize,         // Register to store return value in parent frame
-    pub num_results: usize,        // Number of expected return values
+    pub pc: usize,                       // Program counter
+    pub base_ptr: usize,                 // Index into global register_stack (register window start)
+    pub top: usize,                      // Top of stack for this frame (relative to base_ptr)
+    pub result_reg: usize,               // Register to store return value in parent frame
+    pub num_results: usize,              // Number of expected return values
     pub func_name: Option<&'static str>, // Function name for debugging (static string)
     pub source: Option<&'static str>,    // Source file/chunk name (static string)
-    pub is_protected: bool,        // Is this a pcall frame?
-    pub vararg_start: usize,       // Start index of variable arguments (relative to base_ptr)
-    pub vararg_count: usize,       // Number of variable arguments
+    pub is_protected: bool,              // Is this a pcall frame?
+    pub vararg_start: usize,             // Start index of variable arguments (relative to base_ptr)
+    pub vararg_count: usize,             // Number of variable arguments
 }
 
 impl LuaCallFrame {

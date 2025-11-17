@@ -1570,11 +1570,8 @@ impl LuaVM {
 
         // Slow path: Check for __call metamethod on non-functions (tables, userdata)
         if let Some(metatable) = func.get_metatable() {
-            let call_key = self.create_string("__call".to_string());
-            if let Some(call_func) = metatable
-                .borrow()
-                .raw_get(&LuaValue::from_string_rc(call_key))
-            {
+            let call_key = self.create_string("__call");
+            if let Some(call_func) = metatable.borrow().raw_get(&call_key) {
                 let original_func = func;
                 let call_function = call_func.clone();
 
@@ -1845,10 +1842,10 @@ impl LuaVM {
         }
 
         if success {
-            let string = self.create_string(result);
+            let string = self.create_string(&result);
             let frame = self.current_frame();
             let base_ptr = frame.base_ptr;
-            self.set_register(base_ptr, a, LuaValue::from_string_rc(string));
+            self.set_register(base_ptr, a, string);
             return Ok(());
         }
 
@@ -1994,7 +1991,7 @@ impl LuaVM {
     }
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
-        let key = LuaValue::from_string_rc(self.create_string(name.to_string()));
+        let key = self.create_string(name);
         self.globals.borrow().raw_get(&key)
     }
 
@@ -2003,7 +2000,7 @@ impl LuaVM {
     }
 
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
-        let key = LuaValue::from_string_rc(self.create_string(name.to_string()));
+        let key = self.create_string(name);
         self.globals.borrow_mut().raw_set(key, value);
     }
 
@@ -2018,10 +2015,8 @@ impl LuaVM {
         let metatable = self.create_table();
 
         // Set __index to the string library table
-        let index_key = self.create_string("__index".to_string());
-        metatable
-            .borrow_mut()
-            .raw_set(LuaValue::from_string_rc(index_key), string_lib);
+        let index_key = self.create_string("__index");
+        metatable.borrow_mut().raw_set(index_key, string_lib);
 
         self.string_metatable = Some(metatable);
     }
@@ -2091,17 +2086,13 @@ impl LuaVM {
             CoroutineStatus::Dead => {
                 return Ok((
                     false,
-                    vec![LuaValue::from_string_rc(
-                        self.create_string("cannot resume dead coroutine".to_string()),
-                    )],
+                    vec![self.create_string("cannot resume dead coroutine")],
                 ));
             }
             CoroutineStatus::Running => {
                 return Ok((
                     false,
-                    vec![LuaValue::from_string_rc(self.create_string(
-                        "cannot resume running coroutine".to_string(),
-                    ))],
+                    vec![self.create_string("cannot resume running coroutine")],
                 ));
             }
             _ => {}
@@ -2228,7 +2219,7 @@ impl LuaVM {
                 }
                 Err(e) => {
                     thread.status = CoroutineStatus::Dead;
-                    Ok((false, vec![LuaValue::from_string_rc(self.create_string(e))]))
+                    Ok((false, vec![self.create_string(&e)]))
                 }
             }
         };
@@ -2936,21 +2927,23 @@ impl LuaVM {
 
     /// Create a string and register it with GC
     /// For short strings (≤64 bytes), use interning (global deduplication)
-    pub fn create_string(&mut self, s: String) -> Rc<LuaString> {
+    /// Create a string value, with automatic interning for short strings
+    /// Returns LuaValue directly, eliminating the need for from_string_rc()
+    pub fn create_string(&mut self, s: &str) -> LuaValue {
         let len = s.len();
 
         // Short strings are interned for global uniqueness
         if len <= self.max_short_string_len {
             // Create temporary string to get hash
-            let temp_string = LuaString::new(s.clone());
+            let temp_string = LuaString::new(s.to_string());
             let hash = temp_string.cached_hash();
 
             // Check if already exists in string table
             if let Some(weak_ref) = self.string_table.get(&hash) {
                 if let Some(existing) = weak_ref.upgrade() {
                     // Verify content match (hash collision check)
-                    if existing.as_str() == s.as_str() {
-                        return existing;
+                    if existing.as_str() == s {
+                        return LuaValue::from_string_rc(existing);
                     }
                 }
             }
@@ -2968,23 +2961,14 @@ impl LuaVM {
                 self.string_table.retain(|_, weak| weak.strong_count() > 0);
             }
 
-            string
+            LuaValue::from_string_rc(string)
         } else {
             // Long strings are not interned
-            let string = Rc::new(LuaString::new(s));
+            let string = Rc::new(LuaString::new(s.to_string()));
             let ptr = Rc::as_ptr(&string) as usize;
             self.gc.register_object(ptr, GcObjectType::String);
-            string
+            LuaValue::from_string_rc(string)
         }
-    }
-
-    /// Create a string for builtin function returns (lighter weight, no immediate GC check)
-    /// Returns are short-lived and will be registered when stored in registers
-    pub fn create_builtin_string(&mut self, s: String) -> Rc<LuaString> {
-        let string = Rc::new(LuaString::new(s));
-        let ptr = Rc::as_ptr(&string) as usize;
-        self.gc.register_object(ptr, GcObjectType::String);
-        string
     }
 
     /// Create a function and register it with GC
@@ -3308,11 +3292,8 @@ impl LuaVM {
     ) -> Result<Option<Rc<LuaString>>, String> {
         // Check for __tostring metamethod
         if let Some(metatable) = value.get_metatable() {
-            let tostring_key = self.create_string("__tostring".to_string());
-            if let Some(tostring_func) = metatable
-                .borrow()
-                .raw_get(&LuaValue::from_string_rc(tostring_key))
-            {
+            let tostring_key = self.create_string("__tostring");
+            if let Some(tostring_func) = metatable.borrow().raw_get(&tostring_key) {
                 // Call the metamethod with the value as argument
                 let result = self.call_metamethod(&tostring_func, &[value.clone()])?;
 
@@ -3399,55 +3380,45 @@ impl LuaVM {
                 }
 
                 // Return error without traceback for now (can add later)
-                let error_str = self.create_string(error_msg);
+                let error_str = self.create_string(&error_msg);
 
-                (false, vec![LuaValue::from_string_rc(error_str)])
+                (false, vec![error_str])
             }
         }
     }
 
-    /// Protected call with error handler - 实现 xpcall 机制
+    /// Protected call with error handler
     pub fn protected_call_with_handler(
         &mut self,
         func: LuaValue,
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> (bool, Vec<LuaValue>) {
-        // 保存当前错误处理�?
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
-        // 保存当前栈深�?
         let initial_frame_count = self.frames.len();
 
-        // 尝试调用函数
         let result = self.call_function_internal(func, args);
 
-        // 恢复错误处理�?
         self.error_handler = old_handler;
 
         match result {
             Ok(values) => (true, values),
             Err(err_msg) => {
-                // 清空所�?open upvalues
                 self.open_upvalues.clear();
 
-                // 回滚�?
                 while self.frames.len() > initial_frame_count {
                     self.frames.pop();
                 }
-
-                // 调用错误处理�?
-                let err_str = self.create_string(err_msg.clone());
-                let handler_result = self
-                    .call_function_internal(err_handler, vec![LuaValue::from_string_rc(err_str)]);
+                let err_str = self.create_string(&err_msg);
+                let handler_result = self.call_function_internal(err_handler, vec![err_str]);
 
                 match handler_result {
                     Ok(handler_values) => (false, handler_values),
                     Err(_) => {
-                        // 错误处理器本身出�?返回原始错误
-                        let err_str = self.create_string(err_msg);
-                        (false, vec![LuaValue::from_string_rc(err_str)])
+                        let err_str = self.create_string(&err_msg);
+                        (false, vec![err_str])
                     }
                 }
             }

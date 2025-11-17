@@ -32,11 +32,9 @@ fn create_ffi_c_namespace(vm: &mut LuaVM) -> LuaValue {
 
     // Set __index metamethod for lazy symbol loading
     let meta = vm.create_table();
-    let index_key = vm.create_string("__index".to_string());
-    meta.borrow_mut().raw_set(
-        LuaValue::from_string_rc(index_key),
-        LuaValue::cfunction(ffi_c_index_wrapper),
-    );
+    let index_key = vm.create_string("__index");
+    meta.borrow_mut()
+        .raw_set(index_key, LuaValue::cfunction(ffi_c_index_wrapper));
 
     table.borrow_mut().set_metatable(Some(meta));
     LuaValue::from_table_rc(table)

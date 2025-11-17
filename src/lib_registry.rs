@@ -121,10 +121,8 @@ impl LibraryRegistry {
                 LibraryEntry::Function(func) => LuaValue::cfunction(*func),
                 LibraryEntry::Value(value_init) => value_init(vm),
             };
-            let name_key = vm.create_string(name.to_string());
-            lib_table
-                .borrow_mut()
-                .raw_set(LuaValue::from_string_rc(name_key), value);
+            let name_key = vm.create_string(name);
+            lib_table.borrow_mut().raw_set(name_key, value);
         }
 
         // Set the library table as a global
@@ -153,16 +151,11 @@ impl LibraryRegistry {
             // This allows require() to find standard libraries
             if let Some(package_table) = vm.get_global("package") {
                 if let Some(package_rc) = package_table.as_table() {
-                    let loaded_key = vm.create_string("loaded".to_string());
-                    if let Some(loaded_table) = package_rc
-                        .borrow()
-                        .raw_get(&LuaValue::from_string_rc(loaded_key))
-                    {
+                    let loaded_key = vm.create_string("loaded");
+                    if let Some(loaded_table) = package_rc.borrow().raw_get(&loaded_key) {
                         if let Some(loaded_rc) = loaded_table.as_table() {
-                            let mod_key = vm.create_string(module.name.to_string());
-                            loaded_rc
-                                .borrow_mut()
-                                .raw_set(LuaValue::from_string_rc(mod_key), lib_value);
+                            let mod_key = vm.create_string(module.name);
+                            loaded_rc.borrow_mut().raw_set(mod_key, lib_value);
                         }
                     }
                 }

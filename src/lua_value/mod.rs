@@ -7,9 +7,10 @@ use crate::LuaVM;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::hash::Hasher;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
@@ -57,20 +58,17 @@ pub struct LuaString {
 
 impl LuaString {
     pub fn new(s: String) -> Self {
-        use std::hash::{Hash, Hasher};
-        use std::collections::hash_map::DefaultHasher;
-        
         let mut hasher = DefaultHasher::new();
         s.hash(&mut hasher);
         let hash = hasher.finish();
-        
+
         LuaString { data: s, hash }
     }
 
     pub fn as_str(&self) -> &str {
         &self.data
     }
-    
+
     #[inline]
     pub fn cached_hash(&self) -> u64 {
         self.hash

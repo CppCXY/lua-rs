@@ -1,4 +1,4 @@
-use lua_rs::{Compiler, LuaVM, LuaValue};
+use lua_rs::{Compiler, LuaVM};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -45,10 +45,6 @@ fn main() {
     println!("Type Lua code and press Enter. Type 'exit' to quit.\n");
 
     let mut vm = LuaVM::new();
-
-    // Example: Set some global values
-    let version_str = vm.create_string("0.1.0".to_string());
-    vm.set_global("version", LuaValue::from_string_rc(version_str));
 
     loop {
         print!("> ");

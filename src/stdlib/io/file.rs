@@ -178,50 +178,44 @@ pub fn create_file_metatable(vm: &mut LuaVM) -> Rc<RefCell<LuaTable>> {
     let index_table = Rc::new(RefCell::new(LuaTable::new()));
 
     // file:read([format])
-    index_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("read".to_string())),
-        LuaValue::cfunction(file_read),
-    );
+    index_table
+        .borrow_mut()
+        .raw_set(vm.create_string("read"), LuaValue::cfunction(file_read));
 
     // file:write(...)
-    index_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("write".to_string())),
-        LuaValue::cfunction(file_write),
-    );
+    index_table
+        .borrow_mut()
+        .raw_set(vm.create_string("write"), LuaValue::cfunction(file_write));
 
     // file:flush()
-    index_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("flush".to_string())),
-        LuaValue::cfunction(file_flush),
-    );
+    index_table
+        .borrow_mut()
+        .raw_set(vm.create_string("flush"), LuaValue::cfunction(file_flush));
 
     // file:close()
-    index_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("close".to_string())),
-        LuaValue::cfunction(file_close),
-    );
+    index_table
+        .borrow_mut()
+        .raw_set(vm.create_string("close"), LuaValue::cfunction(file_close));
 
     // file:lines([formats])
-    index_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("lines".to_string())),
-        LuaValue::cfunction(file_lines),
-    );
+    index_table
+        .borrow_mut()
+        .raw_set(vm.create_string("lines"), LuaValue::cfunction(file_lines));
 
     // file:seek([whence [, offset]])
-    index_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("seek".to_string())),
-        LuaValue::cfunction(file_seek),
-    );
+    index_table
+        .borrow_mut()
+        .raw_set(vm.create_string("seek"), LuaValue::cfunction(file_seek));
 
     // file:setvbuf(mode [, size])
     index_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("setvbuf".to_string())),
+        vm.create_string("setvbuf"),
         LuaValue::cfunction(file_setvbuf),
     );
 
     // Set __index to the index table
     mt.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("__index".to_string())),
+        vm.create_string("__index"),
         LuaValue::from_table_rc(index_table),
     );
 
@@ -255,12 +249,12 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
                 let result = match format {
                     "*l" | "*L" => match lua_file.read_line() {
-                        Ok(Some(line)) => LuaValue::from_string_rc(vm.create_string(line)),
+                        Ok(Some(line)) => vm.create_string(&line),
                         Ok(None) => LuaValue::nil(),
                         Err(e) => return Err(format!("read error: {}", e)),
                     },
                     "*a" => match lua_file.read_all() {
-                        Ok(content) => LuaValue::from_string_rc(vm.create_string(content)),
+                        Ok(content) => vm.create_string(&content),
                         Err(e) => return Err(format!("read error: {}", e)),
                     },
                     _ => {
@@ -269,7 +263,7 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
                             match lua_file.read_bytes(n) {
                                 Ok(bytes) => {
                                     let s = String::from_utf8_lossy(&bytes).to_string();
-                                    LuaValue::from_string_rc(vm.create_string(s))
+                                    vm.create_string(&s)
                                 }
                                 Err(e) => return Err(format!("read error: {}", e)),
                             }
@@ -403,10 +397,9 @@ fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // For now, return a simple iterator that reads lines
     // Create state table with file handle
     let state_table = Rc::new(RefCell::new(LuaTable::new()));
-    state_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("file".to_string())),
-        file_val.clone(),
-    );
+    state_table
+        .borrow_mut()
+        .raw_set(vm.create_string("file"), file_val.clone());
 
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(file_lines_iterator),
@@ -422,7 +415,7 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let state_val = get_arg(vm, 0).ok_or("iterator requires state")?;
     let state_table = state_val.as_table().ok_or("invalid iterator state")?;
 
-    let file_key = LuaValue::from_string_rc(vm.create_string("file".to_string()));
+    let file_key = vm.create_string("file");
     let file_val = state_table
         .borrow()
         .raw_get(&file_key)
@@ -430,20 +423,18 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Read next line
     if let Some(ud) = file_val.as_userdata() {
-            let data = ud.get_data();
-            let mut data_ref = data.borrow_mut();
-            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
-                match lua_file.read_line() {
-                    Ok(Some(line)) => {
-                        return Ok(MultiValue::single(LuaValue::from_string_rc(
-                            vm.create_string(line),
-                        )));
-                    }
-                    Ok(None) => return Ok(MultiValue::single(LuaValue::nil())),
-                    Err(e) => return Err(format!("read error: {}", e)),
+        let data = ud.get_data();
+        let mut data_ref = data.borrow_mut();
+        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+            match lua_file.read_line() {
+                Ok(Some(line)) => {
+                    return Ok(MultiValue::single(vm.create_string(&line)));
                 }
+                Ok(None) => return Ok(MultiValue::single(LuaValue::nil())),
+                Err(e) => return Err(format!("read error: {}", e)),
             }
         }
+    }
 
     Err("expected file handle".to_string())
 }
@@ -462,33 +453,33 @@ fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let offset = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(0);
 
     if let Some(ud) = file_val.as_userdata() {
-            let data = ud.get_data();
-            let mut data_ref = data.borrow_mut();
-            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
-                let seek_from = match whence.as_str() {
-                    "set" => std::io::SeekFrom::Start(offset.max(0) as u64),
-                    "cur" => std::io::SeekFrom::Current(offset),
-                    "end" => std::io::SeekFrom::End(offset),
-                    _ => return Err(format!("invalid whence: {}", whence)),
-                };
+        let data = ud.get_data();
+        let mut data_ref = data.borrow_mut();
+        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+            let seek_from = match whence.as_str() {
+                "set" => std::io::SeekFrom::Start(offset.max(0) as u64),
+                "cur" => std::io::SeekFrom::Current(offset),
+                "end" => std::io::SeekFrom::End(offset),
+                _ => return Err(format!("invalid whence: {}", whence)),
+            };
 
-                let pos = match &mut lua_file.inner {
-                    FileInner::Read(reader) => reader.seek(seek_from),
-                    FileInner::Write(_) => {
-                        return Err("cannot seek on write-only file".to_string());
-                    }
-                    FileInner::ReadWrite(file) => file.seek(seek_from),
-                    FileInner::Closed => return Err("file is closed".to_string()),
-                };
-
-                match pos {
-                    Ok(position) => {
-                        return Ok(MultiValue::single(LuaValue::integer(position as i64)));
-                    }
-                    Err(e) => return Err(format!("seek error: {}", e)),
+            let pos = match &mut lua_file.inner {
+                FileInner::Read(reader) => reader.seek(seek_from),
+                FileInner::Write(_) => {
+                    return Err("cannot seek on write-only file".to_string());
                 }
+                FileInner::ReadWrite(file) => file.seek(seek_from),
+                FileInner::Closed => return Err("file is closed".to_string()),
+            };
+
+            match pos {
+                Ok(position) => {
+                    return Ok(MultiValue::single(LuaValue::integer(position as i64)));
+                }
+                Err(e) => return Err(format!("seek error: {}", e)),
             }
         }
+    }
 
     Err("expected file handle".to_string())
 }

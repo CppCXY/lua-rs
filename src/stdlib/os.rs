@@ -55,8 +55,8 @@ fn os_date(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .as_secs();
 
     let date_str = format!("timestamp: {}", timestamp);
-    let result = vm.create_string(date_str);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&date_str);
+    Ok(MultiValue::single(result))
 }
 
 fn os_exit(_vm: &mut LuaVM) -> Result<MultiValue, String> {
@@ -89,7 +89,7 @@ fn os_execute(vm: &mut LuaVM) -> Result<MultiValue, String> {
             let exit_code = result.status.code().unwrap_or(-1);
             Ok(MultiValue::multiple(vec![
                 LuaValue::boolean(result.status.success()),
-                LuaValue::from_string_rc(vm.create_string("exit".to_string())),
+                vm.create_string("exit"),
                 LuaValue::integer(exit_code as i64),
             ]))
         }
@@ -104,8 +104,8 @@ fn os_getenv(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     match std::env::var(varname.as_str()) {
         Ok(value) => {
-            let result = vm.create_string(value);
-            Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+            let result = vm.create_string(&value);
+            Ok(MultiValue::single(result))
         }
         Err(_) => Ok(MultiValue::single(LuaValue::nil())),
     }
@@ -119,11 +119,8 @@ fn os_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
     match std::fs::remove_file(filename.as_str()) {
         Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
         Err(e) => {
-            let err_msg = vm.create_string(format!("{}", e));
-            Ok(MultiValue::multiple(vec![
-                LuaValue::nil(),
-                LuaValue::from_string_rc(err_msg),
-            ]))
+            let err_msg = vm.create_string(&format!("{}", e));
+            Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]))
         }
     }
 }
@@ -139,11 +136,8 @@ fn os_rename(vm: &mut LuaVM) -> Result<MultiValue, String> {
     match std::fs::rename(oldname.as_str(), newname.as_str()) {
         Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
         Err(e) => {
-            let err_msg = vm.create_string(format!("{}", e));
-            Ok(MultiValue::multiple(vec![
-                LuaValue::nil(),
-                LuaValue::from_string_rc(err_msg),
-            ]))
+            let err_msg = vm.create_string(&format!("{}", e));
+            Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]))
         }
     }
 }
@@ -155,8 +149,8 @@ fn os_setlocale(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| "C".to_string());
 
-    let result = vm.create_string(locale);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&locale);
+    Ok(MultiValue::single(result))
 }
 
 fn os_tmpname(vm: &mut LuaVM) -> Result<MultiValue, String> {
@@ -168,6 +162,6 @@ fn os_tmpname(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .as_nanos();
 
     let tmpname = format!("/tmp/lua_tmp_{}", timestamp);
-    let result = vm.create_string(tmpname);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&tmpname);
+    Ok(MultiValue::single(result))
 }

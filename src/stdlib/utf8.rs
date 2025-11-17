@@ -19,7 +19,7 @@ pub fn create_utf8_lib() -> LibraryModule {
         // UTF-8 character pattern for pattern matching
         // This pattern matches any valid UTF-8 character sequence
         let pattern = "[\\x00-\\x7F\\xC2-\\xF4][\\x80-\\xBF]*";
-        LuaValue::from_string_rc(vm.create_string(pattern.to_string()))
+        vm.create_string(&pattern)
     });
 
     module
@@ -44,7 +44,7 @@ fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
         match std::str::from_utf8(bytes) {
             Ok(valid_str) => {
                 return Ok(MultiValue::single(LuaValue::integer(
-                    valid_str.chars().count() as i64
+                    valid_str.chars().count() as i64,
                 )));
             }
             Err(e) if !lax => {
@@ -118,8 +118,8 @@ fn utf8_char(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
 
-    let s = vm.create_string(result);
-    Ok(MultiValue::single(LuaValue::from_string_rc(s)))
+    let s = vm.create_string(&result);
+    Ok(MultiValue::single(s))
 }
 
 /// utf8.codes(s) - Returns an iterator for UTF-8 characters
@@ -131,14 +131,12 @@ fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Create state table: {string = s, position = 0}
     let state_table = vm.create_table();
-    state_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("string".to_string())),
-        s_value,
-    );
-    state_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("position".to_string())),
-        LuaValue::integer(0),
-    );
+    state_table
+        .borrow_mut()
+        .raw_set(vm.create_string("string"), s_value);
+    state_table
+        .borrow_mut()
+        .raw_set(vm.create_string("position"), LuaValue::integer(0));
 
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(utf8_codes_iterator),
@@ -154,8 +152,8 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .as_table()
         .ok_or_else(|| "utf8.codes iterator: state table expected".to_string())?;
 
-    let string_key = LuaValue::from_string_rc(vm.create_string("string".to_string()));
-    let position_key = LuaValue::from_string_rc(vm.create_string("position".to_string()));
+    let string_key = vm.create_string("string");
+    let position_key = vm.create_string("position");
 
     let s_val = state_table
         .borrow()

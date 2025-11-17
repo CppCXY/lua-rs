@@ -268,8 +268,8 @@ fn math_type(vm: &mut LuaVM) -> Result<MultiValue, String> {
         _ => return Ok(MultiValue::single(LuaValue::nil())),
     };
 
-    let result = vm.create_string(type_str.to_string());
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(type_str);
+    Ok(MultiValue::single(result))
 }
 
 fn math_ult(vm: &mut LuaVM) -> Result<MultiValue, String> {

@@ -107,8 +107,8 @@ fn coroutine_status(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     };
 
-    let s = vm.create_string(status_str.to_string());
-    Ok(MultiValue::single(LuaValue::from_string_rc(s)))
+    let s = vm.create_string(status_str);
+    Ok(MultiValue::single(s))
 }
 
 /// coroutine.running() - Get currently running coroutine
@@ -127,7 +127,7 @@ fn coroutine_running(vm: &mut LuaVM) -> Result<MultiValue, String> {
             let main_thread_rc = vm.create_thread(dummy_func);
             vm.main_thread_value = Some(LuaValue::thread_ptr(Rc::into_raw(main_thread_rc)));
         }
-        
+
         Ok(MultiValue::multiple(vec![
             vm.main_thread_value.as_ref().unwrap().clone(),
             LuaValue::boolean(true),

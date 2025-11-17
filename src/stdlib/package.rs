@@ -38,13 +38,13 @@ fn create_preload_table(vm: &mut LuaVM) -> LuaValue {
 // Create package.path string
 fn create_path_string(vm: &mut LuaVM) -> LuaValue {
     let path = "./?.lua;./?/init.lua";
-    LuaValue::from_string_rc(vm.create_string(path.to_string()))
+    vm.create_string(path)
 }
 
 // Create package.cpath string
 fn create_cpath_string(vm: &mut LuaVM) -> LuaValue {
     let cpath = "./?.so;./?.dll;./?.dylib";
-    LuaValue::from_string_rc(vm.create_string(cpath.to_string()))
+    vm.create_string(cpath)
 }
 
 // Create package.config string
@@ -54,7 +54,7 @@ fn create_config_string(vm: &mut LuaVM) -> LuaValue {
     #[cfg(not(windows))]
     let config = "/\n;\n?\n!\n-";
 
-    LuaValue::from_string_rc(vm.create_string(config.to_string()))
+    vm.create_string(config)
 }
 
 // Create package.searchers table with 4 standard searchers
@@ -98,22 +98,18 @@ fn searcher_preload(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let preload_val = package_rc
         .borrow()
-        .raw_get(&LuaValue::from_string_rc(
-            vm.create_string("preload".to_string()),
-        ))
+        .raw_get(&vm.create_string("preload"))
         .unwrap_or(LuaValue::nil());
 
     let preload_table = match preload_val.as_table() {
         Some(t) => t,
         None => {
             let err = format!("\n\tno field package.preload['{}']", modname);
-            return Ok(MultiValue::single(LuaValue::from_string_rc(
-                vm.create_string(err),
-            )));
+            return Ok(MultiValue::single(vm.create_string(&err)));
         }
     };
 
-    let modname_key = LuaValue::from_string_rc(vm.create_string(modname.clone()));
+    let modname_key = vm.create_string(&modname);
     let loader = preload_table
         .borrow()
         .raw_get(&modname_key)
@@ -121,9 +117,7 @@ fn searcher_preload(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     if loader.is_nil() {
         let err = format!("\n\tno field package.preload['{}']", modname);
-        Ok(MultiValue::single(LuaValue::from_string_rc(
-            vm.create_string(err),
-        )))
+        Ok(MultiValue::single(vm.create_string(&err)))
     } else {
         Ok(MultiValue::single(loader))
     }
@@ -151,9 +145,7 @@ fn searcher_lua(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
         let path_val = package_rc
             .borrow()
-            .raw_get(&LuaValue::from_string_rc(
-                vm.create_string("path".to_string()),
-            ))
+            .raw_get(&vm.create_string("path"))
             .unwrap_or(LuaValue::nil());
 
         path_val
@@ -169,7 +161,7 @@ fn searcher_lua(vm: &mut LuaVM) -> Result<MultiValue, String> {
     match result {
         Some(filepath) => Ok(MultiValue::multiple(vec![
             LuaValue::cfunction(lua_file_loader),
-            LuaValue::from_string_rc(vm.create_string(filepath)),
+            vm.create_string(&filepath),
         ])),
         None => {
             let err = format!(
@@ -179,9 +171,7 @@ fn searcher_lua(vm: &mut LuaVM) -> Result<MultiValue, String> {
                     .collect::<Vec<_>>()
                     .join("'\n\tno file '")
             );
-            Ok(MultiValue::single(LuaValue::from_string_rc(
-                vm.create_string(err),
-            )))
+            Ok(MultiValue::single(vm.create_string(&err)))
         }
     }
 }
@@ -262,9 +252,7 @@ fn searcher_c(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
         let cpath_val = package_rc
             .borrow()
-            .raw_get(&LuaValue::from_string_rc(
-                vm.create_string("cpath".to_string()),
-            ))
+            .raw_get(&vm.create_string("cpath"))
             .unwrap_or(LuaValue::nil());
 
         cpath_val
@@ -283,9 +271,7 @@ fn searcher_c(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .collect::<Vec<_>>()
             .join("'\n\tno file '")
     );
-    Ok(MultiValue::single(LuaValue::from_string_rc(
-        vm.create_string(err),
-    )))
+    Ok(MultiValue::single(vm.create_string(&err)))
 }
 
 // Searcher 4: all-in-one loader (stub)
@@ -302,15 +288,11 @@ fn searcher_allinone(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Only try if this is a submodule (contains '.')
     if !modname.contains('.') {
         let err = format!("\n\tno module '{}' in all-in-one loader", modname);
-        return Ok(MultiValue::single(LuaValue::from_string_rc(
-            vm.create_string(err),
-        )));
+        return Ok(MultiValue::single(vm.create_string(&err)));
     }
 
     let err = format!("\n\tall-in-one loader not fully implemented");
-    Ok(MultiValue::single(LuaValue::from_string_rc(
-        vm.create_string(err),
-    )))
+    Ok(MultiValue::single(vm.create_string(&err)))
 }
 
 // Helper: Search for a file in path templates
@@ -331,20 +313,15 @@ fn search_path(name: &str, path: &str, sep: &str, rep: &str) -> Result<Option<St
 }
 
 fn package_loadlib(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let err = vm.create_string("loadlib not implemented".to_string());
-    Ok(MultiValue::multiple(vec![
-        LuaValue::nil(),
-        LuaValue::from_string_rc(err),
-    ]))
+    let err = vm.create_string("loadlib not implemented");
+    Ok(MultiValue::multiple(vec![LuaValue::nil(), err]))
 }
 
 fn package_searchpath(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let name_val = require_arg(vm, 0, "searchpath")?;
     let path_val = require_arg(vm, 1, "searchpath")?;
-    let sep_val =
-        get_arg(vm, 2).unwrap_or(LuaValue::from_string_rc(vm.create_string(".".to_string())));
-    let rep_val =
-        get_arg(vm, 3).unwrap_or(LuaValue::from_string_rc(vm.create_string("/".to_string())));
+    let sep_val = get_arg(vm, 2).unwrap_or(vm.create_string("."));
+    let rep_val = get_arg(vm, 3).unwrap_or(vm.create_string("/"));
 
     let name = unsafe {
         name_val
@@ -379,9 +356,7 @@ fn package_searchpath(vm: &mut LuaVM) -> Result<MultiValue, String> {
     };
 
     match search_path(&name, &path, &sep, &rep)? {
-        Some(filepath) => Ok(MultiValue::single(LuaValue::from_string_rc(
-            vm.create_string(filepath),
-        ))),
+        Some(filepath) => Ok(MultiValue::single(vm.create_string(&filepath))),
         None => {
             let searchname = name.replace(&sep, &rep);
             let err = format!(
@@ -393,7 +368,7 @@ fn package_searchpath(vm: &mut LuaVM) -> Result<MultiValue, String> {
             );
             Ok(MultiValue::multiple(vec![
                 LuaValue::nil(),
-                LuaValue::from_string_rc(vm.create_string(err)),
+                vm.create_string(&err),
             ]))
         }
     }

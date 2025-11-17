@@ -239,31 +239,28 @@ pub fn ffi_c_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // With __call metamethod for invoking the function
     let wrapper = vm.create_table();
 
-    let ptr_key = vm.create_string("_ptr".to_string());
-    wrapper.borrow_mut().raw_set(
-        LuaValue::from_string_rc(ptr_key),
-        LuaValue::integer(symbol_ptr as i64),
-    );
+    let ptr_key = vm.create_string("_ptr");
+    wrapper
+        .borrow_mut()
+        .raw_set(ptr_key, LuaValue::integer(symbol_ptr as i64));
 
-    let name_key = vm.create_string("_name".to_string());
-    wrapper.borrow_mut().raw_set(
-        LuaValue::from_string_rc(name_key),
-        LuaValue::from_string_rc(vm.create_string(name.clone())),
-    );
+    let name_key = vm.create_string("_name");
+    wrapper
+        .borrow_mut()
+        .raw_set(name_key, vm.create_string(&name));
 
     // If we have signature info, store it
     if let Some(sig) = signature {
-        let sig_key = vm.create_string("_sig".to_string());
+        let sig_key = vm.create_string("_sig");
         // Store signature as a table for now
         let sig_table = vm.create_table();
 
-        let ret_key = vm.create_string("return".to_string());
-        sig_table.borrow_mut().raw_set(
-            LuaValue::from_string_rc(ret_key),
-            LuaValue::integer(sig.return_type.kind as i64),
-        );
+        let ret_key = vm.create_string("return");
+        sig_table
+            .borrow_mut()
+            .raw_set(ret_key, LuaValue::integer(sig.return_type.kind as i64));
 
-        let params_key = vm.create_string("params".to_string());
+        let params_key = vm.create_string("params");
         let params_table = vm.create_table();
         for (i, param) in sig.param_types.iter().enumerate() {
             params_table.borrow_mut().raw_set(
@@ -271,24 +268,21 @@ pub fn ffi_c_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 LuaValue::integer(param.kind as i64),
             );
         }
-        sig_table.borrow_mut().raw_set(
-            LuaValue::from_string_rc(params_key),
-            LuaValue::from_table_rc(params_table),
-        );
+        sig_table
+            .borrow_mut()
+            .raw_set(params_key, LuaValue::from_table_rc(params_table));
 
-        wrapper.borrow_mut().raw_set(
-            LuaValue::from_string_rc(sig_key),
-            LuaValue::from_table_rc(sig_table),
-        );
+        wrapper
+            .borrow_mut()
+            .raw_set(sig_key, LuaValue::from_table_rc(sig_table));
     }
 
     // Set metatable with __call
     let metatable = vm.create_table();
-    let call_key = vm.create_string("__call".to_string());
-    metatable.borrow_mut().raw_set(
-        LuaValue::from_string_rc(call_key),
-        LuaValue::cfunction(ffi_call_wrapper),
-    );
+    let call_key = vm.create_string("__call");
+    metatable
+        .borrow_mut()
+        .raw_set(call_key, LuaValue::cfunction(ffi_call_wrapper));
 
     wrapper.borrow_mut().set_metatable(Some(metatable));
 
@@ -312,10 +306,8 @@ pub fn ffi_call_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .as_table()
             .ok_or("ffi call: invalid wrapper object")?;
 
-        let ptr_key = vm.create_string("_ptr".to_string());
-        let ptr_val = wrapper_table
-            .borrow()
-            .raw_get(&LuaValue::from_string_rc(ptr_key));
+        let ptr_key = vm.create_string("_ptr");
+        let ptr_val = wrapper_table.borrow().raw_get(&ptr_key);
         let ptr = if let Some(ptr_value) = ptr_val {
             ptr_value
                 .as_integer()
@@ -324,10 +316,8 @@ pub fn ffi_call_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
             return Err("ffi call: function pointer not found".to_string());
         } as *mut u8;
 
-        let name_key = vm.create_string("_name".to_string());
-        let name_val = wrapper_table
-            .borrow()
-            .raw_get(&LuaValue::from_string_rc(name_key));
+        let name_key = vm.create_string("_name");
+        let name_val = wrapper_table.borrow().raw_get(&name_key);
         let name = if let Some(name_value) = name_val {
             let name_str_ptr = name_value
                 .as_string_ptr()
@@ -397,41 +387,32 @@ pub fn ffi_new(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     if matches!(ctype.kind, CTypeKind::Struct) {
         // Store the struct data
-        let data_key = vm.create_string("__cdata".to_string());
-        table
-            .borrow_mut()
-            .raw_set(LuaValue::from_string_rc(data_key), cdata.to_lua_value());
+        let data_key = vm.create_string("__cdata");
+        table.borrow_mut().raw_set(data_key, cdata.to_lua_value());
 
         // Store the type info
-        let type_key = vm.create_string("__ctype".to_string());
-        let type_name_rc = vm.create_string(type_name.clone());
-        table.borrow_mut().raw_set(
-            LuaValue::from_string_rc(type_key),
-            LuaValue::from_string_rc(type_name_rc),
-        );
+        let type_key = vm.create_string("__ctype");
+        let type_name_rc = vm.create_string(&type_name);
+        table.borrow_mut().raw_set(type_key, type_name_rc);
 
         // Set metamethods for field access
         let metatable = vm.create_table();
 
-        let index_key = vm.create_string("__index".to_string());
-        metatable.borrow_mut().raw_set(
-            LuaValue::from_string_rc(index_key),
-            LuaValue::cfunction(ffi_struct_index),
-        );
+        let index_key = vm.create_string("__index");
+        metatable
+            .borrow_mut()
+            .raw_set(index_key, LuaValue::cfunction(ffi_struct_index));
 
-        let newindex_key = vm.create_string("__newindex".to_string());
-        metatable.borrow_mut().raw_set(
-            LuaValue::from_string_rc(newindex_key),
-            LuaValue::cfunction(ffi_struct_newindex),
-        );
+        let newindex_key = vm.create_string("__newindex");
+        metatable
+            .borrow_mut()
+            .raw_set(newindex_key, LuaValue::cfunction(ffi_struct_newindex));
 
         table.borrow_mut().set_metatable(Some(metatable));
     } else {
         // For non-struct types, just store the value
-        let value_key = vm.create_string("_value".to_string());
-        table
-            .borrow_mut()
-            .raw_set(LuaValue::from_string_rc(value_key), cdata.to_lua_value());
+        let value_key = vm.create_string("_value");
+        table.borrow_mut().raw_set(value_key, cdata.to_lua_value());
     }
 
     Ok(MultiValue::single(LuaValue::from_table_rc(table)))
@@ -452,17 +433,15 @@ pub fn ffi_typeof(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Return a table representing the ctype
     let table = vm.create_table();
-    let size_key = vm.create_string("size".to_string());
-    let align_key = vm.create_string("alignment".to_string());
+    let size_key = vm.create_string("size");
+    let align_key = vm.create_string("alignment");
 
-    table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(size_key),
-        LuaValue::integer(ctype.size as i64),
-    );
-    table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(align_key),
-        LuaValue::integer(ctype.alignment as i64),
-    );
+    table
+        .borrow_mut()
+        .raw_set(size_key, LuaValue::integer(ctype.size as i64));
+    table
+        .borrow_mut()
+        .raw_set(align_key, LuaValue::integer(ctype.alignment as i64));
 
     Ok(MultiValue::single(LuaValue::from_table_rc(table)))
 }
@@ -487,10 +466,8 @@ pub fn ffi_cast(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Return as table (simplified)
     let table = vm.create_table();
-    let value_key = vm.create_string("_value".to_string());
-    table
-        .borrow_mut()
-        .raw_set(LuaValue::from_string_rc(value_key), cdata.to_lua_value());
+    let value_key = vm.create_string("_value");
+    table.borrow_mut().raw_set(value_key, cdata.to_lua_value());
 
     Ok(MultiValue::single(LuaValue::from_table_rc(table)))
 }
@@ -586,9 +563,9 @@ pub fn ffi_string(vm: &mut LuaVM) -> Result<MultiValue, String> {
             };
 
             let slice = std::slice::from_raw_parts(c_str_ptr as *const u8, len);
-            let string = String::from_utf8_lossy(slice).to_string();
-            let lua_str = vm.create_string(string);
-            Ok(MultiValue::single(LuaValue::from_string_rc(lua_str)))
+            let string = String::from_utf8_lossy(slice);
+            let lua_str = vm.create_string(&string);
+            Ok(MultiValue::single(lua_str))
         }
     } else {
         Err("ffi.string() requires pointer argument".to_string())
@@ -687,16 +664,16 @@ pub fn ffi_struct_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let field_name = unsafe {
         if let Some(s) = field_name_val.as_string_ptr() {
-            (*s).as_str().to_string()
+            (*s).as_str()
         } else {
             return Err("struct field name must be string".to_string());
         }
     };
 
     // Create all string keys upfront
-    let type_key = LuaValue::from_string_rc(vm.create_string("__ctype".to_string()));
-    let fields_key = LuaValue::from_string_rc(vm.create_string("__fields".to_string()));
-    let field_key = LuaValue::from_string_rc(vm.create_string(field_name.clone()));
+    let type_key = vm.create_string("__ctype");
+    let fields_key = vm.create_string("__fields");
+    let field_key = vm.create_string(field_name);
 
     // Get the struct type
     unsafe {
@@ -706,7 +683,7 @@ pub fn ffi_struct_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
         let type_name = if let Some(tn) = type_name_val {
             if let Some(s) = tn.as_string_ptr() {
-                (*s).as_str().to_string()
+                (*s).as_str()
             } else {
                 return Err("invalid struct type".to_string());
             }
@@ -723,7 +700,7 @@ pub fn ffi_struct_index(vm: &mut LuaVM) -> Result<MultiValue, String> {
         // Get field info
         let fields = ctype.fields.as_ref().ok_or("not a struct type")?;
         let field = fields
-            .get(&field_name)
+            .get(field_name)
             .ok_or_else(|| format!("Field '{}' not found", field_name))?;
 
         // Get stored field values
@@ -778,7 +755,7 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> Result<MultiValue, String> {
     unsafe {
         let table = struct_table.as_table().ok_or("invalid struct object")?;
 
-        let type_key = LuaValue::from_string_rc(vm.create_string("__ctype".to_string()));
+        let type_key = vm.create_string("__ctype");
         let type_name_val = table.borrow().raw_get(&type_key);
 
         let type_name = if let Some(tn) = type_name_val {
@@ -804,8 +781,7 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
 
         // Get or create __fields table
-        let fields_key_rc = vm.create_string("__fields".to_string());
-        let fields_key = LuaValue::from_string_rc(fields_key_rc.clone());
+        let fields_key = vm.create_string("__fields");
         let fields_table_val = table.borrow().raw_get(&fields_key);
 
         let fields_table = if let Some(ft) = fields_table_val {
@@ -822,15 +798,14 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> Result<MultiValue, String> {
         } else {
             // Create fields table
             let new_fields = vm.create_table();
-            table.borrow_mut().raw_set(
-                LuaValue::from_string_rc(fields_key_rc),
-                LuaValue::from_table_rc(new_fields.clone()),
-            );
+            table
+                .borrow_mut()
+                .raw_set(fields_key, LuaValue::from_table_rc(new_fields.clone()));
             new_fields
         };
 
         // Set the field value
-        let field_key = LuaValue::from_string_rc(vm.create_string(field_name.to_string()));
+        let field_key = vm.create_string(field_name);
         fields_table.borrow_mut().raw_set(field_key, value.clone());
 
         Ok(MultiValue::empty())

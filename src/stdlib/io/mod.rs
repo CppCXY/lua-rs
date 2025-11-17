@@ -1,10 +1,10 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 
+use crate::LuaString;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
-use crate::LuaString;
 use std::io::{self, BufRead, Write};
 use std::rc::Rc;
 
@@ -163,7 +163,7 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
             // Create userdata with VM (proper GC tracking)
             use crate::lua_value::LuaUserdata;
             let userdata = vm.alloc_userdata(LuaUserdata::new(file));
-            
+
             // Set metatable
             if let Some(ud) = userdata.as_userdata() {
                 ud.set_metatable(Some(file_mt));
@@ -175,7 +175,7 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
             // Return nil and error message
             Ok(MultiValue::multiple(vec![
                 LuaValue::nil(),
-                LuaValue::from_string_rc(vm.create_string(e.to_string())),
+                vm.create_string(&e.to_string()),
             ]))
         }
     }

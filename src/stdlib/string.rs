@@ -84,8 +84,8 @@ fn string_char(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let result_str =
         String::from_utf8(bytes).map_err(|_| "string.char: invalid UTF-8".to_string())?;
 
-    let result = vm.create_string(result_str);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&result_str);
+    Ok(MultiValue::single(result))
 }
 
 /// string.len(s) - Return string length
@@ -107,8 +107,8 @@ fn string_lower(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'string.lower' (string expected)".to_string())?;
 
-    let result = vm.create_string(s.as_str().to_lowercase());
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&s.as_str().to_lowercase());
+    Ok(MultiValue::single(result))
 }
 
 /// string.upper(s) - Convert to uppercase
@@ -118,8 +118,8 @@ fn string_upper(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'string.upper' (string expected)".to_string())?;
 
-    let result = vm.create_string(s.as_str().to_uppercase());
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&s.as_str().to_uppercase());
+    Ok(MultiValue::single(result))
 }
 
 /// string.rep(s, n [, sep]) - Repeat string
@@ -144,8 +144,8 @@ fn string_rep(vm: &mut LuaVM) -> Result<MultiValue, String> {
     };
 
     if n <= 0 {
-        let empty = vm.create_string(String::new());
-        return Ok(MultiValue::single(LuaValue::from_string_rc(empty)));
+        let empty = vm.create_string("");
+        return Ok(MultiValue::single(empty));
     }
 
     let mut result = String::new();
@@ -156,8 +156,8 @@ fn string_rep(vm: &mut LuaVM) -> Result<MultiValue, String> {
         result.push_str(s.as_str());
     }
 
-    let result = vm.create_string(result);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&result);
+    Ok(MultiValue::single(result))
 }
 
 /// string.reverse(s) - Reverse string
@@ -168,8 +168,8 @@ fn string_reverse(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "bad argument #1 to 'string.reverse' (string expected)".to_string())?;
 
     let reversed: String = s.as_str().chars().rev().collect();
-    let result = vm.create_string(reversed);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&reversed);
+    Ok(MultiValue::single(result))
 }
 
 /// string.sub(s, i [, j]) - Extract substring
@@ -204,8 +204,8 @@ fn string_sub(vm: &mut LuaVM) -> Result<MultiValue, String> {
         String::new()
     };
 
-    let result = vm.create_string(result_str);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    let result = vm.create_string(&result_str);
+    Ok(MultiValue::single(result))
 }
 
 /// string.format(formatstring, ...) - Format string (simplified)
@@ -533,8 +533,8 @@ fn string_format(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
 
-    let result_str = vm.create_string(result);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result_str)))
+    let result_str = vm.create_string(&result);
+    Ok(MultiValue::single(result_str))
 }
 
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
@@ -604,7 +604,7 @@ fn string_find(vm: &mut LuaVM) -> Result<MultiValue, String> {
                         ];
                         // Add captures
                         for cap in captures {
-                            results.push(LuaValue::from_string_rc(vm.create_string(cap)));
+                            results.push(vm.create_string(&cap));
                         }
                         Ok(MultiValue::multiple(results))
                     } else {
@@ -640,15 +640,11 @@ fn string_match(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 if captures.is_empty() {
                     // No captures, return the matched portion
                     let matched = &text[start..end];
-                    Ok(MultiValue::single(LuaValue::from_string_rc(
-                        vm.create_string(matched.to_string()),
-                    )))
+                    Ok(MultiValue::single(vm.create_string(matched)))
                 } else {
                     // Return captures
-                    let results: Vec<LuaValue> = captures
-                        .into_iter()
-                        .map(|s| LuaValue::from_string_rc(vm.create_string(s)))
-                        .collect();
+                    let results: Vec<LuaValue> =
+                        captures.into_iter().map(|s| vm.create_string(&s)).collect();
                     Ok(MultiValue::multiple(results))
                 }
             } else {
@@ -687,9 +683,9 @@ fn string_gsub(vm: &mut LuaVM) -> Result<MultiValue, String> {
         Ok(pattern) => {
             let (result_str, count) = lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max);
 
-            let result = vm.create_string(result_str);
+            let result = vm.create_string(&result_str);
             Ok(MultiValue::multiple(vec![
-                LuaValue::from_string_rc(result),
+                result,
                 LuaValue::integer(count as i64),
             ]))
         }
@@ -724,18 +720,16 @@ fn string_gmatch(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Create state table: {string = s, pattern = p, position = 0}
     let state_table = Rc::new(RefCell::new(LuaTable::new()));
+    state_table
+        .borrow_mut()
+        .raw_set(vm.create_string("string"), vm.create_string(s.as_str()));
     state_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("string".to_string())),
-        LuaValue::from_string_rc(vm.create_string(s.as_str().to_string())),
+        vm.create_string("pattern"),
+        vm.create_string(pattern_str.as_str()),
     );
-    state_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("pattern".to_string())),
-        LuaValue::from_string_rc(vm.create_string(pattern_str.as_str().to_string())),
-    );
-    state_table.borrow_mut().raw_set(
-        LuaValue::from_string_rc(vm.create_string("position".to_string())),
-        LuaValue::integer(0),
-    );
+    state_table
+        .borrow_mut()
+        .raw_set(vm.create_string("position"), LuaValue::integer(0));
 
     // Return: iterator function, state table, nil (initial control variable)
     Ok(MultiValue::multiple(vec![
@@ -756,9 +750,9 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "gmatch iterator: state table expected".to_string())?;
 
     // Extract string, pattern, and position from state
-    let string_key = LuaValue::from_string_rc(vm.create_string("string".to_string()));
-    let pattern_key = LuaValue::from_string_rc(vm.create_string("pattern".to_string()));
-    let position_key = LuaValue::from_string_rc(vm.create_string("position".to_string()));
+    let string_key = vm.create_string("string");
+    let pattern_key = vm.create_string("pattern");
+    let position_key = vm.create_string("position");
 
     let s_val = state_table
         .borrow()
@@ -804,13 +798,11 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
         // Return captures if any, otherwise return the matched string
         if captures.is_empty() {
             let matched = &s.as_str()[start..end];
-            Ok(MultiValue::single(LuaValue::from_string_rc(
-                vm.create_string(matched.to_string()),
-            )))
+            Ok(MultiValue::single(vm.create_string(matched)))
         } else {
             let mut results = Vec::new();
             for cap in captures {
-                results.push(LuaValue::from_string_rc(vm.create_string(cap)));
+                results.push(vm.create_string(&cap));
             }
             Ok(MultiValue::multiple(results))
         }
@@ -989,9 +981,7 @@ fn string_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Create a string directly from bytes without UTF-8 validation
     // Lua strings can contain arbitrary binary data
     let packed = unsafe { String::from_utf8_unchecked(result) };
-    Ok(MultiValue::single(LuaValue::from_string_rc(
-        vm.create_string(packed),
-    )))
+    Ok(MultiValue::single(vm.create_string(&packed)))
 }
 
 /// string.packsize(fmt) - Return size of packed data
@@ -1154,8 +1144,8 @@ fn string_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 while idx < bytes.len() && bytes[idx] != 0 {
                     idx += 1;
                 }
-                let s = String::from_utf8_lossy(&bytes[start..idx]).to_string();
-                results.push(LuaValue::from_string_rc(vm.create_string(s)));
+                let s = String::from_utf8_lossy(&bytes[start..idx]);
+                results.push(vm.create_string(&s));
                 idx += 1; // Skip null terminator
             }
             'c' => {
@@ -1173,8 +1163,8 @@ fn string_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 if idx + size > bytes.len() {
                     return Err("data string too short".to_string());
                 }
-                let s = String::from_utf8_lossy(&bytes[idx..idx + size]).to_string();
-                results.push(LuaValue::from_string_rc(vm.create_string(s)));
+                let s = String::from_utf8_lossy(&bytes[idx..idx + size]);
+                results.push(vm.create_string(&s));
                 idx += size;
             }
             _ => {
