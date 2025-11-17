@@ -8,10 +8,10 @@ use crate::lua_value::{
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 use crate::opcode::{Instruction, OpCode};
-use crate::{Compiler, lib_registry};
+use crate::lib_registry;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 /// Coroutine status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +82,8 @@ pub struct LuaVM {
     string_metatable: Option<Rc<RefCell<LuaTable>>>,
 
     // String interning table (for short strings ≤64 bytes)
-    // Maps hash -> Weak<LuaString> for global string deduplication
-    string_table: HashMap<u64, Weak<LuaString>>,
+    // Maps hash -> *const LuaString for O(1) deduplication (VM owns the lifetime)
+    string_table: HashMap<u64, *const LuaString>,
 
     // Maximum length for interned strings (like Lua's LUAI_MAXSHORTLEN)
     max_short_string_len: usize,
@@ -200,9 +200,25 @@ impl LuaVM {
     }
 
     pub fn execute_string(&mut self, source: &str) -> Result<LuaValue, String> {
-        let chunk = Compiler::compile(source)?;
-
+        let chunk = self.compile(source)?;
         self.execute(Rc::new(chunk))
+    }
+
+    /// Compile source code using VM's string pool
+    /// This ensures all strings created during compilation are properly interned and GC-tracked
+    pub fn compile(&mut self, source: &str) -> Result<Chunk, String> {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use crate::compiler::{Compiler, StringCreator};
+
+        // Create a closure that captures &mut self for string creation
+        // We use unsafe pointer to work around borrow checker limitations
+        let vm_ptr = self as *mut LuaVM;
+        let string_creator: StringCreator = Rc::new(RefCell::new(move |s: &str| {
+            unsafe { (*vm_ptr).create_string(s) }
+        }));
+
+        Compiler::compile(source, string_creator)
     }
 
     fn run(&mut self) -> Result<LuaValue, String> {
@@ -2927,47 +2943,55 @@ impl LuaVM {
 
     /// Create a string and register it with GC
     /// For short strings (≤64 bytes), use interning (global deduplication)
-    /// Create a string value, with automatic interning for short strings
-    /// Returns LuaValue directly, eliminating the need for from_string_rc()
+    /// Create a string value with automatic interning for short strings
+    /// Returns LuaValue directly with ZERO allocation overhead for interned strings
+    /// 
+    /// Performance characteristics:
+    /// - Cache hit (interned): O(1) hash lookup, 0 allocations, 0 atomic ops
+    /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
+    /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let len = s.len();
 
-        // Short strings are interned for global uniqueness
+        // Short strings (≤64 bytes) are interned for memory efficiency
         if len <= self.max_short_string_len {
-            // Create temporary string to get hash
-            let temp_string = LuaString::new(s.to_string());
-            let hash = temp_string.cached_hash();
+            // Fast hash computation (inline, no allocation)
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            s.hash(&mut hasher);
+            let hash = hasher.finish();
 
-            // Check if already exists in string table
-            if let Some(weak_ref) = self.string_table.get(&hash) {
-                if let Some(existing) = weak_ref.upgrade() {
-                    // Verify content match (hash collision check)
-                    if existing.as_str() == s {
-                        return LuaValue::from_string_rc(existing);
+            // Check string pool - O(1) lookup, zero allocations
+            if let Some(&ptr) = self.string_table.get(&hash) {
+                // Verify content match (hash collision protection)
+                unsafe {
+                    if (*ptr).as_str() == s {
+                        // Cache hit: return existing string (0 allocations, 0 atomic ops)
+                        return LuaValue::string_ptr(ptr);
                     }
                 }
             }
 
-            // Not found or dead reference, create new string
-            let string = Rc::new(temp_string);
-            let ptr = Rc::as_ptr(&string) as usize;
-            self.gc.register_object(ptr, GcObjectType::String);
+            // Cache miss: allocate new string (Box, not Rc - 50% smaller overhead)
+            let lua_string = LuaString::new(s.to_string());
+            let ptr = Box::into_raw(Box::new(lua_string));
+            let addr = ptr as usize;
+            
+            // Register with GC for lifetime management
+            self.gc.register_object(addr, GcObjectType::String);
 
-            // Store weak reference in string table
-            self.string_table.insert(hash, Rc::downgrade(&string));
+            // Insert into string pool for future O(1) lookups
+            self.string_table.insert(hash, ptr);
 
-            // Clean up dead entries periodically
-            if self.string_table.len() > 4096 && self.string_table.len() % 512 == 0 {
-                self.string_table.retain(|_, weak| weak.strong_count() > 0);
-            }
-
-            LuaValue::from_string_rc(string)
+            LuaValue::string_ptr(ptr)
         } else {
-            // Long strings are not interned
-            let string = Rc::new(LuaString::new(s.to_string()));
-            let ptr = Rc::as_ptr(&string) as usize;
-            self.gc.register_object(ptr, GcObjectType::String);
-            LuaValue::from_string_rc(string)
+            // Long strings (>64 bytes): not interned, direct allocation
+            let lua_string = LuaString::new(s.to_string());
+            let ptr = Box::into_raw(Box::new(lua_string));
+            let addr = ptr as usize;
+            self.gc.register_object(addr, GcObjectType::String);
+            LuaValue::string_ptr(ptr)
         }
     }
 
@@ -3638,6 +3662,21 @@ impl LuaVM {
                 }
             },
             _ => Err("attempt to call a non-function value".to_string()),
+        }
+    }
+}
+
+// Cleanup: VM owns all strings in the string pool and must free them
+impl Drop for LuaVM {
+    fn drop(&mut self) {
+        // Free all interned strings in the string pool
+        // Note: GC will handle strings registered with it, but we need to handle
+        // strings that are only in the pool (though in practice they should all be registered)
+        for (_hash, ptr) in self.string_table.drain() {
+            // Check if this pointer is still valid (GC might have freed it)
+            // For safety, we just let GC handle all cleanup during final collection
+            // The string_table is just for lookup, GC owns the actual objects
+            let _ = ptr; // Just drop the reference
         }
     }
 }

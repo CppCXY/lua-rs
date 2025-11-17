@@ -193,8 +193,8 @@ fn lua_file_loader(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let source = std::fs::read_to_string(&filepath)
         .map_err(|e| format!("cannot read file '{}': {}", filepath, e))?;
 
-    // Compile it
-    let chunk = crate::Compiler::compile(&source)
+    // Compile it using VM's string pool
+    let chunk = vm.compile(&source)
         .map_err(|e| format!("error loading module '{}': {}", filepath, e))?;
 
     // Create a function from the chunk

@@ -203,12 +203,28 @@ impl GC {
 
                     survivors.push((ptr, obj));
                 } else {
-                    // Collect garbage
+                    // Collect garbage - actually free the memory!
                     collected += 1;
                     let size = match obj.obj_type {
-                        GcObjectType::String => 64,
-                        GcObjectType::Table => 256,
-                        GcObjectType::Function => 128,
+                        GcObjectType::String => {
+                            unsafe {
+                                // Reconstruct Box and drop it
+                                let _ = Box::from_raw(ptr as *mut crate::LuaString);
+                            }
+                            64
+                        }
+                        GcObjectType::Table => {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut std::cell::RefCell<crate::LuaTable>);
+                            }
+                            256
+                        }
+                        GcObjectType::Function => {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut crate::LuaFunction);
+                            }
+                            128
+                        }
                     };
                     self.record_deallocation(size);
                 }
@@ -247,10 +263,26 @@ impl GC {
                     self.objects.remove(&ptr);
                     collected += 1;
 
+                    // Actually free the memory!
                     let size = match obj_type {
-                        GcObjectType::String => 64,
-                        GcObjectType::Table => 256,
-                        GcObjectType::Function => 128,
+                        GcObjectType::String => {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut crate::LuaString);
+                            }
+                            64
+                        }
+                        GcObjectType::Table => {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut std::cell::RefCell<crate::LuaTable>);
+                            }
+                            256
+                        }
+                        GcObjectType::Function => {
+                            unsafe {
+                                let _ = Box::from_raw(ptr as *mut crate::LuaFunction);
+                            }
+                            128
+                        }
                     };
                     self.record_deallocation(size);
                 }

@@ -25,18 +25,17 @@ use std::rc::Rc;
 
 /// Main entry point for executing Lua code
 pub fn execute(source: &str) -> Result<LuaValue, String> {
-    // Compile source to bytecode
-    let chunk = Compiler::compile(source)?;
-
-    // Create VM and execute
+    // Create VM and compile using its string pool
     let mut vm = LuaVM::new();
+    let chunk = vm.compile(source)?;
+    
     vm.open_libs();
     vm.execute(Rc::new(chunk))
 }
 
 /// Execute Lua code with custom VM instance
 pub fn execute_with_vm(vm: &mut LuaVM, source: &str) -> Result<LuaValue, String> {
-    let chunk = Compiler::compile(source)?;
+    let chunk = vm.compile(source)?;
     vm.open_libs();
     vm.execute(Rc::new(chunk))
 }

@@ -1,4 +1,4 @@
-use lua_rs::{Compiler, LuaVM};
+use lua_rs::LuaVM;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -14,7 +14,7 @@ fn main() {
             Ok(code) => {
                 let mut vm = LuaVM::new();
                 vm.open_libs();
-                match Compiler::compile(&code) {
+                match vm.compile(&code) {
                     Ok(chunk) => match vm.execute(Rc::new(chunk)) {
                         Ok(result) => {
                             if !result.is_nil() {
@@ -63,7 +63,7 @@ fn main() {
         }
 
         // Try to compile and execute
-        match Compiler::compile(input) {
+        match vm.compile(input) {
             Ok(chunk) => match vm.execute(Rc::new(chunk)) {
                 Ok(result) => {
                     if !result.is_nil() {

@@ -1,13 +1,14 @@
 // Compiler helper functions
 
 use super::{Compiler, Local};
-use crate::lua_value::{LuaString, LuaValue};
+use crate::lua_value::LuaValue;
 use crate::opcode::{Instruction, OpCode};
-use std::rc::Rc;
 
-/// Create a string using the string pool
-pub fn intern_string(c: &Compiler, s: String) -> Rc<LuaString> {
-    c.string_pool.borrow_mut().intern(s)
+/// Create a string value using VM's string pool
+/// This ensures proper string interning and GC tracking
+pub fn create_string_value(c: &Compiler, s: String) -> LuaValue {
+    // Call VM's create_string through the callback
+    c.string_creator.borrow_mut()(&s)
 }
 
 /// Emit an instruction and return its position
@@ -156,8 +157,8 @@ pub fn end_scope(c: &mut Compiler) {
 
 /// Get a global variable
 pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
-    let lua_str = intern_string(c, name.to_string());
-    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
+    let lua_str = create_string_value(c, name.to_string());
+    let const_idx = add_constant(c, lua_str);
     emit(
         c,
         Instruction::encode_abx(OpCode::GetGlobal, dest_reg, const_idx),
@@ -166,8 +167,8 @@ pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
 
 /// Set a global variable
 pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
-    let lua_str = intern_string(c, name.to_string());
-    let const_idx = add_constant(c, LuaValue::from_string_rc(lua_str));
+    let lua_str = create_string_value(c, name.to_string());
+    let const_idx = add_constant(c, lua_str);
     emit(
         c,
         Instruction::encode_abx(OpCode::SetGlobal, src_reg, const_idx),

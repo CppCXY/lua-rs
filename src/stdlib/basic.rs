@@ -688,8 +688,8 @@ fn lua_load(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Optional environment table
     let _env = get_arg(vm, 3);
 
-    // Compile the code
-    match crate::Compiler::compile(&code) {
+    // Compile the code using VM's string pool
+    match vm.compile(&code) {
         Ok(chunk) => {
             let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
                 chunk: std::rc::Rc::new(chunk),
@@ -725,8 +725,8 @@ fn lua_loadfile(vm: &mut LuaVM) -> Result<MultiValue, String> {
         return Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]));
     };
 
-    // Compile the code
-    match crate::Compiler::compile(&code) {
+    // Compile the code using VM's string pool
+    match vm.compile(&code) {
         Ok(chunk) => {
             let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
                 chunk: std::rc::Rc::new(chunk),
@@ -757,8 +757,8 @@ fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
         return Err("stdin loading not implemented".to_string());
     };
 
-    // Compile and execute
-    match crate::Compiler::compile(&code) {
+    // Compile and execute using VM's string pool
+    match vm.compile(&code) {
         Ok(chunk) => {
             let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
                 chunk: std::rc::Rc::new(chunk),

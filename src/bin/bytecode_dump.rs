@@ -1,5 +1,5 @@
 use lua_rs::Chunk;
-use lua_rs::compiler::Compiler;
+use lua_rs::LuaVM;
 use lua_rs::opcode::{Instruction, OpCode};
 use std::env;
 use std::fs;
@@ -25,7 +25,8 @@ fn main() {
         std::process::exit(0);
     };
 
-    match Compiler::compile(&source) {
+    let mut vm = LuaVM::new();
+    match vm.compile(&source) {
         Ok(chunk) => {
             println!("=== Bytecode Analysis ===\n");
             println!("Total instructions: {}", chunk.code.len());

@@ -4,7 +4,7 @@ mod expr;
 mod helpers;
 mod stmt;
 
-use crate::lua_value::{Chunk, StringPool};
+use crate::lua_value::Chunk;
 use crate::opcode::{Instruction, OpCode};
 use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
 use helpers::*;
@@ -40,6 +40,12 @@ impl ScopeChain {
     }
 }
 
+use crate::lua_value::LuaValue;
+
+/// String creator callback: takes &str, returns LuaValue
+/// VM provides this to ensure strings are interned and GC-tracked
+pub type StringCreator = Rc<RefCell<dyn FnMut(&str) -> LuaValue>>;
+
 /// Compiler state
 pub struct Compiler {
     pub(crate) chunk: Chunk,
@@ -50,7 +56,7 @@ pub struct Compiler {
     pub(crate) gotos: Vec<GotoInfo>,     // Pending goto statements
     pub(crate) child_chunks: Vec<Chunk>, // Nested function chunks
     pub(crate) scope_chain: Rc<RefCell<ScopeChain>>, // Scope chain for variable resolution
-    pub(crate) string_pool: Rc<RefCell<StringPool>>, // String interning pool
+    pub(crate) string_creator: StringCreator, // Callback to VM's create_string
 }
 
 /// Upvalue information
@@ -90,7 +96,7 @@ pub(crate) struct GotoInfo {
 }
 
 impl Compiler {
-    pub fn new() -> Self {
+    pub fn new(string_creator: StringCreator) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
@@ -100,14 +106,14 @@ impl Compiler {
             gotos: Vec::new(),
             child_chunks: Vec::new(),
             scope_chain: ScopeChain::new(),
-            string_pool: Rc::new(RefCell::new(StringPool::new())),
+            string_creator,
         }
     }
 
-    /// Create a new compiler with a parent scope chain and shared string pool
+    /// Create a new compiler with a parent scope chain
     pub fn new_with_parent(
         parent_scope: Rc<RefCell<ScopeChain>>,
-        string_pool: Rc<RefCell<StringPool>>,
+        string_creator: StringCreator,
     ) -> Self {
         Compiler {
             chunk: Chunk::new(),
@@ -118,13 +124,14 @@ impl Compiler {
             gotos: Vec::new(),
             child_chunks: Vec::new(),
             scope_chain: ScopeChain::new_with_parent(parent_scope),
-            string_pool,
+            string_creator,
         }
     }
 
     /// Compile Lua source code to bytecode
-    pub fn compile(source: &str) -> Result<Chunk, String> {
-        let mut compiler = Compiler::new();
+    /// Takes a string_creator callback from VM to ensure proper string interning and GC tracking
+    pub fn compile(source: &str, string_creator: StringCreator) -> Result<Chunk, String> {
+        let mut compiler = Compiler::new(string_creator);
 
         let tree = LuaParser::parse(source, ParserConfig::with_level(LuaLanguageLevel::Lua54));
         let _line_index = LineIndex::parse(source);
