@@ -92,25 +92,21 @@ fn searcher_preload(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .get_global("package")
         .ok_or_else(|| "package table not found".to_string())?;
 
-    let package_rc = package_table
-        .as_table_id()
-        .ok_or_else(|| "package is not a table".to_string())?;
-
-    let preload_val = package_rc
+    let preload_key = vm.create_string("preload");
+    let package_ref_cell = vm.get_table(&package_table).ok_or("Invalid package table")?;
+    let preload_val = package_ref_cell
         .borrow()
-        .raw_get(&vm.create_string("preload"))
+        .raw_get(&preload_key)
         .unwrap_or(LuaValue::nil());
 
-    let preload_table = match preload_val.as_table() {
-        Some(t) => t,
-        None => {
-            let err = format!("\n\tno field package.preload['{}']", modname);
-            return Ok(MultiValue::single(vm.create_string(&err)));
-        }
-    };
+    if preload_val.is_nil() || preload_val.as_table_id().is_none() {
+        let err = format!("\n\tno field package.preload['{}']", modname);
+        return Ok(MultiValue::single(vm.create_string(&err)));
+    }
 
     let modname_key = vm.create_string(&modname);
-    let loader = preload_table
+    let preload_ref_cell = vm.get_table(&preload_val).ok_or("Invalid preload table")?;
+    let loader = preload_ref_cell
         .borrow()
         .raw_get(&modname_key)
         .unwrap_or(LuaValue::nil());
@@ -139,13 +135,11 @@ fn searcher_lua(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .get_global("package")
             .ok_or_else(|| "package table not found".to_string())?;
 
-        let package_rc = package_table
-            .as_table_id()
-            .ok_or_else(|| "package is not a table".to_string())?;
-
-        let path_val = package_rc
+        let path_key = vm.create_string("path");
+        let package_ref_cell = vm.get_table(&package_table).ok_or("Invalid package table")?;
+        let path_val = package_ref_cell
             .borrow()
-            .raw_get(&vm.create_string("path"))
+            .raw_get(&path_key)
             .unwrap_or(LuaValue::nil());
 
         path_val
@@ -198,10 +192,7 @@ fn lua_file_loader(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .map_err(|e| format!("error loading module '{}': {}", filepath, e))?;
 
     // Create a function from the chunk
-    let func = LuaValue::from_function_rc(std::rc::Rc::new(crate::LuaFunction {
-        chunk: std::rc::Rc::new(chunk),
-        upvalues: vec![],
-    }));
+    let func = vm.create_function(std::rc::Rc::new(chunk), vec![]);
 
     // Call the function
     let (success, results) = vm.protected_call(func, vec![]);
@@ -246,13 +237,11 @@ fn searcher_c(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .get_global("package")
             .ok_or_else(|| "package table not found".to_string())?;
 
-        let package_rc = package_table
-            .as_table_id()
-            .ok_or_else(|| "package is not a table".to_string())?;
-
-        let cpath_val = package_rc
+        let cpath_key = vm.create_string("cpath");
+        let package_ref_cell = vm.get_table(&package_table).ok_or("Invalid package table")?;
+        let cpath_val = package_ref_cell
             .borrow()
-            .raw_get(&vm.create_string("cpath"))
+            .raw_get(&cpath_key)
             .unwrap_or(LuaValue::nil());
 
         cpath_val

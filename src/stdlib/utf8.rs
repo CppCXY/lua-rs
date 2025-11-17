@@ -155,7 +155,8 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let string_key = vm.create_string("string");
     let position_key = vm.create_string("position");
 
-    let s_val = state_table
+    let state_ref_cell = vm.get_table(&t_value).ok_or("Invalid state table")?;
+    let s_val = state_ref_cell
         .borrow()
         .raw_get(&string_key)
         .ok_or_else(|| "utf8.codes iterator: string not found".to_string())?;
@@ -165,7 +166,7 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .ok_or_else(|| "utf8.codes iterator: invalid string".to_string())?
     };
 
-    let pos = state_table
+    let pos = state_ref_cell
         .borrow()
         .raw_get(&position_key)
         .and_then(|v| v.as_integer())
@@ -184,7 +185,7 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
         let code_point = ch as u32;
 
         // Update position
-        state_table
+        state_ref_cell
             .borrow_mut()
             .raw_set(position_key, LuaValue::integer((pos + char_len) as i64));
 

@@ -5,7 +5,7 @@ mod lua_call_frame;
 use crate::gc::{GC, GcObjectType};
 use crate::lib_registry;
 use crate::lua_value::{
-    Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind,
+    Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue, LuaValueKind,
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 use crate::opcode::{Instruction, OpCode};
@@ -169,11 +169,8 @@ impl LuaVM {
         // Register all constants in the chunk with GC
         self.register_chunk_constants(&chunk);
 
-        // Create main function
-        let main_func = LuaFunction {
-            chunk: chunk.clone(),
-            upvalues: Vec::new(),
-        };
+        // Create main function in object pool
+        let main_func_value = self.create_function(chunk.clone(), Vec::new());
 
         // Create initial call frame using unified stack
         let frame_id = self.next_frame_id;
@@ -185,7 +182,7 @@ impl LuaVM {
 
         let frame = LuaCallFrame::new_lua_function(
             frame_id,
-            Rc::new(main_func),
+            main_func_value,
             base_ptr,
             chunk.max_stack_size,
             0,
@@ -230,16 +227,27 @@ impl LuaVM {
                 return Ok(LuaValue::nil());
             }
 
-            let frame = self.current_frame_mut();
+            // Resolve function and cache chunk reference for this iteration
+            let frame = self.current_frame();
             let pc = frame.pc;
+            let function_value = frame.function_value;
+            
+            // Get chunk from function (fast path for hot loop)
+            let chunk = if let Some(func_id) = function_value.as_function_id() {
+                let func_ref = self.object_pool.get_function(func_id)
+                    .ok_or("Invalid function ID")?;
+                func_ref.borrow().chunk.clone()
+            } else {
+                return Err("Frame function is not a Lua function".to_string());
+            };
 
-            if pc >= frame.function.chunk.code.len() {
+            if pc >= chunk.code.len() {
                 self.frames.pop();
                 continue;
             }
 
-            let instr = frame.function.chunk.code[pc];
-            frame.pc += 1;
+            let instr = chunk.code[pc];
+            self.frames.last_mut().unwrap().pc += 1;
 
             let opcode = Instruction::get_opcode(instr);
 
@@ -332,9 +340,9 @@ impl LuaVM {
     fn op_loadk(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
-        let frame = self.current_frame();
-        let constant = frame.function.chunk.constants[bx].clone();
-        let base_ptr = frame.base_ptr;
+        let chunk = self.get_current_chunk()?;
+        let constant = chunk.constants[bx].clone();
+        let base_ptr = self.current_frame().base_ptr;
         self.set_register(base_ptr, a, constant);
         Ok(())
     }
@@ -471,10 +479,10 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
+        let chunk = self.get_current_chunk()?;
+        let key = chunk.constants[c].clone();
+        let base_ptr = self.current_frame().base_ptr;
         let table = self.get_register(base_ptr, b);
-        let key = frame.function.chunk.constants[c].clone();
 
         if table.is_table() {
             // Not found or not a string key: use generic get with metamethods
@@ -493,10 +501,10 @@ impl LuaVM {
         let b = Instruction::get_b(instr) as usize;
         let c = Instruction::get_c(instr) as usize;
 
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
+        let chunk = self.get_current_chunk()?;
+        let key = chunk.constants[b].clone();
+        let base_ptr = self.current_frame().base_ptr;
         let table = self.get_register(base_ptr, a);
-        let key = frame.function.chunk.constants[b].clone();
         let value = self.get_register(base_ptr, c);
 
         if table.is_table() {
@@ -1395,14 +1403,18 @@ impl LuaVM {
         // Fast path: Lua function (most common case)
         if func.is_function() {
             if let Some(lua_func_id) = func.as_function_id() {
-                let lua_func = self
-                    .object_pool
-                    .get_function(lua_func_id)
-                    .ok_or("Missing function")?
-                    .borrow();
-                let max_stack_size = lua_func.chunk.max_stack_size;
-                let param_count = lua_func.chunk.param_count;
-                let is_vararg = lua_func.chunk.is_vararg;
+                let (max_stack_size, param_count, is_vararg) = {
+                    let func_ref = self
+                        .object_pool
+                        .get_function(lua_func_id)
+                        .ok_or("Missing function")?;
+                    let lua_func = func_ref.borrow();
+                    (
+                        lua_func.chunk.max_stack_size,
+                        lua_func.chunk.param_count,
+                        lua_func.chunk.is_vararg,
+                    )
+                };
 
                 let frame = self.current_frame();
                 let src_base = frame.base_ptr + a;
@@ -1449,10 +1461,9 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                // Create temporary Rc for LuaCallFrame
                 let mut new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
-                    func_rc_clone,
+                    func,
                     new_base,
                     max_stack_size,
                     a,
@@ -1504,7 +1515,7 @@ impl LuaVM {
 
                 let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
-                    self.current_frame().function.clone(),
+                    func,
                     self.current_frame().pc,
                     cfunc_base,
                     arg_registers.len(),
@@ -1562,40 +1573,10 @@ impl LuaVM {
             }
         }
 
-        // Slow path: Check for __call metamethod on non-functions (tables, userdata)
-        if let Some(metatable) = self.get_metamatable(&func) {
-            let call_key = self.create_string("__call");
-            if let Some(call_func) = metatable.borrow().raw_get(&call_key) {
-                let original_func = func;
-                let call_function = call_func.clone();
-
-                let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
-                let top = frame.top;
-
-                // Create new register layout
-                self.register_stack[base_ptr + a] = call_function;
-
-                // Shift existing arguments right by one position
-                for i in (1..b).rev() {
-                    if a + i + 1 < top {
-                        let val = self.register_stack[base_ptr + a + i];
-                        self.register_stack[base_ptr + a + i + 1] = val;
-                    }
-                }
-
-                // Place original func as first argument
-                if a + 1 < top {
-                    self.register_stack[base_ptr + a + 1] = original_func;
-                }
-
-                let new_b = b + 1;
-                let new_instr =
-                    Instruction::encode_abc(OpCode::Call, a as u32, new_b as u32, c as u32);
-                return self.op_call(new_instr);
-            }
-        }
-
+        // TODO: Slow path: Check for __call metamethod on non-functions (tables, userdata)
+        // Requires implementing get_metamethod for non-table types
+        // Currently disabled as the get_metamethod method needs to be updated for ID-based system
+        
         Err("Attempt to call a non-function value".to_string())
     }
 
@@ -1689,13 +1670,7 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
 
-        let upvalue = {
-            let frame = self.current_frame();
-            if b >= frame.function.upvalues.len() {
-                return Err(format!("Invalid upvalue index: {}", b));
-            }
-            frame.function.upvalues[b].clone()
-        };
+        let upvalue = self.get_current_upvalue(b)?;
 
         // Get value from upvalue with access to register_stack
         let value = upvalue.get_value(&self.frames, &self.register_stack);
@@ -1714,13 +1689,7 @@ impl LuaVM {
         let base_ptr = frame.base_ptr;
         let value = self.get_register(base_ptr, a);
 
-        let upvalue = {
-            let frame = self.current_frame();
-            if b >= frame.function.upvalues.len() {
-                return Err(format!("Invalid upvalue index: {}", b));
-            }
-            frame.function.upvalues[b].clone()
-        };
+        let upvalue = self.get_current_upvalue(b)?;
 
         // Set value to upvalue with access to register_stack
         upvalue.set_value(&mut self.frames, &mut self.register_stack, value);
@@ -1732,9 +1701,10 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
 
+        // Dynamically resolve parent function chunk and frame info
         let (proto, parent_frame_id) = {
             let frame = self.current_frame();
-            let parent_chunk = &frame.function.chunk;
+            let parent_chunk = self.get_current_chunk()?;
 
             // Get the child chunk (prototype)
             if bx >= parent_chunk.child_protos.len() {
@@ -1771,13 +1741,8 @@ impl LuaVM {
                 upvalues.push(upvalue);
             } else {
                 // Capture from parent's upvalue (share the same upvalue)
-                let frame = self.current_frame();
-                if (desc.index as usize) < frame.function.upvalues.len() {
-                    upvalues.push(frame.function.upvalues[desc.index as usize].clone());
-                } else {
-                    // Fallback: create closed upvalue with nil
-                    upvalues.push(LuaUpvalue::new_closed(LuaValue::nil()));
-                }
+                let upvalue = self.get_current_upvalue(desc.index as usize)?;
+                upvalues.push(upvalue);
             }
         }
 
@@ -1817,9 +1782,11 @@ impl LuaVM {
             } else if let Some(n) = left.as_number() {
                 result.push_str(&n.to_string());
                 success = true;
-            } else if let Some(s) = self.call_tostring_metamethod(&left)? {
-                result.push_str(s.as_str());
-                success = true;
+            } else if let Some(val) = self.call_tostring_metamethod(&left)? {
+                if let Some(s) = val.as_string() {
+                    result.push_str(s.as_str());
+                    success = true;
+                }
             }
 
             if success {
@@ -1827,8 +1794,12 @@ impl LuaVM {
                     result.push_str(s.as_str());
                 } else if let Some(n) = right.as_number() {
                     result.push_str(&n.to_string());
-                } else if let Some(s) = self.call_tostring_metamethod(&right)? {
-                    result.push_str(s.as_str());
+                } else if let Some(val) = self.call_tostring_metamethod(&right)? {
+                    if let Some(s) = val.as_string() {
+                        result.push_str(s.as_str());
+                    } else {
+                        success = false;
+                    }
                 } else {
                     success = false;
                 }
@@ -1855,8 +1826,8 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
 
-        let frame = self.current_frame();
-        let name_val = &frame.function.chunk.constants[bx];
+        let chunk = self.get_current_chunk()?;
+        let name_val = &chunk.constants[bx];
         let value = self.get_global_by_lua_value(&name_val);
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
@@ -1876,9 +1847,9 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
 
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let name_val = frame.function.chunk.constants[bx].clone();
+        let chunk = self.get_current_chunk()?;
+        let name_val = chunk.constants[bx].clone();
+        let base_ptr = self.current_frame().base_ptr;
         let value = self.get_register(base_ptr, a);
 
         unsafe {
@@ -2496,7 +2467,7 @@ impl LuaVM {
                 self.next_frame_id += 1;
 
                 // We need a dummy function for the frame - use an empty one
-                let dummy_func = Rc::new(LuaFunction {
+                let dummy_func = LuaFunction {
                     chunk: Rc::new(Chunk {
                         code: Vec::new(),
                         constants: Vec::new(),
@@ -2511,7 +2482,10 @@ impl LuaVM {
                         line_info: Vec::new(),
                     }),
                     upvalues: Vec::new(),
-                });
+                };
+                
+                let dummy_func_id = self.object_pool.create_function(dummy_func);
+                let dummy_func_value = LuaValue::function_id(dummy_func_id);
 
                 let base_ptr = self.register_stack.len();
                 let num_args = registers.len();
@@ -2522,7 +2496,7 @@ impl LuaVM {
 
                 let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
-                    dummy_func.clone(),
+                    dummy_func_value,
                     0,
                     base_ptr,
                     num_args,
@@ -2546,18 +2520,22 @@ impl LuaVM {
             }
             LuaValueKind::Function => {
                 let lua_func_id = func.as_function_id().unwrap();
-                let lua_func = self
-                    .object_pool
-                    .get_function(lua_func_id)
-                    .ok_or("invalid function")?
-                    .borrow();
+                
+                // Get max_stack_size before mutable operations
+                let max_stack_size = {
+                    let lua_func_ref = self
+                        .object_pool
+                        .get_function(lua_func_id)
+                        .ok_or("invalid function")?;
+                    lua_func_ref.borrow().chunk.max_stack_size
+                };
+                
                 // Call Lua function
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
                 // Create a new call frame
                 let base_ptr = self.register_stack.len();
-                let max_stack_size = lua_func.chunk.max_stack_size;
                 self.ensure_stack_capacity(base_ptr + max_stack_size);
 
                 // Initialize with nil
@@ -2574,7 +2552,7 @@ impl LuaVM {
 
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
-                    lua_func,
+                    func.clone(),  // Clone the LuaValue to pass ownership
                     base_ptr,
                     max_stack_size,
                     0,
@@ -2593,7 +2571,14 @@ impl LuaVM {
 
                     let frame_idx = self.frames.len() - 1;
                     let pc = self.frames[frame_idx].pc;
-                    let chunk = self.frames[frame_idx].function.chunk.clone();
+                    let function_value = self.frames[frame_idx].function_value;
+                    
+                    // Dynamically resolve chunk
+                    let chunk = if let Some(func_ref) = self.get_function(&function_value) {
+                        func_ref.borrow().chunk.clone()
+                    } else {
+                        break Err("Invalid function in frame".to_string());
+                    };
 
                     if pc >= chunk.code.len() {
                         // End of code
@@ -3054,6 +3039,33 @@ impl LuaVM {
             None
         }
     }
+    
+    /// Helper: Get chunk from current frame's function (for hot path)
+    #[inline]
+    fn get_current_chunk(&self) -> Result<std::rc::Rc<Chunk>, String> {
+        let frame = self.current_frame();
+        if let Some(func_ref) = self.get_function(&frame.function_value) {
+            Ok(func_ref.borrow().chunk.clone())
+        } else {
+            Err("Invalid function in current frame".to_string())
+        }
+    }
+    
+    /// Helper: Get upvalue from current frame's function
+    #[inline]
+    fn get_current_upvalue(&self, index: usize) -> Result<std::rc::Rc<LuaUpvalue>, String> {
+        let frame = self.current_frame();
+        if let Some(func_ref) = self.get_function(&frame.function_value) {
+            let func = func_ref.borrow();
+            if index < func.upvalues.len() {
+                Ok(func.upvalues[index].clone())
+            } else {
+                Err(format!("Invalid upvalue index: {}", index))
+            }
+        } else {
+            Err("Invalid function in current frame".to_string())
+        }
+    }
 
     /// Check if GC should run and collect garbage if needed
     #[allow(unused)]
@@ -3076,17 +3088,23 @@ impl LuaVM {
                         }
                     }
                     LuaValueKind::Table => {
-                        if let Some(t) = value.as_table_id() {
-                            let ptr = t as *const _ as usize;
-                            self.gc.register_object(ptr, GcObjectType::Table);
-                        }
+                        // Table IDs are managed by object pool, no direct GC registration needed
+                        // The object pool will handle lifetime management
                     }
                     LuaValueKind::Function => {
-                        if let Some(f) = value.as_function() {
-                            let ptr = f as *const _ as usize;
-                            self.gc.register_object(ptr, GcObjectType::Function);
-                            // Recursively register nested function chunks
-                            self.register_chunk_constants(&f.chunk);
+                        // Function IDs are managed by object pool, no direct GC registration needed
+                        // Recursively register nested function chunks if needed
+                        if let Some(func_id) = value.as_function_id() {
+                            // Extract child chunk before recursion to avoid borrow conflicts
+                            let child_chunk = if let Some(func_ref) = self.object_pool.get_function(func_id) {
+                                Some(func_ref.borrow().chunk.clone())
+                            } else {
+                                None
+                            };
+                            
+                            if let Some(child_chunk) = child_chunk {
+                                self.register_chunk_constants(&child_chunk);
+                            }
                         }
                     }
                     _ => {}
@@ -3229,14 +3247,19 @@ impl LuaVM {
         result_reg: usize,
     ) -> Result<bool, String> {
         match metamethod.kind() {
-            LuaValueKind::Function => unsafe {
-                let f = metamethod.as_function().unwrap();
+            LuaValueKind::Function => {
+                let func_id = metamethod.as_function_id().ok_or("Invalid function ID")?;
+                let max_stack_size = {
+                    let func_ref = self.object_pool.get_function(func_id)
+                        .ok_or("Invalid function reference")?;
+                    func_ref.borrow().chunk.max_stack_size
+                };
+                
                 // Save current state
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
                 // Allocate registers in global stack
-                let max_stack_size = f.chunk.max_stack_size;
                 let new_base = self.register_stack.len();
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
@@ -3247,15 +3270,9 @@ impl LuaVM {
                     }
                 }
 
-                // FIXME: Creating temporary Rc - should refactor LuaCallFrame
-                let f_ptr = f as *const LuaFunction;
-                let f_rc = Rc::from_raw(f_ptr);
-                let f_rc_clone = f_rc.clone();
-                std::mem::forget(f_rc); // Don't drop the Rc
-
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
-                    f_rc_clone,
+                    metamethod,
                     new_base,
                     max_stack_size,
                     result_reg,
@@ -3291,11 +3308,10 @@ impl LuaVM {
                     self.register_stack[new_base + i + 1] = *arg;
                 }
 
-                let parent_func = self.current_frame().function.clone();
                 let parent_pc = self.current_frame().pc;
                 let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
-                    parent_func,
+                    metamethod,
                     parent_pc,
                     new_base,
                     arg_count,
@@ -3355,22 +3371,31 @@ impl LuaVM {
 
         // Iterate through call frames from top to bottom (most recent first)
         for frame in self.frames.iter().rev() {
-            // Get source from frame (if set) or from chunk
-            let source = frame
-                .source
-                .or_else(|| frame.function.chunk.source_name.as_deref())
-                .unwrap_or("[?]");
-            let func_name = frame.func_name.unwrap_or("?");
-
-            // Get line number from debug info with bounds checking
-            let pc = frame.pc.saturating_sub(1);
-            let line = if !frame.function.chunk.line_info.is_empty()
-                && pc < frame.function.chunk.line_info.len()
-            {
-                frame.function.chunk.line_info[pc].to_string()
+            // Dynamically resolve chunk for debug info
+            let (source, line) = if let Some(func_ref) = self.get_function(&frame.function_value) {
+                let func = func_ref.borrow();
+                let chunk = &func.chunk;
+                
+                let source_str = frame
+                    .source
+                    .or_else(|| chunk.source_name.as_deref())
+                    .unwrap_or("[?]");
+                
+                let pc = frame.pc.saturating_sub(1);
+                let line_str = if !chunk.line_info.is_empty()
+                    && pc < chunk.line_info.len()
+                {
+                    chunk.line_info[pc].to_string()
+                } else {
+                    "?".to_string()
+                };
+                
+                (source_str.to_string(), line_str)
             } else {
-                "?".to_string()
+                ("[?]".to_string(), "?".to_string())
             };
+            
+            let func_name = frame.func_name.unwrap_or("?");
 
             trace.push_str(&format!(
                 "\n\t{}:{}: in function '{}'",
@@ -3475,7 +3500,8 @@ impl LuaVM {
                     }
                 }
 
-                let dummy_func = Rc::new(LuaFunction {
+                // Create dummy function and add to object pool
+                let dummy_func = LuaFunction {
                     chunk: Rc::new(Chunk {
                         code: Vec::new(),
                         constants: Vec::new(),
@@ -3490,10 +3516,12 @@ impl LuaVM {
                         line_info: Vec::new(),
                     }),
                     upvalues: Vec::new(),
-                });
+                };
+                let dummy_func_id = self.object_pool.create_function(dummy_func);
+                let dummy_func_value = LuaValue::function_id(dummy_func_id);
 
                 let temp_frame = LuaCallFrame::new_lua_function(
-                    frame_id, dummy_func, new_base, stack_size, 0, 0,
+                    frame_id, dummy_func_value, new_base, stack_size, 0, 0,
                 );
 
                 self.frames.push(temp_frame);
@@ -3511,17 +3539,22 @@ impl LuaVM {
 
                 Ok(result.all_values())
             }
-            LuaValueKind::Function => unsafe {
+            LuaValueKind::Function => {
                 let lua_func_id = func.as_function_id().unwrap();
-                let lua_func_ref = self
-                    .object_pool
-                    .get_function(lua_func_id)
-                    .ok_or("Invalid function reference")?.borrow();
+                
+                // Get max_stack_size before entering the execution loop
+                let max_stack_size = {
+                    let lua_func_ref = self
+                        .object_pool
+                        .get_function(lua_func_id)
+                        .ok_or("Invalid function reference")?;
+                    lua_func_ref.borrow().chunk.max_stack_size
+                };
+                
                 // For Lua function, use similar logic to call_metamethod
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                let max_stack_size = lua_func_ref.chunk.max_stack_size;
                 let new_base = self.register_stack.len();
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
@@ -3533,7 +3566,7 @@ impl LuaVM {
 
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
-                    f_rc_clone,
+                    func,
                     new_base,
                     max_stack_size,
                     0,
@@ -3552,7 +3585,14 @@ impl LuaVM {
 
                     let frame_idx = self.frames.len() - 1;
                     let pc = self.frames[frame_idx].pc;
-                    let chunk = self.frames[frame_idx].function.chunk.clone();
+                    let function_value = self.frames[frame_idx].function_value;
+                    
+                    // Dynamically resolve chunk
+                    let chunk = if let Some(func_ref) = self.get_function(&function_value) {
+                        func_ref.borrow().chunk.clone()
+                    } else {
+                        break Err("Invalid function in frame".to_string());
+                    };
 
                     if pc >= chunk.code.len() {
                         // End of code

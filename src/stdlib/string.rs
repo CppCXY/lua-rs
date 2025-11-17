@@ -754,7 +754,8 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let pattern_key = vm.create_string("pattern");
     let position_key = vm.create_string("position");
 
-    let s_val = state_table
+    let state_ref_cell = vm.get_table(&state_table_value).ok_or("Invalid state table")?;
+    let s_val = state_ref_cell
         .borrow()
         .raw_get(&string_key)
         .ok_or_else(|| "gmatch iterator: string not found in state".to_string())?;
@@ -764,7 +765,7 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .ok_or_else(|| "gmatch iterator: string invalid".to_string())?
     };
 
-    let pattern_val = state_table
+    let pattern_val = state_ref_cell
         .borrow()
         .raw_get(&pattern_key)
         .ok_or_else(|| "gmatch iterator: pattern not found in state".to_string())?;
@@ -774,7 +775,7 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .ok_or_else(|| "gmatch iterator: pattern invalid".to_string())?
     };
 
-    let position = state_table
+    let position = state_ref_cell
         .borrow()
         .raw_get(&position_key)
         .and_then(|v| v.as_integer())
@@ -791,7 +792,7 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     if let Some((start, end, captures)) = lua_pattern::find(s.as_str(), &pattern, position) {
         // Update position for next iteration
         let next_pos = if end > start { end } else { end + 1 };
-        state_table
+        state_ref_cell
             .borrow_mut()
             .raw_set(position_key, LuaValue::integer(next_pos as i64));
 

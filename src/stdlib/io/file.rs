@@ -416,7 +416,8 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let state_table = state_val.as_table_id().ok_or("invalid iterator state")?;
 
     let file_key = vm.create_string("file");
-    let file_val = state_table
+    let state_ref_cell = vm.get_table(&state_val).ok_or("Invalid state table")?;
+    let file_val = state_ref_cell
         .borrow()
         .raw_get(&file_key)
         .ok_or("file not found in state")?;
