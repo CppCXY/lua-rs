@@ -28,12 +28,9 @@
 // - Type check is single comparison
 // - No pattern matching overhead
 
-use std::{cell::RefCell, rc::Rc};
+use std::cell::RefCell;
 
-use crate::{
-    LuaFunction, LuaString, LuaTable,
-    lua_value::{CFunction, LuaUserdata},
-};
+use crate::{lua_value::CFunction, object_pool::TableId, LuaString, UserdataId};
 use std::cmp::Ordering;
 
 // Primary word tags (public for VM fast paths)
@@ -135,33 +132,30 @@ impl LuaValue {
         }
     }
 
+    /// Create string from ID (new object pool architecture)
     #[inline(always)]
-    pub(crate) fn table_ptr(ptr: *const RefCell<LuaTable>) -> Self {
-        let addr = ptr as u64;
-        debug_assert!(addr < (1u64 << 48), "Pointer too large");
+    pub fn string_id(id: u32) -> Self {
+        LuaValue {
+            primary: TAG_STRING,
+            secondary: id as u64,
+        }
+    }
+
+    /// Create table from ID (new object pool architecture)
+    #[inline(always)]
+    pub fn table_id(id: u32) -> Self {
         LuaValue {
             primary: TAG_TABLE,
-            secondary: addr & POINTER_MASK,
+            secondary: id as u64,
         }
     }
 
+    /// Create userdata from ID (new object pool architecture)
     #[inline(always)]
-    pub(crate) fn function_ptr(ptr: *const LuaFunction) -> Self {
-        let addr = ptr as u64;
-        debug_assert!(addr < (1u64 << 48), "Pointer too large");
-        LuaValue {
-            primary: TAG_FUNCTION,
-            secondary: addr & POINTER_MASK,
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn userdata_ptr(ptr: *const LuaUserdata) -> Self {
-        let addr = ptr as u64;
-        debug_assert!(addr < (1u64 << 48), "Pointer too large");
+    pub fn userdata_id(id: u32) -> Self {
         LuaValue {
             primary: TAG_USERDATA,
-            secondary: addr & POINTER_MASK,
+            secondary: id as u64,
         }
     }
 
@@ -308,6 +302,15 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn as_table_id(&self) -> Option<TableId> {
+        if self.is_table() {
+            Some(TableId(self.secondary as u32))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
     pub(crate) unsafe fn as_string_ptr(&self) -> Option<*const LuaString> {
         if self.is_string() {
             Some((self.secondary & POINTER_MASK) as *const LuaString)
@@ -316,52 +319,26 @@ impl LuaValue {
         }
     }
 
-    #[inline(always)]
-    pub(crate) unsafe fn as_table_ptr(&self) -> Option<*const RefCell<LuaTable>> {
-        if self.is_table() {
-            Some((self.secondary & POINTER_MASK) as *const RefCell<LuaTable>)
+    /// Get string ID (for new object pool architecture)
+    #[inline]
+    pub fn as_string_id(&self) -> Option<u32> {
+        if self.is_string() {
+            Some(self.secondary as u32)
         } else {
             None
         }
     }
 
-    #[inline(always)]
-    pub(crate) unsafe fn as_function_ptr(&self) -> Option<*const LuaFunction> {
-        if self.is_function() {
-            Some((self.secondary & POINTER_MASK) as *const LuaFunction)
-        } else {
-            None
-        }
-    }
 
-    #[inline(always)]
-    pub(crate) unsafe fn as_userdata_ptr(&self) -> Option<*const LuaUserdata> {
+    /// Get userdata ID (for new object pool architecture)
+    #[inline]
+    pub fn as_userdata_id(&self) -> Option<UserdataId> {
         if self.is_userdata() {
-            Some((self.secondary & POINTER_MASK) as *const LuaUserdata)
+            Some(UserdataId(self.secondary as u32))
         } else {
             None
         }
     }
-
-    #[inline(always)]
-    pub fn as_cfunction(&self) -> Option<CFunction> {
-        if self.is_cfunction() {
-            let addr = (self.secondary & POINTER_MASK) as usize;
-            unsafe { Some(std::mem::transmute::<usize, CFunction>(addr)) }
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) unsafe fn as_thread_ptr(&self) -> Option<*const RefCell<crate::lua_vm::LuaThread>> {
-        if self.is_thread() {
-            Some((self.secondary & POINTER_MASK) as *const RefCell<crate::lua_vm::LuaThread>)
-        } else {
-            None
-        }
-    }
-
     // ============ Raw Access ============
 
     #[inline(always)]
@@ -405,29 +382,6 @@ impl LuaValue {
         }
     }
 
-    // ============ Additional Compatibility Constructors ============
-    // Note: These increment refcount, so caller loses ownership of the Rc
-    /// Create from Rc<RefCell<LuaTable>> (takes ownership)
-    #[inline(always)]
-    pub fn from_table_rc(t: Rc<RefCell<LuaTable>>) -> Self {
-        let ptr = Rc::into_raw(t);
-        Self::table_ptr(ptr)
-    }
-
-    /// Create from Rc<LuaFunction> (takes ownership)
-    #[inline(always)]
-    pub fn from_function_rc(f: Rc<LuaFunction>) -> Self {
-        let ptr = Rc::into_raw(f);
-        Self::function_ptr(ptr)
-    }
-
-    /// Create from Rc<LuaUserdata> (takes ownership)
-    #[inline(always)]
-    pub fn from_userdata_rc(u: Rc<LuaUserdata>) -> Self {
-        let ptr = Rc::into_raw(u);
-        Self::userdata_ptr(ptr)
-    }
-
     // ============ Safe public accessors ============
     // Safe because VM is single-threaded and GC only runs at safe points
 
@@ -457,76 +411,13 @@ impl LuaValue {
         }
     }
 
-    /// Get table reference safely
     #[inline]
-    pub fn as_table(&self) -> Option<&RefCell<LuaTable>> {
-        if self.primary == TAG_TABLE {
-            unsafe {
-                let ptr = self.secondary as *const RefCell<LuaTable>;
-                Some(&*ptr)
-            }
+    pub fn as_cfunction(&self) -> Option<CFunction> {
+        if self.primary == TAG_CFUNCTION {
+            let addr = self.secondary & POINTER_MASK;
+            Some(unsafe { std::mem::transmute::<u64, CFunction>(addr) })
         } else {
             None
-        }
-    }
-
-    /// Get function reference safely
-    #[inline]
-    pub fn as_function(&self) -> Option<&LuaFunction> {
-        if self.primary == TAG_FUNCTION {
-            unsafe {
-                let ptr = self.secondary as *const LuaFunction;
-                Some(&*ptr)
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Get userdata reference safely
-    #[inline]
-    pub fn as_userdata(&self) -> Option<&LuaUserdata> {
-        if self.primary == TAG_USERDATA {
-            unsafe {
-                let ptr = self.secondary as *const LuaUserdata;
-                Some(&*ptr)
-            }
-        } else {
-            None
-        }
-    }
-
-    // ============ Internal methods for VM ============
-
-    /// Create temporary Rc for VM internal operations
-    #[inline]
-    pub(crate) unsafe fn to_table_rc(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        unsafe {
-            if let Some(t) = self.as_table() {
-                let ptr = t as *const RefCell<LuaTable>;
-                let rc = Rc::from_raw(ptr);
-                let clone = rc.clone();
-                std::mem::forget(rc);
-                Some(clone)
-            } else {
-                None
-            }
-        }
-    }
-
-    /// Create temporary Rc for VM internal operations
-    #[inline]
-    pub(crate) unsafe fn to_function_rc(&self) -> Option<Rc<LuaFunction>> {
-        unsafe {
-            if let Some(f) = self.as_function() {
-                let ptr = f as *const LuaFunction;
-                let rc = Rc::from_raw(ptr);
-                let clone = rc.clone();
-                std::mem::forget(rc);
-                Some(clone)
-            } else {
-                None
-            }
         }
     }
 
@@ -564,19 +455,6 @@ impl LuaValue {
     /// Check if value is callable (function or cfunction)
     pub fn is_callable(&self) -> bool {
         self.is_function() || self.is_cfunction()
-    }
-
-    /// Get metatable for tables and userdata (returns temporary Rc)
-    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        unsafe {
-            if let Some(table) = self.as_table() {
-                table.borrow().get_metatable()
-            } else if let Some(userdata) = self.as_userdata() {
-                userdata.get_metatable()
-            } else {
-                None
-            }
-        }
     }
 
     /// Alias for type_kind() - returns the type discriminator

@@ -746,7 +746,7 @@ fn gmatch_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Arg 1: control variable (unused, we use state.position)
     let state_table_value = require_arg(vm, 0, "gmatch iterator")?;
     let state_table = state_table_value
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "gmatch iterator: state table expected".to_string())?;
 
     // Extract string, pattern, and position from state

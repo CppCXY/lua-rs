@@ -413,7 +413,7 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
 
     let state_val = get_arg(vm, 0).ok_or("iterator requires state")?;
-    let state_table = state_val.as_table().ok_or("invalid iterator state")?;
+    let state_table = state_val.as_table_id().ok_or("invalid iterator state")?;
 
     let file_key = vm.create_string("file");
     let file_val = state_table

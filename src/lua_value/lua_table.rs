@@ -6,10 +6,8 @@
 use crate::LuaVM;
 
 use super::LuaValue;
-use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 
 /// Hash node for the hash part of the table
 /// Uses open addressing with chaining via next pointer
@@ -45,8 +43,9 @@ pub struct LuaTable {
     /// Last free position in hash table (used for allocation)
     last_free: i32,
 
-    /// Metatable - optional table that defines special behaviors
-    metatable: Option<Rc<RefCell<LuaTable>>>,
+    /// Metatable - optional table that defines special behaviors  
+    /// Store as LuaValue (table ID) instead of Rc for ID-based architecture
+    metatable: Option<LuaValue>,
 }
 
 impl LuaTable {
@@ -61,12 +60,12 @@ impl LuaTable {
     }
 
     /// Get the metatable of this table
-    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
+    pub fn get_metatable(&self) -> Option<LuaValue> {
         self.metatable.clone()
     }
 
     /// Set the metatable of this table
-    pub fn set_metatable(&mut self, mt: Option<Rc<RefCell<LuaTable>>>) {
+    pub fn set_metatable(&mut self, mt: Option<LuaValue>) {
         self.metatable = mt;
     }
 

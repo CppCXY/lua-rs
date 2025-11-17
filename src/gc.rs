@@ -327,7 +327,7 @@ impl GC {
 
             // Mark children
 
-            if let Some(table) = value.as_table() {
+            if let Some(table) = value.as_table_id() {
                 self.mark_table(&table.borrow(), &mut worklist);
             } else if let Some(func) = value.as_function() {
                 self.mark_function(&func, &mut worklist);
@@ -371,7 +371,7 @@ impl GC {
             if value.is_string() {
                 value.as_string().map(|s| s as *const _ as usize)
             } else if value.is_table() {
-                value.as_table().map(|t| t as *const _ as usize)
+                value.as_table_id().map(|t| t as *const _ as usize)
             } else if value.is_function() {
                 value.as_function().map(|f| f as *const _ as usize)
             } else {

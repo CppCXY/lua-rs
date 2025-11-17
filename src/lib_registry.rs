@@ -150,7 +150,7 @@ impl LibraryRegistry {
             // Also register in package.loaded (if package exists)
             // This allows require() to find standard libraries
             if let Some(package_table) = vm.get_global("package") {
-                if let Some(package_rc) = package_table.as_table() {
+                if let Some(package_rc) = package_table.as_table_id() {
                     let loaded_key = vm.create_string("loaded");
                     if let Some(loaded_table) = package_rc.borrow().raw_get(&loaded_key) {
                         if let Some(loaded_rc) = loaded_table.as_table() {

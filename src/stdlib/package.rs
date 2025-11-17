@@ -93,7 +93,7 @@ fn searcher_preload(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "package table not found".to_string())?;
 
     let package_rc = package_table
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "package is not a table".to_string())?;
 
     let preload_val = package_rc
@@ -140,7 +140,7 @@ fn searcher_lua(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .ok_or_else(|| "package table not found".to_string())?;
 
         let package_rc = package_table
-            .as_table()
+            .as_table_id()
             .ok_or_else(|| "package is not a table".to_string())?;
 
         let path_val = package_rc
@@ -247,7 +247,7 @@ fn searcher_c(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .ok_or_else(|| "package table not found".to_string())?;
 
         let package_rc = package_table
-            .as_table()
+            .as_table_id()
             .ok_or_else(|| "package is not a table".to_string())?;
 
         let cpath_val = package_rc

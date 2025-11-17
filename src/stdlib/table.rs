@@ -21,7 +21,7 @@ pub fn create_table_lib() -> LibraryModule {
 fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.concat")?;
     let table = table_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #1 to 'table.concat' (table expected)".to_string())?;
 
     let sep_value = get_arg(vm, 2);
@@ -68,7 +68,7 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.insert")?;
     let table = table_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #1 to 'table.insert' (table expected)".to_string())?;
 
     let argc = crate::lib_registry::arg_count(vm);
@@ -106,7 +106,7 @@ fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.remove")?;
     let table = table_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #1 to 'table.remove' (table expected)".to_string())?;
 
     let mut table_ref = table.borrow_mut();
@@ -134,7 +134,7 @@ fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let src_val = require_arg(vm, 0, "table.move")?;
     let src = src_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #1 to 'table.move' (table expected)".to_string())?;
 
     let f = require_arg(vm, 1, "table.move")?
@@ -151,7 +151,7 @@ fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let dst_value = get_arg(vm, 4).unwrap_or_else(|| src_val.clone());
     let dst = dst_value
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #5 to 'table.move' (table expected)".to_string())?;
     // Copy elements
     let mut values = Vec::new();
@@ -198,7 +198,7 @@ fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.unpack")?;
     let table = table_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #1 to 'table.unpack' (table expected)".to_string())?;
 
     let table_ref = table.borrow();
@@ -225,7 +225,7 @@ fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.sort")?;
     let table = table_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #1 to 'table.sort' (table expected)".to_string())?;
 
     let comp = get_arg(vm, 1);

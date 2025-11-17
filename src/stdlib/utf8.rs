@@ -149,7 +149,7 @@ fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let t_value = require_arg(vm, 0, "utf8.codes iterator")?;
     let state_table = t_value
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "utf8.codes iterator: state table expected".to_string())?;
 
     let string_key = vm.create_string("string");

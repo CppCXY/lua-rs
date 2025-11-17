@@ -202,7 +202,7 @@ fn lua_ipairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "ipairs")?;
 
     // Validate that it's a table
-    if table_val.as_table().is_none() {
+    if table_val.as_table_id().is_none() {
         return Err("bad argument #1 to 'ipairs' (table expected)".to_string());
     }
 
@@ -223,7 +223,7 @@ fn ipairs_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let index_val = require_arg(vm, 1, "ipairs iterator")?;
 
     // Quick type checks for hot path
-    if let Some(table) = table_val.as_table() {
+    if let Some(table) = table_val.as_table_id() {
         if let Some(index) = index_val.as_integer() {
             let next_index = index + 1;
 
@@ -245,7 +245,7 @@ fn ipairs_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Slow path with proper error messages
     let table = table_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "ipairs iterator: table expected".to_string())?;
 
     let index = index_val
@@ -269,7 +269,7 @@ fn lua_pairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "pairs")?;
 
     // Validate that it's a table
-    if table_val.as_table().is_none() {
+    if table_val.as_table_id().is_none() {
         return Err("bad argument #1 to 'pairs' (table expected)".to_string());
     }
 
@@ -287,7 +287,7 @@ fn lua_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "next")?;
 
     let table = table_val
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "bad argument #1 to 'next' (table expected)".to_string())?;
 
     let index_val = get_arg(vm, 1).unwrap_or(LuaValue::nil());
@@ -362,7 +362,7 @@ fn lua_getmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     match value.kind() {
         LuaValueKind::Table => {
-            if let Some(t) = value.as_table() {
+            if let Some(t) = value.as_table_id() {
                 if let Some(mt) = t.borrow().get_metatable() {
                     Ok(MultiValue::single(LuaValue::from_table_rc(mt)))
                 } else {
@@ -386,7 +386,7 @@ fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // First argument must be a table
     unsafe {
-        if let Some(t) = table.as_table() {
+        if let Some(t) = table.as_table_id() {
             // Check if current metatable has __metatable field (protected)
             if let Some(mt) = t.borrow().get_metatable() {
                 let metatable_key = vm.create_string("__metatable");
@@ -401,7 +401,7 @@ fn lua_setmetatable(vm: &mut LuaVM) -> Result<MultiValue, String> {
                     t.borrow_mut().set_metatable(None);
                 }
                 LuaValueKind::Table => {
-                    if let Some(mt) = metatable.as_table() {
+                    if let Some(mt) = metatable.as_table_id() {
                         let mt_rc = Rc::from_raw(mt as *const RefCell<LuaTable>);
                         let mt_clone = mt_rc.clone();
                         std::mem::forget(mt_rc);
@@ -428,7 +428,7 @@ fn lua_rawget(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table = get_arg(vm, 0).ok_or("rawget() requires 2 arguments")?;
     let key = get_arg(vm, 1).ok_or("rawget() requires 2 arguments")?;
 
-    if let Some(t) = table.as_table() {
+    if let Some(t) = table.as_table_id() {
         let value = t.borrow().raw_get(&key).unwrap_or(LuaValue::nil());
         Ok(MultiValue::single(value))
     } else {
@@ -444,7 +444,7 @@ fn lua_rawset(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let key = get_arg(vm, 1).ok_or("rawset() requires 3 arguments")?;
     let value = get_arg(vm, 2).ok_or("rawset() requires 3 arguments")?;
 
-    if let Some(t) = table.as_table() {
+    if let Some(t) = table.as_table_id() {
         if key.is_nil() {
             return Err("table index is nil".to_string());
         }
@@ -465,7 +465,7 @@ fn lua_rawlen(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let len = unsafe {
         match value.kind() {
             LuaValueKind::Table => {
-                if let Some(t) = value.as_table() {
+                if let Some(t) = value.as_table_id() {
                     t.borrow().len() as i64
                 } else {
                     return Err("rawlen() argument must be a table or string".to_string());
@@ -534,7 +534,7 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Check if module is already loaded in package.loaded
     if let Some(package_table) = vm.get_global("package") {
-        if let Some(package_rc) = package_table.as_table() {
+        if let Some(package_rc) = package_table.as_table_id() {
             let loaded_key = vm.create_string("loaded");
             if let Some(loaded_table) = package_rc.borrow().raw_get(&loaded_key) {
                 if let Some(loaded_rc) = loaded_table.as_table() {
@@ -556,7 +556,7 @@ fn lua_require(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or_else(|| "package table not found".to_string())?;
 
     let package_rc = package_table
-        .as_table()
+        .as_table_id()
         .ok_or_else(|| "package is not a table".to_string())?;
 
     let searchers_val = package_rc
