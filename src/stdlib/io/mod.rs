@@ -4,8 +4,7 @@
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
-use crate::{LuaString, LuaTable};
-use std::cell::RefCell;
+use crate::LuaString;
 use std::io::{self, BufRead, Write};
 use std::rc::Rc;
 
@@ -138,13 +137,13 @@ fn io_flush(_vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::{get_arg, require_arg};
 
-    let filename = require_arg(vm, 0, "io.open")?
+    let filename_val = require_arg(vm, 0, "io.open")?;
+    let filename = filename_val
         .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'io.open' (string expected)".to_string())?;
 
     let mode_str = get_arg(vm, 1)
-        .and_then(|v| v.as_lua_string())
-        .map(|s| s.as_str().to_string())
+        .and_then(|v| v.to_str().map(str::to_string))
         .unwrap_or_else(|| "r".to_string());
     let mode = mode_str.as_str();
 
@@ -162,13 +161,12 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
             let file_mt = create_file_metatable(vm);
 
             // Create userdata with VM (proper GC tracking)
-            let userdata = vm.alloc_userdata(file);
+            use crate::lua_value::LuaUserdata;
+            let userdata = vm.alloc_userdata(LuaUserdata::new(file));
             
             // Set metatable
-            unsafe {
-                if let Some(ud) = userdata.as_userdata() {
-                    ud.set_metatable(Some(file_mt));
-                }
+            if let Some(ud) = userdata.as_userdata() {
+                ud.set_metatable(Some(file_mt));
             }
 
             Ok(MultiValue::single(userdata))
@@ -177,7 +175,7 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
             // Return nil and error message
             Ok(MultiValue::multiple(vec![
                 LuaValue::nil(),
-                vm.create_string(e.to_string()),
+                LuaValue::from_string_rc(vm.create_string(e.to_string())),
             ]))
         }
     }

@@ -34,6 +34,7 @@ pub struct FFIState {
     /// C function signatures
     function_signatures: HashMap<String, CFunctionSignature>,
     /// C callbacks
+    #[allow(unused)]
     callbacks: Vec<Arc<Mutex<CCallback>>>,
 }
 

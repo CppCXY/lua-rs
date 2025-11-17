@@ -31,39 +31,36 @@ fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'utf8.len' (string expected)".to_string())?;
 
-    let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
+    let bytes = s.as_str().as_bytes();
+    let len = bytes.len() as i64;
 
-    let j = get_arg(vm, 2)
-        .and_then(|v| v.as_integer())
-        .map(|v| v as usize);
+    // i and j are BYTE positions (1-based), not character positions
+    let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1);
+    let j = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(len);
 
-    let s_str = s.as_str();
-    let bytes = s_str.as_bytes();
+    // Convert 1-based byte positions to 0-based byte indices
+    let start_byte = ((i - 1).max(0) as usize).min(bytes.len());
+    let end_byte = (j.max(0) as usize).min(bytes.len());
 
-    // Convert 1-based indices to 0-based byte positions
-    let start_byte = if i > 0 { i - 1 } else { 0 };
-    let end_byte = j.unwrap_or(bytes.len());
-
-    if start_byte > bytes.len() || end_byte > bytes.len() || start_byte > end_byte {
+    if start_byte > end_byte {
         return Ok(MultiValue::multiple(vec![
             LuaValue::nil(),
             LuaValue::integer(start_byte as i64 + 1),
         ]));
     }
 
-    // Count UTF-8 characters
-    let slice = &s_str[start_byte..end_byte];
-    match std::str::from_utf8(slice.as_bytes()) {
+    // Count UTF-8 characters in byte range
+    match std::str::from_utf8(&bytes[start_byte..end_byte]) {
         Ok(valid_str) => {
             let len = valid_str.chars().count();
             Ok(MultiValue::single(LuaValue::integer(len as i64)))
         }
         Err(e) => {
-            // Return nil and position of invalid byte
-            let error_pos = start_byte + e.valid_up_to();
+            // Return nil and position of first invalid byte (1-based)
+            let error_pos = start_byte + e.valid_up_to() + 1;
             Ok(MultiValue::multiple(vec![
                 LuaValue::nil(),
-                LuaValue::integer(error_pos as i64 + 1),
+                LuaValue::integer(error_pos as i64),
             ]))
         }
     }

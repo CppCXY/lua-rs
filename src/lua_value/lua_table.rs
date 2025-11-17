@@ -89,6 +89,38 @@ impl LuaTable {
         self.get_from_hash(&LuaValue::from_string_rc(key.clone()))
     }
 
+    /// Optimized string key access using &str - avoids LuaValue allocation
+    /// This is a hot path for table access with string literals
+    #[inline(always)]
+    pub fn get_by_str(&self, key_str: &str) -> Option<LuaValue> {
+        if self.node.is_empty() {
+            return None;
+        }
+
+        // Hash the string directly
+        let hash = self.hash_str(key_str);
+        let mask = self.node.len() - 1;
+        let mut idx = (hash & mask) as usize;
+
+        // Search for matching key
+        loop {
+            let node = &self.node[idx];
+            if node.is_empty() {
+                return None;
+            }
+            // Fast path: compare string content directly
+            if let Some(node_str) = unsafe { node.key.as_string() } {
+                if node_str.as_str() == key_str {
+                    return Some(node.value.clone());
+                }
+            }
+            if node.next < 0 {
+                return None;
+            }
+            idx = node.next as usize;
+        }
+    }
+
     /// Generic key access
     pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         // Try array part first for integer keys
@@ -162,6 +194,159 @@ impl LuaTable {
     #[inline(always)]
     pub fn set_str(&mut self, key: Rc<crate::LuaString>, value: LuaValue) {
         self.set_in_hash(LuaValue::from_string_rc(key), value);
+    }
+
+    /// Optimized string key write using &str - for VM hot paths
+    /// Defers string allocation until insertion confirmed
+    /// The create_string closure is only called if a new key needs to be inserted
+    #[inline]
+    pub fn set_by_str<F>(&mut self, key_str: &str, value: LuaValue, mut create_string: F)
+    where
+        F: FnMut(&str) -> Rc<crate::LuaString>,
+    {
+        if value.is_nil() {
+            // Setting to nil - find and remove
+            self.remove_by_str(key_str);
+            return;
+        }
+
+        // Initialize hash table if empty
+        if self.node.is_empty() {
+            self.resize_hash(4);
+        }
+
+        // Try to insert
+        if !self.insert_by_str_impl(key_str, value.clone(), &mut create_string) {
+            // Table is full, need to resize
+            let new_size = (self.node.len() * 2).max(4);
+            self.resize_hash(new_size);
+            // Retry insertion (must succeed now)
+            self.insert_by_str_impl(key_str, value, &mut create_string);
+        }
+    }
+
+    /// Insert using &str key, only creates LuaString if insertion succeeds
+    fn insert_by_str_impl<F>(&mut self, key_str: &str, value: LuaValue, create_string: &mut F) -> bool
+    where
+        F: FnMut(&str) -> Rc<crate::LuaString>,
+    {
+        let hash = self.hash_str(key_str);
+        let mask = self.node.len() - 1;
+        let main_pos = (hash & mask) as usize;
+
+        // Check if key already exists
+        let mut idx = main_pos;
+        loop {
+            let node = &self.node[idx];
+            if node.is_empty() {
+                break;
+            }
+            // Check for existing key match
+            if let Some(node_str) = unsafe { node.key.as_string() } {
+                if node_str.as_str() == key_str {
+                    // Update existing key
+                    self.node[idx].value = value;
+                    return true;
+                }
+            }
+            if node.next < 0 {
+                break;
+            }
+            idx = node.next as usize;
+        }
+
+        // Key doesn't exist, need to insert - NOW create the string
+        let key = LuaValue::from_string_rc(create_string(key_str));
+
+        // Continue with normal insertion logic
+        if self.node[main_pos].is_empty() {
+            self.node[main_pos] = Node {
+                key,
+                value,
+                next: -1,
+            };
+            return true;
+        }
+
+        // Handle collision
+        let colliding_key = self.node[main_pos].key.clone();
+        let free_pos = match self.find_free_pos() {
+            Some(pos) => pos,
+            None => return false,
+        };
+
+        let colliding_hash = self.hash_key(&colliding_key);
+        let colliding_main = (colliding_hash & mask) as usize;
+
+        if colliding_main == main_pos {
+            self.node[free_pos] = Node {
+                key,
+                value,
+                next: -1,
+            };
+            let old_next = self.node[main_pos].next;
+            self.node[main_pos].next = free_pos as i32;
+            if old_next >= 0 {
+                self.node[free_pos].next = old_next;
+            }
+        } else {
+            let displaced = self.node[main_pos].clone();
+            self.node[main_pos] = Node {
+                key,
+                value,
+                next: -1,
+            };
+            self.node[free_pos] = displaced;
+            let mut prev_idx = colliding_main;
+            while self.node[prev_idx].next != main_pos as i32 {
+                prev_idx = self.node[prev_idx].next as usize;
+            }
+            self.node[prev_idx].next = free_pos as i32;
+        }
+        true
+    }
+
+    /// Remove entry by &str key
+    fn remove_by_str(&mut self, key_str: &str) {
+        if self.node.is_empty() {
+            return;
+        }
+
+        let hash = self.hash_str(key_str);
+        let mask = self.node.len() - 1;
+        let main_pos = (hash & mask) as usize;
+
+        let mut idx = main_pos;
+        let mut prev_idx: Option<usize> = None;
+
+        loop {
+            let node = &self.node[idx];
+            if node.is_empty() {
+                return;
+            }
+
+            if let Some(node_str) = unsafe { node.key.as_string() } {
+                if node_str.as_str() == key_str {
+                    // Found the key, remove it
+                    let next = node.next;
+                    if let Some(prev) = prev_idx {
+                        self.node[prev].next = next;
+                    }
+                    self.node[idx] = Node {
+                        key: LuaValue::nil(),
+                        value: LuaValue::nil(),
+                        next: -1,
+                    };
+                    return;
+                }
+            }
+
+            if node.next < 0 {
+                return;
+            }
+            prev_idx = Some(idx);
+            idx = node.next as usize;
+        }
     }
 
     /// Generic key write
@@ -372,6 +557,15 @@ impl LuaTable {
     fn hash_key(&self, key: &LuaValue) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
+        hasher.finish() as usize
+    }
+
+    /// Hash a string directly - optimized for hot path
+    #[inline]
+    fn hash_str(&self, s: &str) -> usize {
+        let mut hasher = DefaultHasher::new();
+        // Use same hashing as LuaValue for string consistency
+        s.hash(&mut hasher);
         hasher.finish() as usize
     }
 

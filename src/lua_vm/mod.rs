@@ -10,8 +10,8 @@ pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 use crate::opcode::{Instruction, OpCode};
 use crate::{Compiler, lib_registry};
 use std::cell::RefCell;
-use std::rc::{Rc, Weak};
 use std::collections::HashMap;
+use std::rc::{Rc, Weak};
 
 /// Coroutine status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,11 +103,11 @@ impl LuaVM {
             ffi_state: crate::ffi::FFIState::new(),
             current_thread: None,
             current_thread_value: None,
-            main_thread_value: None,  // Will be initialized lazily
+            main_thread_value: None, // Will be initialized lazily
             yielding: false,
             string_metatable: None,
             string_table: HashMap::with_capacity(2048),
-            max_short_string_len: 64,  // Like Lua's LUAI_MAXSHORTLEN
+            max_short_string_len: 64, // Like Lua's LUAI_MAXSHORTLEN
         };
 
         // Set _G to point to the global table itself
@@ -138,7 +138,7 @@ impl LuaVM {
 
     pub fn open_libs(&mut self) {
         let _ = lib_registry::create_standard_registry().load_all(self);
-        
+
         // Override coroutine.wrap with a Lua implementation
         // because it needs to return a closure that captures the thread
         let wrap_impl = r#"
@@ -369,12 +369,10 @@ impl LuaVM {
 
         // Fast path: integer key
         if is_tbl_int {
-            unsafe {
-                if let (Some(tbl), Some(idx)) = (val_b.as_table(), val_c.as_integer()) {
-                    let value = tbl.borrow().get_int(idx).unwrap_or(LuaValue::nil());
-                    self.set_register(base_ptr, a, value);
-                    return Ok(());
-                }
+            if let (Some(tbl), Some(idx)) = (val_b.as_table(), val_c.as_integer()) {
+                let value = tbl.borrow().get_int(idx).unwrap_or(LuaValue::nil());
+                self.set_register(base_ptr, a, value);
+                return Ok(());
             }
         }
 
@@ -403,12 +401,9 @@ impl LuaVM {
         let key = val_c;
 
         unsafe {
-            if let Some(tbl) = table.as_table() {
-                // Need temporary Rc for table_get
-                let tbl_clone = table.to_table_rc().unwrap();
-                
+            if let Some(tbl) = table.to_table_rc() {
                 // Use VM's table_get which handles metamethods
-                let value = self.table_get(tbl_clone, &key).unwrap_or(LuaValue::nil());
+                let value = self.table_get(tbl, &key).unwrap_or(LuaValue::nil());
                 self.set_register(base_ptr, a, value);
                 return Ok(());
             } else if let Some(ud) = table.as_userdata() {
@@ -416,7 +411,7 @@ impl LuaVM {
                 let ud_rc = Rc::from_raw(ud as *const LuaUserdata);
                 let ud_clone = ud_rc.clone();
                 std::mem::forget(ud_rc);
-                
+
                 // Handle userdata __index metamethod
                 let value = self.userdata_get(ud_clone, &key).unwrap_or(LuaValue::nil());
                 self.set_register(base_ptr, a, value);
@@ -428,7 +423,7 @@ impl LuaVM {
                 return Ok(());
             }
         }
-        
+
         Err("Attempt to index a non-table value".to_string())
     }
 
@@ -454,12 +449,12 @@ impl LuaVM {
                 }
                 (LuaValueKind::Table, LuaValueKind::String) => {
                     let tbl_clone = val_a.to_table_rc().unwrap();
-                    
+
                     let key_str = val_b.as_string().unwrap();
                     let key_rc = Rc::from_raw(key_str as *const LuaString);
                     let key_clone = key_rc.clone();
                     std::mem::forget(key_rc);
-                    
+
                     (Some(tbl_clone), None, Some(key_clone))
                 }
                 _ => (None, None, None),
@@ -528,13 +523,11 @@ impl LuaVM {
         let table = self.get_register(base_ptr, a);
         let value = self.get_register(base_ptr, c);
 
-        unsafe {
-            if let Some(tbl) = table.as_table() {
-                tbl.borrow_mut().set_int(b, value);
-                Ok(())
-            } else {
-                Err("Attempt to index a non-table value".to_string())
-            }
+        if let Some(tbl) = table.as_table() {
+            tbl.borrow_mut().set_int(b, value);
+            Ok(())
+        } else {
+            Err("Attempt to index a non-table value".to_string())
         }
     }
 
@@ -553,13 +546,8 @@ impl LuaVM {
         unsafe {
             if let Some(tbl_clone) = table.to_table_rc() {
                 if let Some(key_str) = key.as_string() {
-                    // Create temporary Rc for get_str
-                    let key_rc = Rc::from_raw(key_str as *const LuaString);
-                    let key_rc_clone = key_rc.clone();
-                    std::mem::forget(key_rc);
-
-                    // Try fast path: direct string key access
-                    let value = tbl_clone.borrow().get_str(&key_rc_clone);
+                    // Optimized: use &str directly, no Rc allocation
+                    let value = tbl_clone.borrow().get_by_str(key_str.as_str());
                     if let Some(v) = value {
                         self.set_register(base_ptr, a, v);
                         return Ok(());
@@ -592,12 +580,11 @@ impl LuaVM {
         unsafe {
             if let Some(tbl_clone) = table.to_table_rc() {
                 if let Some(key_str) = key.as_string() {
-                    // Create temporary Rc for set_str
+                    // Optimized: create Rc from existing pointer (no allocation)
                     let key_rc = Rc::from_raw(key_str as *const LuaString);
                     let key_rc_clone = key_rc.clone();
                     std::mem::forget(key_rc);
 
-                    // Fast path: direct string key set
                     tbl_clone.borrow_mut().set_str(key_rc_clone, value);
                     Ok(())
                 } else {
@@ -1043,17 +1030,16 @@ impl LuaVM {
         }
 
         // Try __len metamethod for tables
-        unsafe {
-            if value.as_table().is_some() {
-                if self.call_unop_metamethod(&value, "__len", a)? {
-                    return Ok(());
-                }
 
-                // No __len metamethod, use raw length
-                if let Some(t) = value.as_table() {
-                    self.set_register(base_ptr, a, LuaValue::integer(t.borrow().len() as i64));
-                    return Ok(());
-                }
+        if value.is_table() {
+            if self.call_unop_metamethod(&value, "__len", a)? {
+                return Ok(());
+            }
+
+            // No __len metamethod, use raw length
+            if let Some(t) = value.as_table() {
+                self.set_register(base_ptr, a, LuaValue::integer(t.borrow().len() as i64));
+                return Ok(());
             }
         }
 
@@ -2045,7 +2031,7 @@ impl LuaVM {
 
         // Get the table
         let table_val = self.get_register(base_ptr, a);
-        
+
         if !table_val.is_table() {
             return Err(format!("SetList: not a table, got {:?}", table_val));
         }
@@ -2278,10 +2264,10 @@ impl LuaVM {
 
         // Check if thread yielded (use yielding flag, not yield_values)
         let did_yield = self.yielding;
-        let yield_values = {
-            let thread = thread_rc.borrow();
-            thread.yield_values.clone()
-        };
+        // let yield_values = {
+        //     let thread = thread_rc.borrow();
+        //     thread.yield_values.clone()
+        // };
 
         // Save thread state back
         let final_result = if did_yield {
@@ -2326,7 +2312,7 @@ impl LuaVM {
         self.open_upvalues = saved_upvalues;
         self.next_frame_id = saved_frame_id;
         self.current_thread = saved_thread;
-        self.current_thread_value = None;  // Clear after resume completes
+        self.current_thread_value = None; // Clear after resume completes
         self.yielding = saved_yielding;
 
         final_result
@@ -3044,13 +3030,13 @@ impl LuaVM {
     /// For short strings (≤64 bytes), use interning (global deduplication)
     pub fn create_string(&mut self, s: String) -> Rc<LuaString> {
         let len = s.len();
-        
+
         // Short strings are interned for global uniqueness
         if len <= self.max_short_string_len {
             // Create temporary string to get hash
             let temp_string = LuaString::new(s.clone());
             let hash = temp_string.cached_hash();
-            
+
             // Check if already exists in string table
             if let Some(weak_ref) = self.string_table.get(&hash) {
                 if let Some(existing) = weak_ref.upgrade() {
@@ -3060,20 +3046,20 @@ impl LuaVM {
                     }
                 }
             }
-            
+
             // Not found or dead reference, create new string
             let string = Rc::new(temp_string);
             let ptr = Rc::as_ptr(&string) as usize;
             self.gc.register_object(ptr, GcObjectType::String);
-            
+
             // Store weak reference in string table
             self.string_table.insert(hash, Rc::downgrade(&string));
-            
+
             // Clean up dead entries periodically
             if self.string_table.len() > 4096 && self.string_table.len() % 512 == 0 {
                 self.string_table.retain(|_, weak| weak.strong_count() > 0);
             }
-            
+
             string
         } else {
             // Long strings are not interned
@@ -3106,6 +3092,7 @@ impl LuaVM {
     }
 
     /// Check if GC should run and collect garbage if needed
+    #[allow(unused)]
     fn maybe_collect_garbage(&mut self) {
         if self.gc.should_collect() {
             self.collect_garbage();
@@ -3243,7 +3230,7 @@ impl LuaVM {
     /// Try to get a metamethod from a value
     fn get_metamethod(&self, value: &LuaValue, event: &str) -> Option<LuaValue> {
         match value.kind() {
-            LuaValueKind::Table => unsafe {
+            LuaValueKind::Table => {
                 if let Some(t) = value.as_table() {
                     if let Some(mt) = t.borrow().get_metatable() {
                         let key =
@@ -3255,7 +3242,7 @@ impl LuaVM {
                 } else {
                     None
                 }
-            },
+            }
             LuaValueKind::String => {
                 // All strings share a metatable
                 if let Some(mt) = &self.string_metatable {
@@ -3455,9 +3442,10 @@ impl LuaVM {
         // Iterate through call frames from top to bottom (most recent first)
         for frame in self.frames.iter().rev() {
             // Get source from frame (if set) or from chunk
-            let source = frame.source.or_else(|| {
-                frame.function.chunk.source_name.as_deref()
-            }).unwrap_or("[?]");
+            let source = frame
+                .source
+                .or_else(|| frame.function.chunk.source_name.as_deref())
+                .unwrap_or("[?]");
             let func_name = frame.func_name.unwrap_or("?");
 
             // Get line number from debug info with bounds checking
