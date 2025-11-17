@@ -152,19 +152,17 @@ impl LibraryRegistry {
             // Also register in package.loaded (if package exists)
             // This allows require() to find standard libraries
             if let Some(package_table) = vm.get_global("package") {
-                if let Some(package_rc) = package_table.as_table_rc() {
+                if let Some(package_rc) = package_table.as_table() {
                     let loaded_key = vm.create_string("loaded".to_string());
                     if let Some(loaded_table) = package_rc
                         .borrow()
                         .raw_get(&LuaValue::from_string_rc(loaded_key))
                     {
-                        unsafe {
-                            if let Some(loaded_rc) = loaded_table.as_table() {
-                                let mod_key = vm.create_string(module.name.to_string());
-                                loaded_rc
-                                    .borrow_mut()
-                                    .raw_set(LuaValue::from_string_rc(mod_key), lib_value);
-                            }
+                        if let Some(loaded_rc) = loaded_table.as_table() {
+                            let mod_key = vm.create_string(module.name.to_string());
+                            loaded_rc
+                                .borrow_mut()
+                                .raw_set(LuaValue::from_string_rc(mod_key), lib_value);
                         }
                     }
                 }

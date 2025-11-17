@@ -52,7 +52,7 @@ fn io_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Default to "*l" (read line)
     let format_str = format
-        .and_then(|v| v.as_string_rc().map(|s| s.as_str().to_string()))
+        .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "*l".to_string());
 
     match format_str.as_str() {
@@ -139,11 +139,11 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::{get_arg, require_arg};
 
     let filename = require_arg(vm, 0, "io.open")?
-        .as_string_rc()
+        .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'io.open' (string expected)".to_string())?;
 
     let mode_str = get_arg(vm, 1)
-        .and_then(|v| v.as_string_rc())
+        .and_then(|v| v.as_lua_string())
         .map(|s| s.as_str().to_string())
         .unwrap_or_else(|| "r".to_string());
     let mode = mode_str.as_str();
@@ -161,12 +161,15 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
             // Create file metatable if not already created
             let file_mt = create_file_metatable(vm);
 
-            // Convert Rc to raw pointer for GC management
-            let mt_ptr = &*file_mt as *const RefCell<LuaTable>;
-
-            // Create userdata with metatable (deprecated but works during migration)
-            #[allow(deprecated)]
-            let userdata = LuaValue::userdata_with_metatable(file, mt_ptr);
+            // Create userdata with VM (proper GC tracking)
+            let userdata = vm.alloc_userdata(file);
+            
+            // Set metatable
+            unsafe {
+                if let Some(ud) = userdata.as_userdata() {
+                    ud.set_metatable(Some(file_mt));
+                }
+            }
 
             Ok(MultiValue::single(userdata))
         }
@@ -174,7 +177,7 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
             // Return nil and error message
             Ok(MultiValue::multiple(vec![
                 LuaValue::nil(),
-                LuaValue::from_string_rc(vm.create_string(e.to_string())),
+                vm.create_string(e.to_string()),
             ]))
         }
     }

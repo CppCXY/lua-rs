@@ -88,46 +88,44 @@ fn searcher_preload(vm: &mut LuaVM) -> Result<MultiValue, String> {
             .to_string()
     };
 
-    unsafe {
-        let package_table = vm
-            .get_global("package")
-            .ok_or_else(|| "package table not found".to_string())?;
+    let package_table = vm
+        .get_global("package")
+        .ok_or_else(|| "package table not found".to_string())?;
 
-        let package_rc = package_table
-            .as_table()
-            .ok_or_else(|| "package is not a table".to_string())?;
+    let package_rc = package_table
+        .as_table()
+        .ok_or_else(|| "package is not a table".to_string())?;
 
-        let preload_val = package_rc
-            .borrow()
-            .raw_get(&LuaValue::from_string_rc(
-                vm.create_string("preload".to_string()),
-            ))
-            .unwrap_or(LuaValue::nil());
+    let preload_val = package_rc
+        .borrow()
+        .raw_get(&LuaValue::from_string_rc(
+            vm.create_string("preload".to_string()),
+        ))
+        .unwrap_or(LuaValue::nil());
 
-        let preload_table = match preload_val.as_table() {
-            Some(t) => t,
-            None => {
-                let err = format!("\n\tno field package.preload['{}']", modname);
-                return Ok(MultiValue::single(LuaValue::from_string_rc(
-                    vm.create_string(err),
-                )));
-            }
-        };
-
-        let modname_key = LuaValue::from_string_rc(vm.create_string(modname.clone()));
-        let loader = preload_table
-            .borrow()
-            .raw_get(&modname_key)
-            .unwrap_or(LuaValue::nil());
-
-        if loader.is_nil() {
+    let preload_table = match preload_val.as_table() {
+        Some(t) => t,
+        None => {
             let err = format!("\n\tno field package.preload['{}']", modname);
-            Ok(MultiValue::single(LuaValue::from_string_rc(
+            return Ok(MultiValue::single(LuaValue::from_string_rc(
                 vm.create_string(err),
-            )))
-        } else {
-            Ok(MultiValue::single(loader))
+            )));
         }
+    };
+
+    let modname_key = LuaValue::from_string_rc(vm.create_string(modname.clone()));
+    let loader = preload_table
+        .borrow()
+        .raw_get(&modname_key)
+        .unwrap_or(LuaValue::nil());
+
+    if loader.is_nil() {
+        let err = format!("\n\tno field package.preload['{}']", modname);
+        Ok(MultiValue::single(LuaValue::from_string_rc(
+            vm.create_string(err),
+        )))
+    } else {
+        Ok(MultiValue::single(loader))
     }
 }
 

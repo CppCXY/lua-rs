@@ -16,13 +16,13 @@ pub fn create_debug_lib() -> LibraryModule {
 
 fn debug_traceback(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Simple traceback
-    let message = crate::lib_registry::get_arg(vm, 0)
-        .and_then(|v| v.as_string_rc())
-        .map(|s| s.as_str().to_string())
-        .unwrap_or_else(|| "stack traceback:".to_string());
+    let message = crate::lib_registry::get_arg(vm, 0).unwrap_or(LuaValue::nil());
+    // .and_then(|v| v.as_lua_string())
+    // .map(|s| s.as_str().to_string())
+    // .unwrap_or_else(|| "stack traceback:".to_string());
 
-    let result = vm.create_string(message);
-    Ok(MultiValue::single(LuaValue::from_string_rc(result)))
+    // let result = vm.create_string(message);
+    Ok(MultiValue::single(message))
 }
 
 fn debug_getinfo(_vm: &mut LuaVM) -> Result<MultiValue, String> {

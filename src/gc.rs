@@ -294,12 +294,11 @@ impl GC {
             }
 
             // Mark children
-            unsafe {
-                if let Some(table) = value.as_table() {
-                    self.mark_table(&table.borrow(), &mut worklist);
-                } else if let Some(func) = value.as_function() {
-                    self.mark_function(&func, &mut worklist);
-                }
+
+            if let Some(table) = value.as_table() {
+                self.mark_table(&table.borrow(), &mut worklist);
+            } else if let Some(func) = value.as_function() {
+                self.mark_function(&func, &mut worklist);
             }
         }
 

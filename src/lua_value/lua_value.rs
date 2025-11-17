@@ -28,7 +28,7 @@
 // - Type check is single comparison
 // - No pattern matching overhead
 
-use std::{any::Any, cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     LuaFunction, LuaString, LuaTable,
@@ -436,165 +436,112 @@ impl LuaValue {
         Self::userdata_ptr(ptr)
     }
 
-    // ============ Additional Compatibility Constructors ============
-    // Note: These are now deprecated - use VM::alloc_string/table/function instead
+    // ============ Safe public accessors ============
+    // Safe because VM is single-threaded and GC only runs at safe points
 
-    /// Create string value (allocates on heap, NOT registered with GC!)
-    /// WARNING: Use VM::alloc_string() instead to ensure GC tracking
-    #[deprecated(note = "Use VM::alloc_string() to ensure GC tracking")]
-    pub fn string(s: LuaString) -> Self {
-        let ptr = Box::into_raw(Box::new(s));
-        Self::string_ptr(ptr)
-    }
-
-    /// Create table value (allocates on heap, NOT registered with GC!)
-    /// WARNING: Use VM::alloc_table() instead to ensure GC tracking
-    #[deprecated(note = "Use VM::alloc_table() to ensure GC tracking")]
-    pub fn table(t: LuaTable) -> Self {
-        let ptr = Box::into_raw(Box::new(RefCell::new(t)));
-        Self::table_ptr(ptr)
-    }
-
-    /// Create function value (allocates on heap, NOT registered with GC!)
-    /// WARNING: Use VM::alloc_function() instead to ensure GC tracking
-    #[deprecated(note = "Use VM::alloc_function() to ensure GC tracking")]
-    pub fn function(f: LuaFunction) -> Self {
-        let ptr = Box::into_raw(Box::new(f));
-        Self::function_ptr(ptr)
-    }
-
-    /// Create userdata (allocates on heap, NOT registered with GC!)
-    /// WARNING: Use VM::alloc_userdata() instead to ensure GC tracking
-    #[deprecated(note = "Use VM::alloc_userdata() to ensure GC tracking")]
-    pub fn userdata<T: Any>(data: T) -> Self {
-        let ptr = Box::into_raw(Box::new(LuaUserdata::new(data)));
-        Self::userdata_ptr(ptr)
-    }
-
-    /// Create userdata with metatable (allocates on heap, NOT registered with GC!)
-    /// WARNING: Use VM::alloc_userdata_with_metatable() instead
-    #[deprecated(note = "Use VM::alloc_userdata_with_metatable() to ensure GC tracking")]
-    pub fn userdata_with_metatable<T: Any>(data: T, _metatable: *const RefCell<LuaTable>) -> Self {
-        // Simplified: just create without metatable for now
-        let ptr = Box::into_raw(Box::new(LuaUserdata::new(data)));
-        Self::userdata_ptr(ptr)
-    }
-
-    // ============ GC-based accessors (return references, not Rc) ============
-
-    /// Get string reference (unsafe - must ensure GC has not collected it)
+    /// Get string reference safely
     #[inline]
-    pub unsafe fn as_string(&self) -> Option<&LuaString> {
+    pub fn to_str(&self) -> Option<&str> {
         if self.primary == TAG_STRING {
-            let ptr = self.secondary as *const LuaString;
-            unsafe { Some(&*ptr) }
+            unsafe {
+                let ptr = self.secondary as *const LuaString;
+                Some((*ptr).as_str())
+            }
         } else {
             None
         }
     }
 
-    /// Get mutable string reference (unsafe)
+    /// Get string as LuaString reference
     #[inline]
-    pub unsafe fn as_string_mut(&mut self) -> Option<&mut LuaString> {
+    pub fn as_lua_string(&self) -> Option<&LuaString> {
         if self.primary == TAG_STRING {
-            let ptr = self.secondary as *mut LuaString;
-            unsafe { Some(&mut *ptr) }
+            unsafe {
+                let ptr = self.secondary as *const LuaString;
+                Some(&*ptr)
+            }
         } else {
             None
         }
     }
 
-    /// Get table reference (unsafe - must ensure GC has not collected it)
+    /// Get table reference safely
     #[inline]
-    pub unsafe fn as_table(&self) -> Option<&RefCell<LuaTable>> {
+    pub fn as_table(&self) -> Option<&RefCell<LuaTable>> {
         if self.primary == TAG_TABLE {
-            let ptr = self.secondary as *const RefCell<LuaTable>;
-            unsafe { Some(&*ptr) }
+            unsafe {
+                let ptr = self.secondary as *const RefCell<LuaTable>;
+                Some(&*ptr)
+            }
         } else {
             None
         }
     }
 
-    /// Get function reference (unsafe - must ensure GC has not collected it)
+    /// Get function reference safely
     #[inline]
-    pub unsafe fn as_function(&self) -> Option<&LuaFunction> {
+    pub fn as_function(&self) -> Option<&LuaFunction> {
         if self.primary == TAG_FUNCTION {
-            let ptr = self.secondary as *const LuaFunction;
-            unsafe { Some(&*ptr) }
+            unsafe {
+                let ptr = self.secondary as *const LuaFunction;
+                Some(&*ptr)
+            }
         } else {
             None
         }
     }
 
-    /// Get userdata reference (unsafe - must ensure GC has not collected it)
+    /// Get userdata reference safely
     #[inline]
-    pub unsafe fn as_userdata(&self) -> Option<&LuaUserdata> {
+    pub fn as_userdata(&self) -> Option<&LuaUserdata> {
         if self.primary == TAG_USERDATA {
-            let ptr = self.secondary as *const LuaUserdata;
-            unsafe { Some(&*ptr) }
+            unsafe {
+                let ptr = self.secondary as *const LuaUserdata;
+                Some(&*ptr)
+            }
         } else {
             None
         }
     }
 
-    // ============ Legacy Rc-based accessors (for compatibility) ============
-    // These create temporary Rc references - use sparingly
+    // ============ Internal methods for VM ============
 
-    /// Get string as Rc (creates temporary Rc without proper GC tracking)
-    /// Use only for compatibility during migration
+    /// Create temporary Rc for VM internal operations
     #[inline]
-    pub fn as_string_rc(&self) -> Option<Rc<LuaString>> {
+    pub(crate) unsafe fn to_table_rc(&self) -> Option<Rc<RefCell<LuaTable>>> {
         unsafe {
-            self.as_string().map(|s| {
-                let ptr = s as *const LuaString;
-                let rc = Rc::from_raw(ptr);
-                let clone = rc.clone();
-                std::mem::forget(rc); // Don't drop
-                clone
-            })
-        }
-    }
-
-    /// Get table as Rc<RefCell<>> (creates temporary Rc)
-    #[inline]
-    pub fn as_table_rc(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        unsafe {
-            self.as_table().map(|t| {
+            if let Some(t) = self.as_table() {
                 let ptr = t as *const RefCell<LuaTable>;
                 let rc = Rc::from_raw(ptr);
                 let clone = rc.clone();
-                std::mem::forget(rc); // Don't drop
-                clone
-            })
+                std::mem::forget(rc);
+                Some(clone)
+            } else {
+                None
+            }
         }
     }
 
-    /// Get function as Rc (creates temporary Rc)
+    /// Create temporary Rc for VM internal operations
     #[inline]
-    pub fn as_function_rc(&self) -> Option<Rc<LuaFunction>> {
+    pub(crate) unsafe fn to_function_rc(&self) -> Option<Rc<LuaFunction>> {
         unsafe {
-            self.as_function().map(|f| {
+            if let Some(f) = self.as_function() {
                 let ptr = f as *const LuaFunction;
                 let rc = Rc::from_raw(ptr);
                 let clone = rc.clone();
-                std::mem::forget(rc); // Don't drop
-                clone
-            })
+                std::mem::forget(rc);
+                Some(clone)
+            } else {
+                None
+            }
         }
     }
 
-    /// Get userdata as Rc (creates temporary Rc)
+    /// Get string reference (internal alias)
     #[inline]
-    pub fn as_userdata_rc(&self) -> Option<Rc<LuaUserdata>> {
-        unsafe {
-            self.as_userdata().map(|u| {
-                let ptr = u as *const LuaUserdata;
-                let rc = Rc::from_raw(ptr);
-                let clone = rc.clone();
-                std::mem::forget(rc); // Don't drop
-                clone
-            })
-        }
+    pub(crate) unsafe fn as_string(&self) -> Option<&LuaString> {
+        self.as_lua_string()
     }
 
     /// Get as_boolean for compatibility

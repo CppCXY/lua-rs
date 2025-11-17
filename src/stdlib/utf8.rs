@@ -1,7 +1,7 @@
 // UTF-8 library
 // Implements: char, charpattern, codes, codepoint, len, offset
 
-use crate::lib_registry::LibraryModule;
+use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::LuaVM;
 
@@ -26,15 +26,14 @@ pub fn create_utf8_lib() -> LibraryModule {
 }
 
 fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let s = crate::lib_registry::require_arg(vm, 0, "utf8.len")?
-        .as_string_rc()
+    let s_value = require_arg(vm, 0, "utf8.len")?;
+    let s = s_value
+        .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'utf8.len' (string expected)".to_string())?;
 
-    let i = crate::lib_registry::get_arg(vm, 1)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(1) as usize;
+    let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
 
-    let j = crate::lib_registry::get_arg(vm, 2)
+    let j = get_arg(vm, 2)
         .and_then(|v| v.as_integer())
         .map(|v| v as usize);
 
@@ -71,7 +70,7 @@ fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 fn utf8_char(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let args = crate::lib_registry::get_args(vm);
+    let args = get_args(vm);
 
     let mut result = String::new();
     for arg in args {
@@ -95,19 +94,16 @@ fn utf8_char(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// utf8.codes(s) - Returns an iterator for UTF-8 characters
 fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lua_value::LuaTable;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    let s = crate::lib_registry::require_arg(vm, 0, "utf8.codes")?
-        .as_string_rc()
-        .ok_or_else(|| "bad argument #1 to 'utf8.codes' (string expected)".to_string())?;
+    let s_value = require_arg(vm, 0, "utf8.codes")?;
+    if !s_value.is_string() {
+        return Err("bad argument #1 to 'utf8.codes' (string expected)".to_string());
+    }
 
     // Create state table: {string = s, position = 0}
-    let state_table = Rc::new(RefCell::new(LuaTable::new()));
+    let state_table = vm.create_table();
     state_table.borrow_mut().raw_set(
         LuaValue::from_string_rc(vm.create_string("string".to_string())),
-        LuaValue::from_string_rc(s),
+        s_value,
     );
     state_table.borrow_mut().raw_set(
         LuaValue::from_string_rc(vm.create_string("position".to_string())),
@@ -123,8 +119,9 @@ fn utf8_codes(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// Iterator function for utf8.codes
 fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let state_table = crate::lib_registry::require_arg(vm, 0, "utf8.codes iterator")?
-        .as_table_rc()
+    let t_value = require_arg(vm, 0, "utf8.codes iterator")?;
+    let state_table = t_value
+        .as_table()
         .ok_or_else(|| "utf8.codes iterator: state table expected".to_string())?;
 
     let string_key = LuaValue::from_string_rc(vm.create_string("string".to_string()));
@@ -174,15 +171,14 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// utf8.codepoint(s [, i [, j]]) - Returns code points of characters
 fn utf8_codepoint(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let s = crate::lib_registry::require_arg(vm, 0, "utf8.codepoint")?
-        .as_string_rc()
+    let s_value = require_arg(vm, 0, "utf8.codepoint")?;
+    let s = s_value
+        .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'utf8.codepoint' (string expected)".to_string())?;
 
-    let i = crate::lib_registry::get_arg(vm, 1)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(1) as usize;
+    let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
 
-    let j = crate::lib_registry::get_arg(vm, 2)
+    let j = get_arg(vm, 2)
         .and_then(|v| v.as_integer())
         .map(|v| v as usize)
         .unwrap_or(i);
@@ -213,15 +209,16 @@ fn utf8_codepoint(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
 /// utf8.offset(s, n [, i]) - Returns byte position of n-th character
 fn utf8_offset(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let s = crate::lib_registry::require_arg(vm, 0, "utf8.offset")?
-        .as_string_rc()
+    let s_value = require_arg(vm, 0, "utf8.offset")?;
+    let s = s_value
+        .as_lua_string()
         .ok_or_else(|| "bad argument #1 to 'utf8.offset' (string expected)".to_string())?;
 
-    let n = crate::lib_registry::require_arg(vm, 1, "utf8.offset")?
+    let n = require_arg(vm, 1, "utf8.offset")?
         .as_integer()
         .ok_or_else(|| "bad argument #2 to 'utf8.offset' (number expected)".to_string())?;
 
-    let i = crate::lib_registry::get_arg(vm, 2)
+    let i = get_arg(vm, 2)
         .and_then(|v| v.as_integer())
         .unwrap_or(if n >= 0 {
             1

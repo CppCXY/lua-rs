@@ -354,16 +354,14 @@ fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let file_val = get_arg(vm, 1).ok_or("file:flush requires self parameter")?;
 
     // Extract LuaFile from userdata
-    unsafe {
-        if let Some(ud) = file_val.as_userdata() {
-            let data = ud.get_data();
-            let mut data_ref = data.borrow_mut();
-            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
-                if let Err(e) = lua_file.flush() {
-                    return Err(format!("flush error: {}", e));
-                }
-                return Ok(MultiValue::single(LuaValue::boolean(true)));
+    if let Some(ud) = file_val.as_userdata() {
+        let data = ud.get_data();
+        let mut data_ref = data.borrow_mut();
+        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+            if let Err(e) = lua_file.flush() {
+                return Err(format!("flush error: {}", e));
             }
+            return Ok(MultiValue::single(LuaValue::boolean(true)));
         }
     }
 
@@ -378,16 +376,14 @@ fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let file_val = get_arg(vm, 1).ok_or("file:close requires self parameter")?;
 
     // Extract LuaFile from userdata
-    unsafe {
-        if let Some(ud) = file_val.as_userdata() {
-            let data = ud.get_data();
-            let mut data_ref = data.borrow_mut();
-            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
-                if let Err(e) = lua_file.close() {
-                    return Err(format!("close error: {}", e));
-                }
-                return Ok(MultiValue::single(LuaValue::boolean(true)));
+    if let Some(ud) = file_val.as_userdata() {
+        let data = ud.get_data();
+        let mut data_ref = data.borrow_mut();
+        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+            if let Err(e) = lua_file.close() {
+                return Err(format!("close error: {}", e));
             }
+            return Ok(MultiValue::single(LuaValue::boolean(true)));
         }
     }
 
@@ -423,10 +419,8 @@ fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::get_arg;
 
-    let state_table = get_arg(vm, 0)
-        .ok_or("iterator requires state")?
-        .as_table_rc()
-        .ok_or("invalid iterator state")?;
+    let state_val = get_arg(vm, 0).ok_or("iterator requires state")?;
+    let state_table = state_val.as_table().ok_or("invalid iterator state")?;
 
     let file_key = LuaValue::from_string_rc(vm.create_string("file".to_string()));
     let file_val = state_table
@@ -435,8 +429,7 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .ok_or("file not found in state")?;
 
     // Read next line
-    unsafe {
-        if let Some(ud) = file_val.as_userdata() {
+    if let Some(ud) = file_val.as_userdata() {
             let data = ud.get_data();
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -451,7 +444,6 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 }
             }
         }
-    }
 
     Err("expected file handle".to_string())
 }
@@ -469,8 +461,7 @@ fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let offset = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(0);
 
-    unsafe {
-        if let Some(ud) = file_val.as_userdata() {
+    if let Some(ud) = file_val.as_userdata() {
             let data = ud.get_data();
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
@@ -498,7 +489,6 @@ fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 }
             }
         }
-    }
 
     Err("expected file handle".to_string())
 }
