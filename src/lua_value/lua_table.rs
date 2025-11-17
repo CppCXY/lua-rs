@@ -3,6 +3,8 @@
 // - Hash part using open addressing with separate chaining
 // - No insertion_order vector needed - natural iteration order
 
+use crate::LuaVM;
+
 use super::LuaValue;
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -83,42 +85,16 @@ impl LuaTable {
         None
     }
 
-    /// Fast string key access - O(1) average
-    #[inline(always)]
-    pub fn get_str(&self, key: &Rc<crate::LuaString>) -> Option<LuaValue> {
-        self.get_from_hash(&LuaValue::from_string_rc(key.clone()))
-    }
-
     /// Optimized string key access using &str - avoids LuaValue allocation
     /// This is a hot path for table access with string literals
     #[inline(always)]
-    pub fn get_by_str(&self, key_str: &str) -> Option<LuaValue> {
+    pub fn get_str(&self, vm: &mut LuaVM, key_str: &str) -> Option<LuaValue> {
         if self.node.is_empty() {
             return None;
         }
 
-        // Hash the string directly
-        let hash = self.hash_str(key_str);
-        let mask = self.node.len() - 1;
-        let mut idx = (hash & mask) as usize;
-
-        // Search for matching key
-        loop {
-            let node = &self.node[idx];
-            if node.is_empty() {
-                return None;
-            }
-            // Fast path: compare string content directly
-            if let Some(node_str) = unsafe { node.key.as_string() } {
-                if node_str.as_str() == key_str {
-                    return Some(node.value.clone());
-                }
-            }
-            if node.next < 0 {
-                return None;
-            }
-            idx = node.next as usize;
-        }
+        let key = LuaValue::from_string_rc(vm.create_string(key_str.to_string()));
+        self.get_from_hash(&key)
     }
 
     /// Generic key access
@@ -190,12 +166,6 @@ impl LuaTable {
         self.set_in_hash(LuaValue::integer(key), value);
     }
 
-    /// Fast string key write
-    #[inline(always)]
-    pub fn set_str(&mut self, key: Rc<crate::LuaString>, value: LuaValue) {
-        self.set_in_hash(LuaValue::from_string_rc(key), value);
-    }
-
     /// Optimized string key write using &str - for VM hot paths
     /// Defers string allocation until insertion confirmed
     /// The create_string closure is only called if a new key needs to be inserted
@@ -226,7 +196,12 @@ impl LuaTable {
     }
 
     /// Insert using &str key, only creates LuaString if insertion succeeds
-    fn insert_by_str_impl<F>(&mut self, key_str: &str, value: LuaValue, create_string: &mut F) -> bool
+    fn insert_by_str_impl<F>(
+        &mut self,
+        key_str: &str,
+        value: LuaValue,
+        create_string: &mut F,
+    ) -> bool
     where
         F: FnMut(&str) -> Rc<crate::LuaString>,
     {

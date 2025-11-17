@@ -34,9 +34,37 @@ fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let bytes = s.as_str().as_bytes();
     let len = bytes.len() as i64;
 
-    // i and j are BYTE positions (1-based), not character positions
-    let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(len);
+    // Fast path: no range specified, count entire string
+    let i_arg = get_arg(vm, 1);
+    let j_arg = get_arg(vm, 2);
+    let lax = get_arg(vm, 3).and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if i_arg.is_none() && j_arg.is_none() {
+        // Fast path: validate and count entire string
+        match std::str::from_utf8(bytes) {
+            Ok(valid_str) => {
+                return Ok(MultiValue::single(LuaValue::integer(
+                    valid_str.chars().count() as i64
+                )));
+            }
+            Err(e) if !lax => {
+                // Return nil and position of first invalid byte (1-based)
+                return Ok(MultiValue::multiple(vec![
+                    LuaValue::nil(),
+                    LuaValue::integer(e.valid_up_to() as i64 + 1),
+                ]));
+            }
+            Err(_) if lax => {
+                // In lax mode, just return nil
+                return Ok(MultiValue::single(LuaValue::nil()));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // Slow path: i and j are BYTE positions (1-based), not character positions
+    let i = i_arg.and_then(|v| v.as_integer()).unwrap_or(1);
+    let j = j_arg.and_then(|v| v.as_integer()).unwrap_or(len);
 
     // Convert 1-based byte positions to 0-based byte indices
     let start_byte = ((i - 1).max(0) as usize).min(bytes.len());
@@ -55,7 +83,7 @@ fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
             let len = valid_str.chars().count();
             Ok(MultiValue::single(LuaValue::integer(len as i64)))
         }
-        Err(e) => {
+        Err(e) if !lax => {
             // Return nil and position of first invalid byte (1-based)
             let error_pos = start_byte + e.valid_up_to() + 1;
             Ok(MultiValue::multiple(vec![
@@ -63,6 +91,11 @@ fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 LuaValue::integer(error_pos as i64),
             ]))
         }
+        Err(_) if lax => {
+            // In lax mode, just return nil
+            Ok(MultiValue::single(LuaValue::nil()))
+        }
+        _ => unreachable!(),
     }
 }
 

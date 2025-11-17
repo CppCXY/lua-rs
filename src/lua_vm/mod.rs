@@ -365,8 +365,6 @@ impl LuaVM {
         let val_b = self.get_register(base_ptr, b);
         let val_c = self.get_register(base_ptr, c);
         let is_tbl_int = val_b.is_table() && val_c.is_integer();
-        let is_tbl_str = val_b.is_table() && val_c.is_string();
-
         // Fast path: integer key
         if is_tbl_int {
             if let (Some(tbl), Some(idx)) = (val_b.as_table(), val_c.as_integer()) {
@@ -376,52 +374,25 @@ impl LuaVM {
             }
         }
 
-        // Fast path: string key
-        if is_tbl_str {
-            unsafe {
-                if let (Some(tbl), Some(key_str)) = (val_b.as_table(), val_c.as_string()) {
-                    // Need to create temporary Rc for get_str
-                    let key_rc = Rc::from_raw(key_str as *const LuaString);
-                    let key_rc_clone = key_rc.clone();
-                    std::mem::forget(key_rc);
-
-                    let value = tbl.borrow().get_str(&key_rc_clone);
-                    // If found, return immediately (fast path)
-                    if let Some(v) = value {
-                        self.set_register(base_ptr, a, v);
-                        return Ok(());
-                    }
-                    // If not found, fall through to check metamethods
-                }
-            }
-        }
-
         // Slow path: clone for complex cases
         let table = val_b;
         let key = val_c;
 
-        unsafe {
-            if let Some(tbl) = table.to_table_rc() {
-                // Use VM's table_get which handles metamethods
-                let value = self.table_get(tbl, &key).unwrap_or(LuaValue::nil());
-                self.set_register(base_ptr, a, value);
-                return Ok(());
-            } else if let Some(ud) = table.as_userdata() {
-                // Need temporary Rc for userdata_get
-                let ud_rc = Rc::from_raw(ud as *const LuaUserdata);
-                let ud_clone = ud_rc.clone();
-                std::mem::forget(ud_rc);
-
-                // Handle userdata __index metamethod
-                let value = self.userdata_get(ud_clone, &key).unwrap_or(LuaValue::nil());
-                self.set_register(base_ptr, a, value);
-                return Ok(());
-            } else if table.is_string() {
-                // Handle string indexing (uses string metatable)
-                let value = self.string_get(&table, &key).unwrap_or(LuaValue::nil());
-                self.set_register(base_ptr, a, value);
-                return Ok(());
-            }
+        if table.is_table() {
+            // Use VM's table_get which handles metamethods
+            let value = self.table_get(&table, &key).unwrap_or(LuaValue::nil());
+            self.set_register(base_ptr, a, value);
+            return Ok(());
+        } else if table.is_userdata() {
+            // Handle userdata __index metamethod
+            let value = self.userdata_get(&table, &key).unwrap_or(LuaValue::nil());
+            self.set_register(base_ptr, a, value);
+            return Ok(());
+        } else if table.is_string() {
+            // Handle string indexing (uses string metatable)
+            let value = self.string_get(&table, &key).unwrap_or(LuaValue::nil());
+            self.set_register(base_ptr, a, value);
+            return Ok(());
         }
 
         Err("Attempt to index a non-table value".to_string())
@@ -440,47 +411,18 @@ impl LuaVM {
         let val_b = self.get_register(base_ptr, b);
         let val_c = self.get_register(base_ptr, c);
 
-        let (tbl_clone, idx_opt, key_opt) = unsafe {
-            match (val_a.kind(), val_b.kind()) {
-                (LuaValueKind::Table, LuaValueKind::Integer) => {
-                    let tbl_clone = val_a.to_table_rc().unwrap();
-                    let idx = val_b.as_integer().unwrap();
-                    (Some(tbl_clone), Some(idx), None)
-                }
-                (LuaValueKind::Table, LuaValueKind::String) => {
-                    let tbl_clone = val_a.to_table_rc().unwrap();
-
-                    let key_str = val_b.as_string().unwrap();
-                    let key_rc = Rc::from_raw(key_str as *const LuaString);
-                    let key_clone = key_rc.clone();
-                    std::mem::forget(key_rc);
-
-                    (Some(tbl_clone), None, Some(key_clone))
-                }
-                _ => (None, None, None),
-            }
-        };
-
-        // Fast path: integer key
-        if let (Some(tbl), Some(idx)) = (tbl_clone.as_ref(), idx_opt) {
-            tbl.borrow_mut().set_int(idx, val_c);
-            return Ok(());
-        }
-
-        // Fast path: string key
-        if let (Some(tbl), Some(key)) = (tbl_clone.as_ref(), key_opt.as_ref()) {
-            tbl.borrow_mut().set_str(Rc::clone(key), val_c);
-            return Ok(());
-        }
-
-        // Slow path
-        let table = val_a;
-        let key = val_b;
-        let value = val_c;
-
         unsafe {
-            if let Some(tbl_clone) = table.to_table_rc() {
-                self.table_set(tbl_clone, key, value)?;
+            // Fast path 1: integer key - no Rc allocation
+            if val_a.is_table() && val_b.is_integer() {
+                let tbl_ref = val_a.as_table().unwrap();
+                let idx = val_b.as_integer().unwrap();
+                tbl_ref.borrow_mut().set_int(idx, val_c);
+                return Ok(());
+            }
+
+            // Slow path: metamethods or non-table
+            if let Some(tbl_clone) = val_a.to_table_rc() {
+                self.table_set(tbl_clone, val_b, val_c)?;
                 Ok(())
             } else {
                 Err("Attempt to index a non-table value".to_string())
@@ -499,15 +441,14 @@ impl LuaVM {
         let base_ptr = frame.base_ptr;
         let table = self.get_register(base_ptr, b);
 
-        unsafe {
-            if let Some(tbl_clone) = table.to_table_rc() {
-                // Fast path: direct integer access
-                let value = tbl_clone.borrow().get_int(c).unwrap_or(LuaValue::nil());
-                self.set_register(base_ptr, a, value);
-                Ok(())
-            } else {
-                Err("Attempt to index a non-table value".to_string())
-            }
+        // Optimized: use direct reference, no Rc clone
+        if let Some(tbl) = table.as_table() {
+            // Fast path: direct integer access, no atomic ops
+            let value = tbl.borrow().get_int(c).unwrap_or(LuaValue::nil());
+            self.set_register(base_ptr, a, value);
+            Ok(())
+        } else {
+            Err("Attempt to index a non-table value".to_string())
         }
     }
 
@@ -543,24 +484,13 @@ impl LuaVM {
         let table = self.get_register(base_ptr, b);
         let key = frame.function.chunk.constants[c].clone();
 
-        unsafe {
-            if let Some(tbl_clone) = table.to_table_rc() {
-                if let Some(key_str) = key.as_string() {
-                    // Optimized: use &str directly, no Rc allocation
-                    let value = tbl_clone.borrow().get_by_str(key_str.as_str());
-                    if let Some(v) = value {
-                        self.set_register(base_ptr, a, v);
-                        return Ok(());
-                    }
-                }
-
-                // Not found or not a string key: use generic get with metamethods
-                let value = self.table_get(tbl_clone, &key).unwrap_or(LuaValue::nil());
-                self.set_register(base_ptr, a, value);
-                Ok(())
-            } else {
-                Err("Attempt to index a non-table value".to_string())
-            }
+        if table.is_table() {
+            // Not found or not a string key: use generic get with metamethods
+            let value = self.table_get(&table, &key).unwrap_or(LuaValue::nil());
+            self.set_register(base_ptr, a, value);
+            Ok(())
+        } else {
+            Err("Attempt to index a non-table value".to_string())
         }
     }
 
@@ -579,19 +509,9 @@ impl LuaVM {
 
         unsafe {
             if let Some(tbl_clone) = table.to_table_rc() {
-                if let Some(key_str) = key.as_string() {
-                    // Optimized: create Rc from existing pointer (no allocation)
-                    let key_rc = Rc::from_raw(key_str as *const LuaString);
-                    let key_rc_clone = key_rc.clone();
-                    std::mem::forget(key_rc);
-
-                    tbl_clone.borrow_mut().set_str(key_rc_clone, value);
-                    Ok(())
-                } else {
-                    // Fallback: use generic set with metamethods
-                    self.table_set(tbl_clone, key, value)?;
-                    Ok(())
-                }
+                // Fallback: use generic set with metamethods
+                self.table_set(tbl_clone, key, value)?;
+                Ok(())
             } else {
                 Err("Attempt to index a non-table value".to_string())
             }
@@ -1945,19 +1865,18 @@ impl LuaVM {
         let bx = Instruction::get_bx(instr) as usize;
 
         let frame = self.current_frame();
-        let name_val = frame.function.chunk.constants[bx].clone();
-
-        unsafe {
-            if let Some(name_str) = name_val.as_string() {
-                let name = name_str.as_str();
-                let value = self.get_global(name).unwrap_or(LuaValue::nil());
-
-                let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
-                self.set_register(base_ptr, a, value);
+        let name_val = &frame.function.chunk.constants[bx];
+        let value = self.get_global_by_lua_value(&name_val);
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        match value {
+            Some(v) => {
+                self.set_register(base_ptr, a, v);
                 Ok(())
-            } else {
-                Err("Invalid global name".to_string())
+            }
+            None => {
+                self.set_register(base_ptr, a, LuaValue::nil());
+                Ok(())
             }
         }
     }
@@ -2036,7 +1955,8 @@ impl LuaVM {
             return Err(format!("SetList: not a table, got {:?}", table_val));
         }
 
-        let table_rc = unsafe { table_val.to_table_rc().unwrap() };
+        // Optimized: use direct reference, no Rc clone needed for raw_set
+        let table_ref = table_val.as_table().unwrap();
 
         // Determine how many elements to set
         let count = if b == 0 {
@@ -2052,7 +1972,7 @@ impl LuaVM {
             let value_reg = a + 1 + i;
             let value = self.get_register(base_ptr, value_reg);
             let key = LuaValue::integer((c + i + 1) as i64); // Lua arrays are 1-indexed
-            table_rc.borrow_mut().raw_set(key, value);
+            table_ref.borrow_mut().raw_set(key, value);
         }
 
         Ok(())
@@ -2073,14 +1993,22 @@ impl LuaVM {
         left == right
     }
 
-    pub fn get_global(&self, name: &str) -> Option<LuaValue> {
-        let key = Rc::new(LuaString::new(name.to_string()));
-        self.globals.borrow().get_str(&key)
+    pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
+        let key = LuaValue::from_string_rc(self.create_string(name.to_string()));
+        self.globals.borrow().raw_get(&key)
+    }
+
+    pub fn get_global_by_lua_value(&self, key: &LuaValue) -> Option<LuaValue> {
+        self.globals.borrow().raw_get(key)
     }
 
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
-        let key = Rc::new(LuaString::new(name.to_string()));
-        self.globals.borrow_mut().set_str(key, value);
+        let key = LuaValue::from_string_rc(self.create_string(name.to_string()));
+        self.globals.borrow_mut().raw_set(key, value);
+    }
+
+    pub fn set_global_by_lua_value(&self, key: &LuaValue, value: LuaValue) {
+        self.globals.borrow_mut().raw_set(key.clone(), value);
     }
 
     /// Set the metatable for all strings
@@ -2334,11 +2262,11 @@ impl LuaVM {
 
     /// Get value from table with metatable support
     /// Handles __index metamethod
-    pub fn table_get(
-        &mut self,
-        table_rc: Rc<RefCell<LuaTable>>,
-        key: &LuaValue,
-    ) -> Option<LuaValue> {
+    pub fn table_get(&mut self, lua_table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        let Some(table_rc) = lua_table.as_table() else {
+            return None;
+        };
+
         // First try raw get
         let value = {
             let table = table_rc.borrow();
@@ -2367,19 +2295,11 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table
-                    LuaValueKind::Table => unsafe {
-                        if let Some(t) = index_val.as_table() {
-                            let t_rc = Rc::from_raw(t as *const RefCell<LuaTable>);
-                            let t_rc_clone = t_rc.clone();
-                            std::mem::forget(t_rc);
-                            return self.table_get(t_rc_clone, key);
-                        }
-                    },
+                    LuaValueKind::Table => return self.table_get(&index_val, key),
+
                     // __index is a function - call it with (table, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let self_value = LuaValue::from_table_rc(table_rc);
-                        let args = vec![self_value, key.clone()];
-
+                        let args = vec![lua_table.clone(), key.clone()];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -2395,7 +2315,11 @@ impl LuaVM {
 
     /// Get value from userdata with metatable support
     /// Handles __index metamethod
-    pub fn userdata_get(&mut self, userdata: Rc<LuaUserdata>, key: &LuaValue) -> Option<LuaValue> {
+    pub fn userdata_get(&mut self, lua_userdata: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        let Some(userdata) = lua_userdata.as_userdata() else {
+            return None;
+        };
+
         // Check for __index metamethod
         let metatable = userdata.get_metatable();
 
@@ -2411,19 +2335,11 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table
-                    LuaValueKind::Table => unsafe {
-                        if let Some(t) = index_val.as_table() {
-                            let t_rc = Rc::from_raw(t as *const RefCell<LuaTable>);
-                            let t_rc_clone = t_rc.clone();
-                            std::mem::forget(t_rc);
-                            return self.table_get(t_rc_clone, key);
-                        }
-                    },
+                    LuaValueKind::Table => return self.table_get(&index_val, key),
+
                     // __index is a function - call it with (userdata, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let self_value = LuaValue::from_userdata_rc(userdata);
-                        let args = vec![self_value, key.clone()];
-
+                        let args = vec![lua_userdata.clone(), key.clone()];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -2453,18 +2369,10 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table (this is the common case for strings)
-                    LuaValueKind::Table => unsafe {
-                        if let Some(t) = index_val.as_table() {
-                            let t_rc = Rc::from_raw(t as *const RefCell<LuaTable>);
-                            let t_rc_clone = t_rc.clone();
-                            std::mem::forget(t_rc);
-                            return self.table_get(t_rc_clone, key);
-                        }
-                    },
+                    LuaValueKind::Table => return self.table_get(&index_val, key),
                     // __index is a function - call it with (string, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
                         let args = vec![string_val.clone(), key.clone()];
-
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
