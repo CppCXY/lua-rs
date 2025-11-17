@@ -9,6 +9,8 @@ pub struct LuaCallFrame {
     pub cached_function_id: Option<crate::object_pool::FunctionId>, // Cached function ID for fast access
     pub cached_code_ptr: Option<*const Vec<u32>>, // Cached pointer to chunk.code for ultra-fast instruction fetch
     pub cached_code_len: usize,          // Cached code length for bounds checking
+    pub cached_constants_ptr: Option<*const Vec<LuaValue>>, // Cached pointer to chunk.constants for ultra-fast LoadK
+    pub cached_constants_len: usize,     // Cached constants length for bounds checking
     pub pc: usize,                       // Program counter
     pub base_ptr: usize,                 // Index into global register_stack (register window start)
     pub top: usize,                      // Top of stack for this frame (relative to base_ptr)
@@ -37,6 +39,8 @@ impl LuaCallFrame {
             cached_function_id,
             cached_code_ptr: None,  // Will be set by VM after frame creation
             cached_code_len: 0,
+            cached_constants_ptr: None,  // Will be set by VM after frame creation
+            cached_constants_len: 0,
             pc: 0,
             base_ptr,
             top: max_stack_size,
@@ -63,6 +67,8 @@ impl LuaCallFrame {
             cached_function_id: None,
             cached_code_ptr: None,
             cached_code_len: 0,
+            cached_constants_ptr: None,
+            cached_constants_len: 0,
             pc: parent_pc,
             base_ptr,
             top: num_args,

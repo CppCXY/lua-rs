@@ -125,6 +125,7 @@ impl LuaVM {
 
     // Register access helpers for unified stack architecture
     #[inline(always)]
+    #[inline(always)]
     fn get_register(&self, base_ptr: usize, reg: usize) -> LuaValue {
         self.register_stack[base_ptr + reg]
     }
@@ -264,12 +265,16 @@ impl LuaVM {
                     }
                     
                     let instr = func_borrowed.chunk.code[pc];
+                    let constants_ptr = &func_borrowed.chunk.constants as *const Vec<LuaValue>;
+                    let constants_len = func_borrowed.chunk.constants.len();
                     drop(func_borrowed);
                     
-                    // Update frame cache
+                    // Update frame cache (code + constants)
                     if let Some(frame) = self.frames.last_mut() {
                         frame.cached_code_ptr = Some(code_ptr);
                         frame.cached_code_len = code_len;
+                        frame.cached_constants_ptr = Some(constants_ptr);
+                        frame.cached_constants_len = constants_len;
                     }
                     
                     instr
@@ -362,8 +367,12 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let base_ptr = self.current_frame().base_ptr;
-        let value = self.get_register(base_ptr, b);
-        self.set_register(base_ptr, a, value);
+        
+        // SAFETY: Compiler guarantees indices are within bounds
+        unsafe {
+            let value = *self.register_stack.get_unchecked(base_ptr + b);
+            *self.register_stack.get_unchecked_mut(base_ptr + a) = value;
+        }
         Ok(())
     }
 
@@ -371,9 +380,50 @@ impl LuaVM {
     fn op_loadk(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
+        
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        // ULTRA-FAST PATH: Use cached constants pointer (zero overhead!)
+        if let Some(constants_ptr) = frame.cached_constants_ptr {
+            unsafe {
+                if bx < frame.cached_constants_len {
+                    let constants_vec = &*constants_ptr;
+                    let constant = *constants_vec.get_unchecked(bx);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) = constant;
+                    return Ok(());
+                }
+            }
+        }
+        
+        // Fallback path (first call - will cache for next time)
+        if let Some(function_id) = frame.cached_function_id {
+            if let Some(func_ref) = self.object_pool.get_function(function_id) {
+                let func_borrowed = func_ref.borrow();
+                if bx < func_borrowed.chunk.constants.len() {
+                    let constant = func_borrowed.chunk.constants[bx];
+                    
+                    // Cache for next time
+                    let constants_ptr = &func_borrowed.chunk.constants as *const Vec<LuaValue>;
+                    let constants_len = func_borrowed.chunk.constants.len();
+                    drop(func_borrowed);
+                    
+                    if let Some(frame_mut) = self.frames.last_mut() {
+                        frame_mut.cached_constants_ptr = Some(constants_ptr);
+                        frame_mut.cached_constants_len = constants_len;
+                    }
+                    
+                    unsafe {
+                        *self.register_stack.get_unchecked_mut(base_ptr + a) = constant;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        
+        // Super slow fallback
         let chunk = self.get_current_chunk()?;
-        let constant = chunk.constants[bx].clone();
-        let base_ptr = self.current_frame().base_ptr;
+        let constant = chunk.constants[bx];
         self.set_register(base_ptr, a, constant);
         Ok(())
     }
@@ -575,8 +625,24 @@ impl LuaVM {
                 return Ok(());
             }
 
-            // Both floats
-            if left_tag < crate::lua_value::NAN_BASE && right_tag < crate::lua_value::NAN_BASE {
+            // Helper: check if value is float (positive or negative)
+            #[inline(always)]
+            fn is_float_fast(tag: u64) -> bool {
+                if tag < crate::lua_value::NAN_BASE {
+                    true  // Positive float
+                } else {
+                    let high_bits = tag >> 48;
+                    high_bits >= 0x8000 && high_bits < 0xFFF8  // Negative float
+                }
+            }
+
+            let left_is_float = is_float_fast(left_tag);
+            let right_is_float = is_float_fast(right_tag);
+            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
+            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
+
+            // Both floats (including negative floats)
+            if left_is_float && right_is_float {
                 let l = f64::from_bits(left_tag);
                 let r = f64::from_bits(right_tag);
                 *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l + r);
@@ -584,16 +650,13 @@ impl LuaVM {
             }
 
             // Mixed int/float - convert to float
-            if (left_tag == crate::lua_value::TAG_INTEGER || left_tag < crate::lua_value::NAN_BASE)
-                && (right_tag == crate::lua_value::TAG_INTEGER
-                    || right_tag < crate::lua_value::NAN_BASE)
-            {
-                let l = if left_tag == crate::lua_value::TAG_INTEGER {
+            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
+                let l = if left_is_int {
                     left.secondary() as i64 as f64
                 } else {
                     f64::from_bits(left_tag)
                 };
-                let r = if right_tag == crate::lua_value::TAG_INTEGER {
+                let r = if right_is_int {
                     right.secondary() as i64 as f64
                 } else {
                     f64::from_bits(right_tag)
@@ -631,34 +694,57 @@ impl LuaVM {
             let left = self.register_stack.get_unchecked(base_ptr + b);
             let right = self.register_stack.get_unchecked(base_ptr + c);
 
-            match (left.kind(), right.kind()) {
-                (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                    let i = left.as_integer().unwrap();
-                    let j = right.as_integer().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i - j);
-                    return Ok(());
+            let left_tag = left.primary();
+            let right_tag = right.primary();
+
+            // Fast path: both integers
+            if left_tag == crate::lua_value::TAG_INTEGER
+                && right_tag == crate::lua_value::TAG_INTEGER
+            {
+                let i = left.secondary() as i64;
+                let j = right.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i - j);
+                return Ok(());
+            }
+
+            // Helper: check if value is float (positive or negative)
+            #[inline(always)]
+            fn is_float_fast(tag: u64) -> bool {
+                if tag < crate::lua_value::NAN_BASE {
+                    true
+                } else {
+                    let high_bits = tag >> 48;
+                    high_bits >= 0x8000 && high_bits < 0xFFF8
                 }
-                (LuaValueKind::Float, LuaValueKind::Float) => {
-                    let l = left.as_float().unwrap();
-                    let r = right.as_float().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l - r);
-                    return Ok(());
-                }
-                (LuaValueKind::Integer, LuaValueKind::Float) => {
-                    let i = left.as_integer().unwrap();
-                    let f = right.as_float().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) =
-                        LuaValue::float(i as f64 - f);
-                    return Ok(());
-                }
-                (LuaValueKind::Float, LuaValueKind::Integer) => {
-                    let f = left.as_float().unwrap();
-                    let i = right.as_integer().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) =
-                        LuaValue::float(f - i as f64);
-                    return Ok(());
-                }
-                _ => {}
+            }
+
+            let left_is_float = is_float_fast(left_tag);
+            let right_is_float = is_float_fast(right_tag);
+            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
+            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
+
+            // Both floats
+            if left_is_float && right_is_float {
+                let l = f64::from_bits(left_tag);
+                let r = f64::from_bits(right_tag);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l - r);
+                return Ok(());
+            }
+
+            // Mixed int/float
+            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
+                let l = if left_is_int {
+                    left.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(left_tag)
+                };
+                let r = if right_is_int {
+                    right.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(right_tag)
+                };
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l - r);
+                return Ok(());
             }
         }
 
@@ -687,34 +773,56 @@ impl LuaVM {
             let left = self.register_stack.get_unchecked(base_ptr + b);
             let right = self.register_stack.get_unchecked(base_ptr + c);
 
-            match (left.kind(), right.kind()) {
-                (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                    let i = left.as_integer().unwrap();
-                    let j = right.as_integer().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i * j);
-                    return Ok(());
+            let left_tag = left.primary();
+            let right_tag = right.primary();
+
+            // Fast path: both integers
+            if left_tag == crate::lua_value::TAG_INTEGER
+                && right_tag == crate::lua_value::TAG_INTEGER
+            {
+                let i = left.secondary() as i64;
+                let j = right.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i * j);
+                return Ok(());
+            }
+
+            #[inline(always)]
+            fn is_float_fast(tag: u64) -> bool {
+                if tag < crate::lua_value::NAN_BASE {
+                    true
+                } else {
+                    let high_bits = tag >> 48;
+                    high_bits >= 0x8000 && high_bits < 0xFFF8
                 }
-                (LuaValueKind::Float, LuaValueKind::Float) => {
-                    let l = left.as_float().unwrap();
-                    let r = right.as_float().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l * r);
-                    return Ok(());
-                }
-                (LuaValueKind::Integer, LuaValueKind::Float) => {
-                    let i = left.as_integer().unwrap();
-                    let f = right.as_float().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) =
-                        LuaValue::float(i as f64 * f);
-                    return Ok(());
-                }
-                (LuaValueKind::Float, LuaValueKind::Integer) => {
-                    let f = left.as_float().unwrap();
-                    let i = right.as_integer().unwrap();
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) =
-                        LuaValue::float(f * i as f64);
-                    return Ok(());
-                }
-                _ => {}
+            }
+
+            let left_is_float = is_float_fast(left_tag);
+            let right_is_float = is_float_fast(right_tag);
+            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
+            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
+
+            // Both floats
+            if left_is_float && right_is_float {
+                let l = f64::from_bits(left_tag);
+                let r = f64::from_bits(right_tag);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l * r);
+                return Ok(());
+            }
+
+            // Mixed int/float
+            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
+                let l = if left_is_int {
+                    left.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(left_tag)
+                };
+                let r = if right_is_int {
+                    right.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(right_tag)
+                };
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l * r);
+                return Ok(());
             }
         }
 
@@ -737,43 +845,52 @@ impl LuaVM {
 
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
-        let val_b = self.get_register(base_ptr, b);
-        let val_c = self.get_register(base_ptr, c);
 
-        // Fast path: division always returns float in Lua
-        match (val_b.kind(), val_c.kind()) {
-            (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let i = val_b.as_integer().unwrap();
-                let j = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float(i as f64 / j as f64));
+        // SAFETY: Compiler guarantees indices are within bounds
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            let right = self.register_stack.get_unchecked(base_ptr + c);
+
+            let left_tag = left.primary();
+            let right_tag = right.primary();
+
+            #[inline(always)]
+            fn is_float_fast(tag: u64) -> bool {
+                if tag < crate::lua_value::NAN_BASE {
+                    true
+                } else {
+                    let high_bits = tag >> 48;
+                    high_bits >= 0x8000 && high_bits < 0xFFF8
+                }
+            }
+
+            let left_is_float = is_float_fast(left_tag);
+            let right_is_float = is_float_fast(right_tag);
+            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
+            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
+
+            // Division always returns float in Lua
+            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
+                let l = if left_is_int {
+                    left.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(left_tag)
+                };
+                let r = if right_is_int {
+                    right.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(right_tag)
+                };
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l / r);
                 return Ok(());
             }
-            (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = val_b.as_float().unwrap();
-                let r = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float(l / r));
-                return Ok(());
-            }
-            (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = val_b.as_integer().unwrap();
-                let f = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float(i as f64 / f));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = val_b.as_float().unwrap();
-                let i = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float(f / i as f64));
-                return Ok(());
-            }
-            _ => {}
         }
 
         // Slow path
-        let left = val_b;
-        let right = val_c;
+        let val_b = self.get_register(base_ptr, b);
+        let val_c = self.get_register(base_ptr, c);
 
-        if self.call_binop_metamethod(&left, &right, "__div", a)? {
+        if self.call_binop_metamethod(&val_b, &val_c, "__div", a)? {
             Ok(())
         } else {
             Err(format!("attempt to divide non-number values"))
@@ -866,22 +983,39 @@ impl LuaVM {
 
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
-        let val = self.get_register(base_ptr, b);
 
-        // Fast path: avoid clone
-        match val.kind() {
-            LuaValueKind::Integer => {
-                let i = val.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::integer(-i));
+        // SAFETY: Compiler guarantees indices are within bounds
+        unsafe {
+            let val = self.register_stack.get_unchecked(base_ptr + b);
+            let tag = val.primary();
+
+            // Fast path: integer negation
+            if tag == crate::lua_value::TAG_INTEGER {
+                let i = val.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(-i);
                 return Ok(());
             }
-            LuaValueKind::Float => {
-                let f = val.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float(-f));
+
+            // Fast path: float negation (including negative floats)
+            #[inline(always)]
+            fn is_float_fast(tag: u64) -> bool {
+                if tag < crate::lua_value::NAN_BASE {
+                    true
+                } else {
+                    let high_bits = tag >> 48;
+                    high_bits >= 0x8000 && high_bits < 0xFFF8
+                }
+            }
+
+            if is_float_fast(tag) {
+                let f = f64::from_bits(tag);
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(-f);
                 return Ok(());
             }
-            _ => {}
         }
+
+        // Slow path: metamethod
+        let val = self.get_register(base_ptr, b);
 
         // Slow path: need to clone for metamethod
         let value = val;
@@ -1086,37 +1220,60 @@ impl LuaVM {
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
 
-        // Fast path: numeric comparison without clone
+        // SAFETY: Compiler guarantees indices are within bounds
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            let right = self.register_stack.get_unchecked(base_ptr + c);
+
+            let left_tag = left.primary();
+            let right_tag = right.primary();
+
+            // Fast path: both integers
+            if left_tag == crate::lua_value::TAG_INTEGER
+                && right_tag == crate::lua_value::TAG_INTEGER
+            {
+                let l = left.secondary() as i64;
+                let r = right.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l < r);
+                return Ok(());
+            }
+
+            // Helper: check if value is float
+            #[inline(always)]
+            fn is_float_fast(tag: u64) -> bool {
+                if tag < crate::lua_value::NAN_BASE {
+                    true
+                } else {
+                    let high_bits = tag >> 48;
+                    high_bits >= 0x8000 && high_bits < 0xFFF8
+                }
+            }
+
+            let left_is_float = is_float_fast(left_tag);
+            let right_is_float = is_float_fast(right_tag);
+            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
+            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
+
+            // Mixed int/float comparisons
+            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
+                let l = if left_is_int {
+                    left.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(left_tag)
+                };
+                let r = if right_is_int {
+                    right.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(right_tag)
+                };
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l < r);
+                return Ok(());
+            }
+        }
+
+        // Slow path: strings and metamethods
         let val_b = self.get_register(base_ptr, b);
         let val_c = self.get_register(base_ptr, c);
-
-        match (val_b.kind(), val_c.kind()) {
-            (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let l = val_b.as_integer().unwrap();
-                let r = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean(l < r));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = val_b.as_float().unwrap();
-                let r = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean(l < r));
-                return Ok(());
-            }
-            (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = val_b.as_integer().unwrap();
-                let f = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean((i as f64) < f));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = val_b.as_float().unwrap();
-                let i = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean(f < (i as f64)));
-                return Ok(());
-            }
-            _ => {}
-        }
 
         // Slow path: strings and metamethods
         let left = val_b;
@@ -1145,37 +1302,59 @@ impl LuaVM {
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
 
-        // Fast path: numeric comparison without clone
+        // SAFETY: Compiler guarantees indices are within bounds
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            let right = self.register_stack.get_unchecked(base_ptr + c);
+
+            let left_tag = left.primary();
+            let right_tag = right.primary();
+
+            // Fast path: both integers
+            if left_tag == crate::lua_value::TAG_INTEGER
+                && right_tag == crate::lua_value::TAG_INTEGER
+            {
+                let l = left.secondary() as i64;
+                let r = right.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l <= r);
+                return Ok(());
+            }
+
+            #[inline(always)]
+            fn is_float_fast(tag: u64) -> bool {
+                if tag < crate::lua_value::NAN_BASE {
+                    true
+                } else {
+                    let high_bits = tag >> 48;
+                    high_bits >= 0x8000 && high_bits < 0xFFF8
+                }
+            }
+
+            let left_is_float = is_float_fast(left_tag);
+            let right_is_float = is_float_fast(right_tag);
+            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
+            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
+
+            // Mixed int/float comparisons
+            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
+                let l = if left_is_int {
+                    left.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(left_tag)
+                };
+                let r = if right_is_int {
+                    right.secondary() as i64 as f64
+                } else {
+                    f64::from_bits(right_tag)
+                };
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l <= r);
+                return Ok(());
+            }
+        }
+
+        // Slow path: strings and metamethods
         let val_b = self.get_register(base_ptr, b);
         let val_c = self.get_register(base_ptr, c);
-
-        match (val_b.kind(), val_c.kind()) {
-            (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let l = val_b.as_integer().unwrap();
-                let r = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean(l <= r));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = val_b.as_float().unwrap();
-                let r = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean(l <= r));
-                return Ok(());
-            }
-            (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = val_b.as_integer().unwrap();
-                let f = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean((i as f64) <= f));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = val_b.as_float().unwrap();
-                let i = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::boolean(f <= (i as f64)));
-                return Ok(());
-            }
-            _ => {}
-        }
 
         // Slow path
         let left = val_b;
