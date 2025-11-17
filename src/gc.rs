@@ -365,19 +365,8 @@ impl GC {
         }
     }
 
-    /// Get pointer address for a value
     fn get_value_ptr(&self, value: &LuaValue) -> Option<usize> {
-        unsafe {
-            if value.is_string() {
-                value.as_string().map(|s| s as *const _ as usize)
-            } else if value.is_table() {
-                value.as_table_id().map(|t| t as *const _ as usize)
-            } else if value.is_function() {
-                value.as_function().map(|f| f as *const _ as usize)
-            } else {
-                None
-            }
-        }
+        todo!()
     }
 
     /// Update generation size statistics
@@ -392,12 +381,6 @@ impl GC {
 
         self.stats.young_gen_size = young;
         self.stats.old_gen_size = old;
-    }
-
-    /// Get unique ID for a value (for cycle detection)
-    #[allow(unused)]
-    fn value_id(&self, value: &LuaValue) -> usize {
-        self.get_value_ptr(value).unwrap_or(0)
     }
 
     /// Adjust GC threshold based on current usage

@@ -1394,7 +1394,12 @@ impl LuaVM {
 
         // Fast path: Lua function (most common case)
         if func.is_function() {
-            if let Some(lua_func) = func.as_function_id() {
+            if let Some(lua_func_id) = func.as_function_id() {
+                let lua_func = self
+                    .object_pool
+                    .get_function(lua_func_id)
+                    .ok_or("Missing function")?
+                    .borrow();
                 let max_stack_size = lua_func.chunk.max_stack_size;
                 let param_count = lua_func.chunk.param_count;
                 let is_vararg = lua_func.chunk.is_vararg;
@@ -1445,10 +1450,6 @@ impl LuaVM {
                 self.next_frame_id += 1;
 
                 // Create temporary Rc for LuaCallFrame
-                let func_rc = Rc::from_raw(lua_func as *const LuaFunction);
-                let func_rc_clone = func_rc.clone();
-                std::mem::forget(func_rc);
-
                 let mut new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     func_rc_clone,
@@ -1562,7 +1563,7 @@ impl LuaVM {
         }
 
         // Slow path: Check for __call metamethod on non-functions (tables, userdata)
-        if let Some(metatable) = func.get_metatable() {
+        if let Some(metatable) = self.get_metamatable(&func) {
             let call_key = self.create_string("__call");
             if let Some(call_func) = metatable.borrow().raw_get(&call_key) {
                 let original_func = func;
@@ -1785,7 +1786,7 @@ impl LuaVM {
 
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
-        self.set_register(base_ptr, a, LuaValue::from_function_rc(func));
+        self.set_register(base_ptr, a, func);
 
         Ok(())
     }
@@ -1946,7 +1947,11 @@ impl LuaVM {
         }
 
         // Optimized: use direct reference, no Rc clone needed for raw_set
-        let table_ref = table_val.as_table_id().unwrap();
+        let table_id = table_val.as_table_id().unwrap();
+        let table_ref = self
+            .object_pool
+            .get_table(table_id)
+            .ok_or("SetList: missing table")?;
 
         // Determine how many elements to set
         let count = if b == 0 {
@@ -1985,33 +1990,50 @@ impl LuaVM {
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
         let key = self.create_string(name);
-        self.globals.borrow().raw_get(&key)
+        if let Some(global_id) = self.globals.as_table_id() {
+            let global = self.object_pool.get_table(global_id).unwrap();
+            global.borrow().raw_get(&key)
+        } else {
+            None
+        }
     }
 
     pub fn get_global_by_lua_value(&self, key: &LuaValue) -> Option<LuaValue> {
-        self.globals.borrow().raw_get(key)
+        if let Some(global_id) = self.globals.as_table_id() {
+            let global = self.object_pool.get_table(global_id).unwrap();
+            global.borrow().raw_get(key)
+        } else {
+            None
+        }
     }
 
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
         let key = self.create_string(name);
-        self.globals.borrow_mut().raw_set(key, value);
+
+        if let Some(global_id) = self.globals.as_table_id() {
+            let global = self.object_pool.get_table(global_id).unwrap();
+            global.borrow_mut().raw_set(key, value);
+        }
     }
 
     pub fn set_global_by_lua_value(&self, key: &LuaValue, value: LuaValue) {
-        self.globals.borrow_mut().raw_set(key.clone(), value);
+        if let Some(global_id) = self.globals.as_table_id() {
+            let global = self.object_pool.get_table(global_id).unwrap();
+            global.borrow_mut().raw_set(key.clone(), value);
+        }
     }
 
     /// Set the metatable for all strings
     /// In Lua, all strings share a metatable with __index pointing to the string library
-    pub fn set_string_metatable(&mut self, string_lib: LuaValue) {
+    pub fn set_string_metatable(&mut self, _string_lib: LuaValue) {
         // Create the metatable
-        let metatable = self.create_table();
+        // let metatable = self.create_table();
 
-        // Set __index to the string library table
-        let index_key = self.create_string("__index");
-        metatable.borrow_mut().raw_set(index_key, string_lib);
+        // // Set __index to the string library table
+        // let index_key = self.create_string("__index");
+        // metatable.borrow_mut().raw_set(index_key, string_lib);
 
-        self.string_metatable = Some(metatable);
+        // self.string_metatable = Some(metatable);
     }
 
     /// Get the shared string metatable
@@ -2303,19 +2325,24 @@ impl LuaVM {
 
     /// Get value from userdata with metatable support
     /// Handles __index metamethod
-    pub fn userdata_get(&mut self, lua_userdata: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        let Some(userdata) = lua_userdata.as_userdata() else {
+    pub fn userdata_get(
+        &mut self,
+        lua_userdata_value: &LuaValue,
+        key: &LuaValue,
+    ) -> Option<LuaValue> {
+        let Some(userdata_id) = lua_userdata_value.as_userdata_id() else {
             return None;
         };
 
+        let userdata = self.object_pool.get_userdata(userdata_id)?;
         // Check for __index metamethod
         let metatable = userdata.get_metatable();
 
-        if let Some(mt) = metatable {
+        if let Some(mt_id) = metatable.as_table_id() {
             let index_key = self.create_string("__index");
 
             let index_value = {
-                let mt_borrowed = mt.borrow();
+                let mt_borrowed = self.object_pool.get_table(mt_id)?.borrow();
                 mt_borrowed.raw_get(&index_key)
             };
 
@@ -2326,7 +2353,7 @@ impl LuaVM {
 
                     // __index is a function - call it with (userdata, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![lua_userdata.clone(), key.clone()];
+                        let args = vec![lua_userdata_value.clone(), key.clone()];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -2518,7 +2545,12 @@ impl LuaVM {
                 }
             }
             LuaValueKind::Function => {
-                let lua_func = unsafe { func.to_function_rc().unwrap() };
+                let lua_func_id = func.as_function_id().unwrap();
+                let lua_func = self
+                    .object_pool
+                    .get_function(lua_func_id)
+                    .ok_or("invalid function")?
+                    .borrow();
                 // Call Lua function
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
@@ -3007,16 +3039,20 @@ impl LuaVM {
         }
     }
 
-    /// Create a function and register it with GC
-    pub fn create_function(
-        &mut self,
-        chunk: Rc<Chunk>,
-        upvalues: Vec<Rc<LuaUpvalue>>,
-    ) -> Rc<LuaFunction> {
-        let func = Rc::new(LuaFunction { chunk, upvalues });
-        let ptr = Rc::as_ptr(&func) as usize;
-        self.gc.register_object(ptr, GcObjectType::Function);
-        func
+    /// Create a function in object pool
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<Rc<LuaUpvalue>>) -> LuaValue {
+        let func = LuaFunction { chunk, upvalues };
+        let id = self.object_pool.create_function(func);
+        LuaValue::function_id(id)
+    }
+
+    /// Get function by LuaValue (resolves ID from object pool)
+    pub fn get_function(&self, value: &LuaValue) -> Option<&std::cell::RefCell<LuaFunction>> {
+        if let Some(id) = value.as_function_id() {
+            self.object_pool.get_function(id)
+        } else {
+            None
+        }
     }
 
     /// Check if GC should run and collect garbage if needed
@@ -3025,42 +3061,6 @@ impl LuaVM {
         if self.gc.should_collect() {
             self.collect_garbage();
         }
-    }
-
-    /// Register all constants in a chunk with GC
-    // ============ GC-managed Allocation Interface ============
-
-    /// Allocate a new string with GC tracking
-    pub fn alloc_string(&mut self, s: LuaString) -> LuaValue {
-        let ptr = Box::into_raw(Box::new(s));
-        let addr = ptr as usize;
-        self.gc.register_object(addr, GcObjectType::String);
-        LuaValue::string_ptr(ptr)
-    }
-
-    /// Allocate a new table with GC tracking
-    pub fn alloc_table(&mut self, t: LuaTable) -> LuaValue {
-        let ptr = Box::into_raw(Box::new(RefCell::new(t)));
-        let addr = ptr as usize;
-        self.gc.register_object(addr, GcObjectType::Table);
-        LuaValue::table_ptr(ptr)
-    }
-
-    /// Allocate a new function with GC tracking
-    pub fn alloc_function(&mut self, f: LuaFunction) -> LuaValue {
-        let ptr = Box::into_raw(Box::new(f));
-        let addr = ptr as usize;
-        self.gc.register_object(addr, GcObjectType::Function);
-        LuaValue::function_ptr(ptr)
-    }
-
-    /// Allocate userdata with GC tracking
-    pub fn alloc_userdata(&mut self, u: LuaUserdata) -> LuaValue {
-        let ptr = Box::into_raw(Box::new(u));
-        let _addr = ptr as usize;
-        // Note: Userdata not yet in GcObjectType, but added for completeness
-        // self.gc.register_object(_addr, GcObjectType::Userdata);
-        LuaValue::userdata_ptr(ptr)
     }
 
     // ============ GC Management ============
@@ -3101,8 +3101,7 @@ impl LuaVM {
         let mut roots = Vec::new();
 
         // Add the global table itself as a root
-        #[allow(deprecated)]
-        roots.push(LuaValue::from_table_rc(self.globals.clone()));
+        roots.push(self.globals);
 
         // Add all frame registers as roots
         for frame in &self.frames {
@@ -3159,10 +3158,14 @@ impl LuaVM {
     fn get_metamethod(&mut self, value: &LuaValue, event: &str) -> Option<LuaValue> {
         match value.kind() {
             LuaValueKind::Table => {
-                if let Some(t) = value.as_table_id() {
-                    if let Some(mt) = t.borrow().get_metatable() {
+                if let Some(table_id) = value.as_table_id() {
+                    let metatable = {
+                        let table = self.object_pool.get_table(table_id).expect("invalid table");
+                        table.borrow().get_metatable()
+                    };
+                    if let Some(metatable) = metatable {
                         let key = self.create_string(event);
-                        mt.borrow().raw_get(&key)
+                        self.table_get(&metatable, &key)
                     } else {
                         None
                     }
@@ -3320,31 +3323,14 @@ impl LuaVM {
     }
 
     /// Call __tostring metamethod if it exists, return the string result
-    #[allow(deprecated)]
     pub fn call_tostring_metamethod(
         &mut self,
-        value: &LuaValue,
-    ) -> Result<Option<Rc<LuaString>>, String> {
+        lua_table_value: &LuaValue,
+    ) -> Result<Option<LuaValue>, String> {
         // Check for __tostring metamethod
-        if let Some(metatable) = value.get_metatable() {
-            let tostring_key = self.create_string("__tostring");
-            if let Some(tostring_func) = metatable.borrow().raw_get(&tostring_key) {
-                // Call the metamethod with the value as argument
-                let result = self.call_metamethod(&tostring_func, &[value.clone()])?;
-
-                // Extract string from result
-                if let Some(result_val) = result {
-                    unsafe {
-                        if let Some(s) = result_val.as_string() {
-                            // Create temporary Rc for compatibility
-                            let ptr = s as *const LuaString;
-                            return Ok(Some(Rc::from_raw(ptr)));
-                        } else {
-                            return Err("'__tostring' must return a string".to_string());
-                        }
-                    }
-                }
-            }
+        if let Some(tostring_func) = self.get_metamethod(lua_table_value, "__tostring") {
+            // Call the metamethod with the value as argument
+            return self.call_metamethod(&tostring_func, &[lua_table_value.clone()]);
         }
 
         Ok(None)
@@ -3353,7 +3339,11 @@ impl LuaVM {
     /// Convert a value to string, calling __tostring metamethod if present
     pub fn value_to_string(&mut self, value: &LuaValue) -> Result<String, String> {
         if let Some(s) = self.call_tostring_metamethod(value)? {
-            Ok(s.as_str().to_string())
+            if let Some(str) = s.as_lua_string() {
+                Ok(str.as_str().to_string())
+            } else {
+                Err("`__tostring` metamethod did not return a string".to_string())
+            }
         } else {
             Ok(value.to_string_repr())
         }
@@ -3522,12 +3512,16 @@ impl LuaVM {
                 Ok(result.all_values())
             }
             LuaValueKind::Function => unsafe {
-                let lua_func = func.as_function().unwrap();
+                let lua_func_id = func.as_function_id().unwrap();
+                let lua_func_ref = self
+                    .object_pool
+                    .get_function(lua_func_id)
+                    .ok_or("Invalid function reference")?.borrow();
                 // For Lua function, use similar logic to call_metamethod
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                let max_stack_size = lua_func.chunk.max_stack_size;
+                let max_stack_size = lua_func_ref.chunk.max_stack_size;
                 let new_base = self.register_stack.len();
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
@@ -3536,12 +3530,6 @@ impl LuaVM {
                         self.register_stack[new_base + i] = arg.clone();
                     }
                 }
-
-                // FIXME: Creating temporary Rc - should refactor LuaCallFrame
-                let f_ptr = lua_func as *const LuaFunction;
-                let f_rc = Rc::from_raw(f_ptr);
-                let f_rc_clone = f_rc.clone();
-                std::mem::forget(f_rc); // Don't drop the Rc
 
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,

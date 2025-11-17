@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::cell::RefCell;
-use crate::{LuaString, LuaTable};
+use crate::{LuaFunction, LuaString, LuaTable};
 use crate::lua_value::LuaUserdata;
 
 /// Object IDs - u32 is enough for most use cases (4 billion objects)
@@ -47,17 +47,32 @@ impl UserdataId {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FunctionId(pub u32);
+
+impl FunctionId {
+    pub fn to_u32(self) -> u32 {
+        self.0
+    }
+
+    pub fn next(self) -> Self {
+        FunctionId(self.0 + 1)
+    }
+}
+
 /// Object Pool for all heap-allocated Lua objects
 pub struct ObjectPool {
     // Object storage
     strings: HashMap<StringId, LuaString>,
     tables: HashMap<TableId, RefCell<LuaTable>>,
     userdata: HashMap<UserdataId, LuaUserdata>,
+    functions: HashMap<FunctionId, RefCell<crate::lua_value::LuaFunction>>,
     
     // ID generators
     next_string_id: StringId,
     next_table_id: TableId,
     next_userdata_id: UserdataId,
+    next_function_id: FunctionId,
     
     // String interning table (hash -> id mapping)
     // For strings ≤ 64 bytes, we intern them for memory efficiency
@@ -71,9 +86,11 @@ impl ObjectPool {
             strings: HashMap::with_capacity(2048),
             tables: HashMap::with_capacity(512),
             userdata: HashMap::with_capacity(128),
+            functions: HashMap::with_capacity(512),
             next_string_id: StringId(1), // 0 reserved for null/invalid
             next_table_id: TableId(1),
             next_userdata_id: UserdataId(1),
+            next_function_id: FunctionId(1),
             string_intern: HashMap::with_capacity(2048),
             max_intern_length: 64,
         }
@@ -207,6 +224,28 @@ impl ObjectPool {
         self.userdata.remove(&id)
     }
     
+    // ============ Function Operations ============
+    
+    /// Create a new function
+    pub fn create_function(&mut self, func: LuaFunction) -> FunctionId {
+        let id = self.next_function_id;
+        self.next_function_id = id.next();
+        
+        self.functions.insert(id, RefCell::new(func));
+        id
+    }
+    
+    /// Get function by ID
+    #[inline]
+    pub fn get_function(&self, id: FunctionId) -> Option<&RefCell<LuaFunction>> {
+        self.functions.get(&id)
+    }
+    
+    /// Remove function (called by GC)
+    pub fn remove_function(&mut self, id: FunctionId) -> Option<RefCell<LuaFunction>> {
+        self.functions.remove(&id)
+    }
+    
     // ============ Statistics ============
     
     pub fn string_count(&self) -> usize {
@@ -219,6 +258,10 @@ impl ObjectPool {
     
     pub fn userdata_count(&self) -> usize {
         self.userdata.len()
+    }
+    
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
     }
     
     pub fn interned_string_count(&self) -> usize {

@@ -122,7 +122,7 @@ impl LibraryRegistry {
                 LibraryEntry::Value(value_init) => value_init(vm),
             };
             let name_key = vm.create_string(name);
-            lib_table.borrow_mut().raw_set(name_key, value);
+            vm.table_set(lib_table, name_key, value);
         }
 
         // Set the library table as a global
@@ -137,26 +137,24 @@ impl LibraryRegistry {
             }
         } else {
             // For module libraries, set the table as global
-            let lib_value = LuaValue::from_table_rc(lib_table.clone());
-            vm.set_global(module.name, lib_value.clone());
+            vm.set_global(module.name, lib_table);
 
             // Special handling for string library: set string metatable
             if module.name == "string" {
                 // In Lua, all strings share a metatable where __index points to the string library
                 // This allows using string methods with : syntax (e.g., str:upper())
-                vm.set_string_metatable(lib_value.clone());
+                vm.set_string_metatable(lib_table.clone());
             }
 
             // Also register in package.loaded (if package exists)
             // This allows require() to find standard libraries
             if let Some(package_table) = vm.get_global("package") {
-                if let Some(package_rc) = package_table.as_table_id() {
+                if package_table.is_table() {
                     let loaded_key = vm.create_string("loaded");
-                    if let Some(loaded_table) = package_rc.borrow().raw_get(&loaded_key) {
-                        if let Some(loaded_rc) = loaded_table.as_table() {
-                            let mod_key = vm.create_string(module.name);
-                            loaded_rc.borrow_mut().raw_set(mod_key, lib_value);
-                        }
+                    if let Some(loaded_table) = vm.table_get(&package_table,&loaded_key)
+                    && loaded_table.is_table() {
+                        let mod_key = vm.create_string(module.name);
+                        vm.table_set(loaded_table, mod_key, lib_table.clone());
                     }
                 }
             }

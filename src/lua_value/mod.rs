@@ -231,21 +231,21 @@ impl fmt::Debug for LuaUpvalue {
 #[derive(Clone)]
 pub struct LuaUserdata {
     data: Rc<RefCell<Box<dyn Any>>>,
-    metatable: Rc<RefCell<Option<Rc<RefCell<LuaTable>>>>>,
+    metatable: LuaValue,
 }
 
 impl LuaUserdata {
     pub fn new<T: Any>(data: T) -> Self {
         LuaUserdata {
             data: Rc::new(RefCell::new(Box::new(data))),
-            metatable: Rc::new(RefCell::new(None)),
+            metatable: LuaValue::nil(),
         }
     }
 
-    pub fn with_metatable<T: Any>(data: T, metatable: Rc<RefCell<LuaTable>>) -> Self {
+    pub fn with_metatable<T: Any>(data: T, metatable: LuaValue) -> Self {
         LuaUserdata {
             data: Rc::new(RefCell::new(Box::new(data))),
-            metatable: Rc::new(RefCell::new(Some(metatable))),
+            metatable,
         }
     }
 
@@ -253,12 +253,12 @@ impl LuaUserdata {
         self.data.clone()
     }
 
-    pub fn get_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
-        self.metatable.borrow().clone()
+    pub fn get_metatable(&self) -> LuaValue {
+        self.metatable
     }
 
-    pub fn set_metatable(&self, metatable: Option<Rc<RefCell<LuaTable>>>) {
-        *self.metatable.borrow_mut() = metatable;
+    pub fn set_metatable(&mut self, metatable: LuaValue) {
+        self.metatable = metatable;
     }
 }
 

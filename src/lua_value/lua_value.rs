@@ -30,7 +30,7 @@
 
 use std::cell::RefCell;
 
-use crate::{lua_value::CFunction, object_pool::TableId, LuaString, UserdataId};
+use crate::{lua_value::CFunction, object_pool::TableId, FunctionId, LuaString, StringId, UserdataId};
 use std::cmp::Ordering;
 
 // Primary word tags (public for VM fast paths)
@@ -134,28 +134,37 @@ impl LuaValue {
 
     /// Create string from ID (new object pool architecture)
     #[inline(always)]
-    pub fn string_id(id: u32) -> Self {
+    pub fn string_id(id: StringId) -> Self {
         LuaValue {
             primary: TAG_STRING,
-            secondary: id as u64,
+            secondary: id.0 as u64,
         }
     }
 
     /// Create table from ID (new object pool architecture)
     #[inline(always)]
-    pub fn table_id(id: u32) -> Self {
+    pub fn table_id(id: TableId) -> Self {
         LuaValue {
             primary: TAG_TABLE,
-            secondary: id as u64,
+            secondary: id.0 as u64,
         }
     }
 
     /// Create userdata from ID (new object pool architecture)
     #[inline(always)]
-    pub fn userdata_id(id: u32) -> Self {
+    pub fn userdata_id(id: UserdataId) -> Self {
         LuaValue {
             primary: TAG_USERDATA,
-            secondary: id as u64,
+            secondary: id.0 as u64,
+        }
+    }
+
+    /// Create function from ID (new object pool architecture)
+    #[inline(always)]
+    pub fn function_id(id: FunctionId) -> Self {
+        LuaValue {
+            primary: TAG_FUNCTION,
+            secondary: id.0 as u64,
         }
     }
 
@@ -321,14 +330,13 @@ impl LuaValue {
 
     /// Get string ID (for new object pool architecture)
     #[inline]
-    pub fn as_string_id(&self) -> Option<u32> {
+    pub fn as_string_id(&self) -> Option<StringId> {
         if self.is_string() {
-            Some(self.secondary as u32)
+            Some(StringId(self.secondary as u32))
         } else {
             None
         }
     }
-
 
     /// Get userdata ID (for new object pool architecture)
     #[inline]
@@ -339,6 +347,27 @@ impl LuaValue {
             None
         }
     }
+
+    /// Get function ID (for new object pool architecture)
+    #[inline]
+    pub fn as_function_id(&self) -> Option<FunctionId> {
+        if self.is_function() {
+            Some(FunctionId(self.secondary as u32))
+        } else {
+            None
+        }
+    }
+
+    /// UNSAFE: Get thread pointer (threads not yet migrated to object pool)
+    #[inline]
+    pub unsafe fn as_thread_ptr(&self) -> Option<*const RefCell<crate::lua_vm::LuaThread>> {
+        if self.is_thread() {
+            Some((self.secondary & POINTER_MASK) as *const RefCell<crate::lua_vm::LuaThread>)
+        } else {
+            None
+        }
+    }
+
     // ============ Raw Access ============
 
     #[inline(always)]
