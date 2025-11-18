@@ -179,7 +179,9 @@ fn string_sub(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .get_string(&s_value)
         .ok_or_else(|| "bad argument #1 to 'string.sub' (string expected)".to_string())?;
 
-    let len = s.as_str().len() as i64;
+    // Clone the string to avoid borrow checker issues
+    let s_str = s.as_str().to_string();
+    let char_count = s_str.chars().count() as i64;
 
     let i = require_arg(vm, 1, "string.sub")?
         .as_integer()
@@ -188,23 +190,39 @@ fn string_sub(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let j = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(-1);
 
     // Convert negative indices
-    let start = if i < 0 { len + i + 1 } else { i };
-    let end = if j < 0 { len + j + 1 } else { j };
+    let start = if i < 0 { char_count + i + 1 } else { i };
+    let end = if j < 0 { char_count + j + 1 } else { j };
 
-    let start = start.max(1).min(len + 1) as usize;
-    let end = end.max(0).min(len) as usize;
+    // Clamp to valid range
+    let start = start.max(1).min(char_count + 1);
+    let end = end.max(0).min(char_count);
 
-    let result_str = if start <= end {
-        s.as_str()
-            .chars()
-            .skip(start - 1)
-            .take(end - start + 1)
-            .collect::<String>()
+    let result_str = if start > 0 && start <= end {
+        // Fast path: find byte indices for start and end character positions
+        let start_idx = (start - 1) as usize;
+        let end_idx = end as usize;
+        
+        let mut byte_start = 0;
+        let mut byte_end = s_str.len();
+        let mut char_idx = 0;
+        
+        for (byte_idx, _) in s_str.char_indices() {
+            if char_idx == start_idx {
+                byte_start = byte_idx;
+            }
+            if char_idx == end_idx {
+                byte_end = byte_idx;
+                break;
+            }
+            char_idx += 1;
+        }
+        
+        &s_str[byte_start..byte_end]
     } else {
-        String::new()
+        ""
     };
 
-    let result = vm.create_string(&result_str);
+    let result = vm.create_string(result_str);
     Ok(MultiValue::single(result))
 }
 
@@ -570,7 +588,11 @@ fn string_find(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s_str = s.as_str();
     let pattern = pattern_str.as_str();
 
-    if plain {
+    // Fast path: check if pattern contains special characters
+    // If not, use plain search even if plain=false (major optimization)
+    let has_special = pattern.chars().any(|c| matches!(c, '%' | '.' | '[' | ']' | '*' | '+' | '-' | '?' | '^' | '$' | '(' | ')'));
+    
+    if plain || !has_special {
         // Plain string search (no pattern matching)
         if start_pos > s_str.len() {
             return Ok(MultiValue::single(LuaValue::nil()));

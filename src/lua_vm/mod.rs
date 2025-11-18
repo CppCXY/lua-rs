@@ -1681,24 +1681,32 @@ impl LuaVM {
             }
         }
 
-        // Fast path: C function
+        // Fast path: C function - ultra-optimized for iterators like ipairs
         if func.is_cfunction() {
             if let Some(cfunc) = func.as_cfunction() {
                 let frame = self.current_frame();
                 let base_ptr = frame.base_ptr;
                 let top = frame.top;
 
+                // Fast path for iterators (2-3 arguments)
                 let arg_count = if b == 0 { top - a } else { b };
-                let mut arg_registers = Vec::with_capacity(arg_count);
-                arg_registers.push(func);
-
-                // Copy arguments to registers
-                for i in 1..b {
-                    if a + i < top {
-                        let val = self.register_stack[base_ptr + a + i];
-                        arg_registers.push(val);
-                    } else {
-                        arg_registers.push(LuaValue::nil());
+                
+                // Allocate args directly on register stack to avoid Vec allocation
+                let cfunc_base = self.register_stack.len();
+                self.ensure_stack_capacity(cfunc_base + arg_count);
+                
+                // Copy function and arguments directly
+                unsafe {
+                    // SAFETY: bounds checked by ensure_stack_capacity
+                    *self.register_stack.get_unchecked_mut(cfunc_base) = func;
+                    for i in 1..b {
+                        let src_idx = base_ptr + a + i;
+                        let val = if src_idx < base_ptr + top {
+                            *self.register_stack.get_unchecked(src_idx)
+                        } else {
+                            LuaValue::nil()
+                        };
+                        *self.register_stack.get_unchecked_mut(cfunc_base + i) = val;
                     }
                 }
 
@@ -1706,18 +1714,12 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                let cfunc_base = self.register_stack.len();
-                self.ensure_stack_capacity(cfunc_base + arg_registers.len());
-                for (i, val) in arg_registers.iter().enumerate() {
-                    self.register_stack[cfunc_base + i] = *val;
-                }
-
                 let temp_frame = LuaCallFrame::new_c_function(
                     frame_id,
                     func,
                     self.current_frame().pc,
                     cfunc_base,
-                    arg_registers.len(),
+                    arg_count,
                 );
 
                 self.frames.push(temp_frame);
@@ -1734,9 +1736,7 @@ impl LuaVM {
                 // Pop CFunction frame
                 self.frames.pop();
 
-                // Check if yielding - if so, don't store return values yet
-                // They will be stored when resume() is called with new values
-                // Save CALL instruction info for later
+                // Check if yielding
                 if self.yielding {
                     if let Some(thread_rc) = &self.current_thread {
                         let mut thread = thread_rc.borrow_mut();
@@ -1746,7 +1746,7 @@ impl LuaVM {
                     return Ok(());
                 }
 
-                // Store return values
+                // Store return values efficiently
                 let all_returns = multi_result.all_values();
                 let num_returns = all_returns.len();
                 let num_expected = if c == 0 { num_returns } else { c - 1 };
@@ -1755,16 +1755,29 @@ impl LuaVM {
                 let base_ptr = frame.base_ptr;
                 let top = frame.top;
 
-                for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
-                    if a + i < top {
-                        self.register_stack[base_ptr + a + i] = value;
+                // Fast path for single return value (common in iterators)
+                if num_returns == 1 && num_expected >= 1 && a < top {
+                    self.register_stack[base_ptr + a] = all_returns[0];
+                } else if num_returns == 2 && num_expected >= 2 {
+                    // Fast path for double return (ipairs returns index, value)
+                    if a < top {
+                        self.register_stack[base_ptr + a] = all_returns[0];
                     }
-                }
-
-                // Fill remaining expected registers with nil
-                for i in num_returns..num_expected {
-                    if a + i < top {
-                        self.register_stack[base_ptr + a + i] = LuaValue::nil();
+                    if a + 1 < top {
+                        self.register_stack[base_ptr + a + 1] = all_returns[1];
+                    }
+                } else {
+                    // General case
+                    for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
+                        if a + i < top {
+                            self.register_stack[base_ptr + a + i] = value;
+                        }
+                    }
+                    // Fill remaining with nil
+                    for i in num_returns..num_expected {
+                        if a + i < top {
+                            self.register_stack[base_ptr + a + i] = LuaValue::nil();
+                        }
                     }
                 }
 

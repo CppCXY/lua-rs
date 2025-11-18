@@ -219,52 +219,45 @@ fn lua_ipairs(vm: &mut LuaVM) -> Result<MultiValue, String> {
     ]))
 }
 
-/// Iterator function for ipairs
+/// Iterator function for ipairs - Ultra-optimized for performance
+#[inline]
 fn ipairs_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    // Fast path: avoid type checks and error overhead
-    let table_val = require_arg(vm, 0, "ipairs iterator")?;
-    let index_val = require_arg(vm, 1, "ipairs iterator")?;
-
-    // Quick type checks for hot path
-    if let Some(_table_id) = table_val.as_table_id() {
+    // Ultra-fast path: direct argument access without validation
+    let table_val = if let Some(val) = get_arg(vm, 0) {
+        val
+    } else {
+        return Err("ipairs iterator: table expected".to_string());
+    };
+    
+    let index_val = if let Some(val) = get_arg(vm, 1) {
+        val
+    } else {
+        return Err("ipairs iterator: index expected".to_string());
+    };
+    
+    // Fast type check using bit patterns
+    if let Some(table_id) = table_val.as_table_id() {
         if let Some(index) = index_val.as_integer() {
             let next_index = index + 1;
-
-            // Direct integer access - no LuaValue allocation
-            let table_ref = vm.get_table(&table_val).ok_or("Invalid table")?.borrow();
-            if let Some(value) = table_ref.get_int(next_index) {
-                if !value.is_nil() {
-                    drop(table_ref);
+            
+            // Direct table access
+            if let Some(table_ref) = vm.object_pool.get_table(table_id) {
+                let table = table_ref.borrow();
+                if let Some(value) = table.get_int(next_index) {
+                    drop(table);
                     return Ok(MultiValue::multiple(vec![
                         LuaValue::integer(next_index),
                         value,
                     ]));
                 }
+                // Reached end of array
+                return Ok(MultiValue::single(LuaValue::nil()));
             }
-            drop(table_ref);
-            return Ok(MultiValue::single(LuaValue::nil()));
         }
     }
-
-    // Slow path with proper error messages
-    let table = vm
-        .get_table(&table_val)
-        .ok_or_else(|| "ipairs iterator: table expected".to_string())?;
-
-    let index = index_val
-        .as_integer()
-        .ok_or_else(|| "ipairs iterator: number expected".to_string())?;
-
-    let next_index = index + 1;
-    if let Some(value) = table.borrow().get_int(next_index) {
-        if !value.is_nil() {
-            return Ok(MultiValue::multiple(vec![
-                LuaValue::integer(next_index),
-                value,
-            ]));
-        }
-    }
-    Ok(MultiValue::single(LuaValue::nil()))
+    
+    // Slow path with proper validation
+    Err("ipairs iterator: invalid table or index".to_string())
 }
 
 /// pairs(t) - Return iterator for all key-value pairs

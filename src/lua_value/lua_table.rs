@@ -70,14 +70,19 @@ impl LuaTable {
     }
 
     /// Fast integer key access - O(1) for array part
+    /// Ultra-optimized hot path for ipairs iterations
     #[inline(always)]
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
         if key > 0 {
             let idx = (key - 1) as usize;
+            // SAFETY: bounds check is done explicitly
             if idx < self.array.len() {
-                let val = &self.array[idx];
-                if !val.is_nil() {
-                    return Some(val.clone());
+                unsafe {
+                    let val = self.array.get_unchecked(idx);
+                    // LuaValue is Copy, so this is just a memcpy
+                    if !val.is_nil() {
+                        return Some(*val);
+                    }
                 }
             }
         }
