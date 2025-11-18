@@ -187,10 +187,6 @@ fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// table.unpack(list [, i [, j]]) - Unpack table into values
 fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.unpack")?;
-    let table = table_val
-        .as_table_id()
-        .ok_or_else(|| "bad argument #1 to 'table.unpack' (table expected)".to_string())?;
-
     let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
     let table_ref = table_ref_cell.borrow();
     let len = table_ref.len();

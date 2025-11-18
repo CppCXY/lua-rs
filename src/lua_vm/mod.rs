@@ -2,7 +2,7 @@
 // Executes compiled bytecode with register-based architecture
 mod lua_call_frame;
 
-use crate::gc::{GC, GcObjectType};
+use crate::gc::GC;
 use crate::lib_registry;
 use crate::lua_value::{
     Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue, LuaValueKind,
@@ -87,9 +87,6 @@ pub struct LuaVM {
     // Legacy string interning table (for compatibility during migration)
     // TODO: Remove after full migration to object pool
     string_table: HashMap<u64, *const LuaString>,
-
-    // Maximum length for interned strings (like Lua's LUAI_MAXSHORTLEN)
-    max_short_string_len: usize,
 }
 
 impl LuaVM {
@@ -111,7 +108,6 @@ impl LuaVM {
             string_metatable: None,
             object_pool: crate::object_pool::ObjectPool::new(),
             string_table: HashMap::with_capacity(2048),
-            max_short_string_len: 64, // Like Lua's LUAI_MAXSHORTLEN
         };
 
         // Set _G to point to the global table itself
@@ -124,7 +120,6 @@ impl LuaVM {
     }
 
     // Register access helpers for unified stack architecture
-    #[inline(always)]
     #[inline(always)]
     fn get_register(&self, base_ptr: usize, reg: usize) -> LuaValue {
         self.register_stack[base_ptr + reg]
@@ -2603,8 +2598,6 @@ impl LuaVM {
             let table = lua_table.borrow();
             table.get_metatable()
         };
-
-        drop(lua_table);
 
         if let Some(mt) = meta_value
             && let Some(table_id) = mt.as_table_id()

@@ -122,7 +122,7 @@ impl LibraryRegistry {
                 LibraryEntry::Value(value_init) => value_init(vm),
             };
             let name_key = vm.create_string(name);
-            vm.table_set(lib_table, name_key, value);
+            vm.table_set(lib_table, name_key, value)?;
         }
 
         // Set the library table as a global
@@ -155,7 +155,7 @@ impl LibraryRegistry {
                         && loaded_table.is_table()
                     {
                         let mod_key = vm.create_string(module.name);
-                        vm.table_set(loaded_table, mod_key, lib_table.clone());
+                        vm.table_set(loaded_table, mod_key, lib_table.clone())?;
                     }
                 }
             }

@@ -268,34 +268,32 @@ impl GC {
         let keys: Vec<(GcObjectType, u32)> = self.objects.keys().copied().collect();
 
         for key @ (obj_type, obj_id) in keys {
-            if let Some(obj) = self.objects.get(&key) {
-                if !reachable.contains(&key) {
-                    self.objects.remove(&key);
-                    collected += 1;
+            if !reachable.contains(&key) {
+                self.objects.remove(&key);
+                collected += 1;
 
-                    // Remove from object pool!
-                    match obj_type {
-                        GcObjectType::String => {
-                            let string_id = crate::object_pool::StringId(obj_id);
-                            object_pool.remove_string(string_id);
-                        }
-                        GcObjectType::Table => {
-                            let table_id = crate::object_pool::TableId(obj_id);
-                            object_pool.remove_table(table_id);
-                        }
-                        GcObjectType::Function => {
-                            let func_id = crate::object_pool::FunctionId(obj_id);
-                            object_pool.remove_function(func_id);
-                        }
+                // Remove from object pool!
+                match obj_type {
+                    GcObjectType::String => {
+                        let string_id = crate::object_pool::StringId(obj_id);
+                        object_pool.remove_string(string_id);
                     }
-
-                    let size = match obj_type {
-                        GcObjectType::String => 64,
-                        GcObjectType::Table => 256,
-                        GcObjectType::Function => 128,
-                    };
-                    self.record_deallocation(size);
+                    GcObjectType::Table => {
+                        let table_id = crate::object_pool::TableId(obj_id);
+                        object_pool.remove_table(table_id);
+                    }
+                    GcObjectType::Function => {
+                        let func_id = crate::object_pool::FunctionId(obj_id);
+                        object_pool.remove_function(func_id);
+                    }
                 }
+
+                let size = match obj_type {
+                    GcObjectType::String => 64,
+                    GcObjectType::Table => 256,
+                    GcObjectType::Function => 128,
+                };
+                self.record_deallocation(size);
             }
         }
 
