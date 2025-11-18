@@ -13,6 +13,7 @@ pub mod lua_value;
 pub mod lua_vm;
 pub mod object_pool;
 pub mod opcode;
+pub mod optimizer;
 pub mod stdlib;
 
 pub use compiler::Compiler;

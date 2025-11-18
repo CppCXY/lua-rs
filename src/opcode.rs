@@ -147,6 +147,19 @@ impl Instruction {
 
         (op as u32) | (a << Self::A_OFFSET) | (b << Self::B_OFFSET) | (c << Self::C_OFFSET)
     }
+    
+    // Convenience constructors
+    pub fn new_abc(op: OpCode, a: u32, b: u32, c: u32) -> u32 {
+        Self::encode_abc(op, a, b, c)
+    }
+    
+    pub fn new_abx(op: OpCode, a: u32, bx: u32) -> u32 {
+        Self::encode_abx(op, a, bx)
+    }
+    
+    pub fn new_asbx(op: OpCode, a: u32, sbx: i32) -> u32 {
+        Self::encode_asbx(op, a, sbx)
+    }
 
     // Encode ABx format
     pub fn encode_abx(op: OpCode, a: u32, bx: u32) -> u32 {

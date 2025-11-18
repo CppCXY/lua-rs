@@ -13,3 +13,4 @@ path = "src/bin/main.rs"
 
 [[bin]]
 name = "bytecode_dump"
+path = "src/bin/bytecode_dump.rs"

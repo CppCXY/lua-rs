@@ -7,6 +7,7 @@ mod stmt;
 use crate::lua_value::Chunk;
 use crate::lua_vm::LuaVM;
 use crate::opcode::{Instruction, OpCode};
+// use crate::optimizer::optimize_constants;  // Disabled for now
 use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
 use helpers::*;
 use std::cell::RefCell;
@@ -142,15 +143,20 @@ impl<'a> Compiler<'a> {
         let chunk = tree.get_chunk_node();
         compile_chunk(&mut compiler, &chunk)?;
 
-        // Move child chunks to main chunk
-        let child_protos: Vec<std::rc::Rc<Chunk>> = compiler
+        // Optimize child chunks first
+        let optimized_children: Vec<std::rc::Rc<Chunk>> = compiler
             .child_chunks
             .into_iter()
-            .map(std::rc::Rc::new)
+            .map(|child| {
+                let opt = optimize_chunk(child);
+                std::rc::Rc::new(opt)
+            })
             .collect();
-        compiler.chunk.child_protos = child_protos;
+        compiler.chunk.child_protos = optimized_children;
 
-        Ok(compiler.chunk)
+        // Apply optimization to main chunk
+        let optimized = optimize_chunk(compiler.chunk);
+        Ok(optimized)
     }
 }
 
@@ -174,4 +180,32 @@ fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
         compile_stat(c, &stat)?;
     }
     Ok(())
+}
+
+/// Apply optimization to a chunk
+fn optimize_chunk(chunk: Chunk) -> Chunk {
+    // Optimizer temporarily disabled - causes issues with loops
+    // The simple constant folder doesn't handle control flow correctly
+    // Need proper basic block analysis before enabling optimizations
+    
+    // Return chunk unchanged
+    chunk
+    
+    /* Disabled optimizer code:
+    let (optimized_code, optimized_constants) = optimize_constants(&chunk.code, &chunk.constants);
+    
+    Chunk {
+        code: optimized_code,
+        constants: optimized_constants,
+        locals: chunk.locals,
+        upvalue_count: chunk.upvalue_count,
+        param_count: chunk.param_count,
+        is_vararg: chunk.is_vararg,
+        max_stack_size: chunk.max_stack_size,
+        child_protos: chunk.child_protos,
+        upvalue_descs: chunk.upvalue_descs,
+        source_name: chunk.source_name,
+        line_info: chunk.line_info,
+    }
+    */
 }
