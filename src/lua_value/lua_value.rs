@@ -39,7 +39,7 @@ pub const TAG_USERDATA: u64 = 0x7FFC_0000_0000_0000;
 pub const TAG_BOOLEAN: u64 = 0x7FFD_0000_0000_0000;
 pub const TAG_NIL: u64 = 0x7FFE_0000_0000_0000;
 pub const TAG_CFUNCTION: u64 = 0x7FFF_0000_0000_0000;
-pub const TAG_THREAD: u64 = 0x7FFD_0000_0000_0002; // Threads not yet common
+pub const TAG_THREAD: u64 = 0x7FF7_0000_0000_0000; // Use 0x7FF7 instead of conflicting with BOOLEAN
 
 // Special values
 pub const VALUE_TRUE: u64 = TAG_BOOLEAN | 1;
@@ -47,7 +47,7 @@ pub const VALUE_FALSE: u64 = TAG_BOOLEAN;
 pub const VALUE_NIL: u64 = TAG_NIL;
 
 // NaN detection (any value >= this is a tagged type)
-pub const NAN_BASE: u64 = 0x7FF8_0000_0000_0000;
+pub const NAN_BASE: u64 = 0x7FF7_0000_0000_0000; // Start from TAG_THREAD which is the lowest tag
 
 // Masks for ID extraction (low 32 bits)
 pub const ID_MASK: u64 = 0x0000_0000_FFFF_FFFF;
@@ -568,21 +568,22 @@ impl LuaValue {
             return LuaValueKind::Boolean;
         }
         
-        // Check if it's a float (primary < NAN_BASE)
-        if self.primary < NAN_BASE {
-            return LuaValueKind::Float;
-        }
-        
-        // Check tagged types by masking
-        match self.primary & TYPE_MASK {
-            TAG_INTEGER => LuaValueKind::Integer,
-            TAG_STRING => LuaValueKind::String,
-            TAG_TABLE => LuaValueKind::Table,
-            TAG_FUNCTION => LuaValueKind::Function,
-            TAG_USERDATA => LuaValueKind::Userdata,
-            TAG_THREAD => LuaValueKind::Thread,
-            TAG_CFUNCTION => LuaValueKind::CFunction,
-            _ => LuaValueKind::Float, // Fallback
+        // Check if it's a tagged type first (primary >= NAN_BASE)
+        if self.primary >= NAN_BASE {
+            // Check tagged types by masking
+            match self.primary & TYPE_MASK {
+                TAG_INTEGER => LuaValueKind::Integer,
+                TAG_STRING => LuaValueKind::String,
+                TAG_TABLE => LuaValueKind::Table,
+                TAG_FUNCTION => LuaValueKind::Function,
+                TAG_USERDATA => LuaValueKind::Userdata,
+                TAG_THREAD => LuaValueKind::Thread,
+                TAG_CFUNCTION => LuaValueKind::CFunction,
+                _ => LuaValueKind::Float, // Fallback
+            }
+        } else {
+            // It's a float (primary < NAN_BASE)
+            LuaValueKind::Float
         }
     }
 }

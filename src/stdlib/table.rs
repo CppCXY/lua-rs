@@ -21,10 +21,10 @@ pub fn create_table_lib() -> LibraryModule {
 fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let table_val = require_arg(vm, 0, "table.concat")?;
 
-    let sep_value = get_arg(vm, 2);
+    let sep_value = get_arg(vm, 1);
     let sep = match sep_value {
         Some(v) => vm.get_string(&v)
-            .ok_or_else(|| "bad argument #3 to 'string.rep' (string expected)".to_string())?
+            .ok_or_else(|| "bad argument #2 to 'table.concat' (string expected)".to_string())?
             .as_str()
             .to_string(),
         None => "".to_string(),

@@ -78,8 +78,8 @@ pub struct LuaVM {
     // Yield flag: set when a coroutine yields
     yielding: bool,
 
-    // String metatable (shared by all strings)
-    string_metatable: Option<Rc<RefCell<LuaTable>>>,
+    // String metatable (shared by all strings) - stored as TableId in LuaValue
+    string_metatable: Option<LuaValue>,
 
     // Object pool for unified object management (new architecture)
     pub(crate) object_pool: crate::object_pool::ObjectPool,
@@ -2191,19 +2191,25 @@ impl LuaVM {
 
     /// Set the metatable for all strings
     /// In Lua, all strings share a metatable with __index pointing to the string library
-    pub fn set_string_metatable(&mut self, _string_lib: LuaValue) {
+    pub fn set_string_metatable(&mut self, string_lib: LuaValue) {
         // Create the metatable
-        // let metatable = self.create_table();
-
-        // // Set __index to the string library table
-        // let index_key = self.create_string("__index");
-        // metatable.borrow_mut().raw_set(index_key, string_lib);
-
-        // self.string_metatable = Some(metatable);
+        let metatable = self.create_table();
+        
+        // Create the __index key before any borrowing
+        let index_key = self.create_string("__index");
+        
+        // Get the table reference to set __index
+        if let Some(mt_ref) = self.get_table(&metatable) {
+            // Set __index to the string library table
+            mt_ref.borrow_mut().raw_set(index_key, string_lib);
+        }
+        
+        // Store the metatable as LuaValue (contains TableId)
+        self.string_metatable = Some(metatable);
     }
 
     /// Get the shared string metatable
-    pub fn get_string_metatable(&self) -> Option<Rc<RefCell<LuaTable>>> {
+    pub fn get_string_metatable(&self) -> Option<LuaValue> {
         self.string_metatable.clone()
     }
 
@@ -2539,9 +2545,10 @@ impl LuaVM {
         let index_key = self.create_string("__index");
         // Check for __index metamethod in string metatable
         if let Some(mt) = &self.string_metatable {
-            let index_value = {
-                let mt_borrowed = mt.borrow();
-                mt_borrowed.raw_get(&index_key)
+            let index_value = if let Some(mt_ref) = self.get_table(mt) {
+                mt_ref.borrow().raw_get(&index_key)
+            } else {
+                None
             };
 
             if let Some(index_val) = index_value {
@@ -3392,7 +3399,11 @@ impl LuaVM {
                 let key = self.create_string(event);
                 // All strings share a metatable
                 if let Some(mt) = &self.string_metatable {
-                    mt.borrow().raw_get(&key)
+                    if let Some(mt_ref) = self.get_table(mt) {
+                        mt_ref.borrow().raw_get(&key)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
