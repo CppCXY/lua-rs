@@ -283,6 +283,13 @@ impl LuaVM {
                 OpCode::Mod => self.op_mod(instr)?,
                 OpCode::Pow => self.op_pow(instr)?,
                 OpCode::Unm => self.op_unm(instr)?,
+                OpCode::AddI => self.op_addi(instr)?,
+                OpCode::SubI => self.op_subi(instr)?,
+                OpCode::MulI => self.op_muli(instr)?,
+                OpCode::ModI => self.op_modi(instr)?,
+                OpCode::PowI => self.op_powi(instr)?,
+                OpCode::DivI => self.op_divi(instr)?,
+                OpCode::IDivI => self.op_idivi(instr)?,
                 OpCode::Not => self.op_not(instr)?,
                 OpCode::Len => self.op_len(instr)?,
                 OpCode::Eq => self.op_eq(instr)?,
@@ -291,6 +298,11 @@ impl LuaVM {
                 OpCode::Ne => self.op_ne(instr)?,
                 OpCode::Gt => self.op_gt(instr)?,
                 OpCode::Ge => self.op_ge(instr)?,
+                OpCode::EqI => self.op_eqi(instr)?,
+                OpCode::LtI => self.op_lti(instr)?,
+                OpCode::LeI => self.op_lei(instr)?,
+                OpCode::GtI => self.op_gti(instr)?,
+                OpCode::GeI => self.op_gei(instr)?,
                 OpCode::And => self.op_and(instr)?,
                 OpCode::Or => self.op_or(instr)?,
                 OpCode::BAnd => self.op_band(instr)?,
@@ -703,6 +715,190 @@ impl LuaVM {
             Ok(())
         } else {
             Err(format!("attempt to subtract non-number values"))
+        }
+    }
+
+    // Immediate arithmetic instructions (Lua 5.4 optimization)
+    #[inline(always)]
+    fn op_addi(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr);
+        
+        // Fast immediate decode: sign extend 9-bit to 64-bit
+        let imm = ((c as i32) << 23 >> 23) as i64;
+        
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            
+            // Fast path: integer only
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let i = left.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i + imm);
+                return Ok(());
+            }
+        }
+        
+        // Fallback: metamethods
+        let left = self.get_register(base_ptr, b);
+        let right = LuaValue::integer(imm);
+        if self.call_binop_metamethod(&left, &right, "__add", a)? {
+            Ok(())
+        } else {
+            Err("attempt to add non-number value".to_string())
+        }
+    }
+    
+    #[inline]
+    fn op_subi(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr);
+        
+        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let i = left.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i - imm);
+                return Ok(());
+            }
+        }
+        
+        let left = self.get_register(base_ptr, b);
+        let right = LuaValue::integer(imm);
+        if self.call_binop_metamethod(&left, &right, "__sub", a)? {
+            Ok(())
+        } else {
+            Err("attempt to subtract non-number value".to_string())
+        }
+    }
+    
+    #[inline]
+    fn op_muli(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr);
+        
+        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let i = left.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i * imm);
+                return Ok(());
+            }
+        }
+        
+        let left = self.get_register(base_ptr, b);
+        let right = LuaValue::integer(imm);
+        if self.call_binop_metamethod(&left, &right, "__mul", a)? {
+            Ok(())
+        } else {
+            Err("attempt to multiply non-number value".to_string())
+        }
+    }
+    
+    #[inline]
+    fn op_modi(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr);
+        
+        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let i = left.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i % imm);
+                return Ok(());
+            }
+        }
+        
+        let left = self.get_register(base_ptr, b);
+        let right = LuaValue::integer(imm);
+        if self.call_binop_metamethod(&left, &right, "__mod", a)? {
+            Ok(())
+        } else {
+            Err("attempt to mod non-number value".to_string())
+        }
+    }
+    
+    #[inline]
+    fn op_powi(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr);
+        
+        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        let left = self.get_register(base_ptr, b);
+        let right = LuaValue::integer(imm);
+        if self.call_binop_metamethod(&left, &right, "__pow", a)? {
+            Ok(())
+        } else {
+            Err("attempt to pow non-number value".to_string())
+        }
+    }
+    
+    #[inline]
+    fn op_divi(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr);
+        
+        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        let left = self.get_register(base_ptr, b);
+        let right = LuaValue::integer(imm);
+        if self.call_binop_metamethod(&left, &right, "__div", a)? {
+            Ok(())
+        } else {
+            Err("attempt to divide non-number value".to_string())
+        }
+    }
+    
+    #[inline]
+    fn op_idivi(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+        let c = Instruction::get_c(instr);
+        
+        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + b);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let i = left.secondary() as i64;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i / imm);
+                return Ok(());
+            }
+        }
+        
+        let left = self.get_register(base_ptr, b);
+        let right = LuaValue::integer(imm);
+        if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
+            Ok(())
+        } else {
+            Err("attempt to idiv non-number value".to_string())
         }
     }
 
@@ -1331,7 +1527,129 @@ impl LuaVM {
         Err("attempt to compare incompatible values".to_string())
     }
 
+    // Immediate comparison instructions (Lua 5.4 optimization)
+    // Conditional skip mode: skip next instruction if comparison is FALSE
+    // A = register to compare, B = signed immediate value, C=1 for control flow mode
     #[inline(always)]
+    fn op_lti(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr);
+        
+        // Fast path: decode immediate inline (9-bit signed)
+        let imm = ((b as i32) << 23 >> 23) as i64; // Sign extend 9-bit to 64-bit
+        
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + a);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let val = left.secondary() as i64;
+                // Skip next instruction if comparison is FALSE
+                if !(val < imm) {
+                    self.current_frame_mut().pc += 1;
+                }
+                return Ok(());
+            }
+        }
+        
+        Err("attempt to compare with non-integer".to_string())
+    }
+    
+    #[inline(always)]
+    fn op_lei(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr);
+        
+        let imm = ((b as i32) << 23 >> 23) as i64;
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + a);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let val = left.secondary() as i64;
+                if !(val <= imm) {
+                    self.current_frame_mut().pc += 1;
+                }
+                return Ok(());
+            }
+        }
+        
+        Err("attempt to compare with non-integer".to_string())
+    }
+    
+    #[inline(always)]
+    fn op_gti(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr);
+        
+        let imm = ((b as i32) << 23 >> 23) as i64;
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + a);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let val = left.secondary() as i64;
+                if !(val > imm) {
+                    self.current_frame_mut().pc += 1;
+                }
+                return Ok(());
+            }
+        }
+        
+        Err("attempt to compare with non-integer".to_string())
+    }
+    
+    #[inline(always)]
+    fn op_gei(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr);
+        
+        let imm = ((b as i32) << 23 >> 23) as i64;
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + a);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let val = left.secondary() as i64;
+                if !(val >= imm) {
+                    self.current_frame_mut().pc += 1;
+                }
+                return Ok(());
+            }
+        }
+        
+        Err("attempt to compare with non-integer".to_string())
+    }
+    
+    #[inline(always)]
+    fn op_eqi(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr);
+        
+        let imm = ((b as i32) << 23 >> 23) as i64;
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        unsafe {
+            let left = self.register_stack.get_unchecked(base_ptr + a);
+            if left.primary() == crate::lua_value::TAG_INTEGER {
+                let val = left.secondary() as i64;
+                if !(val == imm) {
+                    self.current_frame_mut().pc += 1;
+                }
+                return Ok(());
+            }
+        }
+        
+        Err("attempt to compare with non-integer".to_string())
+    }
+
+    #[inline(always)]
+    #[inline]
     fn op_jmp(&mut self, instr: u32) -> Result<(), String> {
         let sbx = Instruction::get_sbx(instr);
         let frame = self.current_frame_mut();
@@ -1340,8 +1658,9 @@ impl LuaVM {
     }
 
     // Numeric for loop opcodes for optimal performance
-    // Lua 5.4 semantics: for i = init, limit, step do ... end
-    // FORPREP: Initialize loop by subtracting step from init (so first FORLOOP adds it back)
+    // Lua 5.4 optimization: Pre-compute loop count in FORPREP
+    // R(A) = internal index, R(A+1) = loop counter (integers) or limit (floats)
+    // R(A+2) = step, R(A+3) = loop variable
     #[inline]
     fn op_forprep(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
@@ -1350,49 +1669,114 @@ impl LuaVM {
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
 
-        // R(A) = init, R(A+1) = limit, R(A+2) = step
-        // Validate that all are numbers
-        let val_a = self.get_register(base_ptr, a);
-        let val_a1 = self.get_register(base_ptr, a + 1);
-        let val_a2 = self.get_register(base_ptr, a + 2);
+        unsafe {
+            let init_val = self.register_stack.get_unchecked(base_ptr + a);
+            let limit_val = self.register_stack.get_unchecked(base_ptr + a + 1);
+            let step_val = self.register_stack.get_unchecked(base_ptr + a + 2);
 
-        if !val_a.is_number() {
-            return Err("'for' initial value must be a number".to_string());
-        }
-        if !val_a1.is_number() {
-            return Err("'for' limit must be a number".to_string());
-        }
-        if !val_a2.is_number() {
-            return Err("'for' step must be a number".to_string());
+            let init_tag = init_val.primary();
+            let limit_tag = limit_val.primary();
+            let step_tag = step_val.primary();
+
+            // Fast path: All integers (most loops)
+            if init_tag == crate::lua_value::TAG_INTEGER
+                && limit_tag == crate::lua_value::TAG_INTEGER
+                && step_tag == crate::lua_value::TAG_INTEGER
+            {
+                let init = init_val.secondary() as i64;
+                let limit = limit_val.secondary() as i64;
+                let step = step_val.secondary() as i64;
+
+                if step == 0 {
+                    return Err("'for' step is zero".to_string());
+                }
+
+                // Lua 5.4 optimization: compute loop count using unsigned arithmetic
+                let count = if step > 0 {
+                    // Ascending loop: count = (limit - init) / step
+                    let diff = (limit as u64).wrapping_sub(init as u64);
+                    if step != 1 {
+                        diff / (step as u64)
+                    } else {
+                        diff // Optimize common case step=1
+                    }
+                } else {
+                    // Descending loop: count = (init - limit) / (-step)
+                    let diff = (init as u64).wrapping_sub(limit as u64);
+                    let neg_step = (-(step + 1)) as u64 + 1; // Avoid overflow with min i64
+                    diff / neg_step
+                };
+
+                // Store loop count in R(A+1) instead of limit
+                *self.register_stack.get_unchecked_mut(base_ptr + a + 1) =
+                    LuaValue::integer(count as i64);
+                // Initialize loop variable R(A+3) = init
+                *self.register_stack.get_unchecked_mut(base_ptr + a + 3) =
+                    LuaValue::integer(init);
+
+                // Check if loop should run at all
+                if count == 0 {
+                    // Skip loop body
+                    let frame = self.current_frame_mut();
+                    frame.pc = (frame.pc as i32 + sbx + 1) as usize;
+                    return Ok(());
+                }
+            } else {
+                // Float path: at least one operand is float
+                let is_num = |tag: u64| {
+                    tag == crate::lua_value::TAG_INTEGER || tag < crate::lua_value::NAN_BASE
+                };
+
+                if !is_num(init_tag) || !is_num(limit_tag) || !is_num(step_tag) {
+                    return Err("'for' loop variables must be numbers".to_string());
+                }
+
+                let to_float = |val: &LuaValue, tag: u64| {
+                    if tag == crate::lua_value::TAG_INTEGER {
+                        val.secondary() as i64 as f64
+                    } else {
+                        f64::from_bits(tag)
+                    }
+                };
+
+                let init = to_float(init_val, init_tag);
+                let limit = to_float(limit_val, limit_tag);
+                let step = to_float(step_val, step_tag);
+
+                if step == 0.0 {
+                    return Err("'for' step is zero".to_string());
+                }
+
+                // Check if loop should run
+                let should_run = if step > 0.0 {
+                    init <= limit
+                } else {
+                    init >= limit
+                };
+
+                if !should_run {
+                    // Skip loop body
+                    let frame = self.current_frame_mut();
+                    frame.pc = (frame.pc as i32 + sbx + 1) as usize;
+                    return Ok(());
+                }
+
+                // For floats, keep limit in R(A+1), store internal index in R(A)
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(init);
+                *self.register_stack.get_unchecked_mut(base_ptr + a + 3) = LuaValue::float(init);
+            }
         }
 
-        // Fast path: Pure integer arithmetic (most common)
-        if let (LuaValueKind::Integer, LuaValueKind::Integer) = (val_a.kind(), val_a2.kind()) {
-            let init = val_a.as_integer().unwrap();
-            let step = val_a2.as_integer().unwrap();
-
-            // Subtract step so first FORLOOP iteration adds it back to get init
-            let new_init = init.wrapping_sub(step);
-            self.set_register(base_ptr, a, LuaValue::integer(new_init));
-            self.set_register(base_ptr, a + 3, LuaValue::integer(new_init));
-        } else {
-            // Float path: Any operand is float or needs float precision
-            let init = val_a.as_number().unwrap();
-            let step = val_a2.as_number().unwrap();
-            let new_init = init - step;
-            self.set_register(base_ptr, a, LuaValue::float(new_init));
-            self.set_register(base_ptr, a + 3, LuaValue::float(new_init));
-        }
-
-        // Jump forward to FORLOOP
+        // Jump forward to loop body
         let frame = self.current_frame_mut();
         frame.pc = (frame.pc as i32 + sbx) as usize;
         Ok(())
     }
 
-    // FORLOOP: Increment index and test loop condition
-    // R(A) = index, R(A+1) = limit, R(A+2) = step, R(A+3) = loop variable
-    // Lua 5.4 semantics: continue if (step > 0 and idx <= limit) or (step <= 0 and idx >= limit)
+    // FORLOOP: Lua 5.4 optimized version using pre-computed loop count
+    // For integers: R(A+1) = loop counter (decrement each iteration)
+    // For floats: R(A+1) = limit (traditional comparison)
+    #[inline]
     fn op_forloop(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let sbx = Instruction::get_sbx(instr);
@@ -1400,43 +1784,40 @@ impl LuaVM {
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
 
-        // SAFETY: Compiler guarantees a, a+1, a+2, a+3 are within register bounds
-        // Ultra-fast path: direct tag checking (no kind() overhead)
         unsafe {
             let idx_val = self.register_stack.get_unchecked(base_ptr + a);
-            let limit_val = self.register_stack.get_unchecked(base_ptr + a + 1);
+            let counter_val = self.register_stack.get_unchecked(base_ptr + a + 1);
             let step_val = self.register_stack.get_unchecked(base_ptr + a + 2);
 
             let idx_tag = idx_val.primary();
-            let limit_tag = limit_val.primary();
+            let counter_tag = counter_val.primary();
             let step_tag = step_val.primary();
 
-            // Fast path: All integers (most common - > 95% of loops)
+            // Fast path: Integer loops (with pre-computed counter)
             if idx_tag == crate::lua_value::TAG_INTEGER
-                && limit_tag == crate::lua_value::TAG_INTEGER
+                && counter_tag == crate::lua_value::TAG_INTEGER
                 && step_tag == crate::lua_value::TAG_INTEGER
             {
                 let idx = idx_val.secondary() as i64;
-                let limit = limit_val.secondary() as i64;
+                let mut count = counter_val.secondary() as i64;
                 let step = step_val.secondary() as i64;
 
-                // Add step with wrapping (Lua 5.4 allows overflow)
-                let new_idx = idx.wrapping_add(step);
+                // Check if iterations remain
+                if count > 0 {
+                    // Decrement counter (Lua 5.4 optimization!)
+                    count -= 1;
+                    *self.register_stack.get_unchecked_mut(base_ptr + a + 1) =
+                        LuaValue::integer(count);
 
-                // Lua 5.4 loop condition: (step >= 0) ? (idx <= limit) : (idx >= limit)
-                let continue_loop = if step >= 0 {
-                    new_idx <= limit
-                } else {
-                    new_idx >= limit
-                };
+                    // Update index: idx += step
+                    let new_idx = idx.wrapping_add(step);
+                    *self.register_stack.get_unchecked_mut(base_ptr + a) =
+                        LuaValue::integer(new_idx);
 
-                // Update index register
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(new_idx);
-
-                if continue_loop {
-                    // Update loop variable: R(A+3) = new_idx
+                    // Update loop variable R(A+3) = new_idx
                     *self.register_stack.get_unchecked_mut(base_ptr + a + 3) =
                         LuaValue::integer(new_idx);
+
                     // Jump back to loop body
                     let frame = self.current_frame_mut();
                     frame.pc = (frame.pc as i32 + sbx) as usize;
@@ -1444,38 +1825,11 @@ impl LuaVM {
                 return Ok(());
             }
 
-            // Slow path: Float or mixed types
-            if idx_tag < crate::lua_value::NAN_BASE
-                && limit_tag < crate::lua_value::NAN_BASE
-                && step_tag < crate::lua_value::NAN_BASE
-            {
-                // All floats
-                let idx = f64::from_bits(idx_tag);
-                let limit = f64::from_bits(limit_tag);
-                let step = f64::from_bits(step_tag);
-
-                let new_idx = idx + step;
-                let continue_loop = if step >= 0.0 {
-                    new_idx <= limit
-                } else {
-                    new_idx >= limit
-                };
-
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(new_idx);
-
-                if continue_loop {
-                    *self.register_stack.get_unchecked_mut(base_ptr + a + 3) =
-                        LuaValue::float(new_idx);
-                    let frame = self.current_frame_mut();
-                    frame.pc = (frame.pc as i32 + sbx) as usize;
-                }
-                return Ok(());
-            }
-
-            // Mixed int/float - convert to float
+            // Float path: Use traditional comparison (no pre-computed counter)
             let is_num =
                 |tag: u64| tag == crate::lua_value::TAG_INTEGER || tag < crate::lua_value::NAN_BASE;
-            if is_num(idx_tag) && is_num(limit_tag) && is_num(step_tag) {
+
+            if is_num(idx_tag) && is_num(counter_tag) && is_num(step_tag) {
                 let to_float = |val: &LuaValue, tag: u64| {
                     if tag == crate::lua_value::TAG_INTEGER {
                         val.secondary() as i64 as f64
@@ -1485,21 +1839,25 @@ impl LuaVM {
                 };
 
                 let idx = to_float(idx_val, idx_tag);
-                let limit = to_float(limit_val, limit_tag);
+                let limit = to_float(counter_val, counter_tag); // For floats, R(A+1) is limit
                 let step = to_float(step_val, step_tag);
 
+                // Update index
                 let new_idx = idx + step;
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(new_idx);
+
+                // Check loop condition
                 let continue_loop = if step >= 0.0 {
                     new_idx <= limit
                 } else {
                     new_idx >= limit
                 };
 
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(new_idx);
-
                 if continue_loop {
+                    // Update loop variable
                     *self.register_stack.get_unchecked_mut(base_ptr + a + 3) =
                         LuaValue::float(new_idx);
+                    // Jump back
                     let frame = self.current_frame_mut();
                     frame.pc = (frame.pc as i32 + sbx) as usize;
                 }
@@ -1510,20 +1868,27 @@ impl LuaVM {
         Err("'for' loop variables must be numbers".to_string())
     }
 
+    #[inline]
     fn op_test(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let c = Instruction::get_c(instr);
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
 
-        let is_true = self.get_register(base_ptr, a).is_truthy();
-        let frame = self.current_frame_mut();
-        if (is_true as u32) != c {
-            frame.pc += 1;
+        // Fast path: direct register access
+        unsafe {
+            let val = self.register_stack.get_unchecked(base_ptr + a);
+            let is_true = val.is_truthy();
+            
+            if (is_true as u32) != c {
+                let frame = self.current_frame_mut();
+                frame.pc += 1;
+            }
         }
         Ok(())
     }
 
+    #[inline]
     fn op_testset(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
@@ -1531,13 +1896,16 @@ impl LuaVM {
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
 
-        let val_b = self.get_register(base_ptr, b);
-        let is_true = val_b.is_truthy();
-        if (is_true as u32) == c {
-            self.set_register(base_ptr, a, val_b);
-        } else {
-            let frame = self.current_frame_mut();
-            frame.pc += 1;
+        unsafe {
+            let val_b = *self.register_stack.get_unchecked(base_ptr + b);
+            let is_true = val_b.is_truthy();
+            
+            if (is_true as u32) == c {
+                *self.register_stack.get_unchecked_mut(base_ptr + a) = val_b;
+            } else {
+                let frame = self.current_frame_mut();
+                frame.pc += 1;
+            }
         }
         Ok(())
     }

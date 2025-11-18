@@ -9,8 +9,68 @@ use crate::opcode::{Instruction, OpCode};
 use emmylua_parser::{
     LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat, LuaForStat, LuaFuncStat,
     LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat,
-    LuaVarExpr, LuaWhileStat,
+    LuaVarExpr, LuaWhileStat, LuaBinaryExpr, BinaryOperator, LuaLiteralExpr, LuaLiteralToken,
 };
+
+/// Try to compile binary expression as immediate comparison for control flow
+/// Returns Some(register) if successful (comparison instruction emitted)
+/// The emitted instruction skips next instruction if comparison is FALSE
+fn try_compile_immediate_comparison(c: &mut Compiler, expr: &LuaExpr) -> Result<Option<u32>, String> {
+    // Only handle binary comparison expressions
+    if let LuaExpr::BinaryExpr(bin_expr) = expr {
+        let (left, right) = bin_expr.get_exprs().ok_or("error")?;
+        let op = bin_expr.get_op_token().ok_or("error")?;
+        let op_kind = op.get_op();
+        
+        // Check if right operand is small integer constant
+        if let LuaExpr::LiteralExpr(lit) = &right {
+            if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
+                if !num.is_float() {
+                    let int_val = num.get_int_value();
+                    // Use signed 9-bit immediate: range [-256, 255]
+                    if int_val >= -256 && int_val <= 255 {
+                        // Compile left operand
+                        let left_reg = compile_expr(c, &left)?;
+                        
+                        // Encode immediate value (9 bits)
+                        let imm = if int_val < 0 {
+                            (int_val + 512) as u32
+                        } else {
+                            int_val as u32
+                        };
+                        
+                        // Emit immediate comparison (skips next if FALSE)
+                        match op_kind {
+                            BinaryOperator::OpLt => {
+                                emit(c, Instruction::encode_abc(OpCode::LtI, left_reg, imm, 1));
+                                return Ok(Some(left_reg));
+                            }
+                            BinaryOperator::OpLe => {
+                                emit(c, Instruction::encode_abc(OpCode::LeI, left_reg, imm, 1));
+                                return Ok(Some(left_reg));
+                            }
+                            BinaryOperator::OpGt => {
+                                emit(c, Instruction::encode_abc(OpCode::GtI, left_reg, imm, 1));
+                                return Ok(Some(left_reg));
+                            }
+                            BinaryOperator::OpGe => {
+                                emit(c, Instruction::encode_abc(OpCode::GeI, left_reg, imm, 1));
+                                return Ok(Some(left_reg));
+                            }
+                            BinaryOperator::OpEq => {
+                                emit(c, Instruction::encode_abc(OpCode::EqI, left_reg, imm, 1));
+                                return Ok(Some(left_reg));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(None)
+}
 
 /// Compile any statement
 pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
@@ -155,6 +215,8 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
 /// Compile assignment statement
 fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
+    use super::expr::compile_expr_to;
+    
     // Get vars and expressions from children
     let (vars, exprs) = stat.get_var_and_expr_list();
 
@@ -162,7 +224,19 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
         return Ok(());
     }
 
-    // Compile expressions
+    // OPTIMIZATION: For single local variable assignment, compile directly to target register
+    if vars.len() == 1 && exprs.len() == 1 {
+        if let LuaVarExpr::NameExpr(name_expr) = &vars[0] {
+            let name = name_expr.get_name_text().unwrap_or("".to_string());
+            if let Some(local) = resolve_local(c, &name) {
+                // Local variable - compile expression directly to its register
+                compile_expr_to(c, &exprs[0], Some(local.register))?;
+                return Ok(());
+            }
+        }
+    }
+
+    // Standard path: compile expressions
     let mut val_regs = Vec::new();
 
     for (i, expr) in exprs.iter().enumerate() {
@@ -378,16 +452,22 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
     // Mark loop start
     let loop_start = c.chunk.code.len();
 
-    // Compile condition
+    // OPTIMIZATION: Try to compile condition as immediate comparison (skip Test instruction)
     let cond = stat
         .get_condition_expr()
         .ok_or("while statement missing condition")?;
-    let cond_reg = compile_expr(c, &cond)?;
-
-    // Test condition - if false (C=0), skip next instruction
-    emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-    // If test passes (condition is false), jump to end
-    let end_jump = emit_jump(c, OpCode::Jmp);
+    
+    // Check if condition is immediate comparison pattern: var < constant
+    let end_jump = if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond)? {
+        // Success! Generated LtI/LeI/GtI etc that skips next instruction if FALSE
+        // Now emit jump to exit when comparison fails
+        emit_jump(c, OpCode::Jmp)
+    } else {
+        // Standard path: compile expression + Test
+        let cond_reg = compile_expr(c, &cond)?;
+        emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
+        emit_jump(c, OpCode::Jmp)
+    };
 
     // Compile body
     if let Some(body) = stat.get_block() {
@@ -424,18 +504,19 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
 
     // Compile condition expression
     if let Some(cond_expr) = stat.get_condition_expr() {
-        let cond_reg = compile_expr(c, &cond_expr)?;
-
-        // repeat-until: continue loop if condition is false, exit if true
-        // Test: if (is_truthy != c), skip next instruction
-        // We want: if condition is true (1), skip Jmp (exit loop)
-        // So c = 0: when true, 1 != 0 → skip Jmp
-        emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-
-        // Jump back to loop start
-        // PC will be at (current position + 1) when Jmp executes
-        let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
-        emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, jump_offset));
+        // OPTIMIZATION: Try immediate comparison (skip Test)
+        if let Some(_) = try_compile_immediate_comparison(c, &cond_expr)? {
+            // Immediate comparison skips if FALSE, so Jmp executes when condition is FALSE
+            // This is correct for repeat-until (continue when false)
+            let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
+            emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, jump_offset));
+        } else {
+            // Standard path
+            let cond_reg = compile_expr(c, &cond_expr)?;
+            emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
+            let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
+            emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, jump_offset));
+        }
     }
 
     // End loop (patches all break statements)

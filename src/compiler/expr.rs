@@ -130,6 +130,64 @@ fn compile_binary_expr_to(
     let op = expr.get_op_token().ok_or("error")?;
     let op_kind = op.get_op();
 
+    // Try to optimize with immediate operands (Lua 5.4 optimization)
+    // Check if right operand is a small integer constant
+    if let LuaExpr::LiteralExpr(lit) = &right {
+        if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
+            if !num.is_float() {
+                let int_val = num.get_int_value();
+                // Use signed 9-bit immediate: range [-256, 255]
+                if int_val >= -256 && int_val <= 255 {
+                    let left_reg = compile_expr(c, &left)?;
+                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    
+                    // Encode immediate value (9 bits)
+                    let imm = if int_val < 0 {
+                        (int_val + 512) as u32
+                    } else {
+                        int_val as u32
+                    };
+                    
+                    // Try immediate arithmetic instructions
+                    match op_kind {
+                        BinaryOperator::OpAdd => {
+                            emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpSub => {
+                            emit(c, Instruction::encode_abc(OpCode::SubI, result_reg, left_reg, imm));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpMul => {
+                            emit(c, Instruction::encode_abc(OpCode::MulI, result_reg, left_reg, imm));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpMod => {
+                            emit(c, Instruction::encode_abc(OpCode::ModI, result_reg, left_reg, imm));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpPow => {
+                            emit(c, Instruction::encode_abc(OpCode::PowI, result_reg, left_reg, imm));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpDiv => {
+                            emit(c, Instruction::encode_abc(OpCode::DivI, result_reg, left_reg, imm));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpIDiv => {
+                            emit(c, Instruction::encode_abc(OpCode::IDivI, result_reg, left_reg, imm));
+                            return Ok(result_reg);
+                        }
+                        // Immediate comparison - NOT IMPLEMENTED YET
+                        // (would need conditional skip logic in control flow statements)
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to normal two-operand instruction
     let left_reg = compile_expr(c, &left)?;
     let right_reg = compile_expr(c, &right)?;
     let result_reg = dest.unwrap_or_else(|| alloc_register(c));

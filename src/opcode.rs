@@ -21,13 +21,22 @@ pub enum OpCode {
     SetTableK, // R(A)[K(B)] := R(C) - Direct constant key (K(B) must be string)
 
     // Arithmetic operations
-    Add, // R(A) := R(B) + R(C)
-    Sub, // R(A) := R(B) - R(C)
-    Mul, // R(A) := R(B) * R(C)
-    Div, // R(A) := R(B) / R(C)
-    Mod, // R(A) := R(B) % R(C)
-    Pow, // R(A) := R(B) ^ R(C)
-    Unm, // R(A) := -R(B)
+    Add,  // R(A) := R(B) + R(C)
+    Sub,  // R(A) := R(B) - R(C)
+    Mul,  // R(A) := R(B) * R(C)
+    Div,  // R(A) := R(B) / R(C)
+    Mod,  // R(A) := R(B) % R(C)
+    Pow,  // R(A) := R(B) ^ R(C)
+    Unm,  // R(A) := -R(B)
+    
+    // Arithmetic with immediate operands (Lua 5.4 optimization)
+    AddI, // R(A) := R(B) + sC (signed immediate)
+    SubI, // R(A) := R(B) - sC
+    MulI, // R(A) := R(B) * sC
+    ModI, // R(A) := R(B) % sC
+    PowI, // R(A) := R(B) ^ sC
+    DivI, // R(A) := R(B) / sC
+    IDivI, // R(A) := R(B) // sC
 
     // Logical operations
     Not, // R(A) := not R(B)
@@ -40,6 +49,13 @@ pub enum OpCode {
     Ne, // if (R(B) != R(C)) ~= A then pc++
     Gt, // if (R(B) > R(C)) ~= A then pc++
     Ge, // if (R(B) >= R(C)) ~= A then pc++
+    
+    // Comparison with immediate operands (Lua 5.4 optimization)
+    EqI, // if (R(A) == sB) ~= k then pc++ (k in C field)
+    LtI, // if (R(A) < sB) ~= k then pc++ (k in C field, sB in B field)
+    LeI, // if (R(A) <= sB) ~= k then pc++ (k in C field)
+    GtI, // if (R(A) > sB) ~= k then pc++ (k in C field)
+    GeI, // if (R(A) >= sB) ~= k then pc++ (k in C field)
 
     // Logical operations (short-circuit)
     And, // R(A) := R(B) and R(C)
