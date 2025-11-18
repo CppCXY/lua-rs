@@ -8,7 +8,8 @@ emmylua_parser = "0.19.0"
 libloading = "0.8"
 
 [[bin]]
-name = "main"
+name = "lua"
+path = "src/bin/main.rs"
 
 [[bin]]
 name = "bytecode_dump"

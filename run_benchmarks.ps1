@@ -21,7 +21,7 @@ foreach ($bench in $benchmarks) {
     Write-Host ""
     
     Write-Host "--- Lua-RS ---" -ForegroundColor Magenta
-    & ".\target\release\main.exe" "benchmarks\$bench"
+    & ".\target\release\lua.exe" "benchmarks\$bench"
     
     Write-Host ""
     Write-Host "--- Native Lua ---" -ForegroundColor Green
