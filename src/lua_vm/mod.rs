@@ -223,59 +223,32 @@ impl LuaVM {
                 return Ok(LuaValue::nil());
             }
 
-            // Ultra-optimized instruction fetch: use cached code pointer to avoid HashMap + RefCell overhead
+            // ULTRA-OPTIMIZED: 直接从 LuaValue.secondary 获取缓存的函数指针!
+            // 零 HashMap 查找,零额外缓存字段!
             let frame = self.current_frame();
             let pc = frame.pc;
 
-            // Fast path: use cached code pointer if available
-            let instr = if let Some(code_ptr) = frame.cached_code_ptr {
-                unsafe {
-                    // SAFETY: code_ptr points to chunk.code owned by ObjectPool
-                    // Function lifetime is guaranteed by VM maintaining references
-                    if pc >= frame.cached_code_len {
-                        self.frames.pop();
-                        continue;
-                    }
-                    let code_vec = &*code_ptr;
-                    code_vec[pc]
+            // 直接使用 function_value 中缓存的指针
+            let func_ptr = frame
+                .get_function_ptr()
+                .ok_or("Frame function is not a Lua function")?;
+
+            // SAFETY: func_ptr 来自 LuaValue.secondary,由 ObjectPool 保证有效
+            // 只要 frame 存在,函数就存在
+            let instr = unsafe {
+                let func_ref = &*func_ptr;
+                let func = func_ref.borrow();
+
+                if pc >= func.chunk.code.len() {
+                    // 函数执行完毕
+                    drop(func); // 释放 borrow
+                    self.frames.pop();
+                    continue;
                 }
-            } else {
-                // Slow path: first time access, cache the pointer
-                let cached_func_id = frame.cached_function_id;
-                if let Some(func_id) = cached_func_id {
-                    let func_ref = self
-                        .object_pool
-                        .get_function(func_id)
-                        .ok_or("Invalid function ID")?;
-                    let func_borrowed = func_ref.borrow();
 
-                    // Cache the code pointer for future iterations
-                    let code_ptr = &func_borrowed.chunk.code as *const Vec<u32>;
-                    let code_len = func_borrowed.chunk.code.len();
-
-                    if pc >= code_len {
-                        drop(func_borrowed);
-                        self.frames.pop();
-                        continue;
-                    }
-
-                    let instr = func_borrowed.chunk.code[pc];
-                    let constants_ptr = &func_borrowed.chunk.constants as *const Vec<LuaValue>;
-                    let constants_len = func_borrowed.chunk.constants.len();
-                    drop(func_borrowed);
-
-                    // Update frame cache (code + constants)
-                    if let Some(frame) = self.frames.last_mut() {
-                        frame.cached_code_ptr = Some(code_ptr);
-                        frame.cached_code_len = code_len;
-                        frame.cached_constants_ptr = Some(constants_ptr);
-                        frame.cached_constants_len = constants_len;
-                    }
-
-                    instr
-                } else {
-                    return Err("Frame function is not a Lua function".to_string());
-                }
+                let instruction = func.chunk.code[pc];
+                drop(func); // 立即释放 borrow
+                instruction
             };
 
             self.frames.last_mut().unwrap().pc += 1;
@@ -377,50 +350,28 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
 
+        // ULTRA-OPTIMIZED: 直接从 function_value 获取指针!
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
+        let func_ptr = frame
+            .get_function_ptr()
+            .ok_or("Frame function is not a Lua function")?;
 
-        // ULTRA-FAST PATH: Use cached constants pointer (zero overhead!)
-        if let Some(constants_ptr) = frame.cached_constants_ptr {
-            unsafe {
-                if bx < frame.cached_constants_len {
-                    let constants_vec = &*constants_ptr;
-                    let constant = *constants_vec.get_unchecked(bx);
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) = constant;
-                    return Ok(());
-                }
+        let constant = unsafe {
+            let func_ref = &*func_ptr;
+            let func = func_ref.borrow();
+            if bx >= func.chunk.constants.len() {
+                drop(func); // 释放 borrow 后再返回错误
+                return Err("Invalid constant index".to_string());
             }
+            let const_value = *func.chunk.constants.get_unchecked(bx);
+            drop(func); // 立即释放 borrow
+            const_value
+        };
+
+        unsafe {
+            *self.register_stack.get_unchecked_mut(base_ptr + a) = constant;
         }
-
-        // Fallback path (first call - will cache for next time)
-        if let Some(function_id) = frame.cached_function_id {
-            if let Some(func_ref) = self.object_pool.get_function(function_id) {
-                let func_borrowed = func_ref.borrow();
-                if bx < func_borrowed.chunk.constants.len() {
-                    let constant = func_borrowed.chunk.constants[bx];
-
-                    // Cache for next time
-                    let constants_ptr = &func_borrowed.chunk.constants as *const Vec<LuaValue>;
-                    let constants_len = func_borrowed.chunk.constants.len();
-                    drop(func_borrowed);
-
-                    if let Some(frame_mut) = self.frames.last_mut() {
-                        frame_mut.cached_constants_ptr = Some(constants_ptr);
-                        frame_mut.cached_constants_len = constants_len;
-                    }
-
-                    unsafe {
-                        *self.register_stack.get_unchecked_mut(base_ptr + a) = constant;
-                    }
-                    return Ok(());
-                }
-            }
-        }
-
-        // Super slow fallback
-        let chunk = self.get_current_chunk()?;
-        let constant = chunk.constants[bx];
-        self.set_register(base_ptr, a, constant);
         Ok(())
     }
 
@@ -1674,7 +1625,7 @@ impl LuaVM {
                 if is_vararg && vararg_count > 0 {
                     // vararg_start is now an ABSOLUTE index into register_stack
                     new_frame.vararg_start = vararg_base.unwrap();
-                    new_frame.vararg_count = vararg_count;
+                    new_frame.vararg_count = vararg_count as u16;
                 }
 
                 self.frames.push(new_frame);
@@ -1874,19 +1825,14 @@ impl LuaVM {
                 // Update current frame in-place (tail call optimization!)
                 let frame = self.current_frame_mut();
                 frame.function_value = func;
-                frame.cached_function_id = Some(lua_func_id);
                 frame.pc = 0; // Reset PC to start of new function
                 frame.top = max_stack_size;
 
-                // Clear cached pointers - they will be updated in next instruction fetch
-                frame.cached_code_ptr = None;
-                frame.cached_code_len = 0;
-                frame.cached_constants_ptr = None;
-                frame.cached_constants_len = 0;
+                // 不需要清除缓存 - function_value 已经包含新的指针!
 
                 if is_vararg && vararg_count > 0 {
                     frame.vararg_start = vararg_base.unwrap();
-                    frame.vararg_count = vararg_count;
+                    frame.vararg_count = vararg_count as u16;
                 } else {
                     frame.vararg_start = 0;
                     frame.vararg_count = 0;
@@ -1927,8 +1873,8 @@ impl LuaVM {
         };
 
         // Save caller info before popping
-        let caller_result_reg = self.current_frame().result_reg;
-        let caller_num_results = self.current_frame().num_results;
+        let caller_result_reg = self.current_frame().result_reg as usize;
+        let caller_num_results = self.current_frame().get_num_results();
         let exiting_frame_id = self.current_frame().frame_id;
         let exiting_base_ptr = self.current_frame().base_ptr;
 
@@ -2188,7 +2134,7 @@ impl LuaVM {
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
         let vararg_start = frame.vararg_start; // This is an ABSOLUTE index into register_stack
-        let vararg_count = frame.vararg_count;
+        let vararg_count = frame.vararg_count as usize;
 
         if b == 0 {
             // Load all varargs
@@ -3364,17 +3310,18 @@ impl LuaVM {
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<Rc<LuaUpvalue>>) -> LuaValue {
         let func = LuaFunction { chunk, upvalues };
         let id = self.object_pool.create_function(func);
-        // Get pointer from object pool for direct access
+        // Get Rc pointer from object pool - \u73b0\u5728\u6307\u9488\u7a33\u5b9a\u4e86!
+        // Rc \u7684\u5185\u90e8\u6570\u636e\u4e0d\u4f1a\u56e0\u4e3a HashMap rehash \u800c\u79fb\u52a8
         let ptr = self
             .object_pool
             .get_function(id)
-            .map(|f| f.as_ptr() as *const std::cell::RefCell<LuaFunction>)
+            .map(|rc| rc.as_ref() as *const RefCell<LuaFunction>)
             .unwrap_or(std::ptr::null());
         LuaValue::function_id_ptr(id, ptr)
     }
 
     /// Get function by LuaValue (resolves ID from object pool)
-    pub fn get_function(&self, value: &LuaValue) -> Option<&std::cell::RefCell<LuaFunction>> {
+    pub fn get_function(&self, value: &LuaValue) -> Option<&std::rc::Rc<RefCell<LuaFunction>>> {
         if let Some(id) = value.as_function_id() {
             self.object_pool.get_function(id)
         } else {
@@ -3720,10 +3667,7 @@ impl LuaVM {
                 let func = func_ref.borrow();
                 let chunk = &func.chunk;
 
-                let source_str = frame
-                    .source
-                    .or_else(|| chunk.source_name.as_deref())
-                    .unwrap_or("[?]");
+                let source_str = chunk.source_name.as_deref().unwrap_or("[?]");
 
                 let pc = frame.pc.saturating_sub(1);
                 let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
@@ -3737,12 +3681,7 @@ impl LuaVM {
                 ("[?]".to_string(), "?".to_string())
             };
 
-            let func_name = frame.func_name.unwrap_or("?");
-
-            trace.push_str(&format!(
-                "\n\t{}:{}: in function '{}'",
-                source, line, func_name
-            ));
+            trace.push_str(&format!("\n\t{}:{}: in function", source, line));
         }
 
         trace

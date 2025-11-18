@@ -66,7 +66,8 @@ pub struct ObjectPool {
     strings: HashMap<StringId, LuaString>,
     tables: HashMap<TableId, RefCell<LuaTable>>,
     userdata: HashMap<UserdataId, LuaUserdata>,
-    functions: HashMap<FunctionId, RefCell<crate::lua_value::LuaFunction>>,
+    // 使用 Rc 保证指针稳定 - HashMap rehash 不会影响 Rc 内部数据
+    functions: HashMap<FunctionId, std::rc::Rc<RefCell<crate::lua_value::LuaFunction>>>,
 
     // ID generators
     next_string_id: StringId,
@@ -231,18 +232,19 @@ impl ObjectPool {
         let id = self.next_function_id;
         self.next_function_id = id.next();
 
-        self.functions.insert(id, RefCell::new(func));
+        self.functions
+            .insert(id, std::rc::Rc::new(RefCell::new(func)));
         id
     }
 
     /// Get function by ID
     #[inline]
-    pub fn get_function(&self, id: FunctionId) -> Option<&RefCell<LuaFunction>> {
+    pub fn get_function(&self, id: FunctionId) -> Option<&std::rc::Rc<RefCell<LuaFunction>>> {
         self.functions.get(&id)
     }
 
     /// Remove function (called by GC)
-    pub fn remove_function(&mut self, id: FunctionId) -> Option<RefCell<LuaFunction>> {
+    pub fn remove_function(&mut self, id: FunctionId) -> Option<std::rc::Rc<RefCell<LuaFunction>>> {
         self.functions.remove(&id)
     }
 
