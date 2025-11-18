@@ -1,8 +1,10 @@
 // Compiler helper functions
 
-use super::{Compiler, Local};
+use super::{Compiler, Local, ScopeChain};
 use crate::lua_value::LuaValue;
 use crate::opcode::{Instruction, OpCode};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Create a string value using VM's string pool
 pub fn create_string_value(c: &mut Compiler, s: String) -> LuaValue {
@@ -91,50 +93,91 @@ pub fn add_upvalue(c: &mut Compiler, name: String, is_local: bool, index: u32) -
 
 /// Resolve an upvalue by searching parent scopes through the scope chain
 /// This is called when a variable is not found in local scope
+/// Recursively searches through all ancestor scopes
 pub fn resolve_upvalue_from_chain(c: &mut Compiler, name: &str) -> Option<usize> {
     // Check if already in current upvalues
-    if let Some((idx, _)) = c
-        .scope_chain
-        .borrow()
-        .upvalues
-        .iter()
-        .enumerate()
-        .find(|(_, uv)| uv.name == name)
     {
-        return Some(idx);
-    }
-
-    // Get parent scope
-    let parent = c.scope_chain.borrow().parent.clone();
-    if let Some(parent_scope) = parent {
-        let parent_scope_ref = parent_scope.borrow();
-
-        // First, try to find in parent's locals
-        if let Some(local) = parent_scope_ref
-            .locals
-            .iter()
-            .rev()
-            .find(|l| l.name == name)
-        {
-            // Found in parent's local variables - capture as upvalue
-            let upvalue_index = add_upvalue(c, name.to_string(), true, local.register);
-            return Some(upvalue_index);
-        }
-
-        // If not in parent's locals, try parent's upvalues (for nested closures)
-        if let Some((idx, _)) = parent_scope_ref
+        let scope = c.scope_chain.borrow();
+        if let Some((idx, _)) = scope
             .upvalues
             .iter()
             .enumerate()
             .find(|(_, uv)| uv.name == name)
         {
-            // Found in parent's upvalues - capture as upvalue from parent's upvalue
-            let upvalue_index = add_upvalue(c, name.to_string(), false, idx as u32);
-            return Some(upvalue_index);
+            return Some(idx);
         }
     }
 
-    None
+    // Get parent scope (clone to avoid borrow issues)
+    let parent = c.scope_chain.borrow().parent.clone()?;
+
+    // Resolve from parent scope - this returns info about where the variable was found
+    let (is_local, index) = resolve_in_parent_scope(&parent, name)?;
+
+    // Add upvalue to current scope
+    let upvalue_index = add_upvalue(c, name.to_string(), is_local, index);
+    Some(upvalue_index)
+}
+
+/// Recursively resolve variable in parent scope chain
+/// Returns (is_local, index) where:
+/// - is_local=true means found in direct parent's locals (index = register)
+/// - is_local=false means found in ancestor's upvalue chain (index = upvalue index in parent)
+fn resolve_in_parent_scope(scope: &Rc<RefCell<ScopeChain>>, name: &str) -> Option<(bool, u32)> {
+    // First, search in this scope's locals
+    {
+        let scope_ref = scope.borrow();
+        if let Some(local) = scope_ref.locals.iter().rev().find(|l| l.name == name) {
+            let register = local.register;
+            // Found as local - return (true, register)
+            return Some((true, register));
+        }
+    }
+
+    // Check if already in this scope's upvalues
+    {
+        let scope_ref = scope.borrow();
+        if let Some((idx, _)) = scope_ref
+            .upvalues
+            .iter()
+            .enumerate()
+            .find(|(_, uv)| uv.name == name)
+        {
+            // Found in this scope's existing upvalues - return (false, upvalue_index)
+            return Some((false, idx as u32));
+        }
+    }
+
+    // Not found in this scope - search in grandparent
+    let grandparent = scope.borrow().parent.clone()?;
+
+    // Recursively resolve from grandparent
+    let (gp_is_local, gp_index) = resolve_in_parent_scope(&grandparent, name)?;
+
+    // Add upvalue to this scope (intermediate scope between caller and where variable was found)
+    let upvalue_idx = {
+        let mut scope_mut = scope.borrow_mut();
+        // Check if already in upvalues
+        if let Some((idx, _)) = scope_mut
+            .upvalues
+            .iter()
+            .enumerate()
+            .find(|(_, uv)| uv.name == name)
+        {
+            idx as u32
+        } else {
+            // Add new upvalue - always false because we're capturing from ancestor
+            scope_mut.upvalues.push(super::Upvalue {
+                name: name.to_string(),
+                is_local: gp_is_local,
+                index: gp_index,
+            });
+            (scope_mut.upvalues.len() - 1) as u32
+        }
+    };
+
+    // Return (false, upvalue_idx) because caller needs to capture from our upvalue
+    Some((false, upvalue_idx))
 }
 
 /// Begin a new scope

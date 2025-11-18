@@ -27,7 +27,8 @@ pub fn create_utf8_lib() -> LibraryModule {
 
 fn utf8_len(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s_value = require_arg(vm, 0, "utf8.len")?;
-    let s = vm.get_string(&s_value)
+    let s = vm
+        .get_string(&s_value)
         .ok_or_else(|| "bad argument #1 to 'utf8.len' (string expected)".to_string())?;
 
     let bytes = s.as_str().as_bytes();
@@ -198,7 +199,8 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// utf8.codepoint(s [, i [, j]]) - Returns code points of characters
 fn utf8_codepoint(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s_value = require_arg(vm, 0, "utf8.codepoint")?;
-    let s = vm.get_string(&s_value)
+    let s = vm
+        .get_string(&s_value)
         .ok_or_else(|| "bad argument #1 to 'utf8.codepoint' (string expected)".to_string())?;
 
     let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
@@ -235,7 +237,8 @@ fn utf8_codepoint(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// utf8.offset(s, n [, i]) - Returns byte position of n-th character
 fn utf8_offset(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let s_value = require_arg(vm, 0, "utf8.offset")?;
-    let s = vm.get_string(&s_value)
+    let s = vm
+        .get_string(&s_value)
         .ok_or_else(|| "bad argument #1 to 'utf8.offset' (string expected)".to_string())?;
 
     let n = require_arg(vm, 1, "utf8.offset")?

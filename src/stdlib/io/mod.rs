@@ -132,7 +132,8 @@ fn io_open(vm: &mut LuaVM) -> Result<MultiValue, String> {
     use crate::lib_registry::{get_arg, require_arg};
 
     let filename_val = require_arg(vm, 0, "io.open")?;
-    let filename = vm.get_string(&filename_val)
+    let filename = vm
+        .get_string(&filename_val)
         .ok_or_else(|| "bad argument #1 to 'io.open' (string expected)".to_string())?;
 
     let mode_str = get_arg(vm, 1)

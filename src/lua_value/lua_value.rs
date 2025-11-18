@@ -137,8 +137,8 @@ impl LuaValue {
     #[inline(always)]
     pub fn string_id_ptr(id: StringId, ptr: *const LuaString) -> Self {
         LuaValue {
-            primary: TAG_STRING | (id.0 as u64),  // ID in low 32 bits
-            secondary: ptr as u64,                  // Pointer in secondary
+            primary: TAG_STRING | (id.0 as u64), // ID in low 32 bits
+            secondary: ptr as u64,               // Pointer in secondary
         }
     }
 
@@ -153,7 +153,10 @@ impl LuaValue {
 
     /// Create table from ID + pointer
     #[inline(always)]
-    pub fn table_id_ptr(id: TableId, ptr: *const std::cell::RefCell<crate::lua_value::LuaTable>) -> Self {
+    pub fn table_id_ptr(
+        id: TableId,
+        ptr: *const std::cell::RefCell<crate::lua_value::LuaTable>,
+    ) -> Self {
         LuaValue {
             primary: TAG_TABLE | (id.0 as u64),
             secondary: ptr as u64,
@@ -189,7 +192,10 @@ impl LuaValue {
 
     /// Create function from ID + pointer
     #[inline(always)]
-    pub fn function_id_ptr(id: FunctionId, ptr: *const std::cell::RefCell<crate::lua_value::LuaFunction>) -> Self {
+    pub fn function_id_ptr(
+        id: FunctionId,
+        ptr: *const std::cell::RefCell<crate::lua_value::LuaFunction>,
+    ) -> Self {
         LuaValue {
             primary: TAG_FUNCTION | (id.0 as u64),
             secondary: ptr as u64,
@@ -247,20 +253,20 @@ impl LuaValue {
         // Float if NOT nil, bool, or any tagged type
         // Special values: nil (0xFFFF_FFFF_FFFF_FFFF), true/false (0xFFFF...)
         // Tagged types: 0x7FF8 to 0x7FFF in high 16 bits
-        
+
         // Fast path: if primary < NAN_BASE, definitely a float
         if self.primary < NAN_BASE {
             return true;
         }
-        
+
         // Check if it's a negative float (0x8000... to 0xFFF7...)
         // Negative floats: sign bit = 1, exponent != all 1's
         // This excludes negative NaN (0xFFF8... to 0xFFFF...)
-        let high_bits = self.primary >> 48;  // Top 16 bits
+        let high_bits = self.primary >> 48; // Top 16 bits
         if high_bits >= 0x8000 && high_bits < 0xFFF8 {
-            return true;  // Negative float
+            return true; // Negative float
         }
-        
+
         false
     }
 
@@ -420,7 +426,9 @@ impl LuaValue {
 
     /// Get function pointer directly (ZERO lookups!)
     #[inline(always)]
-    pub fn as_function_ptr(&self) -> Option<*const std::cell::RefCell<crate::lua_value::LuaFunction>> {
+    pub fn as_function_ptr(
+        &self,
+    ) -> Option<*const std::cell::RefCell<crate::lua_value::LuaFunction>> {
         if self.is_function() && self.secondary != 0 {
             Some(self.secondary as *const std::cell::RefCell<crate::lua_value::LuaFunction>)
         } else {
@@ -542,7 +550,7 @@ impl LuaValue {
                 // In ID architecture, we can't dereference without ObjectPool
                 // Return a placeholder - caller should use vm.value_to_string() for proper string representation
                 format!("string: {}", self.secondary())
-            },
+            }
             LuaValueKind::Table => format!("table: {:x}", self.secondary()),
             LuaValueKind::Function => format!("function: {:x}", self.secondary()),
             LuaValueKind::Userdata => format!("userdata: {:x}", self.secondary()),
@@ -567,7 +575,7 @@ impl LuaValue {
         if self.primary == VALUE_TRUE || self.primary == VALUE_FALSE {
             return LuaValueKind::Boolean;
         }
-        
+
         // Check if it's a tagged type first (primary >= NAN_BASE)
         if self.primary >= NAN_BASE {
             // Check tagged types by masking
@@ -619,7 +627,7 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::String => {
                 // In ID architecture, can't dereference without ObjectPool
                 write!(f, "\"<string:{}>\"", self.secondary())
-            },
+            }
             LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
             LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
             LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.secondary()),
@@ -653,7 +661,7 @@ impl std::fmt::Display for LuaValue {
                 // In ID architecture, can't dereference without ObjectPool
                 // Caller should use vm.value_to_string() instead
                 write!(f, "<string:{}>", self.secondary())
-            },
+            }
             LuaValueKind::Table => write!(f, "table: {:x}", self.secondary()),
             LuaValueKind::Function => write!(f, "function: {:x}", self.secondary()),
             LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.secondary()),
@@ -701,7 +709,7 @@ impl PartialOrd for LuaValue {
         let kind_a = self.kind();
         let kind_b = other.kind();
 
-            match kind_a.cmp(&kind_b) {
+        match kind_a.cmp(&kind_b) {
             Ordering::Equal => match kind_a {
                 LuaValueKind::Nil => Some(Ordering::Equal),
                 LuaValueKind::Boolean => self.as_bool().partial_cmp(&other.as_bool()),
@@ -711,7 +719,7 @@ impl PartialOrd for LuaValue {
                     // In ID architecture, compare IDs directly
                     // Same ID = same string content (guaranteed by ObjectPool interning)
                     self.secondary().partial_cmp(&other.secondary())
-                },
+                }
                 LuaValueKind::Table
                 | LuaValueKind::Function
                 | LuaValueKind::Userdata

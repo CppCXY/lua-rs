@@ -41,9 +41,10 @@ pub fn create_basic_lib() -> LibraryModule {
 fn lua_print(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = get_args(vm);
 
-    let output: Vec<String> = args.iter().map(|v| {
-        vm.value_to_string(v).unwrap_or_else(|_| v.to_string_repr())
-    }).collect();
+    let output: Vec<String> = args
+        .iter()
+        .map(|v| vm.value_to_string(v).unwrap_or_else(|_| v.to_string_repr()))
+        .collect();
 
     if !output.is_empty() {
         println!("{}", output.join("\t"));
@@ -91,7 +92,10 @@ fn lua_assert(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// error(message [, level]) - Raise an error
 fn lua_error(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let message = get_arg(vm, 0)
-        .map(|v| vm.value_to_string(&v).unwrap_or_else(|_| v.to_string_repr()))
+        .map(|v| {
+            vm.value_to_string(&v)
+                .unwrap_or_else(|_| v.to_string_repr())
+        })
         .unwrap_or_else(|| "error".to_string());
 
     // Optional level parameter (default = 1)
@@ -769,9 +773,13 @@ fn lua_dofile(vm: &mut LuaVM) -> Result<MultiValue, String> {
 fn lua_warn(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     let args = get_args(_vm);
 
-    let messages: Vec<String> = args.iter().map(|v| {
-        _vm.value_to_string(v).unwrap_or_else(|_| v.to_string_repr())
-    }).collect();
+    let messages: Vec<String> = args
+        .iter()
+        .map(|v| {
+            _vm.value_to_string(v)
+                .unwrap_or_else(|_| v.to_string_repr())
+        })
+        .collect();
     let message = messages.join("");
 
     // Emit warning to stderr

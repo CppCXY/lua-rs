@@ -226,7 +226,7 @@ impl LuaVM {
             // Ultra-optimized instruction fetch: use cached code pointer to avoid HashMap + RefCell overhead
             let frame = self.current_frame();
             let pc = frame.pc;
-            
+
             // Fast path: use cached code pointer if available
             let instr = if let Some(code_ptr) = frame.cached_code_ptr {
                 unsafe {
@@ -248,22 +248,22 @@ impl LuaVM {
                         .get_function(func_id)
                         .ok_or("Invalid function ID")?;
                     let func_borrowed = func_ref.borrow();
-                    
+
                     // Cache the code pointer for future iterations
                     let code_ptr = &func_borrowed.chunk.code as *const Vec<u32>;
                     let code_len = func_borrowed.chunk.code.len();
-                    
+
                     if pc >= code_len {
                         drop(func_borrowed);
                         self.frames.pop();
                         continue;
                     }
-                    
+
                     let instr = func_borrowed.chunk.code[pc];
                     let constants_ptr = &func_borrowed.chunk.constants as *const Vec<LuaValue>;
                     let constants_len = func_borrowed.chunk.constants.len();
                     drop(func_borrowed);
-                    
+
                     // Update frame cache (code + constants)
                     if let Some(frame) = self.frames.last_mut() {
                         frame.cached_code_ptr = Some(code_ptr);
@@ -271,7 +271,7 @@ impl LuaVM {
                         frame.cached_constants_ptr = Some(constants_ptr);
                         frame.cached_constants_len = constants_len;
                     }
-                    
+
                     instr
                 } else {
                     return Err("Frame function is not a Lua function".to_string());
@@ -362,7 +362,7 @@ impl LuaVM {
         let a = Instruction::get_a(instr) as usize;
         let b = Instruction::get_b(instr) as usize;
         let base_ptr = self.current_frame().base_ptr;
-        
+
         // SAFETY: Compiler guarantees indices are within bounds
         unsafe {
             let value = *self.register_stack.get_unchecked(base_ptr + b);
@@ -375,10 +375,10 @@ impl LuaVM {
     fn op_loadk(&mut self, instr: u32) -> Result<(), String> {
         let a = Instruction::get_a(instr) as usize;
         let bx = Instruction::get_bx(instr) as usize;
-        
+
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
-        
+
         // ULTRA-FAST PATH: Use cached constants pointer (zero overhead!)
         if let Some(constants_ptr) = frame.cached_constants_ptr {
             unsafe {
@@ -390,24 +390,24 @@ impl LuaVM {
                 }
             }
         }
-        
+
         // Fallback path (first call - will cache for next time)
         if let Some(function_id) = frame.cached_function_id {
             if let Some(func_ref) = self.object_pool.get_function(function_id) {
                 let func_borrowed = func_ref.borrow();
                 if bx < func_borrowed.chunk.constants.len() {
                     let constant = func_borrowed.chunk.constants[bx];
-                    
+
                     // Cache for next time
                     let constants_ptr = &func_borrowed.chunk.constants as *const Vec<LuaValue>;
                     let constants_len = func_borrowed.chunk.constants.len();
                     drop(func_borrowed);
-                    
+
                     if let Some(frame_mut) = self.frames.last_mut() {
                         frame_mut.cached_constants_ptr = Some(constants_ptr);
                         frame_mut.cached_constants_len = constants_len;
                     }
-                    
+
                     unsafe {
                         *self.register_stack.get_unchecked_mut(base_ptr + a) = constant;
                     }
@@ -415,7 +415,7 @@ impl LuaVM {
                 }
             }
         }
-        
+
         // Super slow fallback
         let chunk = self.get_current_chunk()?;
         let constant = chunk.constants[bx];
@@ -624,10 +624,10 @@ impl LuaVM {
             #[inline(always)]
             fn is_float_fast(tag: u64) -> bool {
                 if tag < crate::lua_value::NAN_BASE {
-                    true  // Positive float
+                    true // Positive float
                 } else {
                     let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8  // Negative float
+                    high_bits >= 0x8000 && high_bits < 0xFFF8 // Negative float
                 }
             }
 
@@ -1873,6 +1873,7 @@ impl LuaVM {
 
         // Get value from upvalue with access to register_stack
         let value = upvalue.get_value(&self.frames, &self.register_stack);
+
         let frame = self.current_frame();
         let base_ptr = frame.base_ptr;
         self.set_register(base_ptr, a, value);
@@ -2194,16 +2195,16 @@ impl LuaVM {
     pub fn set_string_metatable(&mut self, string_lib: LuaValue) {
         // Create the metatable
         let metatable = self.create_table();
-        
+
         // Create the __index key before any borrowing
         let index_key = self.create_string("__index");
-        
+
         // Get the table reference to set __index
         if let Some(mt_ref) = self.get_table(&metatable) {
             // Set __index to the string library table
             mt_ref.borrow_mut().raw_set(index_key, string_lib);
         }
-        
+
         // Store the metatable as LuaValue (contains TableId)
         self.string_metatable = Some(metatable);
     }
@@ -3146,7 +3147,9 @@ impl LuaVM {
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let id = self.object_pool.create_string(s);
         // Get pointer from object pool for direct access
-        let ptr = self.object_pool.get_string(id)
+        let ptr = self
+            .object_pool
+            .get_string(id)
             .map(|s| s as *const LuaString)
             .unwrap_or(std::ptr::null());
         LuaValue::string_id_ptr(id, ptr)
@@ -3165,7 +3168,9 @@ impl LuaVM {
     pub fn create_table(&mut self) -> LuaValue {
         let id = self.object_pool.create_table();
         // Get pointer from object pool for direct access
-        let ptr = self.object_pool.get_table(id)
+        let ptr = self
+            .object_pool
+            .get_table(id)
             .map(|t| t.as_ptr() as *const std::cell::RefCell<LuaTable>)
             .unwrap_or(std::ptr::null());
         LuaValue::table_id_ptr(id, ptr)
@@ -3216,7 +3221,9 @@ impl LuaVM {
     pub fn create_userdata(&mut self, data: crate::lua_value::LuaUserdata) -> LuaValue {
         let id = self.object_pool.create_userdata(data);
         // Get pointer from object pool for direct access
-        let ptr = self.object_pool.get_userdata(id)
+        let ptr = self
+            .object_pool
+            .get_userdata(id)
             .map(|u| u as *const crate::lua_value::LuaUserdata)
             .unwrap_or(std::ptr::null());
         LuaValue::userdata_id_ptr(id, ptr)
@@ -3236,7 +3243,9 @@ impl LuaVM {
         let func = LuaFunction { chunk, upvalues };
         let id = self.object_pool.create_function(func);
         // Get pointer from object pool for direct access
-        let ptr = self.object_pool.get_function(id)
+        let ptr = self
+            .object_pool
+            .get_function(id)
             .map(|f| f.as_ptr() as *const std::cell::RefCell<LuaFunction>)
             .unwrap_or(std::ptr::null());
         LuaValue::function_id_ptr(id, ptr)
@@ -3566,7 +3575,7 @@ impl LuaVM {
                 return Ok(s.as_str().to_string());
             }
         }
-        
+
         if let Some(s) = self.call_tostring_metamethod(value)? {
             if let Some(str) = self.get_string(&s) {
                 Ok(str.as_str().to_string())
