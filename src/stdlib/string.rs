@@ -201,11 +201,11 @@ fn string_sub(vm: &mut LuaVM) -> Result<MultiValue, String> {
         // Fast path: find byte indices for start and end character positions
         let start_idx = (start - 1) as usize;
         let end_idx = end as usize;
-        
+
         let mut byte_start = 0;
         let mut byte_end = s_str.len();
         let mut char_idx = 0;
-        
+
         for (byte_idx, _) in s_str.char_indices() {
             if char_idx == start_idx {
                 byte_start = byte_idx;
@@ -216,7 +216,7 @@ fn string_sub(vm: &mut LuaVM) -> Result<MultiValue, String> {
             }
             char_idx += 1;
         }
-        
+
         &s_str[byte_start..byte_end]
     } else {
         ""
@@ -590,8 +590,13 @@ fn string_find(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Fast path: check if pattern contains special characters
     // If not, use plain search even if plain=false (major optimization)
-    let has_special = pattern.chars().any(|c| matches!(c, '%' | '.' | '[' | ']' | '*' | '+' | '-' | '?' | '^' | '$' | '(' | ')'));
-    
+    let has_special = pattern.chars().any(|c| {
+        matches!(
+            c,
+            '%' | '.' | '[' | ']' | '*' | '+' | '-' | '?' | '^' | '$' | '(' | ')'
+        )
+    });
+
     if plain || !has_special {
         // Plain string search (no pattern matching)
         if start_pos > s_str.len() {

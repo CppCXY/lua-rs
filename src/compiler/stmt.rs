@@ -224,6 +224,59 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         return Ok(());
     }
 
+    // Tail call optimization: if return has a single call expression, use TailCall
+    if exprs.len() == 1 {
+        if let LuaExpr::CallExpr(call_expr) = &exprs[0] {
+            // This is a tail call: return func(...)
+            // Get function being called
+            let func_expr = if let Some(prefix) = call_expr.get_prefix_expr() {
+                prefix
+            } else {
+                return Err("Tail call missing function expression".to_string());
+            };
+
+            // Get arguments first to know how many we have
+            let args = if let Some(args_list) = call_expr.get_args_list() {
+                args_list.get_args().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            // Reserve all registers we'll need (func + args)
+            let num_total = 1 + args.len();
+            let mut reserved_regs = Vec::new();
+            for _ in 0..num_total {
+                reserved_regs.push(alloc_register(c));
+            }
+            let base_reg = reserved_regs[0];
+
+            // Compile function to the first reserved register
+            let func_reg = compile_expr(c, &func_expr)?;
+            if func_reg != base_reg {
+                emit_move(c, base_reg, func_reg);
+            }
+
+            // Compile arguments to consecutive registers after function
+            for (i, arg) in args.iter().enumerate() {
+                let target_reg = reserved_regs[i + 1];
+                let arg_reg = compile_expr(c, &arg)?;
+                if arg_reg != target_reg {
+                    emit_move(c, target_reg, arg_reg);
+                }
+            }
+
+            // Emit TailCall instruction
+            // A = function register, B = num_args + 1
+            let num_args = args.len();
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::TailCall, base_reg, (num_args + 1) as u32, 0),
+            );
+
+            return Ok(());
+        }
+    }
+
     // Allocate consecutive registers for all return values
     let base_reg = alloc_register(c);
     let num_exprs = exprs.len();

@@ -333,6 +333,7 @@ impl LuaVM {
                 OpCode::Test => self.op_test(instr)?,
                 OpCode::TestSet => self.op_testset(instr)?,
                 OpCode::Call => self.op_call(instr)?,
+                OpCode::TailCall => self.op_tailcall(instr)?,
                 OpCode::Return => {
                     let result = self.op_return(instr)?;
                     if self.frames.is_empty() {
@@ -1690,11 +1691,11 @@ impl LuaVM {
 
                 // Fast path for iterators (2-3 arguments)
                 let arg_count = if b == 0 { top - a } else { b };
-                
+
                 // Allocate args directly on register stack to avoid Vec allocation
                 let cfunc_base = self.register_stack.len();
                 self.ensure_stack_capacity(cfunc_base + arg_count);
-                
+
                 // Copy function and arguments directly
                 unsafe {
                     // SAFETY: bounds checked by ensure_stack_capacity
@@ -1790,6 +1791,114 @@ impl LuaVM {
         // Currently disabled as the get_metamethod method needs to be updated for ID-based system
 
         Err("Attempt to call a non-function value".to_string())
+    }
+
+    /// Tail call optimization: reuse current frame instead of creating new one
+    fn op_tailcall(&mut self, instr: u32) -> Result<(), String> {
+        let a = Instruction::get_a(instr) as usize;
+        let b = Instruction::get_b(instr) as usize;
+
+        let frame = self.current_frame();
+        let base_ptr = frame.base_ptr;
+        let func = self.register_stack[base_ptr + a];
+
+        // Only Lua functions can use tail call optimization
+        // C functions execute immediately and return
+        if func.is_function() {
+            if let Some(lua_func_id) = func.as_function_id() {
+                let (max_stack_size, param_count, is_vararg) = {
+                    let func_ref = self
+                        .object_pool
+                        .get_function(lua_func_id)
+                        .ok_or("Missing function")?;
+                    let lua_func = func_ref.borrow();
+                    (
+                        lua_func.chunk.max_stack_size,
+                        lua_func.chunk.param_count,
+                        lua_func.chunk.is_vararg,
+                    )
+                };
+
+                let frame = self.current_frame();
+                let src_base = frame.base_ptr + a; // Function at base_ptr + a
+                let top = frame.top;
+                let current_base = frame.base_ptr;
+                let arg_count = if b == 0 { top - a - 1 } else { b - 1 };
+
+                // Calculate vararg info
+                let vararg_count = if arg_count > param_count {
+                    arg_count - param_count
+                } else {
+                    0
+                };
+                let total_size = max_stack_size + vararg_count;
+
+                // Ensure we have enough space at current_base
+                self.ensure_stack_capacity(current_base + total_size);
+
+                // CRITICAL: Copy arguments to temporary buffer first!
+                // Arguments start at src_base + 1 (after the function)
+                let mut temp_args: Vec<LuaValue> = Vec::with_capacity(arg_count);
+                for i in 0..arg_count {
+                    let src_idx = src_base + 1 + i;
+                    if src_idx < base_ptr + top {
+                        temp_args.push(self.register_stack[src_idx]);
+                    } else {
+                        temp_args.push(LuaValue::nil());
+                    }
+                }
+
+                // Now safely move arguments from temp buffer to current_base
+                // Copy regular parameters (not varargs)
+                let params_to_copy = arg_count.min(param_count);
+                for i in 0..params_to_copy {
+                    self.register_stack[current_base + i] = temp_args[i];
+                }
+
+                // Fill remaining params with nil
+                for i in params_to_copy..param_count {
+                    self.register_stack[current_base + i] = LuaValue::nil();
+                }
+
+                // Handle varargs if function is vararg
+                let vararg_base = if is_vararg && vararg_count > 0 {
+                    let vararg_start = current_base + max_stack_size;
+                    for i in 0..vararg_count {
+                        self.register_stack[vararg_start + i] = temp_args[param_count + i];
+                    }
+                    Some(vararg_start)
+                } else {
+                    None
+                };
+
+                // Update current frame in-place (tail call optimization!)
+                let frame = self.current_frame_mut();
+                frame.function_value = func;
+                frame.cached_function_id = Some(lua_func_id);
+                frame.pc = 0; // Reset PC to start of new function
+                frame.top = max_stack_size;
+
+                // Clear cached pointers - they will be updated in next instruction fetch
+                frame.cached_code_ptr = None;
+                frame.cached_code_len = 0;
+                frame.cached_constants_ptr = None;
+                frame.cached_constants_len = 0;
+
+                if is_vararg && vararg_count > 0 {
+                    frame.vararg_start = vararg_base.unwrap();
+                    frame.vararg_count = vararg_count;
+                } else {
+                    frame.vararg_start = 0;
+                    frame.vararg_count = 0;
+                }
+
+                // No new frame pushed - we reused the current one!
+                return Ok(());
+            }
+        }
+
+        // Fallback to regular call for C functions or non-functions
+        self.op_call(instr)
     }
 
     fn op_return(&mut self, instr: u32) -> Result<LuaValue, String> {

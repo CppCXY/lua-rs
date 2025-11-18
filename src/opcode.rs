@@ -66,8 +66,9 @@ pub enum OpCode {
     TestSet, // if (R(B) <=> C) then R(A) := R(B) else pc++
 
     // Function calls
-    Call,   // R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
-    Return, // return R(A), ... ,R(A+B-2)
+    Call,     // R(A), ... ,R(A+C-2) := R(A)(R(A+1), ... ,R(A+B-1))
+    TailCall, // return R(A)(R(A+1), ... ,R(A+B-1)) - Tail call optimization
+    Return,   // return R(A), ... ,R(A+B-2)
 
     // Upvalues
     GetUpval, // R(A) := UpValue[B]

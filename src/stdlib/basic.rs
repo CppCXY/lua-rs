@@ -228,18 +228,18 @@ fn ipairs_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
     } else {
         return Err("ipairs iterator: table expected".to_string());
     };
-    
+
     let index_val = if let Some(val) = get_arg(vm, 1) {
         val
     } else {
         return Err("ipairs iterator: index expected".to_string());
     };
-    
+
     // Fast type check using bit patterns
     if let Some(table_id) = table_val.as_table_id() {
         if let Some(index) = index_val.as_integer() {
             let next_index = index + 1;
-            
+
             // Direct table access
             if let Some(table_ref) = vm.object_pool.get_table(table_id) {
                 let table = table_ref.borrow();
@@ -255,7 +255,7 @@ fn ipairs_next(vm: &mut LuaVM) -> Result<MultiValue, String> {
             }
         }
     }
-    
+
     // Slow path with proper validation
     Err("ipairs iterator: invalid table or index".to_string())
 }
