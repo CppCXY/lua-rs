@@ -217,7 +217,7 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Extract LuaFile from userdata
     unsafe {
         if let Some(ud) = vm.get_userdata(&file_val) {
-            let data = ud.get_data();
+            let data = ud.borrow().get_data();
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
                 // Get format (default "*l") - register 2 is first argument after self
@@ -274,7 +274,7 @@ fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Extract LuaFile from userdata
     unsafe {
         if let Some(ud) = vm.get_userdata(&file_val) {
-            let data = ud.get_data();
+            let data = ud.borrow().get_data();
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
                 // Write all arguments (starting from register 2)
@@ -330,7 +330,7 @@ fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Extract LuaFile from userdata
     if let Some(ud) = vm.get_userdata(&file_val) {
-        let data = ud.get_data();
+        let data = ud.borrow().get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.flush() {
@@ -352,7 +352,7 @@ fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Extract LuaFile from userdata
     if let Some(ud) = vm.get_userdata(&file_val) {
-        let data = ud.get_data();
+        let data = ud.borrow().get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.close() {
@@ -396,7 +396,7 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     // Read next line
     if let Some(ud) = vm.get_userdata(&file_val) {
-        let data = ud.get_data();
+        let data = ud.borrow().get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             match lua_file.read_line() {
@@ -423,7 +423,7 @@ fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let offset = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(0);
 
     if let Some(ud) = vm.get_userdata(&file_val) {
-        let data = ud.get_data();
+        let data = ud.borrow().get_data();
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             let seek_from = match whence.as_str() {

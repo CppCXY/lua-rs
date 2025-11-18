@@ -2,10 +2,11 @@
 // Unified management for String, Table, and Userdata using ID-based indexing
 // This avoids reference counting and allows proper GC integration
 
-use crate::lua_value::LuaUserdata;
+use crate::lua_value::{self, LuaUserdata};
 use crate::{LuaFunction, LuaString, LuaTable};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Object IDs - u32 is enough for most use cases (4 billion objects)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -62,12 +63,11 @@ impl FunctionId {
 
 /// Object Pool for all heap-allocated Lua objects
 pub struct ObjectPool {
-    // Object storage
-    strings: HashMap<StringId, LuaString>,
-    tables: HashMap<TableId, RefCell<LuaTable>>,
-    userdata: HashMap<UserdataId, LuaUserdata>,
-    // 使用 Rc 保证指针稳定 - HashMap rehash 不会影响 Rc 内部数据
-    functions: HashMap<FunctionId, std::rc::Rc<RefCell<crate::lua_value::LuaFunction>>>,
+    // Object storage - 所有类型都用 Rc 包装以防止 HashMap rehash 导致指针失效
+    strings: HashMap<StringId, Rc<LuaString>>,
+    tables: HashMap<TableId, Rc<RefCell<LuaTable>>>,
+    userdata: HashMap<UserdataId, Rc<RefCell<LuaUserdata>>>,
+    functions: HashMap<FunctionId, Rc<RefCell<lua_value::LuaFunction>>>,
 
     // ID generators
     next_string_id: StringId,
@@ -126,7 +126,7 @@ impl ObjectPool {
             let id = self.next_string_id;
             self.next_string_id = id.next();
 
-            let lua_string = LuaString::new(s.to_string());
+            let lua_string = Rc::new(LuaString::new(s.to_string()));
             self.strings.insert(id, lua_string);
             self.string_intern.insert(hash, id);
 
@@ -136,7 +136,7 @@ impl ObjectPool {
             let id = self.next_string_id;
             self.next_string_id = id.next();
 
-            let lua_string = LuaString::new(s.to_string());
+            let lua_string = Rc::new(LuaString::new(s.to_string()));
             self.strings.insert(id, lua_string);
 
             id
@@ -145,12 +145,12 @@ impl ObjectPool {
 
     /// Get string by ID
     #[inline]
-    pub fn get_string(&self, id: StringId) -> Option<&LuaString> {
+    pub fn get_string(&self, id: StringId) -> Option<&Rc<LuaString>> {
         self.strings.get(&id)
     }
 
     /// Remove string (called by GC)
-    pub fn remove_string(&mut self, id: StringId) -> Option<LuaString> {
+    pub fn remove_string(&mut self, id: StringId) -> Option<Rc<LuaString>> {
         if let Some(string) = self.strings.remove(&id) {
             // Also remove from intern table if present
             if string.as_str().len() <= self.max_intern_length {
@@ -180,19 +180,20 @@ impl ObjectPool {
         let id = self.next_table_id;
         self.next_table_id = id.next();
 
-        self.tables.insert(id, RefCell::new(LuaTable::new()));
+        self.tables
+            .insert(id, Rc::new(RefCell::new(LuaTable::new())));
 
         id
     }
 
     /// Get table by ID
     #[inline]
-    pub fn get_table(&self, id: TableId) -> Option<&RefCell<LuaTable>> {
+    pub fn get_table(&self, id: TableId) -> Option<&Rc<RefCell<LuaTable>>> {
         self.tables.get(&id)
     }
 
     /// Remove table (called by GC)
-    pub fn remove_table(&mut self, id: TableId) -> Option<RefCell<LuaTable>> {
+    pub fn remove_table(&mut self, id: TableId) -> Option<Rc<RefCell<LuaTable>>> {
         self.tables.remove(&id)
     }
 
@@ -203,25 +204,25 @@ impl ObjectPool {
         let id = self.next_userdata_id;
         self.next_userdata_id = id.next();
 
-        self.userdata.insert(id, data);
+        self.userdata.insert(id, Rc::new(RefCell::new(data)));
 
         id
     }
 
     /// Get userdata by ID
     #[inline]
-    pub fn get_userdata(&self, id: UserdataId) -> Option<&LuaUserdata> {
+    pub fn get_userdata(&self, id: UserdataId) -> Option<&Rc<RefCell<LuaUserdata>>> {
         self.userdata.get(&id)
     }
 
-    /// Get mutable userdata by ID
+    /// Get mutable userdata by ID (actually returns &Rc<RefCell<>> - mutate via borrow_mut)
     #[inline]
-    pub fn get_userdata_mut(&mut self, id: UserdataId) -> Option<&mut LuaUserdata> {
-        self.userdata.get_mut(&id)
+    pub fn get_userdata_mut(&mut self, id: UserdataId) -> Option<&Rc<RefCell<LuaUserdata>>> {
+        self.userdata.get(&id)
     }
 
     /// Remove userdata (called by GC)
-    pub fn remove_userdata(&mut self, id: UserdataId) -> Option<LuaUserdata> {
+    pub fn remove_userdata(&mut self, id: UserdataId) -> Option<Rc<RefCell<LuaUserdata>>> {
         self.userdata.remove(&id)
     }
 

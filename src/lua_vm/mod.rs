@@ -2577,7 +2577,7 @@ impl LuaVM {
 
         let userdata = self.object_pool.get_userdata(userdata_id)?;
         // Check for __index metamethod
-        let metatable = userdata.get_metatable();
+        let metatable = userdata.borrow().get_metatable();
 
         if let Some(mt_id) = metatable.as_table_id() {
             let index_key = self.create_string("__index");
@@ -3218,7 +3218,7 @@ impl LuaVM {
         let ptr = self
             .object_pool
             .get_string(id)
-            .map(|s| s as *const LuaString)
+            .map(|s| Rc::as_ptr(s) as *const LuaString)
             .unwrap_or(std::ptr::null());
         LuaValue::string_id_ptr(id, ptr)
     }
@@ -3226,7 +3226,7 @@ impl LuaVM {
     /// Get string by LuaValue (resolves ID from object pool)
     pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
         if let Some(id) = value.as_string_id() {
-            self.object_pool.get_string(id)
+            self.object_pool.get_string(id).map(|rc| &**rc)
         } else {
             None
         }
@@ -3239,7 +3239,7 @@ impl LuaVM {
         let ptr = self
             .object_pool
             .get_table(id)
-            .map(|t| t.as_ptr() as *const std::cell::RefCell<LuaTable>)
+            .map(|t| Rc::as_ptr(t) as *const std::cell::RefCell<LuaTable>)
             .unwrap_or(std::ptr::null());
         LuaValue::table_id_ptr(id, ptr)
     }
@@ -3247,7 +3247,7 @@ impl LuaVM {
     /// Get table by LuaValue (resolves ID from object pool)
     pub fn get_table(&self, value: &LuaValue) -> Option<&std::cell::RefCell<LuaTable>> {
         if let Some(id) = value.as_table_id() {
-            self.object_pool.get_table(id)
+            self.object_pool.get_table(id).map(|rc| &**rc)
         } else {
             None
         }
@@ -3292,15 +3292,18 @@ impl LuaVM {
         let ptr = self
             .object_pool
             .get_userdata(id)
-            .map(|u| u as *const crate::lua_value::LuaUserdata)
+            .map(|u| Rc::as_ptr(u) as *const std::cell::RefCell<crate::lua_value::LuaUserdata>)
             .unwrap_or(std::ptr::null());
         LuaValue::userdata_id_ptr(id, ptr)
     }
 
     /// Get userdata by LuaValue (resolves ID from object pool)
-    pub fn get_userdata(&self, value: &LuaValue) -> Option<&crate::lua_value::LuaUserdata> {
+    pub fn get_userdata(
+        &self,
+        value: &LuaValue,
+    ) -> Option<&std::cell::RefCell<crate::lua_value::LuaUserdata>> {
         if let Some(id) = value.as_userdata_id() {
-            self.object_pool.get_userdata(id)
+            self.object_pool.get_userdata(id).map(|rc| &**rc)
         } else {
             None
         }

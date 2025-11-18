@@ -174,7 +174,10 @@ impl LuaValue {
 
     /// Create userdata from ID + pointer
     #[inline(always)]
-    pub fn userdata_id_ptr(id: UserdataId, ptr: *const crate::lua_value::LuaUserdata) -> Self {
+    pub fn userdata_id_ptr(
+        id: UserdataId,
+        ptr: *const std::cell::RefCell<crate::lua_value::LuaUserdata>,
+    ) -> Self {
         LuaValue {
             primary: TAG_USERDATA | (id.0 as u64),
             secondary: ptr as u64,
