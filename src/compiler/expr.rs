@@ -198,8 +198,61 @@ fn compile_binary_expr_to(
     let op = expr.get_op_token().ok_or("error")?;
     let op_kind = op.get_op();
 
-    // CONSTANT FOLDING: Check if both operands are numeric constants
-    // This matches luac behavior: 1+1 -> 2, 2+3 -> 5, etc.
+    // CONSTANT FOLDING: Check if both operands are numeric constants (including nested expressions)
+    // This matches luac behavior: 1+1 -> 2, 1+2*3 -> 7, etc.
+    // Use try_eval_const_int to recursively evaluate constant expressions
+    if matches!(op_kind, BinaryOperator::OpAdd | BinaryOperator::OpSub | BinaryOperator::OpMul | 
+                BinaryOperator::OpDiv | BinaryOperator::OpIDiv | BinaryOperator::OpMod | 
+                BinaryOperator::OpPow | BinaryOperator::OpBAnd | BinaryOperator::OpBOr | 
+                BinaryOperator::OpBXor | BinaryOperator::OpShl | BinaryOperator::OpShr) {
+        if let (Some(left_int), Some(right_int)) = (try_eval_const_int(&left), try_eval_const_int(&right)) {
+            let left_val = left_int as f64;
+            let right_val = right_int as f64;
+            
+            let result_opt: Option<f64> = match op_kind {
+                BinaryOperator::OpAdd => Some(left_val + right_val),
+                BinaryOperator::OpSub => Some(left_val - right_val),
+                BinaryOperator::OpMul => Some(left_val * right_val),
+                BinaryOperator::OpDiv => Some(left_val / right_val),
+                BinaryOperator::OpIDiv => Some((left_val / right_val).floor()),
+                BinaryOperator::OpMod => Some(left_val % right_val),
+                BinaryOperator::OpPow => Some(left_val.powf(right_val)),
+                BinaryOperator::OpBAnd => Some((left_int & right_int) as f64),
+                BinaryOperator::OpBOr => Some((left_int | right_int) as f64),
+                BinaryOperator::OpBXor => Some((left_int ^ right_int) as f64),
+                BinaryOperator::OpShl => Some((left_int << (right_int & 0x3f)) as f64),
+                BinaryOperator::OpShr => Some((left_int >> (right_int & 0x3f)) as f64),
+                _ => None,
+            };
+            
+            if let Some(result) = result_opt {
+                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                
+                // Emit the folded constant as LOADI or LOADF
+                let result_int = result as i64;
+                if result == result_int as f64 {
+                    // Integer result - try LOADI first
+                    if emit_loadi(c, result_reg, result_int).is_none() {
+                        // Too large for LOADI, use LOADK
+                        let lua_val = LuaValue::integer(result_int);
+                        let const_idx = add_constant(c, lua_val);
+                        emit(c, Instruction::encode_abx(OpCode::LoadK, result_reg, const_idx as u32));
+                    }
+                } else {
+                    // Float result - try LOADF first, then LOADK
+                    if emit_loadf(c, result_reg, result).is_none() {
+                        let lua_val = LuaValue::number(result);
+                        let const_idx = add_constant(c, lua_val);
+                        emit(c, Instruction::encode_abx(OpCode::LoadK, result_reg, const_idx as u32));
+                    }
+                }
+                return Ok(result_reg);
+            }
+        }
+    }
+
+    // OLD CONSTANT FOLDING (literal-only, kept for compatibility)
+    // This is now redundant but kept as fallback
     if let (LuaExpr::LiteralExpr(left_lit), LuaExpr::LiteralExpr(right_lit)) = (&left, &right) {
         if let (Some(LuaLiteralToken::Number(left_num)), Some(LuaLiteralToken::Number(right_num))) = 
             (left_lit.get_literal(), right_lit.get_literal()) {
@@ -500,21 +553,31 @@ pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, St
     compile_call_expr_with_returns(c, expr, 0)
 }
 
-fn compile_call_expr_to(
-    c: &mut Compiler,
-    expr: &LuaCallExpr,
-    _dest: Option<u32>,
-) -> Result<u32, String> {
-    // Note: Call results are always placed in consecutive registers starting from function register
-    // Cannot honor dest for calls, use compile_call_expr_with_returns instead
-    compile_call_expr_with_returns(c, expr, 1)
-}
-
-/// Compile a call expression with specified number of expected return values
+/// Compile a call expression with specified number of expected return values (public API)
 pub fn compile_call_expr_with_returns(
     c: &mut Compiler,
     expr: &LuaCallExpr,
     num_returns: usize,
+) -> Result<u32, String> {
+    compile_call_expr_with_returns_and_dest(c, expr, num_returns, None)
+}
+
+fn compile_call_expr_to(
+    c: &mut Compiler,
+    expr: &LuaCallExpr,
+    dest: Option<u32>,
+) -> Result<u32, String> {
+    // If dest is specified and this is a simple call (not "all out" mode),
+    // we can use dest as the function register to avoid extra Move instructions
+    compile_call_expr_with_returns_and_dest(c, expr, 1, dest)
+}
+
+/// Compile a call expression with specified number of expected return values and optional dest
+fn compile_call_expr_with_returns_and_dest(
+    c: &mut Compiler,
+    expr: &LuaCallExpr,
+    num_returns: usize,
+    dest: Option<u32>,
 ) -> Result<u32, String> {
     use emmylua_parser::{LuaExpr, LuaIndexKey};
     
@@ -542,8 +605,12 @@ pub fn compile_call_expr_with_returns(
             // Method call: obj:method(args) → SELF instruction
             // SELF A B C: R(A+1) = R(B); R(A) = R(B)[C]
             // A = function register, A+1 = self parameter
-            let func_reg = alloc_register(c);
-            alloc_register(c); // Reserve A+1 for self
+            let func_reg = dest.unwrap_or_else(|| alloc_register(c));
+            
+            // Ensure func_reg+1 is allocated for self parameter
+            while c.next_register <= func_reg + 1 {
+                alloc_register(c);
+            }
             
             // Compile object (table)
             let obj_expr = index_expr.get_prefix_expr()
@@ -579,6 +646,7 @@ pub fn compile_call_expr_with_returns(
         }
     } else {
         // Regular call: compile function expression
+        // For now, don't try to optimize with dest - let compile_expr handle it naturally
         compile_expr(c, &prefix_expr)?
     };
     
