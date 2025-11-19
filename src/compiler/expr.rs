@@ -386,6 +386,8 @@ pub fn compile_call_expr_with_returns(
     expr: &LuaCallExpr,
     num_returns: usize,
 ) -> Result<u32, String> {
+    use emmylua_parser::{LuaExpr, LuaIndexKey};
+    
     // Get prefix (function) and arguments from children
     let prefix_expr = expr.get_prefix_expr().ok_or("missing prefix expr")?;
     let arg_exprs = expr
@@ -394,15 +396,70 @@ pub fn compile_call_expr_with_returns(
         .get_args()
         .collect::<Vec<_>>();
 
-    // TODO: Handle method call (colon syntax: obj:method(args)) properly with Self instruction
-    // For now we just compile as regular call
+    // Check if this is a method call (obj:method syntax)
+    let is_method = if let LuaExpr::IndexExpr(index_expr) = &prefix_expr {
+        index_expr
+            .get_index_token()
+            .map(|t| t.is_colon())
+            .unwrap_or(false)
+    } else {
+        false
+    };
     
-    // Lua 5.4 strategy: Compile function into next available register,
-    // then compile arguments into consecutive registers immediately after
-    let func_reg = compile_expr(c, &prefix_expr)?;
+    // Handle method call with SELF instruction
+    let func_reg = if is_method {
+        if let LuaExpr::IndexExpr(index_expr) = &prefix_expr {
+            // Method call: obj:method(args) → SELF instruction
+            // SELF A B C: R(A+1) = R(B); R(A) = R(B)[C]
+            // A = function register, A+1 = self parameter
+            let func_reg = alloc_register(c);
+            alloc_register(c); // Reserve A+1 for self
+            
+            // Compile object (table)
+            let obj_expr = index_expr.get_prefix_expr()
+                .ok_or("Method call missing object")?;
+            let obj_reg = compile_expr(c, &obj_expr)?;
+            
+            // Get method name
+            let method_name = if let Some(LuaIndexKey::Name(name_token)) = index_expr.get_index_key() {
+                name_token.get_name_text().to_string()
+            } else {
+                return Err("Method call requires name index".to_string());
+            };
+            
+            // Add method name to constants
+            let lua_str = create_string_value(c, &method_name);
+            let key_idx = add_constant_dedup(c, lua_str);
+            
+            // Emit SELF instruction: R(func_reg+1) = R(obj_reg); R(func_reg) = R(obj_reg)[key]
+            emit(
+                c,
+                Instruction::create_abck(
+                    OpCode::Self_,
+                    func_reg,
+                    obj_reg,
+                    key_idx,
+                    true,  // k=1: C is constant index
+                ),
+            );
+            
+            func_reg
+        } else {
+            unreachable!("is_method but not IndexExpr")
+        }
+    } else {
+        // Regular call: compile function expression
+        compile_expr(c, &prefix_expr)?
+    };
     
-    // Compile arguments into consecutive registers starting at func_reg + 1
-    let args_start = func_reg + 1;
+    // Compile arguments into consecutive registers
+    // For method calls: func_reg+1 is self, args start at func_reg+2
+    // For regular calls: args start at func_reg+1
+    let args_start = if is_method {
+        func_reg + 2
+    } else {
+        func_reg + 1
+    };
     let mut arg_regs = Vec::new();
     let mut last_arg_is_call_all_out = false;
     
@@ -410,13 +467,63 @@ pub fn compile_call_expr_with_returns(
         let is_last = i == arg_exprs.len() - 1;
         
         // OPTIMIZATION: If last argument is a call, use "all out" mode
+        // Use recursive compile_call_expr_with_returns to support method calls (SELF instruction)
         if is_last && matches!(arg_expr, LuaExpr::CallExpr(_)) {
             if let LuaExpr::CallExpr(call_expr) = arg_expr {
-                let call_prefix = call_expr.get_prefix_expr().ok_or("missing call prefix")?;
-                let call_reg = compile_expr(c, &call_prefix)?;
+                // Compile inner call with "all out" mode (num_returns = 0 means variable returns)
+                // Note: We need to handle this specially for method calls
+                let inner_prefix = call_expr.get_prefix_expr().ok_or("missing call prefix")?;
+                
+                // Check if inner call is a method call
+                let inner_is_method = if let LuaExpr::IndexExpr(index_expr) = &inner_prefix {
+                    index_expr
+                        .get_index_token()
+                        .map(|t| t.is_colon())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                
+                // Handle method call with SELF instruction
+                let call_reg = if inner_is_method {
+                    if let LuaExpr::IndexExpr(index_expr) = &inner_prefix {
+                        let func_reg = alloc_register(c);
+                        alloc_register(c); // Reserve A+1 for self
+                        
+                        let obj_expr = index_expr.get_prefix_expr()
+                            .ok_or("Method call missing object")?;
+                        let obj_reg = compile_expr(c, &obj_expr)?;
+                        
+                        let method_name = if let Some(LuaIndexKey::Name(name_token)) = index_expr.get_index_key() {
+                            name_token.get_name_text().to_string()
+                        } else {
+                            return Err("Method call requires name index".to_string());
+                        };
+                        
+                        let lua_str = create_string_value(c, &method_name);
+                        let key_idx = add_constant_dedup(c, lua_str);
+                        
+                        emit(
+                            c,
+                            Instruction::create_abck(
+                                OpCode::Self_,
+                                func_reg,
+                                obj_reg,
+                                key_idx,
+                                true,
+                            ),
+                        );
+                        
+                        func_reg
+                    } else {
+                        unreachable!("inner_is_method but not IndexExpr")
+                    }
+                } else {
+                    compile_expr(c, &inner_prefix)?
+                };
                 
                 // Compile call arguments
-                let call_args_start = call_reg + 1;
+                let call_args_start = if inner_is_method { call_reg + 2 } else { call_reg + 1 };
                 let call_arg_exprs = call_expr
                     .get_args_list()
                     .ok_or("missing args list")?
@@ -441,12 +548,18 @@ pub fn compile_call_expr_with_returns(
                 }
                 
                 // Emit call with "all out" (C=0)
+                let inner_arg_count = call_arg_exprs.len();
+                let inner_b_param = if inner_is_method {
+                    (inner_arg_count + 2) as u32  // +1 for self, +1 for Lua convention
+                } else {
+                    (inner_arg_count + 1) as u32
+                };
                 emit(
                     c,
                     Instruction::encode_abc(
                         OpCode::Call,
                         call_reg,
-                        (call_arg_exprs.len() + 1) as u32,
+                        inner_b_param,
                         0  // C=0: all out
                     ),
                 );
@@ -491,12 +604,15 @@ pub fn compile_call_expr_with_returns(
     // Emit call instruction
     // A = function register
     // B = number of arguments + 1, or 0 if last arg was "all out" call
+    //     For method calls, B includes the implicit self parameter
     // C = number of expected return values + 1 (1 means 0 returns, 2 means 1 return, 0 means all returns)
     let arg_count = arg_exprs.len();
     let b_param = if last_arg_is_call_all_out {
         0  // B=0: all in
     } else {
-        (arg_count + 1) as u32
+        // For method calls, add 1 for implicit self parameter
+        let total_args = if is_method { arg_count + 1 } else { arg_count };
+        (total_args + 1) as u32
     };
     let c_param = (num_returns + 1) as u32;
     
@@ -626,191 +742,162 @@ fn compile_table_expr_to(
 ) -> Result<u32, String> {
     let reg = dest.unwrap_or_else(|| alloc_register(c));
 
-    // Get all fields to detect special cases
+    // Get all fields
     let fields: Vec<_> = expr.get_fields().collect();
 
-    // Check if the table is just {...} (single vararg field)
-    if fields.len() == 1 && fields[0].is_value_field() {
-        if let Some(value_expr) = fields[0].get_value_expr() {
-            let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
-                if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
-
-            if is_dots {
-                // Special case: {...} - table with only varargs
-                // Create empty table at reg
-                emit(c, Instruction::encode_abc(OpCode::NewTable, reg, 0, 0));
-
-                // Load varargs starting at reg+1
-                // VarArg with B=0 will load all varargs into consecutive registers
-                let vararg_start = reg + 1;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Vararg, vararg_start, 0, 0),
-                );
-
-                // SetList: table at reg, values from reg+1, starting at index 0
-                emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, 0));
-
-                // Important: VarArg with B=0 loads unknown number of values
-                // We don't update next_register here because we don't know how many
-                // The VM will handle this at runtime
-
-                return Ok(reg);
+    // Separate array part from hash part to count sizes
+    let mut array_count = 0;
+    let mut hash_count = 0;
+    
+    for (i, field) in fields.iter().enumerate() {
+        if field.is_value_field() {
+            // Check if it's a simple value (not ... or call as last element)
+            if let Some(value_expr) = field.get_value_expr() {
+                let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
+                    if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
+                let is_call = matches!(&value_expr, LuaExpr::CallExpr(_));
+                let is_last = i == fields.len() - 1;
+                
+                // Stop counting if we hit ... or call as last element
+                if is_last && (is_dots || is_call) {
+                    break;
+                }
+            }
+            array_count += 1;
+        } else {
+            // Hash field
+            hash_count += 1;
+        }
+    }
+    
+    // Helper function to encode table size (Lua's int2fb encoding)
+    fn int2fb(x: usize) -> u32 {
+        if x < 8 {
+            x as u32
+        } else {
+            let mut e = 0;
+            let mut x = x - 1;
+            while x >= 16 {
+                x = (x + 1) >> 1;
+                e += 1;
+            }
+            if x < 8 {
+                ((e + 1) << 3 | x) as u32
+            } else {
+                ((e + 2) << 3 | (x - 8)) as u32
             }
         }
     }
+    
+    // Create table with size hints
+    // NEWTABLE A B C: B = hash size (encoded), C = array size (encoded)
+    let b_param = int2fb(hash_count);
+    let c_param = int2fb(array_count);
+    emit(c, Instruction::encode_abc(OpCode::NewTable, reg, b_param, c_param));
+    
+    // EXTRAARG instruction (always 0 for now, used for extended parameters)
+    emit(c, Instruction::create_ax(OpCode::ExtraArg, 0));
 
-    // General case: table with mixed fields
-    // Create empty table
-    emit(c, Instruction::encode_abc(OpCode::NewTable, reg, 0, 0));
+    if fields.is_empty() {
+        return Ok(reg);
+    }
 
-    // Track array index for list-style entries
-    let mut array_index = 1i64;
+    // Array part: consecutive value-only fields from the start
+    let array_end = array_count;
 
-    let field_count = fields.len();
+    // Process array part with SETLIST optimization
+    if array_end > 0 {
+        const BATCH_SIZE: usize = 50; // Lua uses LFIELDS_PER_FLUSH = 50
+        let mut batch_start = 0;
+        
+        while batch_start < array_end {
+            let batch_end = (batch_start + BATCH_SIZE).min(array_end);
+            let batch_count = batch_end - batch_start;
+            
+            // Compile all values in this batch to consecutive registers
+            let values_start = reg + 1;
+            
+            for (i, field) in fields[batch_start..batch_end].iter().enumerate() {
+                let target_reg = values_start + i as u32;
+                
+                // Ensure we have enough registers allocated
+                while c.next_register <= target_reg {
+                    alloc_register(c);
+                }
+                
+                if let Some(value_expr) = field.get_value_expr() {
+                    let value_reg = compile_expr_to(c, &value_expr, Some(target_reg))?;
+                    if value_reg != target_reg {
+                        emit_move(c, target_reg, value_reg);
+                    }
+                } else {
+                    emit_load_nil(c, target_reg);
+                }
+            }
+            
+            // Emit SETLIST to set table[batch_start+1..batch_end] = R(reg+1)..R(reg+batch_count)
+            // SETLIST A B C: for i=1,B do table[C*50+i] = R(A+i) end
+            // A = table register
+            // B = number of elements (0 means "up to top of stack")
+            // C = batch number (0 for first 50, 1 for next 50, etc.)
+            let c_param = (batch_start / BATCH_SIZE) as u32;
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::SetList, reg, batch_count as u32, c_param),
+            );
+            
+            // Free temporary registers used for array values
+            // After SETLIST, the values have been copied into the table,
+            // so we can reuse these registers. Reset to reg+1 to match luac behavior.
+            c.next_register = reg + 1;
+            
+            batch_start = batch_end;
+        }
+    }
 
-    // Compile table fields
-    for (field_idx, field) in fields.iter().enumerate() {
-        let is_last_field = field_idx == field_count - 1;
+    // Process remaining fields (hash part or special cases)
+    for (field_idx, field) in fields.iter().enumerate().skip(array_end) {
+        let is_last_field = field_idx == fields.len() - 1;
 
         if field.is_value_field() {
-            // Value only format: { 10, 20, 30 } - array part
+            // This must be ... or call as last element
             if let Some(value_expr) = field.get_value_expr() {
-                // Check if this is the last field and it's ... or a function call
                 let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
                     if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
                 let is_call = matches!(&value_expr, LuaExpr::CallExpr(_));
 
-                if is_last_field && (is_dots || is_call) {
-                    // Special handling for ... or function call as last element
-                    // These should expand to multiple values
-
-                    if is_dots {
-                        // VarArg expansion in table constructor
-                        // Strategy: Load all varargs to consecutive registers, then use SetList
-
-                        // First, allocate a register for the first vararg
-                        let vararg_base_reg = alloc_register(c);
-
-                        // VarArg with B=0: load ALL varargs starting at vararg_base_reg
-                        emit(
-                            c,
-                            Instruction::encode_abc(OpCode::Vararg, vararg_base_reg, 0, 0),
-                        );
-
-                        // Now use SetList to set these values in the table
-                        // SetList parameters:
-                        // A = table register (reg)
-                        // B = 0 (means use all registers from A+1 to frame top)
-                        // C = starting table index - 1 (0-based)
-
-                        // But wait - SetList expects values starting at R(A+1)
-                        // We need values at R(reg+1), but we loaded them at vararg_base_reg
-
-                        // We need to either:
-                        // 1. Load varargs starting at reg+1
-                        // 2. Or modify SetList to take a different source register
-
-                        // Let's use approach 1: make sure varargs are loaded right after the table
-                        // But the table is at `reg`, so we need varargs at reg+1
-
-                        // Actually, the issue is that we already allocated registers for array elements
-                        // Let's rethink: for {a, b, c, ...}, we process a, b, c first,
-                        // then hit ..., and need to append remaining varargs
-
-                        // The varargs should start at array_index
-                        // We load them starting at vararg_base_reg
-                        // Then SetList sets table[C+1], table[C+2], ... from these registers
-
-                        // Let me check SetList semantics again:
-                        // table[c + i] = R(a + i) for i = 1..count
-                        // So if a = table register, we need values at a+1, a+2, ...
-
-                        // This means varargs must be loaded at reg+1, reg+2, ...
-                        // Let's free any registers we allocated and restart
-
-                        // Actually simpler: Load varargs where they need to be
-                        // The first vararg goes to table index `array_index`
-                        // But SetList sets table[C+i] from R(A+i)
-                        // If A = reg (table), and we want to set table[array_index],
-                        // then C = array_index - 1, and values start at R(reg + 1)
-
-                        // So vararg_base_reg should be reg + 1
-                        // But that might conflict with other allocated registers...
-
-                        // Let me check if we can use current next_register
-                        let values_start_reg = c.next_register;
-                        emit(
-                            c,
-                            Instruction::encode_abc(OpCode::Vararg, values_start_reg, 0, 0),
-                        );
-
-                        // Now SetList: table at reg, values from values_start_reg
-                        // But SetList expects values at R(A+1), where A is the table
-                        // So we need A = values_start_reg - 1
-                        // Wait, that's backward...
-
-                        // Let me re-read SetList more carefully:
-                        // "table[c + i] = R(a + i) for i = 1..count"
-                        // This means we're setting table with keys c+1, c+2, ...
-                        // from registers a+1, a+2, ...
-
-                        // So if table is at register `reg`, and values are at `values_start_reg`,
-                        // we can't use standard SetList unless values_start_reg = reg + 1
-
-                        // Conclusion: I need to modify SetList to take source register parameter
-                        // Or: ensure varargs are loaded at reg+1
-
-                        // For now, let's ensure varargs load at reg+1 by carefully managing registers
-                        // Actually this is getting complex. Let me simplify the SetList instruction.
-
-                        // Skip for now and mark as TODO
-                        continue;
-                    } else if is_call {
-                        // Function call as last element - it can return multiple values
-                        // We need to call it with MULTRET and add all returns to the table
-
-                        // Similar issue: we need runtime support for this
-                        // For now, we'll just take the first return value
+                if is_last_field && is_dots {
+                    // VarArg expansion: {...} or {a, b, ...}
+                    let vararg_start = reg + 1;
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::Vararg, vararg_start, 0, 0),
+                    );
+                    
+                    // SetList with B=0 (all remaining values), C=array_end/50
+                    let c_param = (array_end / 50) as u32;
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetList, reg, 0, c_param),
+                    );
+                } else if is_last_field && is_call {
+                    // Call as last element: returns multiple values
+                    if let LuaExpr::CallExpr(_call_expr) = &value_expr {
+                        // Compile call to return all values starting at reg+1
+                        // For now, use simplified approach
                         let value_reg = compile_expr(c, &value_expr)?;
-
+                        
+                        // Single value case - fall back to SetTable
+                        let array_index = (array_end + 1) as i64;
                         let key_const = add_constant(c, LuaValue::integer(array_index));
                         let key_reg = alloc_register(c);
                         emit_load_constant(c, key_reg, key_const);
-
                         emit(
                             c,
                             Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
                         );
-                        array_index += 1;
                     }
-                } else {
-                    // Normal value
-                    let value_reg = compile_expr(c, &value_expr)?;
-
-                    let key_const = add_constant(c, LuaValue::integer(array_index));
-                    let key_reg = alloc_register(c);
-                    emit_load_constant(c, key_reg, key_const);
-
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
-                    );
-                    array_index += 1;
                 }
-            } else {
-                let value_reg = alloc_register(c);
-                emit_load_nil(c, value_reg);
-
-                let key_const = add_constant(c, LuaValue::integer(array_index));
-                let key_reg = alloc_register(c);
-                emit_load_constant(c, key_reg, key_const);
-
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
-                );
-                array_index += 1;
             }
         } else {
             let Some(field_key) = field.get_field_key() else {
