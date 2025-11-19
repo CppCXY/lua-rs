@@ -7,17 +7,32 @@ use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
-    BinaryOperator, LuaAssignStat, LuaBinaryExpr, LuaCallExprStat, LuaDoStat, LuaExpr,
+    BinaryOperator, LuaAssignStat, LuaBinaryExpr, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr,
     LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLiteralExpr,
     LuaLiteralToken, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
 };
 
+/// Check if a block contains only a single unconditional jump statement (break/return only)
+/// Note: goto is NOT optimized by luac, so we don't include it here
+fn is_single_jump_block(block: &LuaBlock) -> bool {
+    let stats: Vec<_> = block.get_stats().collect();
+    if stats.len() != 1 {
+        return false;
+    }
+    matches!(
+        stats[0],
+        LuaStat::BreakStat(_) | LuaStat::ReturnStat(_)
+    )
+}
+
 /// Try to compile binary expression as immediate comparison for control flow
 /// Returns Some(register) if successful (comparison instruction emitted)
-/// The emitted instruction skips next instruction if comparison is FALSE
+/// The emitted instruction skips next instruction if comparison result matches `invert`
+/// invert=false: skip if FALSE (normal if-then), invert=true: skip if TRUE (optimized break/goto/return)
 fn try_compile_immediate_comparison(
     c: &mut Compiler,
     expr: &LuaExpr,
+    invert: bool,
 ) -> Result<Option<u32>, String> {
     // Only handle binary comparison expressions
     if let LuaExpr::BinaryExpr(bin_expr) = expr {
@@ -42,27 +57,31 @@ fn try_compile_immediate_comparison(
                             int_val as u32
                         };
 
-                        // Emit immediate comparison (skips next if TRUE to fall through to body)
-                        // C=0 means: if (result != 0) i.e. (result == true) then skip next (the Jmp)
+                        // Emit immediate comparison
+                        // C parameter controls skip behavior:
+                        //   C=0: skip next if FALSE (normal if-then: true executes then-block)
+                        //   C=1: skip next if TRUE (inverted: true skips the jump, false executes jump)
+                        let c_param = if invert { 1 } else { 0 };
+                        
                         match op_kind {
                             BinaryOperator::OpLt => {
-                                emit(c, Instruction::encode_abc(OpCode::LtI, left_reg, imm, 0));
+                                emit(c, Instruction::encode_abc(OpCode::LtI, left_reg, imm, c_param));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpLe => {
-                                emit(c, Instruction::encode_abc(OpCode::LeI, left_reg, imm, 0));
+                                emit(c, Instruction::encode_abc(OpCode::LeI, left_reg, imm, c_param));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpGt => {
-                                emit(c, Instruction::encode_abc(OpCode::GtI, left_reg, imm, 0));
+                                emit(c, Instruction::encode_abc(OpCode::GtI, left_reg, imm, c_param));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpGe => {
-                                emit(c, Instruction::encode_abc(OpCode::GeI, left_reg, imm, 0));
+                                emit(c, Instruction::encode_abc(OpCode::GeI, left_reg, imm, c_param));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpEq => {
-                                emit(c, Instruction::encode_abc(OpCode::EqI, left_reg, imm, 0));
+                                emit(c, Instruction::encode_abc(OpCode::EqI, left_reg, imm, c_param));
                                 return Ok(Some(left_reg));
                             }
                             _ => {}
@@ -277,6 +296,10 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
     // Standard path: compile expressions
     let mut val_regs = Vec::new();
 
+    // For multiple assignments, we need to use temporary registers
+    // to avoid overwriting values that are still needed
+    let use_temp_regs = vars.len() > 1;
+
     for (i, expr) in exprs.iter().enumerate() {
         let is_last = i == exprs.len() - 1;
 
@@ -295,8 +318,15 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             }
         }
 
-        // Regular expression - compile to register
-        let reg = compile_expr(c, expr)?;
+        // For multiple assignments, compile to temporary registers
+        let reg = if use_temp_regs {
+            let temp_reg = alloc_register(c);
+            compile_expr_to(c, expr, Some(temp_reg))?;
+            temp_reg
+        } else {
+            // Single assignment - can compile directly
+            compile_expr(c, expr)?
+        };
         val_regs.push(reg);
     }
 
@@ -310,6 +340,27 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
     // Compile assignments
     for (i, var) in vars.iter().enumerate() {
         compile_var_expr(c, var, val_regs[i])?;
+    }
+
+    // Free temporary registers if used
+    if use_temp_regs && !val_regs.is_empty() {
+        // Find the minimum register that was a local variable
+        let mut min_local_reg = c.next_register;
+        for var in vars.iter() {
+            if let LuaVarExpr::NameExpr(name_expr) = var {
+                let name = name_expr.get_name_text().unwrap_or("".to_string());
+                if let Some(local) = resolve_local(c, &name) {
+                    min_local_reg = min_local_reg.min(local.register);
+                }
+            }
+        }
+        // Reset to the first temporary register we allocated
+        if !val_regs.is_empty() {
+            let first_temp = *val_regs.first().unwrap();
+            if first_temp >= min_local_reg {
+                c.next_register = first_temp;
+            }
+        }
     }
 
     Ok(())
@@ -425,35 +476,105 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
     // Structure: if <condition> then <block> [elseif <condition> then <block>]* [else <block>] end
     let mut end_jumps = Vec::new();
 
+    // Check if there are elseif or else clauses
+    let elseif_clauses = stat.get_else_if_clause_list().collect::<Vec<_>>();
+    let has_else = stat.get_else_clause().is_some();
+    let has_branches = !elseif_clauses.is_empty() || has_else;
+
     // Main if clause
     if let Some(cond) = stat.get_condition_expr() {
-        let cond_reg = compile_expr(c, &cond)?;
+        // Check if then-block contains only a single jump (break/goto/return)
+        // If so, invert comparison to optimize away the jump instruction
+        let then_body = stat.get_block();
+        let invert = then_body.as_ref().map_or(false, |b| is_single_jump_block(b));
+        
+        // Try immediate comparison optimization (like GTI, LEI, etc.)
+        let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, invert)? {
+            // Immediate comparison emitted
+            if invert {
+                // Inverted mode: comparison skips jump if TRUE, executes jump if FALSE
+                // The jump directly replaces the single jump statement (break/goto/return)
+                // So we emit the jump and compile the single statement manually
+                let jump_pos = emit_jump(c, OpCode::Jmp);
+                
+                // Extract and handle the single jump statement
+                if let Some(body) = then_body {
+                    let stats: Vec<_> = body.get_stats().collect();
+                    if stats.len() == 1 {
+                        match &stats[0] {
+                            LuaStat::BreakStat(_) => {
+                                // Register this as a break jump
+                                c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
+                            }
+                            LuaStat::ReturnStat(ret_stat) => {
+                                // Compile return normally
+                                compile_return_stat(c, ret_stat)?;
+                            }
+                            _ => unreachable!("is_single_jump_block should only return true for break/return")
+                        }
+                    }
+                }
+                
+                // No elseif/else for inverted single-jump blocks
+                return Ok(());
+            } else {
+                // Normal mode: skip next instruction if FALSE
+                emit_jump(c, OpCode::Jmp)
+            }
+        } else {
+            // Standard path: compile expression + Test
+            let cond_reg = compile_expr(c, &cond)?;
+            let test_c = if invert { 1 } else { 0 };
+            emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, test_c));
+            
+            if invert {
+                // Same inverted optimization logic for Test instruction
+                let jump_pos = emit_jump(c, OpCode::Jmp);
+                if let Some(body) = then_body {
+                    let stats: Vec<_> = body.get_stats().collect();
+                    if stats.len() == 1 {
+                        match &stats[0] {
+                            LuaStat::BreakStat(_) => {
+                                c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
+                            }
+                            LuaStat::ReturnStat(ret_stat) => {
+                                compile_return_stat(c, ret_stat)?;
+                            }
+                            _ => unreachable!("is_single_jump_block should only return true for break/return")
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            
+            emit_jump(c, OpCode::Jmp)
+        };
 
-        // Test condition: if false, jump to next clause
-        emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-        let next_jump = emit_jump(c, OpCode::Jmp);
-
-        // Compile then block
-        if let Some(body) = stat.get_block() {
+        // Compile then block (only in normal mode, already handled in inverted mode)
+        if let Some(body) = then_body {
             compile_block(c, &body)?;
         }
 
-        // After executing then block, jump to end
-        end_jumps.push(emit_jump(c, OpCode::Jmp));
+        // Only add jump to end if there are other branches
+        if has_branches {
+            end_jumps.push(emit_jump(c, OpCode::Jmp));
+        }
 
         // Patch jump to next clause (elseif or else)
         patch_jump(c, next_jump);
     }
 
     // Handle elseif clauses
-    let elseif_clauses = stat.get_else_if_clause_list().collect::<Vec<_>>();
     for elseif_clause in elseif_clauses {
         if let Some(cond) = elseif_clause.get_condition_expr() {
-            let cond_reg = compile_expr(c, &cond)?;
-
-            // Test elseif condition
-            emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-            let next_jump = emit_jump(c, OpCode::Jmp);
+            // Try immediate comparison optimization (elseif always uses normal mode)
+            let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, false)? {
+                emit_jump(c, OpCode::Jmp)
+            } else {
+                let cond_reg = compile_expr(c, &cond)?;
+                emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
+                emit_jump(c, OpCode::Jmp)
+            };
 
             // Compile elseif block
             if let Some(body) = elseif_clause.get_block() {
@@ -499,7 +620,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         .ok_or("while statement missing condition")?;
 
     // Check if condition is immediate comparison pattern: var < constant
-    let end_jump = if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond)? {
+    let end_jump = if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond, false)? {
         // Success! Generated LtI/LeI/GtI etc that skips next instruction if FALSE
         // Now emit jump to exit when comparison fails
         emit_jump(c, OpCode::Jmp)
@@ -546,7 +667,7 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
     // Compile condition expression
     if let Some(cond_expr) = stat.get_condition_expr() {
         // OPTIMIZATION: Try immediate comparison (skip Test)
-        if let Some(_) = try_compile_immediate_comparison(c, &cond_expr)? {
+        if let Some(_) = try_compile_immediate_comparison(c, &cond_expr, false)? {
             // Immediate comparison skips if FALSE, so Jmp executes when condition is FALSE
             // This is correct for repeat-until (continue when false)
             let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
