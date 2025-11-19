@@ -463,7 +463,7 @@ fn lua_rawequal(vm: &mut LuaVM) -> Result<MultiValue, String> {
     let v1 = get_arg(vm, 0).unwrap_or(LuaValue::nil());
     let v2 = get_arg(vm, 1).unwrap_or(LuaValue::nil());
 
-    let result = vm.values_equal(&v1, &v2);
+    let result = v1 == v2;
     Ok(MultiValue::single(LuaValue::boolean(result)))
 }
 

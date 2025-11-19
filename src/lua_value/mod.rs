@@ -2,6 +2,7 @@
 // 16 bytes, 3-6x faster than enum, full int64 support
 mod lua_table;
 mod lua_value;
+mod lua_thread;
 
 use crate::LuaVM;
 use std::any::Any;
@@ -18,6 +19,8 @@ pub use lua_value::{
     LuaValue, LuaValueKind, NAN_BASE, TAG_BOOLEAN, TAG_CFUNCTION, TAG_FUNCTION, TAG_INTEGER,
     TAG_NIL, TAG_STRING, TAG_TABLE, TAG_USERDATA,
 };
+pub use lua_thread::*;
+
 /// Multi-return values from Lua functions
 #[derive(Debug, Clone)]
 pub struct MultiValue {

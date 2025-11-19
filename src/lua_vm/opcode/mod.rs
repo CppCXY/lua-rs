@@ -1,6 +1,7 @@
 // Lua VM opcodes (simplified instruction set)
 // Each instruction is encoded as a 32-bit word
 // Format: [opcode: 6][A: 8][B: 9][C: 9] or [opcode: 6][A: 8][Bx: 18]
+mod dispatcher;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

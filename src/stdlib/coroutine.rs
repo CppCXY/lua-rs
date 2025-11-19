@@ -2,8 +2,8 @@
 // Implements: create, resume, yield, status, running, wrap, isyieldable
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::{CoroutineStatus, LuaVM};
+use crate::lua_value::{CoroutineStatus, LuaValue, MultiValue};
+use crate::lua_vm::LuaVM;
 use std::rc::Rc;
 
 pub fn create_coroutine_lib() -> LibraryModule {

@@ -2,7 +2,7 @@
 
 use super::{Compiler, Local, ScopeChain};
 use crate::lua_value::LuaValue;
-use crate::opcode::{Instruction, OpCode};
+use crate::lua_vm::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
 

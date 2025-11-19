@@ -26,7 +26,7 @@
 use std::cell::RefCell;
 
 use crate::{
-    FunctionId, LuaString, StringId, UserdataId, lua_value::CFunction, object_pool::TableId,
+    lua_value::{lua_thread::LuaThread, CFunction}, object_pool::TableId, FunctionId, LuaString, StringId, UserdataId
 };
 use std::cmp::Ordering;
 
@@ -215,7 +215,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub(crate) fn thread_ptr(ptr: *const RefCell<crate::lua_vm::LuaThread>) -> Self {
+    pub(crate) fn thread_ptr(ptr: *const RefCell<LuaThread>) -> Self {
         let addr = ptr as u64;
         debug_assert!(addr < (1u64 << 48), "Pointer too large");
         LuaValue {
@@ -441,9 +441,9 @@ impl LuaValue {
 
     /// UNSAFE: Get thread pointer (threads not yet migrated to object pool)
     #[inline]
-    pub unsafe fn as_thread_ptr(&self) -> Option<*const RefCell<crate::lua_vm::LuaThread>> {
+    pub unsafe fn as_thread_ptr(&self) -> Option<*const RefCell<LuaThread>> {
         if self.is_thread() {
-            Some((self.secondary & POINTER_MASK) as *const RefCell<crate::lua_vm::LuaThread>)
+            Some((self.secondary & POINTER_MASK) as *const RefCell<LuaThread>)
         } else {
             None
         }

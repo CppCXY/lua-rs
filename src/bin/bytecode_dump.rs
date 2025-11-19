@@ -1,6 +1,6 @@
 use lua_rs::Chunk;
 use lua_rs::LuaVM;
-use lua_rs::opcode::{Instruction, OpCode};
+use lua_rs::lua_vm::{Instruction, OpCode};
 use std::env;
 use std::fs;
 
@@ -47,7 +47,7 @@ fn main() {
                 let details = match opcode {
                     OpCode::Move => format!("R({}) := R({})", a, b),
                     OpCode::LoadK => format!("R({}) := K({})", a, bx),
-                    OpCode::LoadI => format!("R({}) := {}", a, sbx),  // Load immediate integer
+                    OpCode::LoadI => format!("R({}) := {}", a, sbx), // Load immediate integer
                     OpCode::LoadNil => format!("R({}) := nil", a),
                     OpCode::LoadBool => format!("R({}) := {}", a, b != 0),
                     OpCode::Add => format!("R({}) := R({}) + R({})", a, b, c),
@@ -183,8 +183,11 @@ fn analyze_performance(chunk: &Chunk) {
     if loop_count > 0 {
         println!("\n✓ Optimized for-loops detected (ForPrep/ForLoop)");
     }
-    
+
     if loadi_count > 0 {
-        println!("\n✓ LoadI optimization enabled ({} immediate loads)", loadi_count);
+        println!(
+            "\n✓ LoadI optimization enabled ({} immediate loads)",
+            loadi_count
+        );
     }
 }

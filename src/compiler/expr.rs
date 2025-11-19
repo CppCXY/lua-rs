@@ -5,7 +5,7 @@ use super::helpers::*;
 use crate::compiler::compile_block;
 use crate::lua_value::UpvalueDesc;
 use crate::lua_value::{Chunk, LuaValue};
-use crate::opcode::{Instruction, OpCode};
+use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::LuaClosureExpr;
 use emmylua_parser::LuaIndexExpr;
 use emmylua_parser::LuaIndexKey;

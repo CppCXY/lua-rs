@@ -5,23 +5,26 @@ use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
 use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr};
 use crate::lua_value::LuaValue;
-use crate::opcode::{Instruction, OpCode};
+use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
-    LuaAssignStat, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat, LuaForStat, LuaFuncStat,
-    LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat,
-    LuaVarExpr, LuaWhileStat, LuaBinaryExpr, BinaryOperator, LuaLiteralExpr, LuaLiteralToken,
+    BinaryOperator, LuaAssignStat, LuaBinaryExpr, LuaCallExprStat, LuaDoStat, LuaExpr,
+    LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLiteralExpr,
+    LuaLiteralToken, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
 };
 
 /// Try to compile binary expression as immediate comparison for control flow
 /// Returns Some(register) if successful (comparison instruction emitted)
 /// The emitted instruction skips next instruction if comparison is FALSE
-fn try_compile_immediate_comparison(c: &mut Compiler, expr: &LuaExpr) -> Result<Option<u32>, String> {
+fn try_compile_immediate_comparison(
+    c: &mut Compiler,
+    expr: &LuaExpr,
+) -> Result<Option<u32>, String> {
     // Only handle binary comparison expressions
     if let LuaExpr::BinaryExpr(bin_expr) = expr {
         let (left, right) = bin_expr.get_exprs().ok_or("error")?;
         let op = bin_expr.get_op_token().ok_or("error")?;
         let op_kind = op.get_op();
-        
+
         // Check if right operand is small integer constant
         if let LuaExpr::LiteralExpr(lit) = &right {
             if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
@@ -31,14 +34,14 @@ fn try_compile_immediate_comparison(c: &mut Compiler, expr: &LuaExpr) -> Result<
                     if int_val >= -256 && int_val <= 255 {
                         // Compile left operand
                         let left_reg = compile_expr(c, &left)?;
-                        
+
                         // Encode immediate value (9 bits)
                         let imm = if int_val < 0 {
                             (int_val + 512) as u32
                         } else {
                             int_val as u32
                         };
-                        
+
                         // Emit immediate comparison (skips next if TRUE to fall through to body)
                         // C=0 means: if (result != 0) i.e. (result == true) then skip next (the Jmp)
                         match op_kind {
@@ -69,7 +72,7 @@ fn try_compile_immediate_comparison(c: &mut Compiler, expr: &LuaExpr) -> Result<
             }
         }
     }
-    
+
     Ok(None)
 }
 
@@ -217,7 +220,7 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 /// Compile assignment statement
 fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
     use super::expr::compile_expr_to;
-    
+
     // Get vars and expressions from children
     let (vars, exprs) = stat.get_var_and_expr_list();
 
@@ -457,7 +460,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
     let cond = stat
         .get_condition_expr()
         .ok_or("while statement missing condition")?;
-    
+
     // Check if condition is immediate comparison pattern: var < constant
     let end_jump = if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond)? {
         // Success! Generated LtI/LeI/GtI etc that skips next instruction if FALSE

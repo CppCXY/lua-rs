@@ -6,7 +6,7 @@ mod stmt;
 
 use crate::lua_value::Chunk;
 use crate::lua_vm::LuaVM;
-use crate::opcode::{Instruction, OpCode};
+use crate::lua_vm::{Instruction, OpCode};
 // use crate::optimizer::optimize_constants;  // Disabled for now
 use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
 use helpers::*;

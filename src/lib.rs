@@ -12,8 +12,6 @@ pub mod lua_pattern;
 pub mod lua_value;
 pub mod lua_vm;
 pub mod object_pool;
-pub mod opcode;
-pub mod optimizer;
 pub mod stdlib;
 
 pub use compiler::Compiler;
@@ -21,9 +19,8 @@ pub use ffi::FFIState;
 pub use gc::GC;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
-pub use lua_vm::LuaVM;
+pub use lua_vm::{LuaVM, Instruction, OpCode};
 pub use object_pool::*;
-pub use opcode::{Instruction, OpCode};
 use std::rc::Rc;
 
 /// Main entry point for executing Lua code
