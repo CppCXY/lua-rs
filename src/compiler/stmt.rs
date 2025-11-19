@@ -154,7 +154,7 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                 };
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::VarArg, base_reg, b_value, 0),
+                    Instruction::encode_abc(OpCode::Vararg, base_reg, b_value, 0),
                 );
 
                 // Add all registers

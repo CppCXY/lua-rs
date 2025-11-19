@@ -57,30 +57,30 @@ fn compile_literal_expr(
             emit_load_nil(c, reg);
         }
         LuaLiteralToken::Number(num) => {
-            // Lua 5.4 optimization: Use LoadI for small integers
+            // Lua 5.4 optimization: Try LoadI for integers, LoadF for simple floats
             if !num.is_float() {
                 let int_val = num.get_int_value();
-                // LoadI uses sBx (18-bit signed): range [-131072, 131071]
-                if int_val >= -131072 && int_val <= 131071 {
-                    // encode_asbx handles the offset internally
-                    emit(c, Instruction::encode_asbx(OpCode::LoadI, reg, int_val as i32));
+                // Try LoadI first (fast path for small integers)
+                if let Some(_) = emit_loadi(c, reg, int_val) {
                     return Ok(reg);
                 }
-            }
-            
-            // Fall back to LoadK for floats or large integers
-            let num_value = if num.is_float() {
-                LuaValue::float(num.get_float_value())
+                // LoadI failed, add to constant table
+                let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
+                emit_loadk(c, reg, const_idx);
             } else {
-                LuaValue::integer(num.get_int_value())
-            };
-            let const_idx = add_constant(c, num_value);
-            emit_load_constant(c, reg, const_idx);
+                let float_val = num.get_float_value();
+                // Try LoadF for integer-representable floats
+                if emit_loadf(c, reg, float_val).is_none() {
+                    // LoadF failed, add to constant table
+                    let const_idx = add_constant_dedup(c, LuaValue::float(float_val));
+                    emit_loadk(c, reg, const_idx);
+                }
+            }
         }
         LuaLiteralToken::String(s) => {
-            let lua_string = create_string_value(c, s.get_value());
-            let const_idx = add_constant(c, lua_string);
-            emit_load_constant(c, reg, const_idx);
+            let lua_string = create_string_value(c, &s.get_value());
+            let const_idx = add_constant_dedup(c, lua_string);
+            emit_loadk(c, reg, const_idx);
         }
         LuaLiteralToken::Dots(_) => {
             // Variable arguments: ...
@@ -89,7 +89,7 @@ fn compile_literal_expr(
             // B=2 means load 1 vararg into R(A)
             // B=0 means load all varargs starting from R(A)
             // For expression context, we load 1 vararg into the register
-            emit(c, Instruction::encode_abc(OpCode::VarArg, reg, 2, 0));
+            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 2, 0));
         }
         _ => {}
     }
@@ -168,37 +168,43 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpSub => {
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            emit(c, Instruction::encode_abc(OpCode::SubI, result_reg, left_reg, imm));
+                            // Lua 5.4: Use SubK for constant operand
+                            emit(c, Instruction::create_abck(OpCode::SubK, result_reg, left_reg, imm, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMul => {
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            emit(c, Instruction::encode_abc(OpCode::MulI, result_reg, left_reg, imm));
+                            // Lua 5.4: Use MulK for constant operand
+                            emit(c, Instruction::create_abck(OpCode::MulK, result_reg, left_reg, imm, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMod => {
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            emit(c, Instruction::encode_abc(OpCode::ModI, result_reg, left_reg, imm));
+                            // Lua 5.4: Use ModK for constant operand
+                            emit(c, Instruction::create_abck(OpCode::ModK, result_reg, left_reg, imm, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpPow => {
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            emit(c, Instruction::encode_abc(OpCode::PowI, result_reg, left_reg, imm));
+                            // Lua 5.4: Use PowK for constant operand
+                            emit(c, Instruction::create_abck(OpCode::PowK, result_reg, left_reg, imm, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpDiv => {
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            emit(c, Instruction::encode_abc(OpCode::DivI, result_reg, left_reg, imm));
+                            // Lua 5.4: Use DivK for constant operand
+                            emit(c, Instruction::create_abck(OpCode::DivK, result_reg, left_reg, imm, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpIDiv => {
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            emit(c, Instruction::encode_abc(OpCode::IDivI, result_reg, left_reg, imm));
+                            // Lua 5.4: Use IDivK for constant operand
+                            emit(c, Instruction::create_abck(OpCode::IDivK, result_reg, left_reg, imm, true));
                             return Ok(result_reg);
                         }
                         // Immediate comparison - NOT IMPLEMENTED YET
@@ -226,11 +232,11 @@ fn compile_binary_expr_to(
         BinaryOperator::OpEq => OpCode::Eq,
         BinaryOperator::OpLt => OpCode::Lt,
         BinaryOperator::OpLe => OpCode::Le,
-        BinaryOperator::OpNe => OpCode::Ne,
-        BinaryOperator::OpGt => OpCode::Gt,
-        BinaryOperator::OpGe => OpCode::Ge,
-        BinaryOperator::OpAnd => OpCode::And,
-        BinaryOperator::OpOr => OpCode::Or,
+        BinaryOperator::OpNe => OpCode::Eq, // Lua 5.4: Use Eq with negated k
+        BinaryOperator::OpGt => OpCode::Lt, // Lua 5.4: Use Lt with swapped operands
+        BinaryOperator::OpGe => OpCode::Le, // Lua 5.4: Use Le with swapped operands
+        BinaryOperator::OpAnd => OpCode::TestSet, // Lua 5.4: Use TestSet for short-circuit
+        BinaryOperator::OpOr => OpCode::TestSet, // Lua 5.4: Use TestSet for short-circuit
         BinaryOperator::OpBAnd => OpCode::BAnd,
         BinaryOperator::OpBOr => OpCode::BOr,
         BinaryOperator::OpBXor => OpCode::BXor,
@@ -353,7 +359,7 @@ pub fn compile_call_expr_with_returns(
             .ok_or("Index expression missing key")?;
         let key_reg = match key {
             LuaIndexKey::Name(name_token) => {
-                let field_name = name_token.get_name_text().to_string();
+                let field_name = name_token.get_name_text();
                 let lua_str = create_string_value(c, field_name);
                 let const_idx = add_constant(c, lua_str);
                 let key_reg = alloc_register(c);
@@ -362,7 +368,7 @@ pub fn compile_call_expr_with_returns(
             }
             LuaIndexKey::String(string_token) => {
                 let string_value = string_token.get_value();
-                let lua_str = create_string_value(c, string_value);
+                let lua_str = create_string_value(c, &string_value);
                 let const_idx = add_constant(c, lua_str);
                 let key_reg = alloc_register(c);
                 emit_load_constant(c, key_reg, const_idx);
@@ -488,7 +494,7 @@ fn compile_index_expr_to(
                 emit(
                     c,
                     Instruction::encode_abc(
-                        OpCode::GetTableI,
+                        OpCode::GetI,
                         result_reg,
                         table_reg,
                         int_value as u32,
@@ -508,23 +514,22 @@ fn compile_index_expr_to(
             Ok(result_reg)
         }
         LuaIndexKey::Name(name_token) => {
-            // Optimized: table.field -> GetTableK
-            let field_name = name_token.get_name_text().to_string();
+            // Optimized: table.field -> GetField
+            let field_name = name_token.get_name_text();
             let lua_str = create_string_value(c, field_name);
-            let const_idx = add_constant(c, lua_str);
-            // Use GetTableK: R(A) := R(B)[K(C)]
+            let const_idx = add_constant_dedup(c, lua_str);
+            // Use GetField: R(A) := R(B)[K(C)] with k=1
             // ABC format: A=dest, B=table, C=const_idx
-            if const_idx <= 511 {
-                // C field is 9 bits
+            if const_idx <= Instruction::MAX_B {
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::GetTableK, result_reg, table_reg, const_idx),
+                    Instruction::create_abck(OpCode::GetField, result_reg, table_reg, const_idx, true),
                 );
                 return Ok(result_reg);
             }
             // Fallback for large const_idx
             let key_reg = alloc_register(c);
-            emit_load_constant(c, key_reg, const_idx);
+            emit_loadk(c, key_reg, const_idx);
             emit(
                 c,
                 Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
@@ -532,20 +537,20 @@ fn compile_index_expr_to(
             Ok(result_reg)
         }
         LuaIndexKey::String(string_token) => {
-            // Optimized: table["string"] -> GetTableK
+            // Optimized: table["string"] -> GetField
             let string_value = string_token.get_value();
-            let lua_str = create_string_value(c, string_value);
-            let const_idx = add_constant(c, lua_str);
-            if const_idx <= 511 {
+            let lua_str = create_string_value(c, &string_value);
+            let const_idx = add_constant_dedup(c, lua_str);
+            if const_idx <= Instruction::MAX_B {
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::GetTableK, result_reg, table_reg, const_idx),
+                    Instruction::create_abck(OpCode::GetField, result_reg, table_reg, const_idx, true),
                 );
                 return Ok(result_reg);
             }
             // Fallback
             let key_reg = alloc_register(c);
-            emit_load_constant(c, key_reg, const_idx);
+            emit_loadk(c, key_reg, const_idx);
             emit(
                 c,
                 Instruction::encode_abc(OpCode::GetTable, result_reg, table_reg, key_reg),
@@ -594,7 +599,7 @@ fn compile_table_expr_to(
                 let vararg_start = reg + 1;
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::VarArg, vararg_start, 0, 0),
+                    Instruction::encode_abc(OpCode::Vararg, vararg_start, 0, 0),
                 );
 
                 // SetList: table at reg, values from reg+1, starting at index 0
@@ -644,7 +649,7 @@ fn compile_table_expr_to(
                         // VarArg with B=0: load ALL varargs starting at vararg_base_reg
                         emit(
                             c,
-                            Instruction::encode_abc(OpCode::VarArg, vararg_base_reg, 0, 0),
+                            Instruction::encode_abc(OpCode::Vararg, vararg_base_reg, 0, 0),
                         );
 
                         // Now use SetList to set these values in the table
@@ -691,7 +696,7 @@ fn compile_table_expr_to(
                         let values_start_reg = c.next_register;
                         emit(
                             c,
-                            Instruction::encode_abc(OpCode::VarArg, values_start_reg, 0, 0),
+                            Instruction::encode_abc(OpCode::Vararg, values_start_reg, 0, 0),
                         );
 
                         // Now SetList: table at reg, values from values_start_reg
@@ -769,7 +774,7 @@ fn compile_table_expr_to(
             let key_reg = match field_key {
                 LuaIndexKey::Name(name_token) => {
                     // key is an identifier - use SetTableK optimization
-                    let key_name = name_token.get_name_text().to_string();
+                    let key_name = name_token.get_name_text();
                     let lua_str = create_string_value(c, key_name);
                     let const_idx = add_constant(c, lua_str);
                     
@@ -782,18 +787,18 @@ fn compile_table_expr_to(
                         r
                     };
 
-                    // Use SetTableK: R(A)[K(B)] := R(C)
+                    // Use SetField: R(A)[K(B)] := R(C) with k=1
                     emit(
                         c,
-                        Instruction::encode_abc(OpCode::SetTableK, reg, const_idx, value_reg),
+                        Instruction::create_abck(OpCode::SetField, reg, const_idx, value_reg, true),
                     );
                     
                     continue; // Skip the SetTable at the end
                 }
                 LuaIndexKey::String(string_token) => {
-                    // key is a string literal - use SetTableK optimization  
+                    // key is a string literal - use SetField optimization  
                     let string_value = string_token.get_value();
-                    let lua_str = create_string_value(c, string_value);
+                    let lua_str = create_string_value(c, &string_value);
                     let const_idx = add_constant(c, lua_str);
                     
                     // Compile value expression
@@ -805,10 +810,10 @@ fn compile_table_expr_to(
                         r
                     };
 
-                    // Use SetTableK: R(A)[K(B)] := R(C)
+                    // Use SetField: R(A)[K(B)] := R(C) with k=1
                     emit(
                         c,
-                        Instruction::encode_abc(OpCode::SetTableK, reg, const_idx, value_reg),
+                        Instruction::create_abck(OpCode::SetField, reg, const_idx, value_reg, true),
                     );
                     
                     continue; // Skip the SetTable at the end
@@ -905,7 +910,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                         emit(
                             c,
                             Instruction::encode_abc(
-                                OpCode::SetTableI,
+                                OpCode::SetI,
                                 table_reg,
                                 int_value as u32,
                                 value_reg,
@@ -927,18 +932,19 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                 LuaIndexKey::Name(name_token) => {
                     // Optimized: table.field = value -> SetTableK
                     let field_name = name_token.get_name_text().to_string();
-                    let lua_str = create_string_value(c, field_name);
+                    let lua_str = create_string_value(c, &field_name);
                     let const_idx = add_constant(c, lua_str);
-                    // Use SetTableK: R(A)[K(B)] := R(C)
+                    // Use SetField: R(A)[K(B)] := R(C) with k=1
                     // ABC format: A=table, B=const_idx, C=value
-                    if const_idx <= 511 {
+                    if const_idx <= Instruction::MAX_B {
                         emit(
                             c,
-                            Instruction::encode_abc(
-                                OpCode::SetTableK,
+                            Instruction::create_abck(
+                                OpCode::SetField,
                                 table_reg,
                                 const_idx,
                                 value_reg,
+                                true,
                             ),
                         );
                         return Ok(());
@@ -955,16 +961,17 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                 LuaIndexKey::String(string_token) => {
                     // Optimized: table["string"] = value -> SetTableK
                     let string_value = string_token.get_value();
-                    let lua_str = create_string_value(c, string_value);
-                    let const_idx = add_constant(c, lua_str);
-                    if const_idx <= 511 {
+                    let lua_str = create_string_value(c, &string_value);
+                    let const_idx = add_constant_dedup(c, lua_str);
+                    if const_idx <= Instruction::MAX_B {
                         emit(
                             c,
-                            Instruction::encode_abc(
-                                OpCode::SetTableK,
+                            Instruction::create_abck(
+                                OpCode::SetField,
                                 table_reg,
                                 const_idx,
                                 value_reg,
+                                true,
                             ),
                         );
                         return Ok(());

@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Create a string value using VM's string pool
-pub fn create_string_value(c: &mut Compiler, s: String) -> LuaValue {
-    unsafe { (*c.vm_ptr).create_string(&s) }
+pub fn create_string_value(c: &mut Compiler, s: &str) -> LuaValue {
+    unsafe { (*c.vm_ptr).create_string(s) }
 }
 
 /// Emit an instruction and return its position
@@ -28,10 +28,57 @@ pub fn patch_jump(c: &mut Compiler, pos: usize) {
     c.chunk.code[pos] = Instruction::encode_asbx(OpCode::Jmp, 0, jump);
 }
 
-/// Add a constant to the constant pool
+/// Add a constant to the constant pool (without deduplication)
 pub fn add_constant(c: &mut Compiler, value: LuaValue) -> u32 {
     c.chunk.constants.push(value);
     (c.chunk.constants.len() - 1) as u32
+}
+
+/// Add a constant with deduplication (Lua 5.4 style)
+/// Returns the index in the constant table
+pub fn add_constant_dedup(c: &mut Compiler, value: LuaValue) -> u32 {
+    // Search for existing constant
+    for (i, existing) in c.chunk.constants.iter().enumerate() {
+        if values_equal(existing, &value) {
+            return i as u32;
+        }
+    }
+    // Not found, add new constant
+    add_constant(c, value)
+}
+
+/// Helper: check if two LuaValues are equal for constant deduplication
+fn values_equal(a: &LuaValue, b: &LuaValue) -> bool {
+    // Use LuaValue's type checking methods
+    if a.is_nil() && b.is_nil() {
+        return true;
+    }
+    if let (Some(a_bool), Some(b_bool)) = (a.as_bool(), b.as_bool()) {
+        return a_bool == b_bool;
+    }
+    if let (Some(a_int), Some(b_int)) = (a.as_integer(), b.as_integer()) {
+        return a_int == b_int;
+    }
+    if let (Some(a_num), Some(b_num)) = (a.as_float(), b.as_float()) {
+        return a_num == b_num;
+    }
+    // For strings, compare raw primary/secondary words to avoid unsafe
+    if a.is_string() && b.is_string() {
+        return a.primary == b.primary && a.secondary == b.secondary;
+    }
+    false
+}
+
+/// Try to add a constant to K table (for RK instructions)
+/// Returns Some(k_index) if successful, None if too many constants
+/// In Lua 5.4, K indices are limited to MAXARG_B (255)
+pub fn try_add_constant_k(c: &mut Compiler, value: LuaValue) -> Option<u32> {
+    let idx = add_constant_dedup(c, value);
+    if idx <= Instruction::MAX_B {
+        Some(idx)
+    } else {
+        None // Too many constants, must use register
+    }
 }
 
 /// Allocate a new register
@@ -196,24 +243,71 @@ pub fn end_scope(c: &mut Compiler) {
     clear_scope_labels(c);
 }
 
-/// Get a global variable
+/// Get a global variable (Lua 5.4 uses _ENV upvalue)
 pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
-    let lua_str = create_string_value(c, name.to_string());
-    let const_idx = add_constant(c, lua_str);
+    let lua_str = create_string_value(c, name);
+    let const_idx = add_constant_dedup(c, lua_str);
+    // GetTabUp: R(A) := UpValue[B][K(C)]
+    // B=0 is _ENV upvalue, C is constant index, k=1
     emit(
         c,
-        Instruction::encode_abx(OpCode::GetGlobal, dest_reg, const_idx),
+        Instruction::create_abck(OpCode::GetTabUp, dest_reg, 0, const_idx, true),
     );
 }
 
-/// Set a global variable
+/// Set a global variable (Lua 5.4 uses _ENV upvalue)
 pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
-    let lua_str = create_string_value(c, name.to_string());
-    let const_idx = add_constant(c, lua_str);
+    let lua_str = create_string_value(c, name);
+    let const_idx = add_constant_dedup(c, lua_str);
+    // SetTabUp: UpValue[A][K(B)] := R(C)
+    // A=0 is _ENV upvalue, B is constant index, C is source register, k=1
     emit(
         c,
-        Instruction::encode_abx(OpCode::SetGlobal, src_reg, const_idx),
+        Instruction::create_abck(OpCode::SetTabUp, 0, const_idx, src_reg, true),
     );
+}
+
+/// Emit LoadK/LoadKX instruction (Lua 5.4 style)
+/// Loads a constant from the constant table into a register
+pub fn emit_loadk(c: &mut Compiler, dest: u32, const_idx: u32) -> usize {
+    if const_idx <= Instruction::MAX_BX {
+        emit(c, Instruction::encode_abx(OpCode::LoadK, dest, const_idx))
+    } else {
+        // Use LoadKX + ExtraArg for large constant indices (> 131071)
+        let pos = emit(c, Instruction::encode_abx(OpCode::LoadKX, dest, 0));
+        emit(c, Instruction::create_ax(OpCode::ExtraArg, const_idx));
+        pos
+    }
+}
+
+/// Emit LoadI instruction for small integers (Lua 5.4)
+/// LoadI can encode integers directly in sBx field (-65536 to 65535)
+/// Returns Some(pos) if successful, None if value too large
+pub fn emit_loadi(c: &mut Compiler, dest: u32, value: i64) -> Option<usize> {
+    if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
+        let sbx = value as i32;
+        // Check if fits in sBx field
+        if sbx >= -(Instruction::OFFSET_SBX) && sbx <= Instruction::OFFSET_SBX {
+            return Some(emit(c, Instruction::encode_asbx(OpCode::LoadI, dest, sbx)));
+        }
+    }
+    None // Value too large, must use LoadK
+}
+
+/// Emit LoadF instruction for floats (Lua 5.4)
+/// LoadF encodes small floats in sBx field (integer-representable floats only)
+/// Returns Some(pos) if successful, None if must use LoadK
+pub fn emit_loadf(c: &mut Compiler, dest: u32, value: f64) -> Option<usize> {
+    // For simplicity, only handle integer-representable floats
+    if value.fract() == 0.0 {
+        let int_val = value as i32;
+        if int_val as f64 == value {
+            if int_val >= -(Instruction::OFFSET_SBX) && int_val <= Instruction::OFFSET_SBX {
+                return Some(emit(c, Instruction::encode_asbx(OpCode::LoadF, dest, int_val)));
+            }
+        }
+    }
+    None // Complex float, must use LoadK
 }
 
 /// Load nil into a register
@@ -221,12 +315,13 @@ pub fn emit_load_nil(c: &mut Compiler, reg: u32) {
     emit(c, Instruction::encode_abc(OpCode::LoadNil, reg, 0, 0));
 }
 
-/// Load boolean into a register
+/// Load boolean into a register (Lua 5.4 uses LoadTrue/LoadFalse)
 pub fn emit_load_bool(c: &mut Compiler, reg: u32, value: bool) {
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::LoadBool, reg, value as u32, 0),
-    );
+    if value {
+        emit(c, Instruction::encode_abc(OpCode::LoadTrue, reg, 0, 0));
+    } else {
+        emit(c, Instruction::encode_abc(OpCode::LoadFalse, reg, 0, 0));
+    }
 }
 
 /// Load constant into a register
