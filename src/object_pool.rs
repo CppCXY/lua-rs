@@ -270,6 +270,18 @@ impl ObjectPool {
     pub fn interned_string_count(&self) -> usize {
         self.string_intern.len()
     }
+
+    // ============ GC Support ============
+
+    /// Shrink all hash maps to fit actual size (called after GC)
+    /// This reclaims memory from deleted entries and improves lookup performance
+    pub fn shrink_to_fit(&mut self) {
+        self.strings.shrink_to_fit();
+        self.tables.shrink_to_fit();
+        self.userdata.shrink_to_fit();
+        self.functions.shrink_to_fit();
+        self.string_intern.shrink_to_fit();
+    }
 }
 
 impl Default for ObjectPool {

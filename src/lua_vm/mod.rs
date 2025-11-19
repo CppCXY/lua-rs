@@ -2998,6 +2998,81 @@ impl LuaVM {
     /// Get value from table with metatable support
     /// Handles __index metamethod
     pub fn table_get(&mut self, lua_table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
+        if let Some(ptr) = lua_table_value.as_table_ptr() {
+            // SAFETY: Pointer is valid as long as table exists in ObjectPool
+            let lua_table = unsafe { &*ptr };
+            
+            // First try raw get
+            let value = {
+                let table = lua_table.borrow();
+                table.raw_get(key).unwrap_or(LuaValue::nil())
+            };
+            
+            if !value.is_nil() {
+                return Some(value);
+            }
+            
+            // Check for __index metamethod
+            let meta_value = {
+                let table = lua_table.borrow();
+                table.get_metatable()
+            };
+            
+            if let Some(mt) = meta_value
+                && let Some(meta_id) = mt.as_table_id()
+            {
+                let index_key = self.create_string("__index");
+                
+                // Try cached pointer for metatable too
+                if let Some(mt_ptr) = mt.as_table_ptr() {
+                    let metatable = unsafe { &*mt_ptr };
+                    let index_value = {
+                        let mt_borrowed = metatable.borrow();
+                        mt_borrowed.raw_get(&index_key)
+                    };
+                    
+                    if let Some(index_val) = index_value {
+                        match index_val.kind() {
+                            LuaValueKind::Table => return self.table_get(&index_val, key),
+                            LuaValueKind::CFunction | LuaValueKind::Function => {
+                                let args = vec![lua_table_value.clone(), key.clone()];
+                                match self.call_metamethod(&index_val, &args) {
+                                    Ok(result) => return result,
+                                    Err(_) => return None,
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Fallback to ObjectPool lookup
+                    let metatable = self.object_pool.get_table(meta_id)?;
+                    let index_value = {
+                        let mt_borrowed = metatable.borrow();
+                        mt_borrowed.raw_get(&index_key)
+                    };
+                    
+                    if let Some(index_val) = index_value {
+                        match index_val.kind() {
+                            LuaValueKind::Table => return self.table_get(&index_val, key),
+                            LuaValueKind::CFunction | LuaValueKind::Function => {
+                                let args = vec![lua_table_value.clone(), key.clone()];
+                                match self.call_metamethod(&index_val, &args) {
+                                    Ok(result) => return result,
+                                    Err(_) => return None,
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            
+            return None;
+        }
+        
+        // Slow path: no cached pointer, use ObjectPool lookup
         let Some(table_id) = lua_table_value.as_table_id() else {
             return None;
         };
@@ -3136,6 +3211,72 @@ impl LuaVM {
         key: LuaValue,
         value: LuaValue,
     ) -> Result<(), String> {
+        // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
+        if let Some(ptr) = lua_table_val.as_table_ptr() {
+            // SAFETY: Pointer is valid as long as table exists in ObjectPool
+            let lua_table = unsafe { &*ptr };
+            
+            // Check if key already exists
+            let has_key = {
+                let table = lua_table.borrow();
+                table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false)
+            };
+
+            if has_key {
+                // Key exists, use raw set
+                lua_table.borrow_mut().raw_set(key, value);
+                return Ok(());
+            }
+
+            // Key doesn't exist, check for __newindex metamethod
+            let meta_value = {
+                let table = lua_table.borrow();
+                table.get_metatable()
+            };
+
+            if let Some(mt) = meta_value
+                && let Some(table_id) = mt.as_table_id()
+            {
+                let newindex_key = self.create_string("__newindex");
+                
+                // Try to use cached metatable pointer
+                let newindex_value = if let Some(mt_ptr) = mt.as_table_ptr() {
+                    let metatable = unsafe { &*mt_ptr };
+                    let mt_borrowed = metatable.borrow();
+                    mt_borrowed.raw_get(&newindex_key)
+                } else {
+                    // Fallback to ObjectPool lookup
+                    let metatable = self
+                        .object_pool
+                        .get_table(table_id)
+                        .ok_or("missing metatable")?;
+                    let mt_borrowed = metatable.borrow();
+                    mt_borrowed.raw_get(&newindex_key)
+                };
+
+                if let Some(newindex_val) = newindex_value {
+                    match newindex_val.kind() {
+                        LuaValueKind::Table => {
+                            return self.table_set(newindex_val, key, value);
+                        }
+                        LuaValueKind::CFunction | LuaValueKind::Function => {
+                            let args = vec![lua_table_val, key, value];
+                            match self.call_metamethod(&newindex_val, &args) {
+                                Ok(_) => return Ok(()),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // No metamethod, use raw set
+            lua_table.borrow_mut().raw_set(key, value);
+            return Ok(());
+        }
+        
+        // Slow path: no cached pointer, use ObjectPool lookup
         let Some(table_id) = lua_table_val.as_table_id() else {
             return Err("table_set: not a table".to_string());
         };
@@ -3737,7 +3878,17 @@ impl LuaVM {
 
     /// Create a new table in object pool
     pub fn create_table(&mut self) -> LuaValue {
+        // TODO: Auto GC causes severe performance regression
+        // Need to optimize GC algorithm before enabling
+        // if self.gc.should_collect() {
+        //     self.collect_garbage();
+        // }
+        
         let id = self.object_pool.create_table();
+        
+        // Register with GC for manual collection
+        self.gc.register_object(id.0, crate::gc::GcObjectType::Table);
+        
         // Get pointer from object pool for direct access
         let ptr = self
             .object_pool

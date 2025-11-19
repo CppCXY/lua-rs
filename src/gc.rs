@@ -250,6 +250,13 @@ impl GC {
         self.allocations_since_minor_gc = 0;
         self.minor_gc_count += 1;
 
+        // Shrink ObjectPool HashMaps after collection
+        // This is critical for performance: after deleting many entries,
+        // HashMap capacity remains large, causing O(log n) lookups instead of O(1)
+        if collected > 100 {
+            object_pool.shrink_to_fit();
+        }
+
         collected
     }
 
@@ -308,6 +315,9 @@ impl GC {
         self.minor_gc_count = 0;
         self.allocations_since_minor_gc = 0;
         self.adjust_threshold();
+
+        // Always shrink after major GC
+        object_pool.shrink_to_fit();
 
         collected
     }
