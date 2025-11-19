@@ -773,24 +773,29 @@ fn compile_table_expr_to(
 
             let key_reg = match field_key {
                 LuaIndexKey::Name(name_token) => {
-                    // key is an identifier - use SetTableK optimization
+                    // key is an identifier - use SetField optimization
                     let key_name = name_token.get_name_text();
                     let lua_str = create_string_value(c, key_name);
-                    let const_idx = add_constant(c, lua_str);
+                    let const_idx = add_constant_dedup(c, lua_str);
                     
-                    // Compile value expression
-                    let value_reg = if let Some(value_expr) = field.get_value_expr() {
-                        compile_expr(c, &value_expr)?
+                    // Try to compile value as constant first (for RK optimization)
+                    let (value_operand, use_constant) = if let Some(value_expr) = field.get_value_expr() {
+                        if let Some(k_idx) = try_expr_as_constant(c, &value_expr) {
+                            (k_idx, true)
+                        } else {
+                            (compile_expr(c, &value_expr)?, false)
+                        }
                     } else {
                         let r = alloc_register(c);
                         emit_load_nil(c, r);
-                        r
+                        (r, false)
                     };
 
-                    // Use SetField: R(A)[K(B)] := R(C) with k=1
+                    // Use SetField: R(A)[K(B)] := RK(C)
+                    // k=1 means C is constant index, k=0 means C is register
                     emit(
                         c,
-                        Instruction::create_abck(OpCode::SetField, reg, const_idx, value_reg, true),
+                        Instruction::create_abck(OpCode::SetField, reg, const_idx, value_operand, use_constant),
                     );
                     
                     continue; // Skip the SetTable at the end
@@ -799,21 +804,26 @@ fn compile_table_expr_to(
                     // key is a string literal - use SetField optimization  
                     let string_value = string_token.get_value();
                     let lua_str = create_string_value(c, &string_value);
-                    let const_idx = add_constant(c, lua_str);
+                    let const_idx = add_constant_dedup(c, lua_str);
                     
-                    // Compile value expression
-                    let value_reg = if let Some(value_expr) = field.get_value_expr() {
-                        compile_expr(c, &value_expr)?
+                    // Try to compile value as constant first (for RK optimization)
+                    let (value_operand, use_constant) = if let Some(value_expr) = field.get_value_expr() {
+                        if let Some(k_idx) = try_expr_as_constant(c, &value_expr) {
+                            (k_idx, true)
+                        } else {
+                            (compile_expr(c, &value_expr)?, false)
+                        }
                     } else {
                         let r = alloc_register(c);
                         emit_load_nil(c, r);
-                        r
+                        (r, false)
                     };
 
-                    // Use SetField: R(A)[K(B)] := R(C) with k=1
+                    // Use SetField: R(A)[K(B)] := RK(C)
+                    // k=1 means C is constant index, k=0 means C is register
                     emit(
                         c,
-                        Instruction::create_abck(OpCode::SetField, reg, const_idx, value_reg, true),
+                        Instruction::create_abck(OpCode::SetField, reg, const_idx, value_operand, use_constant),
                     );
                     
                     continue; // Skip the SetTable at the end
@@ -930,12 +940,12 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                     Ok(())
                 }
                 LuaIndexKey::Name(name_token) => {
-                    // Optimized: table.field = value -> SetTableK
+                    // Optimized: table.field = value -> SetField
                     let field_name = name_token.get_name_text().to_string();
                     let lua_str = create_string_value(c, &field_name);
-                    let const_idx = add_constant(c, lua_str);
-                    // Use SetField: R(A)[K(B)] := R(C) with k=1
-                    // ABC format: A=table, B=const_idx, C=value
+                    let const_idx = add_constant_dedup(c, lua_str);
+                    // Use SetField: R(A)[K(B)] := RK(C)
+                    // k=0 because value_reg is a register (already compiled)
                     if const_idx <= Instruction::MAX_B {
                         emit(
                             c,
@@ -944,7 +954,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                                 table_reg,
                                 const_idx,
                                 value_reg,
-                                true,
+                                false,  // k=0: C is register
                             ),
                         );
                         return Ok(());

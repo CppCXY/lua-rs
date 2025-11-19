@@ -336,6 +336,36 @@ pub fn emit_move(c: &mut Compiler, dest: u32, src: u32) {
     }
 }
 
+/// Try to compile expression as a constant, returns Some(const_idx) if successful
+pub fn try_expr_as_constant(c: &mut Compiler, expr: &emmylua_parser::LuaExpr) -> Option<u32> {
+    use emmylua_parser::{LuaExpr, LuaLiteralExpr, LuaLiteralToken};
+    
+    // Only handle literal expressions that can be constants
+    if let LuaExpr::LiteralExpr(lit_expr) = expr {
+        if let Some(literal_token) = lit_expr.get_literal() {
+            match literal_token {
+                LuaLiteralToken::Bool(b) => {
+                    return try_add_constant_k(c, LuaValue::boolean(b.is_true()));
+                }
+                LuaLiteralToken::Number(num) => {
+                    let value = if num.is_float() {
+                        LuaValue::float(num.get_float_value())
+                    } else {
+                        LuaValue::integer(num.get_int_value())
+                    };
+                    return try_add_constant_k(c, value);
+                }
+                LuaLiteralToken::String(s) => {
+                    let lua_str = create_string_value(c, &s.get_value());
+                    return try_add_constant_k(c, lua_str);
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// Begin a new loop (for break statement support)
 pub fn begin_loop(c: &mut Compiler) {
     c.loop_stack.push(super::LoopInfo {

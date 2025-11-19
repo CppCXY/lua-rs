@@ -114,9 +114,9 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
         for expr in exprs.iter().take(exprs.len().saturating_sub(1)) {
             // Allocate a new register for each variable
             let dest_reg = alloc_register(c);
-            let src_reg = compile_expr(c, expr)?;
-            if src_reg != dest_reg {
-                emit_move(c, dest_reg, src_reg);
+            let result_reg = compile_expr_to(c, expr, Some(dest_reg))?;
+            if result_reg != dest_reg {
+                emit_move(c, dest_reg, result_reg);
             }
             regs.push(dest_reg);
         }
@@ -180,18 +180,18 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                 } else {
                     // Single value needed
                     let dest_reg = alloc_register(c);
-                    let src_reg = compile_expr(c, last_expr)?;
-                    if src_reg != dest_reg {
-                        emit_move(c, dest_reg, src_reg);
+                    let result_reg = compile_expr_to(c, last_expr, Some(dest_reg))?;
+                    if result_reg != dest_reg {
+                        emit_move(c, dest_reg, result_reg);
                     }
                     regs.push(dest_reg);
                 }
             } else {
                 // Non-call expression
                 let dest_reg = alloc_register(c);
-                let src_reg = compile_expr(c, last_expr)?;
-                if src_reg != dest_reg {
-                    emit_move(c, dest_reg, src_reg);
+                let result_reg = compile_expr_to(c, last_expr, Some(dest_reg))?;
+                if result_reg != dest_reg {
+                    emit_move(c, dest_reg, result_reg);
                 }
                 regs.push(dest_reg);
             }
@@ -220,6 +220,7 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 /// Compile assignment statement
 fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
     use super::expr::compile_expr_to;
+    use emmylua_parser::LuaIndexKey;
 
     // Get vars and expressions from children
     let (vars, exprs) = stat.get_var_and_expr_list();
@@ -236,6 +237,39 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 // Local variable - compile expression directly to its register
                 compile_expr_to(c, &exprs[0], Some(local.register))?;
                 return Ok(());
+            }
+        }
+        
+        // OPTIMIZATION: For table.field = constant, use SetField with RK
+        if let LuaVarExpr::IndexExpr(index_expr) = &vars[0] {
+            if let Some(LuaIndexKey::Name(name_token)) = index_expr.get_index_key() {
+                // Try to compile value as constant
+                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
+                    // Compile table expression
+                    let prefix_expr = index_expr.get_prefix_expr()
+                        .ok_or("Index expression missing table")?;
+                    let table_reg = compile_expr(c, &prefix_expr)?;
+                    
+                    // Get field name as constant
+                    let field_name = name_token.get_name_text().to_string();
+                    let lua_str = create_string_value(c, &field_name);
+                    let key_idx = add_constant_dedup(c, lua_str);
+                    
+                    // Emit SetField with k=1 (value is constant)
+                    if const_idx <= Instruction::MAX_C && key_idx <= Instruction::MAX_B {
+                        emit(
+                            c,
+                            Instruction::create_abck(
+                                OpCode::SetField,
+                                table_reg,
+                                key_idx,
+                                const_idx,
+                                true,  // k=1: C is constant index
+                            ),
+                        );
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -261,7 +295,7 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             }
         }
 
-        // Regular expression
+        // Regular expression - compile to register
         let reg = compile_expr(c, expr)?;
         val_regs.push(reg);
     }

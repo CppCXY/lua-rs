@@ -88,11 +88,32 @@ fn main() {
                     OpCode::GetTable => format!("R({}) := R({})[R({})]", a, b, c),
                     OpCode::SetTable => format!("R({})[R({})] := R({})", a, b, c),
                     OpCode::GetI => format!("R({}) := R({})[{}]", a, b, c),
-                    OpCode::SetI => format!("R({})[{}] := R({})", a, c, b),
+                    OpCode::SetI => {
+                        let k = Instruction::get_k(instr);
+                        if k {
+                            format!("R({})[{}] := K({})", a, c, b)
+                        } else {
+                            format!("R({})[{}] := R({})", a, c, b)
+                        }
+                    }
                     OpCode::GetField => format!("R({}) := R({})[K({})]", a, b, c),
-                    OpCode::SetField => format!("R({})[K({})] := R({})", a, c, b),
+                    OpCode::SetField => {
+                        let k = Instruction::get_k(instr);
+                        if k {
+                            format!("R({})[K({})] := K({})", a, b, c)
+                        } else {
+                            format!("R({})[K({})] := R({})", a, b, c)
+                        }
+                    }
                     OpCode::GetTabUp => format!("R({}) := UpValue[{}][K({})]", a, b, c),
-                    OpCode::SetTabUp => format!("UpValue[{}][K({})] := R({})", a, b, c),
+                    OpCode::SetTabUp => {
+                        let k = Instruction::get_k(instr);
+                        if k {
+                            format!("UpValue[{}][K({})] := K({})", a, b, c)
+                        } else {
+                            format!("UpValue[{}][K({})] := R({})", a, b, c)
+                        }
+                    }
                     OpCode::GetUpval => format!("R({}) := UpValue[{}]", a, b),
                     OpCode::SetUpval => format!("UpValue[{}] := R({})", b, a),
                     OpCode::Closure => format!("R({}) := closure(PROTO[{}])", a, bx),
