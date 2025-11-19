@@ -19,13 +19,15 @@ pub fn emit(c: &mut Compiler, instr: u32) -> usize {
 
 /// Emit a jump instruction and return its position for later patching
 pub fn emit_jump(c: &mut Compiler, opcode: OpCode) -> usize {
-    emit(c, Instruction::encode_asbx(opcode, 0, 0))
+    // JMP uses sJ format, not AsBx
+    emit(c, Instruction::create_sj(opcode, 0))
 }
 
 /// Patch a jump instruction at the given position
 pub fn patch_jump(c: &mut Compiler, pos: usize) {
     let jump = (c.chunk.code.len() - pos - 1) as i32;
-    c.chunk.code[pos] = Instruction::encode_asbx(OpCode::Jmp, 0, jump);
+    // JMP uses sJ format
+    c.chunk.code[pos] = Instruction::create_sj(OpCode::Jmp, jump);
 }
 
 /// Add a constant to the constant pool (without deduplication)

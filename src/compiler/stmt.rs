@@ -390,28 +390,31 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     }
 
     // Allocate consecutive registers for all return values
-    let base_reg = alloc_register(c);
+    // For main chunk, return values should start at R(0)
+    // For functions, they can start at the first available register
+    // But to match luac behavior, we should try to use R(0) when possible
+    let base_reg = 0; // Start from R(0) to match luac
     let num_exprs = exprs.len();
 
-    // Reserve registers for all return values
-    for _ in 1..num_exprs {
+    // Make sure we have enough registers allocated
+    while c.next_register < base_reg + num_exprs as u32 {
         alloc_register(c);
     }
 
-    // Compile all expressions into consecutive registers
+    // Compile all expressions into consecutive registers starting from base_reg
     for (i, expr) in exprs.iter().enumerate() {
         let target_reg = base_reg + i as u32;
-        let src_reg = compile_expr(c, expr)?;
+        let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
         if src_reg != target_reg {
             emit_move(c, target_reg, src_reg);
         }
     }
 
     // Emit return: B = num_values + 1
-    // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1
+    // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1, k = 1
     emit(
         c,
-        Instruction::encode_abc(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0),
+        Instruction::create_abck(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0, true),
     );
 
     Ok(())
@@ -514,7 +517,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 
     // Jump back to loop start
     let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
-    emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, -jump_offset));
+    emit(c, Instruction::create_sj(OpCode::Jmp, -jump_offset));
 
     // Patch end jump
     patch_jump(c, end_jump);
@@ -547,13 +550,13 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
             // Immediate comparison skips if FALSE, so Jmp executes when condition is FALSE
             // This is correct for repeat-until (continue when false)
             let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
-            emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, jump_offset));
+            emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
         } else {
             // Standard path
             let cond_reg = compile_expr(c, &cond_expr)?;
             emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
             let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
-            emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, jump_offset));
+            emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
         }
     }
 
@@ -596,8 +599,8 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     if exprs.len() >= 3 {
         let _ = compile_expr_to(c, &exprs[2], Some(step_reg))?;
     } else {
-        let const_idx = add_constant(c, LuaValue::integer(1));
-        emit_load_constant(c, step_reg, const_idx);
+        // Use LOADI for immediate integer 1
+        emit(c, Instruction::encode_asbx(OpCode::LoadI, step_reg, 1));
     }
 
     // Emit FORPREP: R(base) -= R(step); jump to FORLOOP (not loop body)
@@ -634,6 +637,9 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 
     end_loop(c);
     end_scope(c);
+
+    // Free the 4 loop control registers (base, limit, step, var)
+    c.next_register = base_reg;
 
     Ok(())
 }
@@ -774,7 +780,7 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
 
     // Jump back to loop start
     let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
-    emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, -jump_offset));
+    emit(c, Instruction::create_sj(OpCode::Jmp, -jump_offset));
 
     // Patch end jump
     patch_jump(c, end_jump);

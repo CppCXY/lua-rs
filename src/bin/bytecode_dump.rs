@@ -4,6 +4,8 @@ use lua_rs::lua_vm::{Instruction, OpCode};
 use std::env;
 use std::fs;
 
+// Import OpMode if it's re-exported, otherwise we'll use the method directly
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -32,9 +34,8 @@ fn main() {
             println!("Total instructions: {}", chunk.code.len());
             println!("Constants: {}", chunk.constants.len());
             println!("Registers used: ~{}", estimate_registers(&chunk));
-            println!("\nInstructions:");
-            println!("{:<4} {:<12} {:<40} {}", "PC", "OpCode", "Details", "Raw");
-            println!("{}", "-".repeat(80));
+            println!("\n{:<4} {:<14} {:<6} {:<10} {:<10} {:<10} {}", "PC", "OpCode", "A", "B/Bx", "C", "Raw Hex", "Details");
+            println!("{}", "-".repeat(130));
 
             for (pc, &instr) in chunk.code.iter().enumerate() {
                 let opcode = Instruction::get_opcode(instr);
@@ -43,6 +44,38 @@ fn main() {
                 let c = Instruction::get_c(instr);
                 let bx = Instruction::get_bx(instr);
                 let sbx = Instruction::get_sbx(instr);
+                let k = Instruction::get_k(instr);
+                
+                // Determine display format based on opcode
+                let (a_display, b_display, c_display) = match opcode {
+                    // ABx format opcodes
+                    OpCode::LoadK | OpCode::Closure => {
+                        (format!("{}", a), format!("{}", bx), String::new())
+                    }
+                    // AsBx format opcodes  
+                    OpCode::LoadI | OpCode::LoadF | OpCode::ForLoop | 
+                    OpCode::ForPrep | OpCode::TForPrep | OpCode::TForLoop => {
+                        let c_str = if matches!(opcode, OpCode::LoadF) { format!("{}", c) } else { String::new() };
+                        (format!("{}", a), format!("{}", sbx), c_str)
+                    }
+                    // Ax format
+                    OpCode::ExtraArg => {
+                        (format!("{}", Instruction::get_ax(instr)), String::new(), String::new())
+                    }
+                    // sJ format - JMP has no A parameter, sJ is the jump offset
+                    OpCode::Jmp => {
+                        (String::new(), format!("{}", Instruction::get_sj(instr)), String::new())
+                    }
+                    // RETURN and CALL show k as third column
+                    OpCode::Return | OpCode::TailCall => {
+                        let k_str = if k { "1".to_string() } else { "0".to_string() };
+                        (format!("{}", a), format!("{}", b), k_str)
+                    }
+                    // ABC format (default)
+                    _ => {
+                        (format!("{}", a), format!("{}", b), format!("{}{}", c, if k { " k" } else { "" }))
+                    }
+                };
 
                 let details = match opcode {
                     // Load/Move operations
@@ -251,7 +284,16 @@ fn main() {
                     OpCode::Closure => format!("R({}) := closure(PROTO[{}], ...)", a, bx),
                 };
 
-                println!("{:<4} {:<12?} {:<40} 0x{:08x}", pc, opcode, details, instr);
+                println!(
+                    "{:<4} {:<14} {:<6} {:<10} {:<10} 0x{:08X} {}",
+                    pc, 
+                    format!("{:?}", opcode),
+                    a_display,
+                    b_display,
+                    c_display,
+                    instr,
+                    details
+                );
             }
 
             if !chunk.constants.is_empty() {

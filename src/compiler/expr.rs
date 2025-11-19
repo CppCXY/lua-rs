@@ -163,6 +163,8 @@ fn compile_binary_expr_to(
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm));
+                            // Emit MMBINI for metamethod call (TM_ADD = 6)
+                            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 6, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpSub => {
@@ -170,6 +172,8 @@ fn compile_binary_expr_to(
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use SubK for constant operand
                             emit(c, Instruction::create_abck(OpCode::SubK, result_reg, left_reg, imm, true));
+                            // Emit MMBINK for metamethod call (TM_SUB = 7)
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 7, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMul => {
@@ -177,6 +181,8 @@ fn compile_binary_expr_to(
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use MulK for constant operand
                             emit(c, Instruction::create_abck(OpCode::MulK, result_reg, left_reg, imm, true));
+                            // Emit MMBINK for metamethod call (TM_MUL = 8)
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 8, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMod => {
@@ -184,6 +190,8 @@ fn compile_binary_expr_to(
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use ModK for constant operand
                             emit(c, Instruction::create_abck(OpCode::ModK, result_reg, left_reg, imm, true));
+                            // Emit MMBINK for metamethod call (TM_MOD = 9)
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 9, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpPow => {
@@ -191,6 +199,8 @@ fn compile_binary_expr_to(
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use PowK for constant operand
                             emit(c, Instruction::create_abck(OpCode::PowK, result_reg, left_reg, imm, true));
+                            // Emit MMBINK for metamethod call (TM_POW = 10)
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 10, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpDiv => {
@@ -198,6 +208,8 @@ fn compile_binary_expr_to(
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use DivK for constant operand
                             emit(c, Instruction::create_abck(OpCode::DivK, result_reg, left_reg, imm, true));
+                            // Emit MMBINK for metamethod call (TM_DIV = 11)
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 11, true));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpIDiv => {
@@ -205,6 +217,33 @@ fn compile_binary_expr_to(
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use IDivK for constant operand
                             emit(c, Instruction::create_abck(OpCode::IDivK, result_reg, left_reg, imm, true));
+                            // Emit MMBINK for metamethod call (TM_IDIV = 12)
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 12, true));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpShr => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            // Lua 5.4: Use ShrI for immediate right shift
+                            emit(c, Instruction::encode_abc(OpCode::ShrI, result_reg, left_reg, imm));
+                            // Emit MMBINI for metamethod call (TM_SHR = 17)
+                            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 17, false));
+                            return Ok(result_reg);
+                        }
+                        BinaryOperator::OpShl => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            // Lua 5.4: Use ShlI for immediate left shift
+                            // Note: ShlI uses negated immediate: sC << R[B] where sC is the immediate
+                            // To shift left by N, we use -N as the immediate
+                            let neg_imm = if int_val < 0 {
+                                ((-int_val) + 256) as u32
+                            } else {
+                                ((-int_val) + 512) as u32 % 512
+                            };
+                            emit(c, Instruction::encode_abc(OpCode::ShlI, result_reg, left_reg, neg_imm));
+                            // Emit MMBINI for metamethod call (TM_SHL = 16)
+                            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 16, false));
                             return Ok(result_reg);
                         }
                         // Immediate comparison - NOT IMPLEMENTED YET
@@ -221,28 +260,29 @@ fn compile_binary_expr_to(
     let right_reg = compile_expr(c, &right)?;
     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
 
-    let opcode = match op_kind {
-        BinaryOperator::OpAdd => OpCode::Add,
-        BinaryOperator::OpSub => OpCode::Sub,
-        BinaryOperator::OpMul => OpCode::Mul,
-        BinaryOperator::OpDiv => OpCode::Div,
-        BinaryOperator::OpMod => OpCode::Mod,
-        BinaryOperator::OpPow => OpCode::Pow,
-        BinaryOperator::OpConcat => OpCode::Concat,
-        BinaryOperator::OpEq => OpCode::Eq,
-        BinaryOperator::OpLt => OpCode::Lt,
-        BinaryOperator::OpLe => OpCode::Le,
-        BinaryOperator::OpNe => OpCode::Eq, // Lua 5.4: Use Eq with negated k
-        BinaryOperator::OpGt => OpCode::Lt, // Lua 5.4: Use Lt with swapped operands
-        BinaryOperator::OpGe => OpCode::Le, // Lua 5.4: Use Le with swapped operands
-        BinaryOperator::OpAnd => OpCode::TestSet, // Lua 5.4: Use TestSet for short-circuit
-        BinaryOperator::OpOr => OpCode::TestSet, // Lua 5.4: Use TestSet for short-circuit
-        BinaryOperator::OpBAnd => OpCode::BAnd,
-        BinaryOperator::OpBOr => OpCode::BOr,
-        BinaryOperator::OpBXor => OpCode::BXor,
-        BinaryOperator::OpShl => OpCode::Shl,
-        BinaryOperator::OpShr => OpCode::Shr,
-        BinaryOperator::OpIDiv => OpCode::IDiv,
+    // Determine opcode and metamethod event (TM)
+    let (opcode, mm_event_opt) = match op_kind {
+        BinaryOperator::OpAdd => (OpCode::Add, Some(6)),      // TM_ADD = 6
+        BinaryOperator::OpSub => (OpCode::Sub, Some(7)),      // TM_SUB = 7
+        BinaryOperator::OpMul => (OpCode::Mul, Some(8)),      // TM_MUL = 8
+        BinaryOperator::OpMod => (OpCode::Mod, Some(9)),      // TM_MOD = 9
+        BinaryOperator::OpPow => (OpCode::Pow, Some(10)),     // TM_POW = 10
+        BinaryOperator::OpDiv => (OpCode::Div, Some(11)),     // TM_DIV = 11
+        BinaryOperator::OpIDiv => (OpCode::IDiv, Some(12)),   // TM_IDIV = 12
+        BinaryOperator::OpBAnd => (OpCode::BAnd, Some(13)),   // TM_BAND = 13
+        BinaryOperator::OpBOr => (OpCode::BOr, Some(14)),     // TM_BOR = 14
+        BinaryOperator::OpBXor => (OpCode::BXor, Some(15)),   // TM_BXOR = 15
+        BinaryOperator::OpShl => (OpCode::Shl, Some(16)),     // TM_SHL = 16
+        BinaryOperator::OpShr => (OpCode::Shr, Some(17)),     // TM_SHR = 17
+        BinaryOperator::OpConcat => (OpCode::Concat, None),   // No MMBIN for concat
+        BinaryOperator::OpEq => (OpCode::Eq, None),
+        BinaryOperator::OpLt => (OpCode::Lt, None),
+        BinaryOperator::OpLe => (OpCode::Le, None),
+        BinaryOperator::OpNe => (OpCode::Eq, None), // Lua 5.4: Use Eq with negated k
+        BinaryOperator::OpGt => (OpCode::Lt, None), // Lua 5.4: Use Lt with swapped operands
+        BinaryOperator::OpGe => (OpCode::Le, None), // Lua 5.4: Use Le with swapped operands
+        BinaryOperator::OpAnd => (OpCode::TestSet, None), // Lua 5.4: Use TestSet for short-circuit
+        BinaryOperator::OpOr => (OpCode::TestSet, None), // Lua 5.4: Use TestSet for short-circuit
         _ => return Err(format!("Unsupported binary operator: {:?}", op_kind)),
     };
 
@@ -250,6 +290,16 @@ fn compile_binary_expr_to(
         c,
         Instruction::encode_abc(opcode, result_reg, left_reg, right_reg),
     );
+    
+    // Emit MMBIN instruction for metamethod call if this is an arithmetic/bitwise operation
+    // Lua 5.4: MMBIN follows the main instruction to call metamethod if operation fails
+    if let Some(mm_event) = mm_event_opt {
+        emit(
+            c,
+            Instruction::create_abck(OpCode::MmBin, left_reg, right_reg, mm_event, false),
+        );
+    }
+    
     Ok(result_reg)
 }
 
@@ -315,7 +365,9 @@ fn compile_paren_expr_to(
 
 /// Compile function call expression
 pub fn compile_call_expr(c: &mut Compiler, expr: &LuaCallExpr) -> Result<u32, String> {
-    compile_call_expr_with_returns(c, expr, 1)
+    // For statement context (discard returns), use num_returns = 0
+    // This will generate CALL with C=1 (0 returns expected)
+    compile_call_expr_with_returns(c, expr, 0)
 }
 
 fn compile_call_expr_to(
@@ -342,129 +394,65 @@ pub fn compile_call_expr_with_returns(
         .get_args()
         .collect::<Vec<_>>();
 
-    // Handle method call (colon syntax: obj:method(args))
-    // For method calls, we compile obj once, then use GetTable to get the method
-    let (func_src_reg, actual_args, self_reg_opt) = if expr.is_colon_call()
-        && let LuaExpr::IndexExpr(prefix_index_expr) = prefix_expr
-    {
-        // For obj:method(args), we compile obj once
-        let self_expr = prefix_index_expr
-            .get_prefix_expr()
-            .ok_or("missing self expr")?;
-        let obj_reg = compile_expr(c, &self_expr)?;
-
-        // Get the method key
-        let key = prefix_index_expr
-            .get_index_key()
-            .ok_or("Index expression missing key")?;
-        let key_reg = match key {
-            LuaIndexKey::Name(name_token) => {
-                let field_name = name_token.get_name_text();
-                let lua_str = create_string_value(c, field_name);
-                let const_idx = add_constant(c, lua_str);
-                let key_reg = alloc_register(c);
-                emit_load_constant(c, key_reg, const_idx);
-                key_reg
-            }
-            LuaIndexKey::String(string_token) => {
-                let string_value = string_token.get_value();
-                let lua_str = create_string_value(c, &string_value);
-                let const_idx = add_constant(c, lua_str);
-                let key_reg = alloc_register(c);
-                emit_load_constant(c, key_reg, const_idx);
-                key_reg
-            }
-            LuaIndexKey::Expr(key_expr) => compile_expr(c, &key_expr)?,
-            _ => return Err("Unsupported method key type".to_string()),
-        };
-
-        // Get the method: func = obj[key]
-        let func_reg = alloc_register(c);
-        emit(
-            c,
-            Instruction::encode_abc(OpCode::GetTable, func_reg, obj_reg, key_reg),
-        );
-
-        // Return: (function_register, args, Some(self_register))
-        // obj_reg is reused as self parameter
-        (func_reg, arg_exprs, Some(obj_reg))
-    } else {
-        // Regular call: func(args)
-        let func_reg = compile_expr(c, &prefix_expr)?;
-        (func_reg, arg_exprs, None)
-    };
-
-    // Calculate total argument count (including self for method calls)
-    let arg_count = if self_reg_opt.is_some() {
-        actual_args.len() + 1 // +1 for self
-    } else {
-        actual_args.len()
-    };
-
-    // First, compile all argument expressions to find their source registers
-    // This is needed to ensure we don't allocate func_reg in a way that would
-    // cause return values to overwrite argument source registers
-    let mut arg_src_regs = Vec::new();
-
-    // Add self register if method call
-    if let Some(self_reg) = self_reg_opt {
-        arg_src_regs.push(self_reg);
-    }
-
-    // Compile arguments to get their source registers
-    for (_idx, arg_expr) in actual_args.iter().enumerate() {
-        let arg_reg = compile_expr(c, arg_expr)?;
-        arg_src_regs.push(arg_reg);
-    }
-
-    // Find the maximum argument source register
-    let max_arg_src_reg = arg_src_regs.iter().max().copied().unwrap_or(0);
-
-    // Ensure func_reg is allocated after all argument source registers and
-    // after func_src_reg to avoid conflicts with return values overwriting arguments
-    let min_safe_reg = max_arg_src_reg.max(func_src_reg) + 1;
-
-    // Allocate registers up to min_safe_reg if needed
-    while c.next_register < min_safe_reg {
-        let _allocated = alloc_register(c);
-    }
-
-    // Now allocate func_reg (which will be at least min_safe_reg)
-    let func_reg = alloc_register(c);
-
-    // Copy function to call register if different
-    if func_src_reg != func_reg {
-        emit_move(c, func_reg, func_src_reg);
-    }
-
-    // Allocate space for arguments starting after the function register
+    // TODO: Handle method call (colon syntax: obj:method(args)) properly with Self instruction
+    // For now we just compile as regular call
+    
+    // Lua 5.4 strategy: Compile function into next available register,
+    // then compile arguments into consecutive registers immediately after
+    let func_reg = compile_expr(c, &prefix_expr)?;
+    
+    // Compile arguments into consecutive registers starting at func_reg + 1
     let args_start = func_reg + 1;
-
-    // Reserve registers for all arguments
-    while c.next_register < args_start + arg_count as u32 {
-        let _allocated = alloc_register(c);
+    let mut arg_regs = Vec::new();
+    
+    for arg_expr in arg_exprs.iter() {
+        let arg_reg = compile_expr(c, arg_expr)?;
+        arg_regs.push(arg_reg);
     }
-
-    // Move arguments to their target positions
-    for (i, &arg_src_reg) in arg_src_regs.iter().enumerate() {
-        let target_reg = args_start + i as u32;
-        if arg_src_reg != target_reg {
-            emit_move(c, target_reg, arg_src_reg);
+    
+    // Check if arguments are already in the correct positions
+    let mut need_move = false;
+    for (i, &arg_reg) in arg_regs.iter().enumerate() {
+        if arg_reg != args_start + i as u32 {
+            need_move = true;
+            break;
         }
     }
-
+    
+    // If arguments are not in consecutive registers, we need to move them
+    if need_move {
+        // Reserve registers for arguments
+        while c.next_register < args_start + arg_regs.len() as u32 {
+            alloc_register(c);
+        }
+        
+        // Move arguments to correct positions
+        for (i, &arg_reg) in arg_regs.iter().enumerate() {
+            let target_reg = args_start + i as u32;
+            if arg_reg != target_reg {
+                emit_move(c, target_reg, arg_reg);
+            }
+        }
+    }
+    
     // Emit call instruction
-    // B = number of arguments + 1 (includes the function itself)
-    // C = number of expected return values + 1 (0 means all returns, 1 means 0 returns, 2 means 1 return, etc.)
-    let c_param = if num_returns == 0 {
-        0
-    } else {
-        (num_returns + 1) as u32
-    };
+    // A = function register
+    // B = number of arguments + 1 (1 means 0 args, 2 means 1 arg, etc.)
+    // C = number of expected return values + 1 (1 means 0 returns, 2 means 1 return, 0 means all returns)
+    let arg_count = arg_exprs.len();
+    let c_param = (num_returns + 1) as u32;
+    
     emit(
         c,
         Instruction::encode_abc(OpCode::Call, func_reg, (arg_count + 1) as u32, c_param),
     );
+
+    // After CALL: adjust next_register based on return values
+    // CALL places return values starting at func_reg
+    // If num_returns == 0, CALL discards all returns, free register is func_reg
+    // If num_returns > 0, return values are in func_reg .. func_reg + num_returns - 1
+    // So next free register should be func_reg + num_returns
+    c.next_register = func_reg + num_returns as u32;
 
     Ok(func_reg)
 }

@@ -162,6 +162,13 @@ impl<'a> Compiler<'a> {
 
 /// Compile a chunk (root node)
 fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
+    // Emit VARARGPREP at the beginning - Lua 5.4 always emits this for main chunks
+    // It adjusts vararg parameters for functions that accept ... (varargs)
+    // For non-vararg functions, nparams = param_count; for vararg functions, nparams is used
+    // Main chunks are always considered vararg (param_count = 0, is_vararg = true)
+    c.chunk.is_vararg = true;
+    emit(c, Instruction::encode_abc(OpCode::VarargPrep, 0, 0, 0));
+    
     if let Some(block) = chunk.get_block() {
         compile_block(c, &block)?;
     }
@@ -170,7 +177,22 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     check_unresolved_gotos(c)?;
 
     // Emit return at the end
-    emit(c, Instruction::encode_abc(OpCode::Return, 0, 1, 0));
+    // Lua 5.4: RETURN instruction format: RETURN A B C k
+    // A = first register to return (usually 0 or freereg)
+    // B = number of values to return + 1 (1 means 0 returns, 2 means 1 return, 0 means return to top)
+    // C = is vararg flag (main chunks are vararg, so C should be > 0)
+    // k = needs to close upvalues
+    // 
+    // For main chunk final return:
+    // - A should be the current free register (or 0 if no registers used)
+    // - B = 1 (return 0 values)
+    // - C = 1 (chunk is vararg, need to correct func - actually encoded in k bit + C field)
+    // - k = depends on whether we have upvalues to close
+    //
+    // Looking at luac output, for main chunks it uses: RETURN freereg 1 1
+    // where the last 1 is actually the k bit set
+    let freereg = c.next_register;
+    emit(c, Instruction::create_abck(OpCode::Return, freereg, 1, 0, true));
     Ok(())
 }
 
