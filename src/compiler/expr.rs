@@ -404,18 +404,71 @@ pub fn compile_call_expr_with_returns(
     // Compile arguments into consecutive registers starting at func_reg + 1
     let args_start = func_reg + 1;
     let mut arg_regs = Vec::new();
+    let mut last_arg_is_call_all_out = false;
     
-    for arg_expr in arg_exprs.iter() {
+    for (i, arg_expr) in arg_exprs.iter().enumerate() {
+        let is_last = i == arg_exprs.len() - 1;
+        
+        // OPTIMIZATION: If last argument is a call, use "all out" mode
+        if is_last && matches!(arg_expr, LuaExpr::CallExpr(_)) {
+            if let LuaExpr::CallExpr(call_expr) = arg_expr {
+                let call_prefix = call_expr.get_prefix_expr().ok_or("missing call prefix")?;
+                let call_reg = compile_expr(c, &call_prefix)?;
+                
+                // Compile call arguments
+                let call_args_start = call_reg + 1;
+                let call_arg_exprs = call_expr
+                    .get_args_list()
+                    .ok_or("missing args list")?
+                    .get_args()
+                    .collect::<Vec<_>>();
+                
+                let mut call_arg_regs = Vec::new();
+                for call_arg in call_arg_exprs.iter() {
+                    let arg_reg = compile_expr(c, call_arg)?;
+                    call_arg_regs.push(arg_reg);
+                }
+                
+                // Move call arguments if needed
+                for (j, &reg) in call_arg_regs.iter().enumerate() {
+                    let target = call_args_start + j as u32;
+                    if reg != target {
+                        while c.next_register <= target {
+                            alloc_register(c);
+                        }
+                        emit_move(c, target, reg);
+                    }
+                }
+                
+                // Emit call with "all out" (C=0)
+                emit(
+                    c,
+                    Instruction::encode_abc(
+                        OpCode::Call,
+                        call_reg,
+                        (call_arg_exprs.len() + 1) as u32,
+                        0  // C=0: all out
+                    ),
+                );
+                
+                arg_regs.push(call_reg);
+                last_arg_is_call_all_out = true;
+                break;
+            }
+        }
+        
         let arg_reg = compile_expr(c, arg_expr)?;
         arg_regs.push(arg_reg);
     }
     
     // Check if arguments are already in the correct positions
     let mut need_move = false;
-    for (i, &arg_reg) in arg_regs.iter().enumerate() {
-        if arg_reg != args_start + i as u32 {
-            need_move = true;
-            break;
+    if !last_arg_is_call_all_out {
+        for (i, &arg_reg) in arg_regs.iter().enumerate() {
+            if arg_reg != args_start + i as u32 {
+                need_move = true;
+                break;
+            }
         }
     }
     
@@ -437,14 +490,19 @@ pub fn compile_call_expr_with_returns(
     
     // Emit call instruction
     // A = function register
-    // B = number of arguments + 1 (1 means 0 args, 2 means 1 arg, etc.)
+    // B = number of arguments + 1, or 0 if last arg was "all out" call
     // C = number of expected return values + 1 (1 means 0 returns, 2 means 1 return, 0 means all returns)
     let arg_count = arg_exprs.len();
+    let b_param = if last_arg_is_call_all_out {
+        0  // B=0: all in
+    } else {
+        (arg_count + 1) as u32
+    };
     let c_param = (num_returns + 1) as u32;
     
     emit(
         c,
-        Instruction::encode_abc(OpCode::Call, func_reg, (arg_count + 1) as u32, c_param),
+        Instruction::encode_abc(OpCode::Call, func_reg, b_param, c_param),
     );
 
     // After CALL: adjust next_register based on return values

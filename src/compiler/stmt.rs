@@ -198,12 +198,10 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                     }
                 } else {
                     // Single value needed
-                    let dest_reg = alloc_register(c);
-                    let result_reg = compile_expr_to(c, last_expr, Some(dest_reg))?;
-                    if result_reg != dest_reg {
-                        emit_move(c, dest_reg, result_reg);
-                    }
-                    regs.push(dest_reg);
+                    // OPTIMIZATION: For call expressions, don't allocate dest first
+                    // Let the call use whatever register it needs, then use that as the local's register
+                    let result_reg = compile_call_expr_with_returns(c, call_expr, 1)?;
+                    regs.push(result_reg);
                 }
             } else {
                 // Non-call expression
@@ -217,11 +215,24 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
         }
     }
 
-    // Fill missing values with nil
-    while regs.len() < names.len() {
-        let reg = alloc_register(c);
-        emit_load_nil(c, reg);
-        regs.push(reg);
+    // Fill missing values with nil (batch optimization)
+    if regs.len() < names.len() {
+        let first_nil_reg = alloc_register(c);
+        let nil_count = names.len() - regs.len();
+        
+        // Allocate remaining registers
+        for _ in 1..nil_count {
+            alloc_register(c);
+        }
+        
+        // Emit single LOADNIL instruction for all nil values
+        // Format: LOADNIL A B - loads nil into R(A)..R(A+B)
+        emit(c, Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0));
+        
+        // Add all nil registers to regs
+        for i in 0..nil_count {
+            regs.push(first_nil_reg + i as u32);
+        }
     }
 
     // Define locals
@@ -293,13 +304,31 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
         }
     }
 
-    // Standard path: compile expressions
+    // Multi-assignment: use luac's reverse-order strategy
+    // Strategy:
+    // 1. Get target registers for all variables
+    // 2. Compile expressions to temps, but last value can go to its target directly
+    // 3. Emit moves in reverse order to avoid conflicts
+    
+    let mut target_regs = Vec::new();
+    
+    // Collect target registers for local variables
+    let mut all_locals = true;
+    for var in vars.iter() {
+        if let LuaVarExpr::NameExpr(name_expr) = var {
+            let name = name_expr.get_name_text().unwrap_or("".to_string());
+            if let Some(local) = resolve_local(c, &name) {
+                target_regs.push(Some(local.register));
+                continue;
+            }
+        }
+        target_regs.push(None);
+        all_locals = false;
+    }
+    
+    // Compile expressions
     let mut val_regs = Vec::new();
-
-    // For multiple assignments, we need to use temporary registers
-    // to avoid overwriting values that are still needed
-    let use_temp_regs = vars.len() > 1;
-
+    
     for (i, expr) in exprs.iter().enumerate() {
         let is_last = i == exprs.len() - 1;
 
@@ -309,7 +338,6 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             if remaining_vars > 0 {
                 if let LuaExpr::CallExpr(call_expr) = expr {
                     let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
-                    // Collect all return values
                     for j in 0..remaining_vars {
                         val_regs.push(base_reg + j as u32);
                     }
@@ -318,48 +346,75 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             }
         }
 
-        // For multiple assignments, compile to temporary registers
-        let reg = if use_temp_regs {
+        // OPTIMIZATION: If last expr and all are local vars, compile to target directly
+        let reg = if is_last && all_locals && val_regs.len() + 1 == vars.len() {
+            // Last value can go directly to its target
+            if let Some(target_reg) = target_regs[val_regs.len()] {
+                compile_expr_to(c, expr, Some(target_reg))?;
+                target_reg
+            } else {
+                let temp_reg = alloc_register(c);
+                compile_expr_to(c, expr, Some(temp_reg))?;
+                temp_reg
+            }
+        } else {
+            // Compile to temporary register
             let temp_reg = alloc_register(c);
             compile_expr_to(c, expr, Some(temp_reg))?;
             temp_reg
-        } else {
-            // Single assignment - can compile directly
-            compile_expr(c, expr)?
         };
         val_regs.push(reg);
     }
 
     // Fill missing values with nil
-    while val_regs.len() < vars.len() {
-        let reg = alloc_register(c);
-        emit_load_nil(c, reg);
-        val_regs.push(reg);
+    if val_regs.len() < vars.len() {
+        let nil_count = vars.len() - val_regs.len();
+        let first_nil_reg = alloc_register(c);
+        
+        // Allocate remaining registers
+        for _ in 1..nil_count {
+            alloc_register(c);
+        }
+        
+        // Emit LOADNIL (batch)
+        if nil_count == 1 {
+            emit(c, Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, 0, 0));
+        } else {
+            emit(c, Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0));
+        }
+        
+        for i in 0..nil_count {
+            val_regs.push(first_nil_reg + i as u32);
+        }
     }
 
-    // Compile assignments
-    for (i, var) in vars.iter().enumerate() {
-        compile_var_expr(c, var, val_regs[i])?;
-    }
-
-    // Free temporary registers if used
-    if use_temp_regs && !val_regs.is_empty() {
-        // Find the minimum register that was a local variable
-        let mut min_local_reg = c.next_register;
-        for var in vars.iter() {
-            if let LuaVarExpr::NameExpr(name_expr) = var {
-                let name = name_expr.get_name_text().unwrap_or("".to_string());
-                if let Some(local) = resolve_local(c, &name) {
-                    min_local_reg = min_local_reg.min(local.register);
+    // Emit assignments in REVERSE order (luac optimization)
+    if all_locals && vars.len() > 1 {
+        // All local variables: use reverse-order moves
+        for i in (0..vars.len()).rev() {
+            if let Some(target_reg) = target_regs[i] {
+                if val_regs[i] != target_reg {
+                    emit_move(c, target_reg, val_regs[i]);
                 }
             }
         }
-        // Reset to the first temporary register we allocated
-        if !val_regs.is_empty() {
-            let first_temp = *val_regs.first().unwrap();
-            if first_temp >= min_local_reg {
-                c.next_register = first_temp;
-            }
+    } else {
+        // Not all locals: compile normally
+        for (i, var) in vars.iter().enumerate() {
+            compile_var_expr(c, var, val_regs[i])?;
+        }
+    }
+
+    // Free temporary registers  
+    if all_locals && !val_regs.is_empty() {
+        // Find all target registers (min and max)
+        let targets: Vec<u32> = target_regs.iter().filter_map(|&r| r).collect();
+        if !targets.is_empty() {
+            let max_target = *targets.iter().max().unwrap();
+            
+            // Reset next_register to just after the last target register
+            // This allows temporary registers to be reused
+            c.next_register = max_target + 1;
         }
     }
 
