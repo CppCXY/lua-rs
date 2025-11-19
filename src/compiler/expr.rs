@@ -131,6 +131,63 @@ fn compile_name_expr_to(
     Ok(reg)
 }
 
+/// Try to evaluate an expression as a constant integer (for SETI/GETI optimization)
+/// Returns Some(int_value) if the expression is a compile-time constant integer
+fn try_eval_const_int(expr: &LuaExpr) -> Option<i64> {
+    match expr {
+        LuaExpr::LiteralExpr(lit) => {
+            if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
+                if !num.is_float() {
+                    return Some(num.get_int_value());
+                }
+            }
+            None
+        }
+        LuaExpr::BinaryExpr(bin_expr) => {
+            // Try to evaluate binary expressions with constant operands
+            let (left, right) = bin_expr.get_exprs()?;
+            let left_val = try_eval_const_int(&left)?;
+            let right_val = try_eval_const_int(&right)?;
+            
+            let op = bin_expr.get_op_token()?.get_op();
+            match op {
+                BinaryOperator::OpAdd => Some(left_val + right_val),
+                BinaryOperator::OpSub => Some(left_val - right_val),
+                BinaryOperator::OpMul => Some(left_val * right_val),
+                BinaryOperator::OpDiv => {
+                    let result = left_val as f64 / right_val as f64;
+                    if result.fract() == 0.0 {
+                        Some(result as i64)
+                    } else {
+                        None
+                    }
+                }
+                BinaryOperator::OpIDiv => Some(left_val / right_val),
+                BinaryOperator::OpMod => Some(left_val % right_val),
+                BinaryOperator::OpBAnd => Some(left_val & right_val),
+                BinaryOperator::OpBOr => Some(left_val | right_val),
+                BinaryOperator::OpBXor => Some(left_val ^ right_val),
+                BinaryOperator::OpShl => Some(left_val << (right_val & 0x3f)),
+                BinaryOperator::OpShr => Some(left_val >> (right_val & 0x3f)),
+                _ => None,
+            }
+        }
+        LuaExpr::UnaryExpr(un_expr) => {
+            // Try to evaluate unary expressions
+            let operand = un_expr.get_expr()?;
+            let op_val = try_eval_const_int(&operand)?;
+            
+            let op = un_expr.get_op_token()?.get_op();
+            match op {
+                UnaryOperator::OpUnm => Some(-op_val),
+                UnaryOperator::OpBNot => Some(!op_val),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn compile_binary_expr_to(
     c: &mut Compiler,
     expr: &LuaBinaryExpr,
@@ -140,6 +197,79 @@ fn compile_binary_expr_to(
     let (left, right) = expr.get_exprs().ok_or("error")?;
     let op = expr.get_op_token().ok_or("error")?;
     let op_kind = op.get_op();
+
+    // CONSTANT FOLDING: Check if both operands are numeric constants
+    // This matches luac behavior: 1+1 -> 2, 2+3 -> 5, etc.
+    if let (LuaExpr::LiteralExpr(left_lit), LuaExpr::LiteralExpr(right_lit)) = (&left, &right) {
+        if let (Some(LuaLiteralToken::Number(left_num)), Some(LuaLiteralToken::Number(right_num))) = 
+            (left_lit.get_literal(), right_lit.get_literal()) {
+            
+            let left_val = if left_num.is_float() {
+                left_num.get_float_value()
+            } else {
+                left_num.get_int_value() as f64
+            };
+            
+            let right_val = if right_num.is_float() {
+                right_num.get_float_value()
+            } else {
+                right_num.get_int_value() as f64
+            };
+            
+            // Calculate result based on operator
+            let result_opt: Option<f64> = match op_kind {
+                BinaryOperator::OpAdd => Some(left_val + right_val),
+                BinaryOperator::OpSub => Some(left_val - right_val),
+                BinaryOperator::OpMul => Some(left_val * right_val),
+                BinaryOperator::OpDiv => Some(left_val / right_val),
+                BinaryOperator::OpIDiv => Some((left_val / right_val).floor()),
+                BinaryOperator::OpMod => Some(left_val % right_val),
+                BinaryOperator::OpPow => Some(left_val.powf(right_val)),
+                // Bitwise operations require integers
+                BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor |
+                BinaryOperator::OpShl | BinaryOperator::OpShr => {
+                    if !left_num.is_float() && !right_num.is_float() {
+                        let left_int = left_num.get_int_value() as i64;
+                        let right_int = right_num.get_int_value() as i64;
+                        let result_int = match op_kind {
+                            BinaryOperator::OpBAnd => left_int & right_int,
+                            BinaryOperator::OpBOr => left_int | right_int,
+                            BinaryOperator::OpBXor => left_int ^ right_int,
+                            BinaryOperator::OpShl => left_int << (right_int & 0x3f),
+                            BinaryOperator::OpShr => left_int >> (right_int & 0x3f),
+                            _ => unreachable!(),
+                        };
+                        Some(result_int as f64)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            
+            if let Some(result) = result_opt {
+                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                
+                // Emit the folded constant as LOADI or LOADK
+                let result_int = result as i64;
+                if result == result_int as f64 {
+                    // Integer result - try LOADI first
+                    if emit_loadi(c, result_reg, result_int).is_none() {
+                        // Too large for LOADI, use LOADK
+                        let lua_val = LuaValue::integer(result_int);
+                        let const_idx = add_constant(c, lua_val);
+                        emit(c, Instruction::encode_abx(OpCode::LoadK, result_reg, const_idx as u32));
+                    }
+                } else {
+                    // Float result - use LOADK
+                    let lua_val = LuaValue::number(result);
+                    let const_idx = add_constant(c, lua_val);
+                    emit(c, Instruction::encode_abx(OpCode::LoadK, result_reg, const_idx as u32));
+                }
+                return Ok(result_reg);
+            }
+        }
+    }
 
     // Try to optimize with immediate operands (Lua 5.4 optimization)
     // Check if right operand is a small integer constant
@@ -962,7 +1092,35 @@ fn compile_table_expr_to(
                     continue; // Skip the SetTable at the end
                 }
                 LuaIndexKey::Integer(number_token) => {
-                    // key is a numeric literal
+                    // key is a numeric literal - try SETI optimization
+                    if !number_token.is_float() {
+                        let int_value = number_token.get_int_value();
+                        // SETI can handle integer keys directly (8-bit unsigned index)
+                        if int_value >= 0 && int_value <= 255 {
+                            // Try to compile value as constant first (for RK optimization)
+                            let (value_operand, use_constant) = if let Some(value_expr) = field.get_value_expr() {
+                                if let Some(k_idx) = try_expr_as_constant(c, &value_expr) {
+                                    (k_idx, true)
+                                } else {
+                                    (compile_expr(c, &value_expr)?, false)
+                                }
+                            } else {
+                                let r = alloc_register(c);
+                                emit_load_nil(c, r);
+                                (r, false)
+                            };
+
+                            // Use SETI: R(A)[B] := RK(C) where B is integer index (0-255)
+                            emit(
+                                c,
+                                Instruction::create_abck(OpCode::SetI, reg, int_value as u32, value_operand, use_constant),
+                            );
+                            
+                            continue; // Skip the SetTable at the end
+                        }
+                    }
+                    
+                    // Fall back to SETTABLE for floats or large integers
                     let const_idx = if number_token.is_float() {
                         let num_value = number_token.get_float_value();
                         add_constant(c, LuaValue::number(num_value))
@@ -977,7 +1135,32 @@ fn compile_table_expr_to(
                     key_reg
                 }
                 LuaIndexKey::Expr(key_expr) => {
-                    // key is an expression
+                    // key is an expression - try to evaluate as constant integer for SETI
+                    if let Some(int_val) = try_eval_const_int(&key_expr) {
+                        if int_val >= 0 && int_val <= 255 {
+                            // Use SETI for small integer keys
+                            let (value_operand, use_constant) = if let Some(value_expr) = field.get_value_expr() {
+                                if let Some(k_idx) = try_expr_as_constant(c, &value_expr) {
+                                    (k_idx, true)
+                                } else {
+                                    (compile_expr(c, &value_expr)?, false)
+                                }
+                            } else {
+                                let r = alloc_register(c);
+                                emit_load_nil(c, r);
+                                (r, false)
+                            };
+
+                            emit(
+                                c,
+                                Instruction::create_abck(OpCode::SetI, reg, int_val as u32, value_operand, use_constant),
+                            );
+                            
+                            continue; // Skip the SetTable at the end
+                        }
+                    }
+                    
+                    // Fall back to compiling key as expression
                     compile_expr(c, &key_expr)?
                 }
                 LuaIndexKey::Idx(_i) => {
@@ -986,21 +1169,31 @@ fn compile_table_expr_to(
             };
 
             // Compile value expression
-            let value_reg = if let Some(value_expr) = field.get_value_expr() {
-                compile_expr(c, &value_expr)?
+            // Try to use constant optimization (RK operand)
+            let (value_operand, use_constant) = if let Some(value_expr) = field.get_value_expr() {
+                if let Some(k_idx) = try_expr_as_constant(c, &value_expr) {
+                    (k_idx, true)
+                } else {
+                    (compile_expr(c, &value_expr)?, false)
+                }
             } else {
                 let r = alloc_register(c);
                 emit_load_nil(c, r);
-                r
+                (r, false)
             };
 
             // Set table field: table[key] = value
+            // Use k-suffix if value is a constant
             emit(
                 c,
-                Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
+                Instruction::create_abck(OpCode::SetTable, reg, key_reg, value_operand, use_constant),
             );
         }
     }
+
+    // Free temporary registers used during table construction
+    // Reset to table_reg + 1 to match luac's register allocation behavior
+    c.next_register = reg + 1;
 
     Ok(reg)
 }
