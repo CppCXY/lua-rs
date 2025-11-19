@@ -1338,14 +1338,20 @@ impl LuaVM {
         let base_ptr = frame.base_ptr;
         let value = self.get_register(base_ptr, b);
 
-        // Strings have raw length
-        if let Some(s) = self.get_string(&value) {
-            self.set_register(base_ptr, a, LuaValue::integer(s.as_str().len() as i64));
-            return Ok(());
+        // ULTRA-OPTIMIZED: Direct string length access via cached pointer
+        // String.len() is O(1) as String internally caches length
+        if value.is_string() {
+            if let Some(ptr) = value.as_string_ptr_direct() {
+                // SAFETY: Pointer is valid as long as value exists
+                unsafe {
+                    let len = (*ptr).as_str().len() as i64;
+                    self.set_register(base_ptr, a, LuaValue::integer(len));
+                    return Ok(());
+                }
+            }
         }
 
         // Try __len metamethod for tables
-
         if value.is_table() {
             if self.call_unop_metamethod(&value, "__len", a)? {
                 return Ok(());

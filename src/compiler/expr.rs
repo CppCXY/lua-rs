@@ -57,7 +57,18 @@ fn compile_literal_expr(
             emit_load_nil(c, reg);
         }
         LuaLiteralToken::Number(num) => {
-            // Try to get the string representation and parse it
+            // Lua 5.4 optimization: Use LoadI for small integers
+            if !num.is_float() {
+                let int_val = num.get_int_value();
+                // LoadI uses sBx (18-bit signed): range [-131072, 131071]
+                if int_val >= -131072 && int_val <= 131071 {
+                    // encode_asbx handles the offset internally
+                    emit(c, Instruction::encode_asbx(OpCode::LoadI, reg, int_val as i32));
+                    return Ok(reg);
+                }
+            }
+            
+            // Fall back to LoadK for floats or large integers
             let num_value = if num.is_float() {
                 LuaValue::float(num.get_float_value())
             } else {
@@ -757,22 +768,50 @@ fn compile_table_expr_to(
 
             let key_reg = match field_key {
                 LuaIndexKey::Name(name_token) => {
-                    // key is an identifier
+                    // key is an identifier - use SetTableK optimization
                     let key_name = name_token.get_name_text().to_string();
                     let lua_str = create_string_value(c, key_name);
                     let const_idx = add_constant(c, lua_str);
-                    let key_reg = alloc_register(c);
-                    emit_load_constant(c, key_reg, const_idx);
-                    key_reg
+                    
+                    // Compile value expression
+                    let value_reg = if let Some(value_expr) = field.get_value_expr() {
+                        compile_expr(c, &value_expr)?
+                    } else {
+                        let r = alloc_register(c);
+                        emit_load_nil(c, r);
+                        r
+                    };
+
+                    // Use SetTableK: R(A)[K(B)] := R(C)
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetTableK, reg, const_idx, value_reg),
+                    );
+                    
+                    continue; // Skip the SetTable at the end
                 }
                 LuaIndexKey::String(string_token) => {
-                    // key is a string literal
+                    // key is a string literal - use SetTableK optimization  
                     let string_value = string_token.get_value();
                     let lua_str = create_string_value(c, string_value);
                     let const_idx = add_constant(c, lua_str);
-                    let key_reg = alloc_register(c);
-                    emit_load_constant(c, key_reg, const_idx);
-                    key_reg
+                    
+                    // Compile value expression
+                    let value_reg = if let Some(value_expr) = field.get_value_expr() {
+                        compile_expr(c, &value_expr)?
+                    } else {
+                        let r = alloc_register(c);
+                        emit_load_nil(c, r);
+                        r
+                    };
+
+                    // Use SetTableK: R(A)[K(B)] := R(C)
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::SetTableK, reg, const_idx, value_reg),
+                    );
+                    
+                    continue; // Skip the SetTable at the end
                 }
                 LuaIndexKey::Integer(number_token) => {
                     // key is a numeric literal

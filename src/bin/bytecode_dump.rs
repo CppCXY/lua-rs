@@ -47,6 +47,7 @@ fn main() {
                 let details = match opcode {
                     OpCode::Move => format!("R({}) := R({})", a, b),
                     OpCode::LoadK => format!("R({}) := K({})", a, bx),
+                    OpCode::LoadI => format!("R({}) := {}", a, sbx),  // Load immediate integer
                     OpCode::LoadNil => format!("R({}) := nil", a),
                     OpCode::LoadBool => format!("R({}) := {}", a, b != 0),
                     OpCode::Add => format!("R({}) := R({}) + R({})", a, b, c),
@@ -131,6 +132,7 @@ fn estimate_registers(chunk: &Chunk) -> usize {
 fn analyze_performance(chunk: &Chunk) {
     let mut move_count = 0;
     let mut loadk_count = 0;
+    let mut loadi_count = 0;
     let mut arithmetic_count = 0;
     let mut loop_count = 0;
     let mut jump_count = 0;
@@ -139,6 +141,7 @@ fn analyze_performance(chunk: &Chunk) {
         match Instruction::get_opcode(instr) {
             OpCode::Move => move_count += 1,
             OpCode::LoadK => loadk_count += 1,
+            OpCode::LoadI => loadi_count += 1,
             OpCode::Add
             | OpCode::Sub
             | OpCode::Mul
@@ -163,6 +166,11 @@ fn analyze_performance(chunk: &Chunk) {
         loadk_count,
         loadk_count as f64 / chunk.code.len() as f64 * 100.0
     );
+    println!(
+        "  LoadI instructions:      {} ({:.1}%)",
+        loadi_count,
+        loadi_count as f64 / chunk.code.len() as f64 * 100.0
+    );
     println!("  Arithmetic operations:   {}", arithmetic_count);
     println!("  Loop control:            {}", loop_count);
     println!("  Jumps:                   {}", jump_count);
@@ -174,5 +182,9 @@ fn analyze_performance(chunk: &Chunk) {
 
     if loop_count > 0 {
         println!("\n✓ Optimized for-loops detected (ForPrep/ForLoop)");
+    }
+    
+    if loadi_count > 0 {
+        println!("\n✓ LoadI optimization enabled ({} immediate loads)", loadi_count);
     }
 }
