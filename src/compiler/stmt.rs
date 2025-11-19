@@ -39,26 +39,27 @@ fn try_compile_immediate_comparison(c: &mut Compiler, expr: &LuaExpr) -> Result<
                             int_val as u32
                         };
                         
-                        // Emit immediate comparison (skips next if FALSE)
+                        // Emit immediate comparison (skips next if TRUE to fall through to body)
+                        // C=0 means: if (result != 0) i.e. (result == true) then skip next (the Jmp)
                         match op_kind {
                             BinaryOperator::OpLt => {
-                                emit(c, Instruction::encode_abc(OpCode::LtI, left_reg, imm, 1));
+                                emit(c, Instruction::encode_abc(OpCode::LtI, left_reg, imm, 0));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpLe => {
-                                emit(c, Instruction::encode_abc(OpCode::LeI, left_reg, imm, 1));
+                                emit(c, Instruction::encode_abc(OpCode::LeI, left_reg, imm, 0));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpGt => {
-                                emit(c, Instruction::encode_abc(OpCode::GtI, left_reg, imm, 1));
+                                emit(c, Instruction::encode_abc(OpCode::GtI, left_reg, imm, 0));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpGe => {
-                                emit(c, Instruction::encode_abc(OpCode::GeI, left_reg, imm, 1));
+                                emit(c, Instruction::encode_abc(OpCode::GeI, left_reg, imm, 0));
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpEq => {
-                                emit(c, Instruction::encode_abc(OpCode::EqI, left_reg, imm, 1));
+                                emit(c, Instruction::encode_abc(OpCode::EqI, left_reg, imm, 0));
                                 return Ok(Some(left_reg));
                             }
                             _ => {}

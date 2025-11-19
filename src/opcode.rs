@@ -8,6 +8,7 @@ pub enum OpCode {
     // Load/Store
     Move = 0, // R(A) := R(B)
     LoadK,    // R(A) := K(Bx)
+    LoadI,    // R(A) := sBx (load signed immediate integer)
     LoadNil,  // R(A) := nil
     LoadBool, // R(A) := bool(B); if C then pc++
 

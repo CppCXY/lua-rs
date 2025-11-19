@@ -19,7 +19,10 @@ fn test_arithmetic_operators() {
     "#,
     );
 
-    assert!(result.is_ok());
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
+    assert!(result.is_ok(), "Test failed with error: {:?}", result.err());
 }
 
 #[test]

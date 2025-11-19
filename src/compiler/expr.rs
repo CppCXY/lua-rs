@@ -138,9 +138,6 @@ fn compile_binary_expr_to(
                 let int_val = num.get_int_value();
                 // Use signed 9-bit immediate: range [-256, 255]
                 if int_val >= -256 && int_val <= 255 {
-                    let left_reg = compile_expr(c, &left)?;
-                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                    
                     // Encode immediate value (9 bits)
                     let imm = if int_val < 0 {
                         (int_val + 512) as u32
@@ -149,32 +146,47 @@ fn compile_binary_expr_to(
                     };
                     
                     // Try immediate arithmetic instructions
+                    // Only compile left operand if we actually use immediate instruction
                     match op_kind {
                         BinaryOperator::OpAdd => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpSub => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::SubI, result_reg, left_reg, imm));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMul => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::MulI, result_reg, left_reg, imm));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMod => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::ModI, result_reg, left_reg, imm));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpPow => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::PowI, result_reg, left_reg, imm));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpDiv => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::DivI, result_reg, left_reg, imm));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpIDiv => {
+                            let left_reg = compile_expr(c, &left)?;
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             emit(c, Instruction::encode_abc(OpCode::IDivI, result_reg, left_reg, imm));
                             return Ok(result_reg);
                         }
