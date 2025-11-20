@@ -387,55 +387,66 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpSub => {
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            // Lua 5.4: Use SubK for constant operand
-                            emit(c, Instruction::create_abck(OpCode::SubK, result_reg, left_reg, imm, true));
-                            // Emit MMBINK for metamethod call (TM_SUB = 7)
-                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 7, true));
+                            // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
+                            let neg_imm = if int_val < 0 {
+                                ((-int_val) % 512) as u32
+                            } else {
+                                (512 - (int_val % 512)) as u32
+                            };
+                            emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, neg_imm));
+                            // Emit MMBINI for metamethod call - use ORIGINAL immediate value from source (TM_SUB = 7)
+                            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 7, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMul => {
+                            // For MulK, need to add constant to constant table
+                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use MulK for constant operand
-                            emit(c, Instruction::create_abck(OpCode::MulK, result_reg, left_reg, imm, true));
+                            emit(c, Instruction::create_abck(OpCode::MulK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_MUL = 8)
-                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 8, true));
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 8, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMod => {
+                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use ModK for constant operand
-                            emit(c, Instruction::create_abck(OpCode::ModK, result_reg, left_reg, imm, true));
+                            emit(c, Instruction::create_abck(OpCode::ModK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_MOD = 9)
-                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 9, true));
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 9, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpPow => {
+                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use PowK for constant operand
-                            emit(c, Instruction::create_abck(OpCode::PowK, result_reg, left_reg, imm, true));
+                            emit(c, Instruction::create_abck(OpCode::PowK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_POW = 10)
-                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 10, true));
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 10, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpDiv => {
+                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use DivK for constant operand
-                            emit(c, Instruction::create_abck(OpCode::DivK, result_reg, left_reg, imm, true));
+                            emit(c, Instruction::create_abck(OpCode::DivK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_DIV = 11)
-                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 11, true));
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 11, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpIDiv => {
+                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             // Lua 5.4: Use IDivK for constant operand
-                            emit(c, Instruction::create_abck(OpCode::IDivK, result_reg, left_reg, imm, true));
+                            emit(c, Instruction::create_abck(OpCode::IDivK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_IDIV = 12)
-                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, imm, 12, true));
+                            emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 12, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpShr => {
@@ -473,11 +484,11 @@ fn compile_binary_expr_to(
     }
 
     // Fall back to normal two-operand instruction
-    // IMPORTANT: Allocate result register FIRST, then compile left to it
-    // This ensures left uses R(0) when dest is None, matching luac behavior
-    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-    let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
+    // Compile left and right first to get their registers
+    let left_reg = compile_expr(c, &left)?;
     let right_reg = compile_expr(c, &right)?;
+    // Then allocate result register
+    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
 
     // Determine opcode and metamethod event (TM)
     let (opcode, mm_event_opt) = match op_kind {

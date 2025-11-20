@@ -414,6 +414,10 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 compile_expr_to(c, expr, Some(temp_reg))?;
                 temp_reg
             }
+        } else if !all_locals && val_regs.is_empty() {
+            // For global variable assignment, use R(0) for first expression
+            compile_expr_to(c, expr, Some(0))?;
+            0
         } else {
             // Compile to temporary register
             let temp_reg = alloc_register(c);

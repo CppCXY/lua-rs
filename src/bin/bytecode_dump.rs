@@ -62,22 +62,22 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::SetUpval => format!("SETUPVAL {} {}", a, b),
             OpCode::GetTabUp => format!("GETTABUP {} {} {}", a, b, c),
             OpCode::SetTabUp => {
-                let k_str = if k { " k" } else { "" };
+                let k_str = if k { "k" } else { "" };
                 format!("SETTABUP {} {} {}{}", a, b, c, k_str)
             }
             OpCode::GetField => {
-                let k_str = if k { " k" } else { "" };
+                let k_str = if k { "k" } else { "" };
                 format!("GETFIELD {} {} {}{}", a, b, c, k_str)
             }
             OpCode::SetField => {
-                let k_str = if k { " k" } else { "" };
+                let k_str = if k { "k" } else { "" };
                 format!("SETFIELD {} {} {}{}", a, b, c, k_str)
             }
             OpCode::GetTable => format!("GETTABLE {} {} {}", a, b, c),
             OpCode::SetTable => format!("SETTABLE {} {} {}", a, b, c),
             OpCode::NewTable => format!("NEWTABLE {} {} {}", a, b, c),
             OpCode::Self_ => {
-                let k_str = if k { " k" } else { "" };
+                let k_str = if k { "k" } else { "" };
                 format!("SELF {} {} {}{}", a, b, c, k_str)
             }
             OpCode::Add => format!("ADD {} {} {}", a, b, c),
@@ -129,9 +129,13 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
                 format!("GEI {} {} {}", a, imm, k as u32)
             }
-            OpCode::ForLoop => format!("FORLOOP {} {}", a, bx),
-            OpCode::ForPrep => format!("FORPREP {} {}", a, bx),
-            OpCode::TForPrep => format!("TFORPREP {} {}", a, bx),
+            OpCode::ForLoop => {
+                // FORLOOP stores negative jump offset, but display as positive distance
+                let jump_dist = if sbx < 0 { -sbx } else { sbx };
+                format!("FORLOOP {} {}", a, jump_dist)
+            }
+            OpCode::ForPrep => format!("FORPREP {} {}", a, sbx),
+            OpCode::TForPrep => format!("TFORPREP {} {}", a, sbx),
             OpCode::TForLoop => format!("TFORLOOP {} {}", a, c),
             OpCode::MmBin => format!("MMBIN {} {} {} {}", a, b, c, k as u32),
             OpCode::MmBinI => format!("MMBINI {} {} {} {}", a, b, c, k as u32),
