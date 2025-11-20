@@ -1,9 +1,11 @@
 // Simple C declaration parser for FFI
 
+use crate::lua_vm::{LuaError, LuaResult};
+
 use super::ctype::{CType, CTypeKind};
 
 /// Parse C declarations and return type definitions
-pub fn parse_c_declaration(decl: &str) -> Result<Vec<(String, CType)>, String> {
+pub fn parse_c_declaration(decl: &str) -> LuaResult<Vec<(String, CType)>> {
     let mut results = Vec::new();
 
     // Multi-line parsing for structs
@@ -62,7 +64,7 @@ pub fn parse_c_declaration(decl: &str) -> Result<Vec<(String, CType)>, String> {
     Ok(results)
 }
 
-fn parse_typedef(line: &str) -> Result<Option<(String, CType)>, String> {
+fn parse_typedef(line: &str) -> LuaResult<Option<(String, CType)>> {
     // typedef <type> <name>;
     let line = line.strip_prefix("typedef ").unwrap().trim();
     let line = line.strip_suffix(';').unwrap_or(line).trim();
@@ -88,12 +90,16 @@ fn parse_typedef(line: &str) -> Result<Option<(String, CType)>, String> {
     Ok(Some((name.to_string(), ctype)))
 }
 
-fn parse_function_declaration(line: &str) -> Result<Option<(String, CType)>, String> {
+fn parse_function_declaration(line: &str) -> LuaResult<Option<(String, CType)>> {
     // <return_type> <name>(<params>);
     let line = line.strip_suffix(';').unwrap_or(line).trim();
 
-    let paren_start = line.find('(').ok_or("Invalid function declaration")?;
-    let paren_end = line.rfind(')').ok_or("Invalid function declaration")?;
+    let paren_start = line.find('(').ok_or(LuaError::RuntimeError(
+        "Invalid function declaration".to_string(),
+    ))?;
+    let paren_end = line.rfind(')').ok_or(LuaError::RuntimeError(
+        "Invalid function declaration".to_string(),
+    ))?;
 
     let signature = &line[..paren_start].trim();
     let params = &line[paren_start + 1..paren_end].trim();
@@ -158,7 +164,7 @@ fn parse_function_declaration(line: &str) -> Result<Option<(String, CType)>, Str
     Ok(Some((func_name.to_string(), ctype)))
 }
 
-pub fn parse_base_type(type_str: &str) -> Result<CType, String> {
+pub fn parse_base_type(type_str: &str) -> LuaResult<CType> {
     let type_str = type_str.trim();
 
     // Handle pointers
@@ -200,13 +206,16 @@ pub fn parse_base_type(type_str: &str) -> Result<CType, String> {
         "uint32_t" => Ok(CType::new(CTypeKind::UInt32, 4, 4)),
         "int64_t" => Ok(CType::new(CTypeKind::Int64, 8, 8)),
         "uint64_t" => Ok(CType::new(CTypeKind::UInt64, 8, 8)),
-        _ => Err(format!("Unknown type: {}", type_str)),
+        _ => Err(LuaError::RuntimeError(format!(
+            "Unknown type: {}",
+            type_str
+        ))),
     }
 }
 
 /// Parse struct definition
 /// Returns (name, ctype) and number of characters consumed
-fn parse_struct_definition(input: &str) -> Result<Option<((String, CType), usize)>, String> {
+fn parse_struct_definition(input: &str) -> LuaResult<Option<((String, CType), usize)>> {
     use super::ctype::StructField;
     use std::collections::HashMap;
 
@@ -218,9 +227,12 @@ fn parse_struct_definition(input: &str) -> Result<Option<((String, CType), usize
     let input = input.trim_start_matches("struct ").trim();
 
     // Find struct name
-    let name_end = input
-        .find(|c: char| c.is_whitespace() || c == '{')
-        .ok_or("Invalid struct definition")?;
+    let name_end =
+        input
+            .find(|c: char| c.is_whitespace() || c == '{')
+            .ok_or(LuaError::RuntimeError(
+                "Invalid struct definition".to_string(),
+            ))?;
     let struct_name = input[..name_end].trim().to_string();
 
     let remaining = input[name_end..].trim();
@@ -246,7 +258,9 @@ fn parse_struct_definition(input: &str) -> Result<Option<((String, CType), usize
     }
 
     if end_pos == 0 {
-        return Err("Unclosed struct definition".to_string());
+        return Err(LuaError::RuntimeError(
+            "Unclosed struct definition".to_string(),
+        ));
     }
 
     let body = &remaining[1..end_pos].trim();

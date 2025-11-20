@@ -151,7 +151,13 @@ pub fn add_local(c: &mut Compiler, name: String, register: u32) {
 }
 
 /// Add a new local variable with <const> and <close> attributes
-pub fn add_local_with_attrs(c: &mut Compiler, name: String, register: u32, is_const: bool, is_to_be_closed: bool) {
+pub fn add_local_with_attrs(
+    c: &mut Compiler,
+    name: String,
+    register: u32,
+    is_const: bool,
+    is_to_be_closed: bool,
+) {
     let local = Local {
         name,
         depth: c.scope_depth,
@@ -160,12 +166,12 @@ pub fn add_local_with_attrs(c: &mut Compiler, name: String, register: u32, is_co
         is_to_be_closed,
     };
     c.scope_chain.borrow_mut().locals.push(local);
-    
+
     // Increment nactvar for non-const locals
     if !is_const {
         c.nactvar += 1;
     }
-    
+
     // Emit TBC instruction for to-be-closed variables
     if is_to_be_closed {
         emit(c, Instruction::encode_abc(OpCode::Tbc, register, 0, 0));
@@ -320,25 +326,25 @@ pub fn end_scope(c: &mut Compiler) {
             }
         }
     }
-    
+
     // Emit CLOSE instruction if there are to-be-closed variables
     if let Some(reg) = min_tbc_reg {
         emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
     }
-    
+
     c.scope_depth -= 1;
-    
+
     // Decrease nactvar by number of removed non-const locals
     c.nactvar = c.nactvar.saturating_sub(removed_count);
-    
+
     c.scope_chain
         .borrow_mut()
         .locals
         .retain(|l| l.depth <= c.scope_depth);
-    
+
     // Reset freereg after removing locals
     reset_freereg(c);
-    
+
     // Clear labels from the scope being closed
     clear_scope_labels(c);
 }

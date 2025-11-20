@@ -1,9 +1,9 @@
 // Coroutine library - Full implementation
 // Implements: create, resume, yield, status, running, wrap, isyieldable
 
-use crate::lib_registry::LibraryModule;
+use crate::lib_registry::{LibraryModule, get_args, require_arg};
 use crate::lua_value::{CoroutineStatus, LuaValue, MultiValue};
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 use std::rc::Rc;
 
 pub fn create_coroutine_lib() -> LibraryModule {
@@ -20,12 +20,13 @@ pub fn create_coroutine_lib() -> LibraryModule {
 }
 
 /// coroutine.create(f) - Create a new coroutine
-fn coroutine_create(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let func = crate::lib_registry::get_arg(vm, 0)
-        .ok_or_else(|| "coroutine.create requires a function argument".to_string())?;
+fn coroutine_create(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let func = require_arg(vm, 0, "coroutine.create")?;
 
     if !func.is_function() && !func.is_cfunction() {
-        return Err("coroutine.create requires a function argument".to_string());
+        return Err(LuaError::RuntimeError(
+            "coroutine.create requires a function argument".to_string(),
+        ));
     }
 
     let thread_rc = vm.create_thread(func);
@@ -35,16 +36,17 @@ fn coroutine_create(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// coroutine.resume(co, ...) - Resume a coroutine
-fn coroutine_resume(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let thread_val = crate::lib_registry::get_arg(vm, 0)
-        .ok_or_else(|| "coroutine.resume requires a thread argument".to_string())?;
+fn coroutine_resume(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let thread_val = require_arg(vm, 0, "coroutine.resume")?;
 
     if !thread_val.is_thread() {
-        return Err("coroutine.resume requires a thread argument".to_string());
+        return Err(LuaError::RuntimeError(
+            "coroutine.resume requires a thread argument".to_string(),
+        ));
     }
 
     // Get arguments
-    let all_args = crate::lib_registry::get_args(vm);
+    let all_args = get_args(vm);
     let args: Vec<LuaValue> = if all_args.len() > 1 {
         all_args[1..].to_vec()
     } else {
@@ -62,12 +64,14 @@ fn coroutine_resume(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// coroutine.yield(...) - Yield from current coroutine
-fn coroutine_yield(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn coroutine_yield(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let args = crate::lib_registry::get_args(vm);
 
     // Check if we're in a coroutine
     if vm.current_thread.is_none() {
-        return Err("attempt to yield from outside a coroutine".to_string());
+        return Err(LuaError::RuntimeError(
+            "attempt to yield from outside a coroutine".to_string(),
+        ));
     }
 
     // Yield with values - this will store the values and mark as suspended
@@ -80,17 +84,20 @@ fn coroutine_yield(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// coroutine.status(co) - Get coroutine status
-fn coroutine_status(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let thread_val = crate::lib_registry::get_arg(vm, 0)
-        .ok_or_else(|| "coroutine.status requires a thread argument".to_string())?;
+fn coroutine_status(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let thread_val = require_arg(vm, 0, "coroutine.status")?;
 
     if !thread_val.is_thread() {
-        return Err("coroutine.status requires a thread argument".to_string());
+        return Err(LuaError::RuntimeError(
+            "coroutine.status requires a thread argument".to_string(),
+        ));
     }
 
     // Get thread from value
     let status_str = unsafe {
-        let ptr = thread_val.as_thread_ptr().ok_or("invalid thread")?;
+        let ptr = thread_val
+            .as_thread_ptr()
+            .ok_or(LuaError::RuntimeError("invalid thread".to_string()))?;
         if ptr.is_null() {
             "dead"
         } else {
@@ -112,7 +119,7 @@ fn coroutine_status(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// coroutine.running() - Get currently running coroutine
-fn coroutine_running(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn coroutine_running(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     if let Some(thread_val) = &vm.current_thread_value {
         // Return the stored thread value for proper comparison
         Ok(MultiValue::multiple(vec![
@@ -138,30 +145,37 @@ fn coroutine_running(vm: &mut LuaVM) -> Result<MultiValue, String> {
 /// coroutine.wrap(f) - Create a wrapped coroutine
 /// This is a placeholder - the actual implementation is done in Lua
 /// and registered in LuaVM::open_libs()
-fn coroutine_wrap(_vm: &mut LuaVM) -> Result<MultiValue, String> {
-    Err("coroutine.wrap should have been overridden in open_libs".to_string())
+fn coroutine_wrap(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    Err(LuaError::RuntimeError(
+        "coroutine.wrap should have been overridden in open_libs".to_string(),
+    ))
 }
 
 /// coroutine.isyieldable() - Check if current position can yield
-fn coroutine_isyieldable(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn coroutine_isyieldable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let can_yield = vm.current_thread.is_some();
     Ok(MultiValue::single(LuaValue::boolean(can_yield)))
 }
 
 /// coroutine.close(co) - Close a coroutine, marking it as dead
-fn coroutine_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let thread_val = crate::lib_registry::get_arg(vm, 0)
-        .ok_or_else(|| "coroutine.close requires a thread argument".to_string())?;
+fn coroutine_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let thread_val = require_arg(vm, 0, "coroutine.close")?;
 
     if !thread_val.is_thread() {
-        return Err("coroutine.close requires a thread argument".to_string());
+        return Err(LuaError::RuntimeError(
+            "coroutine.close requires a thread argument".to_string(),
+        ));
     }
 
     // Get thread from value
     unsafe {
-        let ptr = thread_val.as_thread_ptr().ok_or("invalid thread")?;
+        let ptr = thread_val
+            .as_thread_ptr()
+            .ok_or(LuaError::RuntimeError("invalid thread".to_string()))?;
         if ptr.is_null() {
-            return Err("cannot close dead coroutine".to_string());
+            return Err(LuaError::RuntimeError(
+                "cannot close dead coroutine".to_string(),
+            ));
         }
 
         let thread_rc = Rc::from_raw(ptr);
@@ -170,13 +184,17 @@ fn coroutine_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
         let status = thread_rc.borrow().status;
         if matches!(status, CoroutineStatus::Dead) {
             std::mem::forget(thread_rc);
-            return Err("cannot close dead coroutine".to_string());
+            return Err(LuaError::RuntimeError(
+                "cannot close dead coroutine".to_string(),
+            ));
         }
 
         // Check if running
         if matches!(status, CoroutineStatus::Running) {
             std::mem::forget(thread_rc);
-            return Err("cannot close running coroutine".to_string());
+            return Err(LuaError::RuntimeError(
+                "cannot close running coroutine".to_string(),
+            ));
         }
 
         // Mark as dead

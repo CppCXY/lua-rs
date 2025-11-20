@@ -1,5 +1,5 @@
-use lua_rs::{Chunk, LuaVM};
 use lua_rs::lua_vm::{Instruction, OpCode};
+use lua_rs::{Chunk, LuaVM};
 use std::env;
 use std::fs;
 
@@ -37,11 +37,14 @@ fn main() {
 
 fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
     let indent = "  ".repeat(depth);
-    
+
     println!("{}=== {} ===", indent, name);
-    println!("{}params: {}, vararg: {}", indent, chunk.param_count, chunk.is_vararg);
+    println!(
+        "{}params: {}, vararg: {}",
+        indent, chunk.param_count, chunk.is_vararg
+    );
     println!();
-    
+
     for (pc, &instr) in chunk.code.iter().enumerate() {
         let opcode = Instruction::get_opcode(instr);
         let a = Instruction::get_a(instr);
@@ -50,7 +53,7 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
         let bx = Instruction::get_bx(instr);
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
-        
+
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
             OpCode::Vararg => format!("VARARG {} {}", a, b),
@@ -161,10 +164,10 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Close => format!("CLOSE {}", a),
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
-        
+
         println!("{}{:4} {}", indent, pc + 1, detail);
     }
-    
+
     // Show constants if any
     if !chunk.constants.is_empty() {
         println!("\n{}constants:", indent);
@@ -172,7 +175,7 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             println!("{}  {} = {:?}", indent, i, val);
         }
     }
-    
+
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
         println!();

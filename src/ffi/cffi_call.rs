@@ -3,6 +3,7 @@
 
 use crate::ffi::ctype::{CType, CTypeKind};
 use crate::lua_value::LuaValue;
+use crate::lua_vm::{LuaError, LuaResult};
 use std::ffi::CString;
 
 /// Represents a C function call
@@ -23,14 +24,14 @@ impl CFunctionCall {
 
     /// Call the C function with given Lua arguments
     /// SAFETY: This is highly unsafe and simplified
-    pub fn call(&self, args: &[LuaValue]) -> Result<LuaValue, String> {
+    pub fn call(&self, args: &[LuaValue]) -> LuaResult<LuaValue> {
         // Verify argument count
         if args.len() != self.param_types.len() {
-            return Err(format!(
+            return Err(LuaError::RuntimeError(format!(
                 "wrong number of arguments (expected {}, got {})",
                 self.param_types.len(),
                 args.len()
-            ));
+            )));
         }
 
         // For now, implement only simple calling conventions for common signatures
@@ -56,8 +57,11 @@ impl CFunctionCall {
 
                 // int function(const char*)
                 (CTypeKind::Int32, [param]) if matches!(param.kind, CTypeKind::Pointer) => {
-                    let arg_str = args[0].as_string_ptr().ok_or("expected string argument")?;
-                    let c_str = CString::new((*arg_str).as_str()).map_err(|_| "invalid string")?;
+                    let arg_str = args[0].as_string_ptr().ok_or(LuaError::RuntimeError(
+                        "expected string argument".to_string(),
+                    ))?;
+                    let c_str = CString::new((*arg_str).as_str())
+                        .map_err(|_| LuaError::RuntimeError("invalid string".to_string()))?;
 
                     type FnType = unsafe extern "C" fn(*const i8) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -67,7 +71,9 @@ impl CFunctionCall {
 
                 // int function(int)
                 (CTypeKind::Int32, [param]) if matches!(param.kind, CTypeKind::Int32) => {
-                    let arg_int = args[0].as_integer().ok_or("expected integer argument")?;
+                    let arg_int = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected integer argument".to_string(),
+                    ))?;
 
                     type FnType = unsafe extern "C" fn(i32) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -80,8 +86,12 @@ impl CFunctionCall {
                     if matches!(p1.kind, CTypeKind::Int32)
                         && matches!(p2.kind, CTypeKind::Int32) =>
                 {
-                    let arg1 = args[0].as_integer().ok_or("expected integer argument 1")?;
-                    let arg2 = args[1].as_integer().ok_or("expected integer argument 2")?;
+                    let arg1 = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected integer argument 1".to_string(),
+                    ))?;
+                    let arg2 = args[1].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected integer argument 2".to_string(),
+                    ))?;
 
                     type FnType = unsafe extern "C" fn(i32, i32) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -93,7 +103,9 @@ impl CFunctionCall {
                 (CTypeKind::Pointer, [param])
                     if matches!(param.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
-                    let size = args[0].as_integer().ok_or("expected size argument")?;
+                    let size = args[0]
+                        .as_integer()
+                        .ok_or(LuaError::RuntimeError("expected size argument".to_string()))?;
 
                     type FnType = unsafe extern "C" fn(usize) -> *mut u8;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -106,8 +118,12 @@ impl CFunctionCall {
                     if matches!(p1.kind, CTypeKind::UInt64 | CTypeKind::UInt32)
                         && matches!(p2.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
-                    let nmemb = args[0].as_integer().ok_or("expected size argument 1")?;
-                    let size = args[1].as_integer().ok_or("expected size argument 2")?;
+                    let nmemb = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected size argument 1".to_string(),
+                    ))?;
+                    let size = args[1].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected size argument 2".to_string(),
+                    ))?;
 
                     type FnType = unsafe extern "C" fn(usize, usize) -> *mut u8;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -120,8 +136,12 @@ impl CFunctionCall {
                     if matches!(p1.kind, CTypeKind::Pointer)
                         && matches!(p2.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
-                    let ptr = args[0].as_integer().ok_or("expected pointer argument")?;
-                    let size = args[1].as_integer().ok_or("expected size argument")?;
+                    let ptr = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected pointer argument".to_string(),
+                    ))?;
+                    let size = args[1]
+                        .as_integer()
+                        .ok_or(LuaError::RuntimeError("expected size argument".to_string()))?;
 
                     type FnType = unsafe extern "C" fn(*mut u8, usize) -> *mut u8;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -131,7 +151,9 @@ impl CFunctionCall {
 
                 // void function(void*) - free-like
                 (CTypeKind::Void, [param]) if matches!(param.kind, CTypeKind::Pointer) => {
-                    let ptr = args[0].as_integer().ok_or("expected pointer argument")?;
+                    let ptr = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected pointer argument".to_string(),
+                    ))?;
 
                     type FnType = unsafe extern "C" fn(*mut u8);
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -144,16 +166,16 @@ impl CFunctionCall {
                     if matches!(p1.kind, CTypeKind::Pointer)
                         && matches!(p2.kind, CTypeKind::Pointer) =>
                 {
-                    let arg1_str = args[0]
-                        .as_string_ptr()
-                        .ok_or("expected string argument 1")?;
-                    let arg2_str = args[1]
-                        .as_string_ptr()
-                        .ok_or("expected string argument 2")?;
-                    let c_str1 =
-                        CString::new((*arg1_str).as_str()).map_err(|_| "invalid string 1")?;
-                    let c_str2 =
-                        CString::new((*arg2_str).as_str()).map_err(|_| "invalid string 2")?;
+                    let arg1_str = args[0].as_string_ptr().ok_or(LuaError::RuntimeError(
+                        "expected string argument 1".to_string(),
+                    ))?;
+                    let arg2_str = args[1].as_string_ptr().ok_or(LuaError::RuntimeError(
+                        "expected string argument 2".to_string(),
+                    ))?;
+                    let c_str1 = CString::new((*arg1_str).as_str())
+                        .map_err(|_| LuaError::RuntimeError("invalid string 1".to_string()))?;
+                    let c_str2 = CString::new((*arg2_str).as_str())
+                        .map_err(|_| LuaError::RuntimeError("invalid string 2".to_string()))?;
 
                     type FnType = unsafe extern "C" fn(*const i8, *const i8) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -163,7 +185,9 @@ impl CFunctionCall {
 
                 // double function(double) - sqrt, sin, cos
                 (CTypeKind::Double, [param]) if matches!(param.kind, CTypeKind::Double) => {
-                    let arg = args[0].as_number().ok_or("expected number argument")?;
+                    let arg = args[0].as_number().ok_or(LuaError::RuntimeError(
+                        "expected number argument".to_string(),
+                    ))?;
 
                     type FnType = unsafe extern "C" fn(f64) -> f64;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -176,8 +200,12 @@ impl CFunctionCall {
                     if matches!(p1.kind, CTypeKind::Double)
                         && matches!(p2.kind, CTypeKind::Double) =>
                 {
-                    let arg1 = args[0].as_number().ok_or("expected number argument 1")?;
-                    let arg2 = args[1].as_number().ok_or("expected number argument 2")?;
+                    let arg1 = args[0].as_number().ok_or(LuaError::RuntimeError(
+                        "expected number argument 1".to_string(),
+                    ))?;
+                    let arg2 = args[1].as_number().ok_or(LuaError::RuntimeError(
+                        "expected number argument 2".to_string(),
+                    ))?;
 
                     type FnType = unsafe extern "C" fn(f64, f64) -> f64;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -191,9 +219,15 @@ impl CFunctionCall {
                         && matches!(p2.kind, CTypeKind::Int32)
                         && matches!(p3.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
-                    let ptr = args[0].as_integer().ok_or("expected pointer argument")?;
-                    let value = args[1].as_integer().ok_or("expected int argument")?;
-                    let size = args[2].as_integer().ok_or("expected size argument")?;
+                    let ptr = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected pointer argument".to_string(),
+                    ))?;
+                    let value = args[1]
+                        .as_integer()
+                        .ok_or(LuaError::RuntimeError("expected int argument".to_string()))?;
+                    let size = args[2]
+                        .as_integer()
+                        .ok_or(LuaError::RuntimeError("expected size argument".to_string()))?;
 
                     type FnType = unsafe extern "C" fn(*mut u8, i32, usize) -> *mut u8;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -207,9 +241,15 @@ impl CFunctionCall {
                         && matches!(p2.kind, CTypeKind::Pointer)
                         && matches!(p3.kind, CTypeKind::UInt64 | CTypeKind::UInt32) =>
                 {
-                    let dst = args[0].as_integer().ok_or("expected pointer argument 1")?;
-                    let src = args[1].as_integer().ok_or("expected pointer argument 2")?;
-                    let size = args[2].as_integer().ok_or("expected size argument")?;
+                    let dst = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected pointer argument 1".to_string(),
+                    ))?;
+                    let src = args[1].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected pointer argument 2".to_string(),
+                    ))?;
+                    let size = args[2]
+                        .as_integer()
+                        .ok_or(LuaError::RuntimeError("expected size argument".to_string()))?;
 
                     type FnType = unsafe extern "C" fn(*mut u8, *const u8, usize) -> *mut u8;
                     let f: FnType = std::mem::transmute(self.ptr);
@@ -230,23 +270,25 @@ impl CFunctionCall {
                     if matches!(p1.kind, CTypeKind::Int32)
                         && matches!(p2.kind, CTypeKind::Pointer) =>
                 {
-                    let arg1 = args[0].as_integer().ok_or("expected integer argument 1")?;
-                    let arg2_str = args[1]
-                        .as_string_ptr()
-                        .ok_or("expected string argument 2")?;
-                    let c_str = CString::new((*arg2_str).as_str()).map_err(|_| "invalid string")?;
-
+                    let arg1 = args[0].as_integer().ok_or(LuaError::RuntimeError(
+                        "expected integer argument 1".to_string(),
+                    ))?;
+                    let arg2_str = args[1].as_string_ptr().ok_or(LuaError::RuntimeError(
+                        "expected string argument 2".to_string(),
+                    ))?;
+                    let c_str = CString::new((*arg2_str).as_str())
+                        .map_err(|_| LuaError::RuntimeError("invalid string".to_string()))?;
                     type FnType = unsafe extern "C" fn(i32, *const i8) -> i32;
                     let f: FnType = std::mem::transmute(self.ptr);
                     let result = f(arg1 as i32, c_str.as_ptr());
                     Ok(LuaValue::integer(result as i64))
                 }
 
-                _ => Err(format!(
+                _ => Err(LuaError::RuntimeError(format!(
                     "unsupported C function signature (return: {:?}, params: {} args)",
                     self.return_type.kind,
                     self.param_types.len()
-                )),
+                ))),
             }
         }
     }

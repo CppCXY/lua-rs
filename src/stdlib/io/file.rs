@@ -5,8 +5,9 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 
 use crate::LuaVM;
-use crate::lib_registry::{get_arg, get_args};
+use crate::lib_registry::{get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
+use crate::lua_vm::{LuaError, LuaResult};
 
 /// File handle wrapper
 pub struct LuaFile {
@@ -170,7 +171,7 @@ impl LuaFile {
 }
 
 /// Create file metatable with methods
-pub fn create_file_metatable(vm: &mut LuaVM) -> LuaValue {
+pub fn create_file_metatable(vm: &mut LuaVM) -> LuaResult<LuaValue> {
     let mt = vm.create_table();
 
     // Create __index table with methods
@@ -178,41 +179,40 @@ pub fn create_file_metatable(vm: &mut LuaVM) -> LuaValue {
 
     // file:read([format])
     let read_key = vm.create_string("read");
-    vm.table_set(index_table, read_key, LuaValue::cfunction(file_read));
+    vm.table_set(index_table, read_key, LuaValue::cfunction(file_read))?;
 
     // file:write(...)
     let write_key = vm.create_string("write");
-    vm.table_set(index_table, write_key, LuaValue::cfunction(file_write));
-
+    vm.table_set(index_table, write_key, LuaValue::cfunction(file_write))?;
     // file:flush()
     let flush_key = vm.create_string("flush");
-    vm.table_set(index_table, flush_key, LuaValue::cfunction(file_flush));
+    vm.table_set(index_table, flush_key, LuaValue::cfunction(file_flush))?;
     // file:close()
     let close_key = vm.create_string("close");
-    vm.table_set(index_table, close_key, LuaValue::cfunction(file_close));
+    vm.table_set(index_table, close_key, LuaValue::cfunction(file_close))?;
 
     // file:lines([formats])
     let lines_key = vm.create_string("lines");
-    vm.table_set(index_table, lines_key, LuaValue::cfunction(file_lines));
+    vm.table_set(index_table, lines_key, LuaValue::cfunction(file_lines))?;
 
     // file:seek([whence [, offset]])
     let seek_key = vm.create_string("seek");
-    vm.table_set(index_table, seek_key, LuaValue::cfunction(file_seek));
+    vm.table_set(index_table, seek_key, LuaValue::cfunction(file_seek))?;
 
     // file:setvbuf(mode [, size])
     let setvbuf_key = vm.create_string("setvbuf");
-    vm.table_set(index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf));
+    vm.table_set(index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf))?;
 
     let index_key = vm.create_string("__index");
-    vm.table_set(mt, index_key, index_table);
+    vm.table_set(mt, index_key, index_table)?;
 
-    mt
+    Ok(mt)
 }
 
 /// file:read([format])
-fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = get_arg(vm, 0).ok_or("file:read requires self parameter")?;
+    let file_val = require_arg(vm, 0, "file.read")?;
 
     // Extract LuaFile from userdata
     unsafe {
@@ -236,11 +236,11 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
                     "*l" | "*L" => match lua_file.read_line() {
                         Ok(Some(line)) => vm.create_string(&line),
                         Ok(None) => LuaValue::nil(),
-                        Err(e) => return Err(format!("read error: {}", e)),
+                        Err(e) => return Err(LuaError::RuntimeError(format!("read error: {}", e))),
                     },
                     "*a" => match lua_file.read_all() {
                         Ok(content) => vm.create_string(&content),
-                        Err(e) => return Err(format!("read error: {}", e)),
+                        Err(e) => return Err(LuaError::RuntimeError(format!("read error: {}", e))),
                     },
                     _ => {
                         // Try to parse as number (byte count)
@@ -250,10 +250,18 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
                                     let s = String::from_utf8_lossy(&bytes);
                                     vm.create_string(&s)
                                 }
-                                Err(e) => return Err(format!("read error: {}", e)),
+                                Err(e) => {
+                                    return Err(LuaError::RuntimeError(format!(
+                                        "read error: {}",
+                                        e
+                                    )));
+                                }
                             }
                         } else {
-                            return Err(format!("invalid format: {}", format));
+                            return Err(LuaError::RuntimeError(format!(
+                                "invalid format: {}",
+                                format
+                            )));
                         }
                     }
                 };
@@ -263,13 +271,13 @@ fn file_read(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
 
-    Err("expected file handle".to_string())
+    Err(LuaError::RuntimeError("expected file handle".to_string()))
 }
 
 /// file:write(...)
-fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn file_write(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = get_arg(vm, 0).ok_or("file:write requires self parameter")?;
+    let file_val = require_arg(vm, 0, "file.write")?;
 
     // Extract LuaFile from userdata
     unsafe {
@@ -290,28 +298,38 @@ fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
                             if let Some(s) = val.as_string() {
                                 s.as_str().to_string()
                             } else {
-                                return Err("write expects strings or numbers".to_string());
+                                return Err(LuaError::RuntimeError(
+                                    "write expects strings or numbers".to_string(),
+                                ));
                             }
                         }
                         LuaValueKind::Integer => {
                             if let Some(n) = val.as_integer() {
                                 n.to_string()
                             } else {
-                                return Err("write expects strings or numbers".to_string());
+                                return Err(LuaError::RuntimeError(
+                                    "write expects strings or numbers".to_string(),
+                                ));
                             }
                         }
                         LuaValueKind::Float => {
                             if let Some(n) = val.as_float() {
                                 n.to_string()
                             } else {
-                                return Err("write expects strings or numbers".to_string());
+                                return Err(LuaError::RuntimeError(
+                                    "write expects strings or numbers".to_string(),
+                                ));
                             }
                         }
-                        _ => return Err("write expects strings or numbers".to_string()),
+                        _ => {
+                            return Err(LuaError::RuntimeError(
+                                "write expects strings or numbers".to_string(),
+                            ));
+                        }
                     };
 
                     if let Err(e) = lua_file.write(&text) {
-                        return Err(format!("write error: {}", e));
+                        return Err(LuaError::RuntimeError(format!("write error: {}", e)));
                     }
                 }
 
@@ -320,13 +338,13 @@ fn file_write(vm: &mut LuaVM) -> Result<MultiValue, String> {
         }
     }
 
-    Err("expected file handle".to_string())
+    Err(LuaError::RuntimeError("expected file handle".to_string()))
 }
 
 /// file:flush()
-fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn file_flush(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = get_arg(vm, 0).ok_or("file:flush requires self parameter")?;
+    let file_val = require_arg(vm, 0, "file.flush")?;
 
     // Extract LuaFile from userdata
     if let Some(ud) = vm.get_userdata(&file_val) {
@@ -334,21 +352,19 @@ fn file_flush(vm: &mut LuaVM) -> Result<MultiValue, String> {
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.flush() {
-                return Err(format!("flush error: {}", e));
+                return Err(LuaError::RuntimeError(format!("flush error: {}", e)));
             }
             return Ok(MultiValue::single(LuaValue::boolean(true)));
         }
     }
 
-    Err("expected file handle".to_string())
+    Err(LuaError::RuntimeError("expected file handle".to_string()))
 }
 
 /// file:close()
-fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    use crate::lib_registry::get_arg;
-
+fn file_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = get_arg(vm, 1).ok_or("file:close requires self parameter")?;
+    let file_val = require_arg(vm, 0, "file.close")?;
 
     // Extract LuaFile from userdata
     if let Some(ud) = vm.get_userdata(&file_val) {
@@ -356,25 +372,27 @@ fn file_close(vm: &mut LuaVM) -> Result<MultiValue, String> {
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.close() {
-                return Err(format!("close error: {}", e));
+                return Err(LuaError::RuntimeError(format!("close error: {}", e)));
             }
             return Ok(MultiValue::single(LuaValue::boolean(true)));
         }
     }
 
-    Err("expected file handle".to_string())
+    Err(LuaError::RuntimeError("expected file handle".to_string()))
 }
 
 /// file:lines([formats]) - Returns an iterator for reading lines
-fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn file_lines(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Get file handle from self
-    let file_val = get_arg(vm, 0).ok_or("file:lines requires self parameter")?;
+    let file_val = require_arg(vm, 0, "file.lines")?;
 
     // For now, return a simple iterator that reads lines
     // Create state table with file handle
     let state_table = vm.create_table();
     let file_key = vm.create_string("file");
-    let state_ref = vm.get_table(&state_table).ok_or("Invalid state table")?;
+    let state_ref = vm
+        .get_table(&state_table)
+        .ok_or(LuaError::RuntimeError("Invalid state table".to_string()))?;
     state_ref.borrow_mut().raw_set(file_key, file_val.clone());
 
     Ok(MultiValue::multiple(vec![
@@ -385,14 +403,18 @@ fn file_lines(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// Iterator function for file:lines()
-fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let state_val = get_arg(vm, 0).ok_or("iterator requires state")?;
+fn file_lines_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let state_val = require_arg(vm, 0, "iterator requires state")?;
     let file_key = vm.create_string("file");
-    let state_ref_cell = vm.get_table(&state_val).ok_or("Invalid state table")?;
+    let state_ref_cell = vm
+        .get_table(&state_val)
+        .ok_or(LuaError::RuntimeError("Invalid state table".to_string()))?;
     let file_val = state_ref_cell
         .borrow()
         .raw_get(&file_key)
-        .ok_or("file not found in state")?;
+        .ok_or(LuaError::RuntimeError(
+            "file not found in state".to_string(),
+        ))?;
 
     // Read next line
     if let Some(ud) = vm.get_userdata(&file_val) {
@@ -404,17 +426,17 @@ fn file_lines_iterator(vm: &mut LuaVM) -> Result<MultiValue, String> {
                     return Ok(MultiValue::single(vm.create_string(&line)));
                 }
                 Ok(None) => return Ok(MultiValue::single(LuaValue::nil())),
-                Err(e) => return Err(format!("read error: {}", e)),
+                Err(e) => return Err(LuaError::RuntimeError(format!("read error: {}", e))),
             }
         }
     }
 
-    Err("expected file handle".to_string())
+    Err(LuaError::RuntimeError("expected file handle".to_string()))
 }
 
 /// file:seek([whence [, offset]]) - Sets and gets the file position
-fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let file_val = get_arg(vm, 0).ok_or("file:seek requires self parameter")?;
+fn file_seek(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let file_val = require_arg(vm, 0, "file.seek")?;
 
     let whence = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
@@ -430,33 +452,42 @@ fn file_seek(vm: &mut LuaVM) -> Result<MultiValue, String> {
                 "set" => std::io::SeekFrom::Start(offset.max(0) as u64),
                 "cur" => std::io::SeekFrom::Current(offset),
                 "end" => std::io::SeekFrom::End(offset),
-                _ => return Err(format!("invalid whence: {}", whence)),
+                _ => {
+                    return Err(LuaError::RuntimeError(format!(
+                        "invalid whence: {}",
+                        whence
+                    )));
+                }
             };
 
             let pos = match &mut lua_file.inner {
                 FileInner::Read(reader) => reader.seek(seek_from),
                 FileInner::Write(_) => {
-                    return Err("cannot seek on write-only file".to_string());
+                    return Err(LuaError::RuntimeError(
+                        "cannot seek on write-only file".to_string(),
+                    ));
                 }
                 FileInner::ReadWrite(file) => file.seek(seek_from),
-                FileInner::Closed => return Err("file is closed".to_string()),
+                FileInner::Closed => {
+                    return Err(LuaError::RuntimeError("file is closed".to_string()));
+                }
             };
 
             match pos {
                 Ok(position) => {
                     return Ok(MultiValue::single(LuaValue::integer(position as i64)));
                 }
-                Err(e) => return Err(format!("seek error: {}", e)),
+                Err(e) => return Err(LuaError::RuntimeError(format!("seek error: {}", e))),
             }
         }
     }
 
-    Err("expected file handle".to_string())
+    Err(LuaError::RuntimeError("expected file handle".to_string()))
 }
 
 /// file:setvbuf(mode [, size]) - Sets the buffering mode
-fn file_setvbuf(vm: &mut LuaVM) -> Result<MultiValue, String> {
-    let file_val = get_arg(vm, 0).ok_or("file:setvbuf requires self parameter")?;
+fn file_setvbuf(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let file_val = require_arg(vm, 0, "file.setvbuf")?;
 
     let _mode = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })

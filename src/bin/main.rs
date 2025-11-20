@@ -1,7 +1,7 @@
 use lua_rs::LuaVM;
 use std::env;
 use std::fs;
-use std::io::{self, Write, Read, BufRead};
+use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
 
 const VERSION: &str = "Lua-RS 5.4 (compatible)";
@@ -128,7 +128,7 @@ fn setup_arg_table(vm: &mut LuaVM, script_name: Option<&str>, args: &[String]) {
             "nil".to_string()
         }
     );
-    
+
     let mut full_code = code;
     for (i, arg) in args.iter().enumerate() {
         full_code.push_str(&format!(
@@ -137,7 +137,7 @@ fn setup_arg_table(vm: &mut LuaVM, script_name: Option<&str>, args: &[String]) {
             arg.replace('\\', "\\\\").replace('"', "\\\"")
         ));
     }
-    
+
     if let Ok(chunk) = vm.compile(&full_code) {
         let _ = vm.execute(Rc::new(chunk));
     }
@@ -147,7 +147,7 @@ fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
     let code = format!("{} = require('{}')", module, module);
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute(Rc::new(chunk))?;
+            vm.execute(Rc::new(chunk)).map_err(|e| format!("{}", e))?;
             Ok(())
         }
         Err(e) => Err(format!("failed to load module '{}': {}", module, e)),
@@ -155,13 +155,12 @@ fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
 }
 
 fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
-    let code = fs::read_to_string(filename)
-        .map_err(|e| format!("cannot open {}: {}", filename, e))?;
-    
+    let code =
+        fs::read_to_string(filename).map_err(|e| format!("cannot open {}: {}", filename, e))?;
+
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute(Rc::new(chunk))
-                .map_err(|e| format!("{}", e))?;
+            vm.execute(Rc::new(chunk)).map_err(|e| format!("{}", e))?;
             Ok(())
         }
         Err(e) => Err(format!("{}: {}", filename, e)),
@@ -170,13 +169,13 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
 
 fn execute_stdin(vm: &mut LuaVM) -> Result<(), String> {
     let mut code = String::new();
-    io::stdin().read_to_string(&mut code)
+    io::stdin()
+        .read_to_string(&mut code)
         .map_err(|e| format!("error reading stdin: {}", e))?;
-    
+
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute(Rc::new(chunk))
-                .map_err(|e| format!("{}", e))?;
+            vm.execute(Rc::new(chunk)).map_err(|e| format!("{}", e))?;
             Ok(())
         }
         Err(e) => Err(format!("stdin: {}", e)),
@@ -222,7 +221,7 @@ fn run_repl(vm: &mut LuaVM) {
         // Try to execute as expression first (for immediate values)
         let expr_code = format!("return {}", incomplete);
         let try_expr = vm.compile(&expr_code);
-        
+
         let code_to_run = if try_expr.is_ok() {
             expr_code
         } else {
@@ -325,7 +324,9 @@ fn main() {
     }
 
     // Enter interactive mode if requested or if no script was provided
-    if opts.interactive || (opts.execute_strings.is_empty() && opts.script_file.is_none() && !opts.read_stdin) {
+    if opts.interactive
+        || (opts.execute_strings.is_empty() && opts.script_file.is_none() && !opts.read_stdin)
+    {
         run_repl(&mut vm);
     }
 }

@@ -22,7 +22,7 @@ fn test_arithmetic_operators() {
     if let Err(e) = &result {
         eprintln!("Error: {}", e);
     }
-    assert!(result.is_ok(), "Test failed with error: {:?}", result.err());
+    assert!(result.is_ok());
 }
 
 #[test]

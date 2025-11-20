@@ -1,19 +1,16 @@
 // Library registration system for Lua standard libraries
 // Provides a clean way to register Rust functions as Lua libraries
 
-use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::LuaVM;
+use crate::lua_value::{CFunction, LuaValue};
+use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 use crate::stdlib;
-
-/// Type for native functions that can be called from Lua
-pub type NativeFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
 
 /// Type for value initializers - functions that create values when the module loads
 pub type ValueInitializer = fn(&mut LuaVM) -> LuaValue;
 
 /// Entry in a library module - can be a function or a value
 pub enum LibraryEntry {
-    Function(NativeFunction),
+    Function(CFunction),
     Value(ValueInitializer),
 }
 
@@ -33,7 +30,7 @@ impl LibraryModule {
     }
 
     /// Add a function to this library
-    pub fn with_function(mut self, name: &'static str, func: NativeFunction) -> Self {
+    pub fn with_function(mut self, name: &'static str, func: CFunction) -> Self {
         self.entries.push((name, LibraryEntry::Function(func)));
         self
     }
@@ -103,7 +100,7 @@ impl LibraryRegistry {
     }
 
     /// Load all registered libraries into a VM
-    pub fn load_all(&self, vm: &mut LuaVM) -> Result<(), String> {
+    pub fn load_all(&self, vm: &mut LuaVM) -> LuaResult<()> {
         for module in &self.modules {
             self.load_module(vm, module)?;
         }
@@ -111,7 +108,7 @@ impl LibraryRegistry {
     }
 
     /// Load a specific module into the VM
-    pub fn load_module(&self, vm: &mut LuaVM, module: &LibraryModule) -> Result<(), String> {
+    pub fn load_module(&self, vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> {
         // Create a table for the library
         let lib_table = vm.create_table();
 
@@ -233,8 +230,10 @@ pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
 }
 
 /// Helper to require an argument
-pub fn require_arg(vm: &LuaVM, index: usize, func_name: &str) -> Result<LuaValue, String> {
-    get_arg(vm, index).ok_or_else(|| format!("{}() requires argument {}", func_name, index + 1))
+pub fn require_arg(vm: &LuaVM, index: usize, func_name: &str) -> LuaResult<LuaValue> {
+    get_arg(vm, index).ok_or_else(|| {
+        LuaError::RuntimeError(format!("{}() requires argument {}", func_name, index + 1))
+    })
 }
 
 /// Helper to get argument count
@@ -245,11 +244,17 @@ pub fn arg_count(vm: &LuaVM) -> usize {
 }
 
 /// Helper to get string argument
-pub fn get_string(vm: &LuaVM, index: usize, func_name: &str) -> Result<String, String> {
+pub fn get_string(vm: &LuaVM, index: usize, func_name: &str) -> LuaResult<String> {
     let arg = require_arg(vm, index, func_name)?;
     unsafe {
         arg.as_string()
             .map(|s| s.as_str().to_string())
-            .ok_or_else(|| format!("{}() requires string argument {}", func_name, index + 1))
+            .ok_or_else(|| {
+                LuaError::RuntimeError(format!(
+                    "{}() requires string argument {}",
+                    func_name,
+                    index + 1
+                ))
+            })
     }
 }

@@ -1,9 +1,8 @@
+use super::Compiler;
 /// Expression to register conversion functions
 /// Mirrors Lua's code generation strategy with expdesc
-
 use super::expdesc::*;
 use super::helpers::*;
-use super::Compiler;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
 
@@ -19,10 +18,7 @@ pub fn discharge_vars(c: &mut Compiler, e: &mut ExpDesc) {
         ExpKind::VUpval => {
             // Upvalue: generate GETUPVAL instruction
             let reg = alloc_register(c);
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::GetUpval, reg, e.info, 0),
-            );
+            emit(c, Instruction::encode_abc(OpCode::GetUpval, reg, e.info, 0));
             e.kind = ExpKind::VNonReloc;
             e.info = reg;
         }
@@ -85,6 +81,7 @@ pub fn discharge_vars(c: &mut Compiler, e: &mut ExpDesc) {
 
 /// Ensure expression is in any register
 /// Lua equivalent: discharge2anyreg
+#[allow(dead_code)]
 fn discharge_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) {
     if e.kind != ExpKind::VNonReloc {
         reserve_registers(c, 1);
@@ -96,7 +93,7 @@ fn discharge_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) {
 /// Lua equivalent: discharge2reg
 pub fn discharge_to_reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
     discharge_vars(c, e);
-    
+
     match e.kind {
         ExpKind::VNil => {
             emit(c, Instruction::encode_abc(OpCode::LoadNil, reg, 0, 0));
@@ -151,7 +148,7 @@ pub fn discharge_to_reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
             // Should not happen if discharge_vars was called
         }
     }
-    
+
     e.kind = ExpKind::VNonReloc;
     e.info = reg;
 }
@@ -160,7 +157,7 @@ pub fn discharge_to_reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
 /// Lua equivalent: luaK_exp2anyreg
 pub fn exp_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) -> u32 {
     discharge_vars(c, e);
-    
+
     if e.kind == ExpKind::VNonReloc {
         // Already in a register, but check if we need to free it
         if !e.has_fixed_reg() {
@@ -171,7 +168,7 @@ pub fn exp_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) -> u32 {
             return e.get_register().unwrap();
         }
     }
-    
+
     // Need to allocate a new register
     reserve_registers(c, 1);
     discharge_to_reg(c, e, c.freereg - 1);
@@ -191,18 +188,18 @@ pub fn exp_to_next_reg(c: &mut Compiler, e: &mut ExpDesc) {
 /// Lua equivalent: exp2reg
 pub fn exp_to_reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
     discharge_to_reg(c, e, reg);
-    
+
     if e.kind == ExpKind::VJmp {
         // TODO: Handle jump expressions (for boolean operators)
         // concat_jump_lists(c, &mut e.t, e.info);
     }
-    
+
     if e.has_jumps() {
         // TODO: Patch jump lists
         // patch_list_to_here(c, e.f);
         // patch_list_to_here(c, e.t);
     }
-    
+
     e.f = -1;
     e.t = -1;
     e.kind = ExpKind::VNonReloc;
@@ -219,6 +216,7 @@ pub fn free_exp(c: &mut Compiler, e: &ExpDesc) {
 
 /// Free two expressions
 /// Lua equivalent: freeexps
+#[allow(dead_code)]
 pub fn free_exps(c: &mut Compiler, e1: &ExpDesc, e2: &ExpDesc) {
     let r1 = if e1.kind == ExpKind::VNonReloc {
         e1.info as i32
@@ -230,7 +228,7 @@ pub fn free_exps(c: &mut Compiler, e1: &ExpDesc, e2: &ExpDesc) {
     } else {
         -1
     };
-    
+
     if r1 >= 0 && r2 >= 0 {
         free_registers(c, r1 as u32, r2 as u32);
     } else if r1 >= 0 {
@@ -249,6 +247,7 @@ impl ExpDesc {
 
 /// Store value from expression to a variable
 /// Lua equivalent: luaK_storevar
+#[allow(dead_code)]
 pub fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
     match var.kind {
         ExpKind::VLocal => {
@@ -257,10 +256,7 @@ pub fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
         }
         ExpKind::VUpval => {
             let e = exp_to_any_reg(c, ex);
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::SetUpval, e, var.info, 0),
-            );
+            emit(c, Instruction::encode_abc(OpCode::SetUpval, e, var.info, 0));
             free_exp(c, ex);
         }
         ExpKind::VIndexUp => {
@@ -287,16 +283,15 @@ pub fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
 
 /// Code ABRxK instruction (with RK operand)
 /// Lua equivalent: codeABRK
+#[allow(dead_code)]
 fn code_abrk(c: &mut Compiler, op: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
     let k = exp_to_rk(c, ec);
-    emit(
-        c,
-        Instruction::create_abck(op, a, b, ec.info, k),
-    );
+    emit(c, Instruction::create_abck(op, a, b, ec.info, k));
 }
 
 /// Convert expression to RK operand (register or constant)
 /// Lua equivalent: exp2RK
+#[allow(dead_code)]
 fn exp_to_rk(c: &mut Compiler, e: &mut ExpDesc) -> bool {
     match e.kind {
         ExpKind::VTrue | ExpKind::VFalse | ExpKind::VNil => {

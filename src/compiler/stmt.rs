@@ -132,20 +132,20 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
         LuaStat::LocalFuncStat(s) => compile_local_function_stat(c, s),
         _ => Ok(()), // Other statements not yet implemented
     };
-    
+
     // After each statement, reset freereg to active local variables
     // This matches Lua's: fs->freereg = luaY_nvarstack(fs);
     if result.is_ok() {
         reset_freereg(c);
     }
-    
+
     result
 }
 
 /// Compile local variable declaration
 fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), String> {
-    use super::expr::compile_expr_desc;
     use super::exp2reg::exp_to_next_reg;
+    use super::expr::compile_expr_desc;
     use emmylua_parser::LuaExpr;
 
     let names: Vec<_> = stat.get_local_name_list().collect();
@@ -286,8 +286,8 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
 /// Compile assignment statement
 fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
-    use super::expr::{compile_expr_to, compile_expr_desc};
     use super::exp2reg::exp_to_next_reg;
+    use super::expr::{compile_expr_desc, compile_expr_to};
     use emmylua_parser::LuaIndexKey;
 
     // Get vars and expressions from children
@@ -322,7 +322,7 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 // It's a global - add key to constants first (IMPORTANT: luac adds key before value!)
                 let lua_str = create_string_value(c, &name);
                 let key_idx = add_constant_dedup(c, lua_str);
-                
+
                 // Then check if value is constant
                 if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
                     if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {

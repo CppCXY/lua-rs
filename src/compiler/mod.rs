@@ -1,10 +1,13 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
 mod exp2reg;
-mod expr;
 mod expdesc;
+mod expr;
 mod helpers;
 mod stmt;
+mod tagmethod;
+
+pub(crate) use tagmethod::TagMethod;
 
 use crate::lua_value::Chunk;
 use crate::lua_vm::LuaVM;
@@ -48,8 +51,8 @@ impl ScopeChain {
 pub struct Compiler<'a> {
     pub(crate) chunk: Chunk,
     pub(crate) scope_depth: usize,
-    pub(crate) freereg: u32,     // First free register (replaces next_register)
-    pub(crate) nactvar: usize,   // Number of active local variables
+    pub(crate) freereg: u32,   // First free register (replaces next_register)
+    pub(crate) nactvar: usize, // Number of active local variables
     pub(crate) loop_stack: Vec<LoopInfo>,
     pub(crate) labels: Vec<Label>,       // Label definitions
     pub(crate) gotos: Vec<GotoInfo>,     // Pending goto statements
@@ -73,8 +76,8 @@ pub(crate) struct Local {
     pub name: String,
     pub depth: usize,
     pub register: u32,
-    pub is_const: bool,          // <const> attribute
-    pub is_to_be_closed: bool,   // <close> attribute
+    pub is_const: bool,        // <const> attribute
+    pub is_to_be_closed: bool, // <close> attribute
 }
 
 /// Loop information for break statements
@@ -175,7 +178,7 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     // Main chunks are always considered vararg (param_count = 0, is_vararg = true)
     c.chunk.is_vararg = true;
     emit(c, Instruction::encode_abc(OpCode::VarargPrep, 0, 0, 0));
-    
+
     if let Some(block) = chunk.get_block() {
         compile_block(c, &block)?;
     }
@@ -189,7 +192,7 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     // B = number of values to return + 1 (1 means 0 returns, 2 means 1 return, 0 means return to top)
     // C = is vararg flag (main chunks are vararg, so C should be > 0)
     // k = needs to close upvalues
-    // 
+    //
     // For main chunk final return:
     // - A should be the current free register (or 0 if no registers used)
     // - B = 1 (return 0 values)
@@ -199,7 +202,10 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     // Looking at luac output, for main chunks it uses: RETURN freereg 1 1
     // Main chunk always uses regular RETURN (not Return0), with k=1
     let freereg = c.freereg;
-    emit(c, Instruction::create_abck(OpCode::Return, freereg, 1, 0, true));
+    emit(
+        c,
+        Instruction::create_abck(OpCode::Return, freereg, 1, 0, true),
+    );
     Ok(())
 }
 
@@ -216,13 +222,13 @@ fn optimize_chunk(chunk: Chunk) -> Chunk {
     // Optimizer temporarily disabled - causes issues with loops
     // The simple constant folder doesn't handle control flow correctly
     // Need proper basic block analysis before enabling optimizations
-    
+
     // Return chunk unchanged
     chunk
-    
+
     /* Disabled optimizer code:
     let (optimized_code, optimized_constants) = optimize_constants(&chunk.code, &chunk.constants);
-    
+
     Chunk {
         code: optimized_code,
         constants: optimized_constants,

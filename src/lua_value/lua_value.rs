@@ -26,7 +26,9 @@
 use std::cell::RefCell;
 
 use crate::{
-    lua_value::{lua_thread::LuaThread, CFunction}, object_pool::TableId, FunctionId, LuaString, StringId, UserdataId
+    FunctionId, LuaString, StringId, UserdataId,
+    lua_value::{CFunction, lua_thread::LuaThread},
+    object_pool::TableId,
 };
 use std::cmp::Ordering;
 

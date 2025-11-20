@@ -5,6 +5,8 @@
 use crate::lib_registry::LibraryModule;
 use crate::lib_registry::get_arg;
 use crate::lua_value::{LuaValue, MultiValue};
+use crate::lua_vm::LuaError;
+use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaVM;
 
 pub fn create_os_lib() -> LibraryModule {
@@ -23,7 +25,7 @@ pub fn create_os_lib() -> LibraryModule {
     })
 }
 
-fn os_clock(_vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_clock(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use std::time::SystemTime;
 
     let duration = SystemTime::now()
@@ -34,7 +36,7 @@ fn os_clock(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(LuaValue::float(secs)))
 }
 
-fn os_time(_vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_time(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use std::time::SystemTime;
 
     let timestamp = SystemTime::now()
@@ -45,7 +47,7 @@ fn os_time(_vm: &mut LuaVM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(LuaValue::integer(timestamp as i64)))
 }
 
-fn os_date(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_date(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub: return current timestamp as string
     use std::time::SystemTime;
 
@@ -59,28 +61,34 @@ fn os_date(vm: &mut LuaVM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(result))
 }
 
-fn os_exit(_vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_exit(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
     std::process::exit(0);
 }
 
-fn os_difftime(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_difftime(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let t2 = get_arg(vm, 0)
         .and_then(|v| v.as_integer())
-        .ok_or("difftime: argument 1 must be a number")?;
+        .ok_or(LuaError::RuntimeError(
+            "difftime: argument 1 must be a number".to_string(),
+        ))?;
     let t1 = get_arg(vm, 1)
         .and_then(|v| v.as_integer())
-        .ok_or("difftime: argument 2 must be a number")?;
+        .ok_or(LuaError::RuntimeError(
+            "difftime: argument 2 must be a number".to_string(),
+        ))?;
 
     let diff = t2 - t1;
     Ok(MultiValue::single(LuaValue::integer(diff)))
 }
 
-fn os_execute(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use std::process::Command;
 
     let cmd = get_arg(vm, 0)
         .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
-        .ok_or("execute: argument 1 must be a string")?;
+        .ok_or(LuaError::RuntimeError(
+            "execute: argument 1 must be a string".to_string(),
+        ))?;
 
     let output = Command::new("sh").arg("-c").arg(cmd.as_str()).output();
 
@@ -97,10 +105,12 @@ fn os_execute(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 }
 
-fn os_getenv(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_getenv(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let varname = get_arg(vm, 0)
         .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
-        .ok_or("getenv: argument 1 must be a string")?;
+        .ok_or(LuaError::RuntimeError(
+            "getenv: argument 1 must be a string".to_string(),
+        ))?;
 
     match std::env::var(varname.as_str()) {
         Ok(value) => {
@@ -111,10 +121,12 @@ fn os_getenv(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 }
 
-fn os_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let filename = get_arg(vm, 0)
         .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
-        .ok_or("remove: argument 1 must be a string")?;
+        .ok_or(LuaError::RuntimeError(
+            "remove: argument 1 must be a string".to_string(),
+        ))?;
 
     match std::fs::remove_file(filename.as_str()) {
         Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
@@ -125,13 +137,17 @@ fn os_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 }
 
-fn os_rename(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_rename(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let oldname = get_arg(vm, 0)
         .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
-        .ok_or("rename: argument 1 must be a string")?;
+        .ok_or(LuaError::RuntimeError(
+            "rename: argument 1 must be a string".to_string(),
+        ))?;
     let newname = get_arg(vm, 1)
         .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
-        .ok_or("rename: argument 2 must be a string")?;
+        .ok_or(LuaError::RuntimeError(
+            "rename: argument 2 must be a string".to_string(),
+        ))?;
 
     match std::fs::rename(oldname.as_str(), newname.as_str()) {
         Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
@@ -142,7 +158,7 @@ fn os_rename(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 }
 
-fn os_setlocale(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_setlocale(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub implementation - just return the requested locale or "C"
     let locale = get_arg(vm, 0)
         .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
@@ -153,7 +169,7 @@ fn os_setlocale(vm: &mut LuaVM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(result))
 }
 
-fn os_tmpname(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn os_tmpname(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use std::time::SystemTime;
 
     let timestamp = SystemTime::now()

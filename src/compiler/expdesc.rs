@@ -55,7 +55,7 @@ pub struct IndexInfo {
 /// Local variable information
 #[derive(Debug, Clone, Copy)]
 pub struct VarInfo {
-    pub ridx: u32,  // Register index
+    pub ridx: u32,   // Register index
     pub vidx: usize, // Variable index in locals array
 }
 
@@ -81,6 +81,7 @@ pub struct ExpDesc {
 
 impl ExpDesc {
     /// Create a new void expression
+    #[allow(dead_code)]
     pub fn new_void() -> Self {
         ExpDesc {
             kind: ExpKind::VVoid,
@@ -109,6 +110,7 @@ impl ExpDesc {
     }
 
     /// Create local variable expression
+    #[allow(dead_code)]
     pub fn new_local(reg: u32, vidx: usize) -> Self {
         ExpDesc {
             kind: ExpKind::VLocal,
@@ -207,14 +209,21 @@ impl ExpDesc {
     }
 
     /// Check if expression is a variable
+    #[allow(dead_code)]
     pub fn is_var(&self) -> bool {
         matches!(
             self.kind,
-            ExpKind::VLocal | ExpKind::VUpval | ExpKind::VIndexed | ExpKind::VIndexUp | ExpKind::VIndexI | ExpKind::VIndexStr
+            ExpKind::VLocal
+                | ExpKind::VUpval
+                | ExpKind::VIndexed
+                | ExpKind::VIndexUp
+                | ExpKind::VIndexI
+                | ExpKind::VIndexStr
         )
     }
 
     /// Check if expression has multiple returns
+    #[allow(dead_code)]
     pub fn has_multret(&self) -> bool {
         matches!(self.kind, ExpKind::VCall | ExpKind::VVararg)
     }
@@ -235,6 +244,7 @@ impl ExpDesc {
 }
 
 /// Check if expression can be used as RK operand (register or constant)
+#[allow(dead_code)]
 pub fn is_rk(e: &ExpDesc) -> bool {
     matches!(
         e.kind,
@@ -243,14 +253,22 @@ pub fn is_rk(e: &ExpDesc) -> bool {
 }
 
 /// Check if expression is a constant
+#[allow(dead_code)]
 pub fn is_const(e: &ExpDesc) -> bool {
     matches!(
         e.kind,
-        ExpKind::VNil | ExpKind::VTrue | ExpKind::VFalse | ExpKind::VK | ExpKind::VKInt | ExpKind::VKFlt | ExpKind::VKStr
+        ExpKind::VNil
+            | ExpKind::VTrue
+            | ExpKind::VFalse
+            | ExpKind::VK
+            | ExpKind::VKInt
+            | ExpKind::VKFlt
+            | ExpKind::VKStr
     )
 }
 
 /// Check if expression is a numeric constant
+#[allow(dead_code)]
 pub fn is_numeral(e: &ExpDesc) -> bool {
     matches!(e.kind, ExpKind::VKInt | ExpKind::VKFlt)
 }

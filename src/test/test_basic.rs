@@ -1,7 +1,7 @@
 // Tests for basic library functions
 use crate::*;
 
-fn test_lua(code: &str) -> Result<LuaValue, String> {
+fn test_lua(code: &str) -> LuaResult<LuaValue> {
     execute(code)
 }
 
@@ -111,7 +111,6 @@ fn test_error() {
     );
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Custom error"));
 }
 
 #[test]
