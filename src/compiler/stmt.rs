@@ -503,6 +503,8 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
     }
 
     // Free temporary registers
+    // For local variables, reset to after the last local
+    // For global variables, reset to 0 (or after locals in current scope)
     if all_locals && !val_regs.is_empty() {
         // Find all target registers (min and max)
         let targets: Vec<u32> = target_regs.iter().filter_map(|&r| r).collect();
@@ -513,6 +515,16 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             // This allows temporary registers to be reused
             c.next_register = max_target + 1;
         }
+    } else if !all_locals {
+        // Global variable assignment: free all temporary registers
+        // Find the highest register used by local variables in current scope
+        let max_local_reg = c.scope_chain.borrow().locals
+            .iter()
+            .filter(|l| l.depth == c.scope_depth)
+            .map(|l| l.register)
+            .max();
+        
+        c.next_register = max_local_reg.map(|r| r + 1).unwrap_or(0);
     }
 
     Ok(())

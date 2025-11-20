@@ -375,16 +375,16 @@ fn compile_binary_expr_to(
                     // Only compile left operand if we actually use immediate instruction
                     match op_kind {
                         BinaryOperator::OpAdd => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm));
                             // Emit MMBINI for metamethod call (TM_ADD = 6)
                             emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 6, false));
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpSub => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use SubK for constant operand
                             emit(c, Instruction::create_abck(OpCode::SubK, result_reg, left_reg, imm, true));
                             // Emit MMBINK for metamethod call (TM_SUB = 7)
@@ -392,8 +392,8 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMul => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use MulK for constant operand
                             emit(c, Instruction::create_abck(OpCode::MulK, result_reg, left_reg, imm, true));
                             // Emit MMBINK for metamethod call (TM_MUL = 8)
@@ -401,8 +401,8 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpMod => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use ModK for constant operand
                             emit(c, Instruction::create_abck(OpCode::ModK, result_reg, left_reg, imm, true));
                             // Emit MMBINK for metamethod call (TM_MOD = 9)
@@ -410,8 +410,8 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpPow => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use PowK for constant operand
                             emit(c, Instruction::create_abck(OpCode::PowK, result_reg, left_reg, imm, true));
                             // Emit MMBINK for metamethod call (TM_POW = 10)
@@ -419,8 +419,8 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpDiv => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use DivK for constant operand
                             emit(c, Instruction::create_abck(OpCode::DivK, result_reg, left_reg, imm, true));
                             // Emit MMBINK for metamethod call (TM_DIV = 11)
@@ -428,8 +428,8 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpIDiv => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use IDivK for constant operand
                             emit(c, Instruction::create_abck(OpCode::IDivK, result_reg, left_reg, imm, true));
                             // Emit MMBINK for metamethod call (TM_IDIV = 12)
@@ -437,8 +437,8 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpShr => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use ShrI for immediate right shift
                             emit(c, Instruction::encode_abc(OpCode::ShrI, result_reg, left_reg, imm));
                             // Emit MMBINI for metamethod call (TM_SHR = 17)
@@ -446,8 +446,8 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpShl => {
-                            let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
                             // Lua 5.4: Use ShlI for immediate left shift
                             // Note: ShlI uses negated immediate: sC << R[B] where sC is the immediate
                             // To shift left by N, we use -N as the immediate
@@ -471,9 +471,11 @@ fn compile_binary_expr_to(
     }
 
     // Fall back to normal two-operand instruction
-    let left_reg = compile_expr(c, &left)?;
-    let right_reg = compile_expr(c, &right)?;
+    // IMPORTANT: Allocate result register FIRST, then compile left to it
+    // This ensures left uses R(0) when dest is None, matching luac behavior
     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+    let left_reg = compile_expr_to(c, &left, Some(result_reg))?;
+    let right_reg = compile_expr(c, &right)?;
 
     // Determine opcode and metamethod event (TM)
     let (opcode, mm_event_opt) = match op_kind {

@@ -81,7 +81,12 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 format!("SELF {} {} {}{}", a, b, c, k_str)
             }
             OpCode::Add => format!("ADD {} {} {}", a, b, c),
-            OpCode::AddI => format!("ADDI {} {} {}", a, b, c as i32 - 128),
+            OpCode::AddI => {
+                // ADDI uses signed 8-bit immediate in C field
+                // Values 0-127 are positive, 128-255 are negative (128=-128, 255=-1)
+                let imm = if c > 127 { (c as i32) - 256 } else { c as i32 };
+                format!("ADDI {} {} {}", a, b, imm)
+            }
             OpCode::AddK => format!("ADDK {} {} {}", a, b, c),
             OpCode::Sub => format!("SUB {} {} {}", a, b, c),
             OpCode::SubK => format!("SUBK {} {} {}", a, b, c),
