@@ -1521,6 +1521,8 @@ pub fn compile_closure_expr_to(
                 name: "self".to_string(),
                 depth: 0,
                 register: 0,
+                is_const: false,
+                is_to_be_closed: false,
             });
         func_compiler.chunk.locals.push("self".to_string());
         param_offset = 1;
@@ -1553,6 +1555,8 @@ pub fn compile_closure_expr_to(
                 name: param_name.clone(),
                 depth: 0,
                 register: reg_index,
+                is_const: false,
+                is_to_be_closed: false,
             });
         func_compiler.chunk.locals.push(param_name);
         regular_param_count += 1;

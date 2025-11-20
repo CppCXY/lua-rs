@@ -70,6 +70,8 @@ pub(crate) struct Local {
     pub name: String,
     pub depth: usize,
     pub register: u32,
+    pub is_const: bool,          // <const> attribute
+    pub is_to_be_closed: bool,   // <close> attribute
 }
 
 /// Loop information for break statements

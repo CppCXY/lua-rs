@@ -1,6 +1,9 @@
 // Statement compilation
 
-use super::expr::{compile_call_expr, compile_expr, compile_expr_to, compile_var_expr, compile_call_expr_with_returns_and_dest};
+use super::expr::{
+    compile_call_expr, compile_call_expr_with_returns_and_dest, compile_expr, compile_expr_to,
+    compile_var_expr,
+};
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
 use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr};
@@ -251,12 +254,23 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
         }
     }
 
-    // Define locals
+    // Define locals with attributes
     for (i, name) in names.iter().enumerate() {
         // Get name text from LocalName node
         if let Some(name_token) = name.get_name_token() {
             let name_text = name_token.get_name_text().to_string();
-            add_local(c, name_text, regs[i]);
+
+            // Parse attributes: <const> or <close>
+            let mut is_const = false;
+            let mut is_to_be_closed = false;
+
+            // Check if LocalName has an attribute
+            if let Some(attr_token) = name.get_attrib() {
+                is_const = attr_token.is_const();
+                is_to_be_closed = attr_token.is_close();
+            }
+
+            add_local_with_attrs(c, name_text, regs[i], is_const, is_to_be_closed);
         }
     }
 
@@ -280,18 +294,23 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
         if let LuaVarExpr::NameExpr(name_expr) = &vars[0] {
             let name = name_expr.get_name_text().unwrap_or("".to_string());
             if let Some(local) = resolve_local(c, &name) {
+                // Check if trying to assign to a const variable
+                if local.is_const {
+                    return Err(format!("attempt to assign to const variable '{}'", name));
+                }
                 // Local variable - compile expression directly to its register
                 compile_expr_to(c, &exprs[0], Some(local.register))?;
                 return Ok(());
             }
-            
+
             // OPTIMIZATION: global = constant -> SETTABUP with k=1
             if resolve_upvalue_from_chain(c, &name).is_none() {
-                // It's a global, check if value is constant
+                // It's a global - add key to constants first (IMPORTANT: luac adds key before value!)
+                let lua_str = create_string_value(c, &name);
+                let key_idx = add_constant_dedup(c, lua_str);
+                
+                // Then check if value is constant
                 if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                    let lua_str = create_string_value(c, &name);
-                    let key_idx = add_constant_dedup(c, lua_str);
-                    
                     if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
                         emit(
                             c,
@@ -346,12 +365,16 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
 
     let mut target_regs = Vec::new();
 
-    // Collect target registers for local variables
+    // Collect target registers for local variables and check const
     let mut all_locals = true;
     for var in vars.iter() {
         if let LuaVarExpr::NameExpr(name_expr) = var {
             let name = name_expr.get_name_text().unwrap_or("".to_string());
             if let Some(local) = resolve_local(c, &name) {
+                // Check if trying to assign to a const variable
+                if local.is_const {
+                    return Err(format!("attempt to assign to const variable '{}'", name));
+                }
                 target_regs.push(Some(local.register));
                 continue;
             }
@@ -444,9 +467,11 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             // Special case: global variable assignment with constant value
             if let LuaVarExpr::NameExpr(name_expr) = var {
                 let name = name_expr.get_name_text().unwrap_or("".to_string());
-                
+
                 // Check if it's NOT a local (i.e., it's a global)
-                if resolve_local(c, &name).is_none() && resolve_upvalue_from_chain(c, &name).is_none() {
+                if resolve_local(c, &name).is_none()
+                    && resolve_upvalue_from_chain(c, &name).is_none()
+                {
                     // It's a global - try to use RK optimization
                     // Check if value_reg contains a recently loaded constant
                     if i < exprs.len() {
@@ -454,11 +479,17 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                             // Use SETTABUP with k=1 (both key and value are constants)
                             let lua_str = create_string_value(c, &name);
                             let key_idx = add_constant_dedup(c, lua_str);
-                            
+
                             if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
                                 emit(
                                     c,
-                                    Instruction::create_abck(OpCode::SetTabUp, 0, key_idx, const_idx, true),
+                                    Instruction::create_abck(
+                                        OpCode::SetTabUp,
+                                        0,
+                                        key_idx,
+                                        const_idx,
+                                        true,
+                                    ),
                                 );
                                 continue;
                             }
@@ -466,7 +497,7 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                     }
                 }
             }
-            
+
             compile_var_expr(c, var, val_regs[i])?;
         }
     }
@@ -584,7 +615,15 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     }
 
     // Compile all expressions except the last one
-    for (i, expr) in exprs.iter().take(if last_is_multret && num_exprs > 0 { num_exprs - 1 } else { num_exprs }).enumerate() {
+    for (i, expr) in exprs
+        .iter()
+        .take(if last_is_multret && num_exprs > 0 {
+            num_exprs - 1
+        } else {
+            num_exprs
+        })
+        .enumerate()
+    {
         let target_reg = base_reg + i as u32;
         let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
         if src_reg != target_reg {
@@ -596,20 +635,32 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     if last_is_multret && num_exprs > 0 {
         let last_expr = exprs.last().unwrap();
         let last_target_reg = base_reg + (num_exprs - 1) as u32;
-        
+
         if let LuaExpr::LiteralExpr(lit) = last_expr {
-            if matches!(lit.get_literal(), Some(emmylua_parser::LuaLiteralToken::Dots(_))) {
+            if matches!(
+                lit.get_literal(),
+                Some(emmylua_parser::LuaLiteralToken::Dots(_))
+            ) {
                 // Varargs: emit VARARG with B=0 (all out)
-                emit(c, Instruction::encode_abc(OpCode::Vararg, last_target_reg, 0, 0));
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Vararg, last_target_reg, 0, 0),
+                );
                 // Return with B=0 (all out)
-                emit(c, Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true));
+                emit(
+                    c,
+                    Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true),
+                );
                 return Ok(());
             }
         } else if let LuaExpr::CallExpr(call_expr) = last_expr {
             // Call expression: compile with "all out" mode
             compile_call_expr_with_returns_and_dest(c, call_expr, 0, Some(last_target_reg))?;
             // Return with B=0 (all out)
-            emit(c, Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true));
+            emit(
+                c,
+                Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true),
+            );
             return Ok(());
         }
     }
@@ -640,9 +691,10 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
         // If so, invert comparison to optimize away the jump instruction
         // BUT: Only if there are no else/elseif clauses (otherwise we need to compile them)
         let then_body = stat.get_block();
-        let invert = !has_branches && then_body
-            .as_ref()
-            .map_or(false, |b| is_single_jump_block(b));
+        let invert = !has_branches
+            && then_body
+                .as_ref()
+                .map_or(false, |b| is_single_jump_block(b));
 
         // Try immediate comparison optimization (like GTI, LEI, etc.)
         let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, invert)? {
@@ -1182,6 +1234,8 @@ fn compile_local_function_stat(
         name: func_name.clone(),
         depth: c.scope_depth,
         register: func_reg,
+        is_const: false,
+        is_to_be_closed: false,
     });
     c.chunk.locals.push(func_name);
 

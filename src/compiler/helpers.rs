@@ -105,12 +105,24 @@ pub fn free_register(c: &mut Compiler) {
 
 /// Add a local variable to the current scope
 pub fn add_local(c: &mut Compiler, name: String, register: u32) {
+    add_local_with_attrs(c, name, register, false, false);
+}
+
+/// Add a new local variable with <const> and <close> attributes
+pub fn add_local_with_attrs(c: &mut Compiler, name: String, register: u32, is_const: bool, is_to_be_closed: bool) {
     let local = Local {
         name,
         depth: c.scope_depth,
         register,
+        is_const,
+        is_to_be_closed,
     };
     c.scope_chain.borrow_mut().locals.push(local);
+    
+    // Emit TBC instruction for to-be-closed variables
+    if is_to_be_closed {
+        emit(c, Instruction::encode_abc(OpCode::Tbc, register, 0, 0));
+    }
 }
 
 /// Resolve a local variable by name (searches from innermost to outermost scope)
@@ -238,6 +250,29 @@ pub fn begin_scope(c: &mut Compiler) {
 
 /// End the current scope
 pub fn end_scope(c: &mut Compiler) {
+    // Before closing the scope, emit CLOSE instruction for to-be-closed variables
+    // Find the minimum register of all to-be-closed variables in the current scope
+    let mut min_tbc_reg: Option<u32> = None;
+    {
+        let scope = c.scope_chain.borrow();
+        for local in scope.locals.iter().rev() {
+            if local.depth > c.scope_depth {
+                break; // Only check current scope
+            }
+            if local.depth == c.scope_depth && local.is_to_be_closed {
+                min_tbc_reg = Some(match min_tbc_reg {
+                    None => local.register,
+                    Some(min_reg) => min_reg.min(local.register),
+                });
+            }
+        }
+    }
+    
+    // Emit CLOSE instruction if there are to-be-closed variables
+    if let Some(reg) = min_tbc_reg {
+        emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
+    }
+    
     c.scope_depth -= 1;
     c.scope_chain
         .borrow_mut()
@@ -263,11 +298,11 @@ pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
 pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
     let lua_str = create_string_value(c, name);
     let const_idx = add_constant_dedup(c, lua_str);
-    // SetTabUp: UpValue[A][K(B)] := R(C)
-    // A=0 is _ENV upvalue, B is constant index, C is source register, k=1
+    // SetTabUp: UpValue[A][K(B)] := RK(C)
+    // A=0 is _ENV upvalue, B is constant index (key name), C is source register, k=0 (C is register, not constant)
     emit(
         c,
-        Instruction::create_abck(OpCode::SetTabUp, 0, const_idx, src_reg, true),
+        Instruction::create_abck(OpCode::SetTabUp, 0, const_idx, src_reg, false),
     );
 }
 
