@@ -133,6 +133,12 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::ForPrep => format!("FORPREP {} {}", a, bx),
             OpCode::TForPrep => format!("TFORPREP {} {}", a, bx),
             OpCode::TForLoop => format!("TFORLOOP {} {}", a, c),
+            OpCode::MmBin => format!("MMBIN {} {} {} {}", a, b, c, k as u32),
+            OpCode::MmBinI => format!("MMBINI {} {} {} {}", a, b, c, k as u32),
+            OpCode::MmBinK => format!("MMBINK {} {} {} {}", a, b, c, k as u32),
+            OpCode::ExtraArg => format!("EXTRAARG {}", bx),
+            OpCode::Tbc => format!("TBC {}", a),
+            OpCode::Close => format!("CLOSE {}", a),
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
         
