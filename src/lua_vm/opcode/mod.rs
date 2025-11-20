@@ -9,8 +9,6 @@
   - isJ:   [Op(7) | sJ(signed 25)]
 ----------------------------------------------------------------------*/
 
-pub mod dispatcher;
-
 /// Instruction format modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpMode {

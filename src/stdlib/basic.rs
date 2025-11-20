@@ -321,7 +321,7 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     // Use protected_call from VM
-    let (success, results) = vm.protected_call(func, args);
+    let (success, results) = vm.protected_call(func, args)?;
 
     // Return status and results
     let mut return_values = vec![LuaValue::boolean(success)];
@@ -349,7 +349,7 @@ fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     // Use protected_call_with_handler from VM
-    let (success, results) = vm.protected_call_with_handler(func, args, err_handler);
+    let (success, results) = vm.protected_call_with_handler(func, args, err_handler)?;
 
     // Return status and results
     let mut return_values = vec![LuaValue::boolean(success)];
@@ -598,7 +598,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
 
         // Call searcher with module name
-        let (success, results) = vm.protected_call(searcher.clone(), vec![modname_str.clone()]);
+        let (success, results) = vm.protected_call(searcher.clone(), vec![modname_str.clone()])?;
 
         if !success {
             let error_msg = results
@@ -626,7 +626,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 };
 
                 let (load_success, load_results) =
-                    vm.protected_call(first_result.clone(), loader_args);
+                    vm.protected_call(first_result.clone(), loader_args)?;
 
                 if !load_success {
                     let error_msg = load_results
@@ -792,7 +792,7 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let func = vm.create_function(std::rc::Rc::new(chunk), vec![]);
 
             // Call the function
-            let (success, results) = vm.protected_call(func, vec![]);
+            let (success, results) = vm.protected_call(func, vec![])?;
 
             if success {
                 Ok(MultiValue::multiple(results))

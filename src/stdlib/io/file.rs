@@ -179,32 +179,32 @@ pub fn create_file_metatable(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
     // file:read([format])
     let read_key = vm.create_string("read");
-    vm.table_set(index_table, read_key, LuaValue::cfunction(file_read))?;
+    vm.table_set_with_meta(index_table, read_key, LuaValue::cfunction(file_read))?;
 
     // file:write(...)
     let write_key = vm.create_string("write");
-    vm.table_set(index_table, write_key, LuaValue::cfunction(file_write))?;
+    vm.table_set_with_meta(index_table, write_key, LuaValue::cfunction(file_write))?;
     // file:flush()
     let flush_key = vm.create_string("flush");
-    vm.table_set(index_table, flush_key, LuaValue::cfunction(file_flush))?;
+    vm.table_set_with_meta(index_table, flush_key, LuaValue::cfunction(file_flush))?;
     // file:close()
     let close_key = vm.create_string("close");
-    vm.table_set(index_table, close_key, LuaValue::cfunction(file_close))?;
+    vm.table_set_with_meta(index_table, close_key, LuaValue::cfunction(file_close))?;
 
     // file:lines([formats])
     let lines_key = vm.create_string("lines");
-    vm.table_set(index_table, lines_key, LuaValue::cfunction(file_lines))?;
+    vm.table_set_with_meta(index_table, lines_key, LuaValue::cfunction(file_lines))?;
 
     // file:seek([whence [, offset]])
     let seek_key = vm.create_string("seek");
-    vm.table_set(index_table, seek_key, LuaValue::cfunction(file_seek))?;
+    vm.table_set_with_meta(index_table, seek_key, LuaValue::cfunction(file_seek))?;
 
     // file:setvbuf(mode [, size])
     let setvbuf_key = vm.create_string("setvbuf");
-    vm.table_set(index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf))?;
+    vm.table_set_with_meta(index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf))?;
 
     let index_key = vm.create_string("__index");
-    vm.table_set(mt, index_key, index_table)?;
+    vm.table_set_with_meta(mt, index_key, index_table)?;
 
     Ok(mt)
 }

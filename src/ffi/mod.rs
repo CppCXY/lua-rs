@@ -319,7 +319,7 @@ pub fn ffi_call_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         } as *mut u8;
 
         let name_key = vm.create_string("_name");
-        let name = if let Some(name_value) = vm.table_get(wrapper, &name_key) {
+        let name = if let Some(name_value) = vm.table_get_with_meta(wrapper, &name_key) {
             let name_str_ptr = name_value.as_string_ptr().ok_or(LuaError::RuntimeError(
                 "ffi call: invalid function name".to_string(),
             ))?;
@@ -786,7 +786,7 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Get the struct type and validate field exists
     unsafe {
         let type_key = vm.create_string("__ctype");
-        let type_name_val = vm.table_get(struct_table, &type_key);
+        let type_name_val = vm.table_get_with_meta(struct_table, &type_key);
 
         let type_name = if let Some(tn) = type_name_val {
             if let Some(s) = tn.as_string_ptr() {
@@ -818,7 +818,7 @@ pub fn ffi_struct_newindex(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
         // Get or create __fields table
         let fields_key = vm.create_string("__fields");
-        let fields_table_val = vm.table_get(struct_table, &fields_key);
+        let fields_table_val = vm.table_get_with_meta(struct_table, &fields_key);
 
         let fields_table_value = if let Some(ft) = fields_table_val {
             if ft.as_table_id().is_some() {

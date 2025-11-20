@@ -8,11 +8,24 @@ use super::DispatchAction;
 
 /// VARARGPREP A
 /// Prepare stack for vararg function
-pub fn exec_varargprep(_vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
-    // let a = Instruction::get_a(instr);
-    // For now, just mark that we have a vararg function
-    // Full implementation requires handling the ... operator
-    // TODO: Implement proper vararg handling
+/// A is the number of fixed parameters
+pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    
+    let frame = vm.current_frame_mut();
+    let base_ptr = frame.base_ptr;
+    let top = frame.top;
+    
+    // varargs start after the fixed parameters
+    // If we have more values on stack than fixed params, those are varargs
+    if top > a {
+        let vararg_start = base_ptr + a;
+        let vararg_count = top - a;
+        frame.set_vararg(vararg_start, vararg_count);
+    } else {
+        frame.set_vararg(base_ptr + a, 0);
+    }
+    
     Ok(DispatchAction::Continue)
 }
 

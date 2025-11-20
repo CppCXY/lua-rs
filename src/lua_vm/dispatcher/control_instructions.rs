@@ -1,9 +1,10 @@
+use crate::lua_value::LuaValueKind;
 /// Control flow instructions
 /// 
 /// These instructions handle function calls, returns, jumps, and coroutine operations.
 
 use crate::LuaValue;
-use crate::lua_vm::{LuaVM, LuaResult, LuaError, Instruction};
+use crate::lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM};
 use super::DispatchAction;
 
 /// RETURN A B C k
@@ -65,8 +66,599 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         }
     }
 
-    // TODO: Handle upvalue closing (k bit)
-    // if k { close_upvalues() }
+    // Handle upvalue closing (k bit)
+    // k=1 means close upvalues >= R[A]
+    if _k {
+        let close_from = base_ptr + a;
+        vm.close_upvalues_from(close_from);
+    }
+
+    Ok(DispatchAction::Return)
+}
+
+// ============ Jump Instructions ============
+
+/// JMP sJ
+/// pc += sJ
+pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let sj = Instruction::get_sj(instr);
+    
+    let frame = vm.current_frame_mut();
+    // PC already incremented by dispatcher, so we add offset directly
+    frame.pc = (frame.pc as i32 + sj) as usize;
+    
+    Ok(DispatchAction::Continue)
+}
+
+// ============ Test Instructions ============
+
+/// TEST A k
+/// if (not R[A] == k) then pc++
+pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let value = vm.register_stack[base_ptr + a];
+    
+    // Lua truthiness: nil and false are falsy, everything else is truthy
+    let is_truthy = !value.is_nil() && value.as_bool().unwrap_or(true);
+    
+    // If (not value) == k, skip next instruction
+    if !is_truthy == k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// TESTSET A B k
+/// if (not R[B] == k) then R[A] := R[B] else pc++
+pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let value = vm.register_stack[base_ptr + b];
+    
+    // Lua truthiness
+    let is_truthy = !value.is_nil() && value.as_bool().unwrap_or(true);
+    
+    // If (not value) == k, assign R[A] = R[B]
+    // Otherwise skip next instruction
+    if !is_truthy == k {
+        vm.register_stack[base_ptr + a] = value;
+    } else {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+// ============ Comparison Instructions ============
+
+/// EQ A B k
+/// if ((R[A] == R[B]) ~= k) then pc++
+pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+    let right = vm.register_stack[base_ptr + b];
+
+    let is_equal = left == right;
+    
+    // If (left == right) != k, skip next instruction
+    if is_equal != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// LT A B k
+/// if ((R[A] < R[B]) ~= k) then pc++
+pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+    let right = vm.register_stack[base_ptr + b];
+
+    let is_less = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+        l < r
+    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+        l < r
+    } else if left.is_string() && right.is_string() {
+        // String comparison - would need VM to get strings
+        // For now, just use default comparison
+        left < right
+    } else {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to compare {} with {}",
+            left.type_name(),
+            right.type_name()
+        )));
+    };
+    
+    if is_less != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// LE A B k
+/// if ((R[A] <= R[B]) ~= k) then pc++
+pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+    let right = vm.register_stack[base_ptr + b];
+
+    let is_less_equal = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+        l <= r
+    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+        l <= r
+    } else if left.is_string() && right.is_string() {
+        left <= right
+    } else {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to compare {} with {}",
+            left.type_name(),
+            right.type_name()
+        )));
+    };
+    
+    if is_less_equal != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// EQK A B k
+/// if ((R[A] == K[B]) ~= k) then pc++
+pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+    
+    let func_ptr = frame.get_function_ptr().ok_or_else(|| {
+        LuaError::RuntimeError("Not a Lua function".to_string())
+    })?;
+    let func = unsafe { &*func_ptr };
+    let constant = func.borrow().chunk.constants.get(b).copied().ok_or_else(|| {
+        LuaError::RuntimeError(format!("Invalid constant index: {}", b))
+    })?;
+
+    let left = vm.register_stack[base_ptr + a];
+
+    let is_equal = left == constant;
+    
+    if is_equal != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// EQI A sB k
+/// if ((R[A] == sB) ~= k) then pc++
+pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let sb = Instruction::get_sb(instr);
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+
+    let is_equal = if let Some(l) = left.as_integer() {
+        l == sb as i64
+    } else if let Some(l) = left.as_number() {
+        l == sb as f64
+    } else {
+        false
+    };
+    
+    if is_equal != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// LTI A sB k
+/// if ((R[A] < sB) ~= k) then pc++
+pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let sb = Instruction::get_sb(instr);
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+
+    let is_less = if let Some(l) = left.as_integer() {
+        l < sb as i64
+    } else if let Some(l) = left.as_number() {
+        l < sb as f64
+    } else {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to compare {} with number",
+            left.type_name()
+        )));
+    };
+    
+    if is_less != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// LEI A sB k
+/// if ((R[A] <= sB) ~= k) then pc++
+pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let sb = Instruction::get_sb(instr);
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+
+    let is_less_equal = if let Some(l) = left.as_integer() {
+        l <= sb as i64
+    } else if let Some(l) = left.as_number() {
+        l <= sb as f64
+    } else {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to compare {} with number",
+            left.type_name()
+        )));
+    };
+    
+    if is_less_equal != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// GTI A sB k
+/// if ((R[A] > sB) ~= k) then pc++
+pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let sb = Instruction::get_sb(instr);
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+
+    let is_greater = if let Some(l) = left.as_integer() {
+        l > sb as i64
+    } else if let Some(l) = left.as_number() {
+        l > sb as f64
+    } else {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to compare {} with number",
+            left.type_name()
+        )));
+    };
+    
+    if is_greater != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// GEI A sB k
+/// if ((R[A] >= sB) ~= k) then pc++
+pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let sb = Instruction::get_sb(instr);
+    let k = Instruction::get_k(instr);
+
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    let left = vm.register_stack[base_ptr + a];
+
+    let is_greater_equal = if let Some(l) = left.as_integer() {
+        l >= sb as i64
+    } else if let Some(l) = left.as_number() {
+        l >= sb as f64
+    } else {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to compare {} with number",
+            left.type_name()
+        )));
+    };
+    
+    if is_greater_equal != k {
+        vm.current_frame_mut().pc += 1;
+    }
+    
+    Ok(DispatchAction::Continue)
+}
+
+// ============ Call Instructions ============
+
+/// CALL A B C
+/// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
+pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    use crate::lua_value::LuaValueKind;
+    use crate::lua_vm::LuaCallFrame;
+    
+    // CALL A B C: R[A], ..., R[A+C-2] := R[A](R[A+1], ..., R[A+B-1])
+    // A: function register, B: arg count + 1 (0 = use top), C: return count + 1 (0 = use top)
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let c = Instruction::get_c(instr) as usize;
+
+    let frame = vm.frames.last().unwrap();
+    let base = frame.base_ptr;
+
+    // Get function from R[A]
+    let func = vm.register_stack[base + a];
+
+    // Determine argument count
+    let arg_count = if b == 0 {
+        // Use all values from R[A+1] to top
+        let frame = vm.current_frame();
+        frame.top - (a + 1)
+    } else {
+        b - 1
+    };
+
+    // Determine expected return count
+    let return_count = if c == 0 {
+        usize::MAX // Want all return values
+    } else {
+        c - 1
+    };
+
+    match func.kind() {
+        LuaValueKind::CFunction => {
+            // Call C function immediately
+            let cfunc = func.as_cfunction().unwrap();
+            
+            // Create temporary frame for CFunction
+            let frame_id = vm.next_frame_id;
+            vm.next_frame_id += 1;
+            
+            // Set up call arguments in a new stack segment
+            let call_base = vm.register_stack.len();
+            vm.ensure_stack_capacity(call_base + arg_count + 1);
+            
+            // Copy function and arguments
+            vm.register_stack[call_base] = func;
+            for i in 0..arg_count {
+                vm.register_stack[call_base + i + 1] = vm.register_stack[base + a + 1 + i];
+            }
+            
+            let temp_frame = LuaCallFrame::new_c_function(
+                frame_id,
+                vm.current_frame().function_value,
+                vm.current_frame().pc,
+                call_base,
+                arg_count + 1,
+            );
+            
+            vm.frames.push(temp_frame);
+            let result = cfunc(vm)?;
+            vm.frames.pop();
+            
+            // Store return values
+            let values = result.all_values();
+            let num_returns = if return_count == usize::MAX {
+                values.len()
+            } else {
+                return_count
+            };
+            
+            for i in 0..num_returns {
+                let value = values.get(i).copied().unwrap_or(crate::LuaValue::nil());
+                vm.register_stack[base + a + i] = value;
+            }
+            
+            Ok(DispatchAction::Continue)
+        },
+        LuaValueKind::Function => {
+            // Get max_stack_size from function before creating frame
+            let func_id = func.as_function_id().unwrap();
+            let max_stack_size = match vm.object_pool.get_function(func_id) {
+                Some(func_ref) => func_ref.borrow().chunk.max_stack_size,
+                None => {
+                    return Err(LuaError::RuntimeError("Invalid function reference".to_string()));
+                }
+            };
+
+            // Create new frame
+            let frame_id = vm.next_frame_id;
+            vm.next_frame_id += 1;
+
+            let new_base = vm.register_stack.len();
+            vm.ensure_stack_capacity(new_base + max_stack_size);
+
+            // Initialize registers with nil
+            for i in 0..max_stack_size {
+                vm.register_stack[new_base + i] = crate::LuaValue::nil();
+            }
+
+            // Copy arguments to new frame
+            for i in 0..arg_count {
+                vm.register_stack[new_base + i] = vm.register_stack[base + a + 1 + i];
+            }
+
+            // Create and push new frame
+            let new_frame = LuaCallFrame::new_lua_function(
+                frame_id,
+                func,
+                new_base,
+                max_stack_size,
+                a, // result_reg: where to store return values
+                return_count,
+            );
+            vm.frames.push(new_frame);
+
+            Ok(DispatchAction::Call)
+        },
+        _ => {
+            Err(LuaError::RuntimeError(format!(
+                "attempt to call a {} value",
+                func.type_name()
+            )))
+        }
+    }
+}
+
+/// TAILCALL A B C k
+/// return R[A](R[A+1], ... ,R[A+B-1])
+pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    
+    // TAILCALL A B C: return R[A](R[A+1], ..., R[A+B-1])
+    // Reuse current frame (tail call optimization)
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+
+    let frame = vm.frames.last().unwrap();
+    let base = frame.base_ptr;
+
+    // Get function from R[A]
+    let func = vm.register_stack[base + a];
+
+    // Determine argument count
+    let arg_count = if b == 0 {
+        // Use all values from R[A+1] to top
+        let frame = vm.current_frame();
+        frame.top - (base + a + 1)
+    } else {
+        b - 1
+    };
+
+    // Copy arguments to temporary buffer
+    let mut args = Vec::with_capacity(arg_count);
+    for i in 0..arg_count {
+        args.push(vm.register_stack[base + a + 1 + i]);
+    }
+
+    // Pop current frame (tail call optimization)
+    let old_base = frame.base_ptr;
+    let return_count = frame.get_num_results();
+    vm.frames.pop();
+
+    // Get max_stack_size from function
+    let max_stack_size = match func.kind() {
+        LuaValueKind::Function => {
+            let func_id = func.as_function_id().unwrap();
+            match vm.object_pool.get_function(func_id) {
+                Some(func_ref) => func_ref.borrow().chunk.max_stack_size,
+                None => {
+                    return Err(LuaError::RuntimeError("Invalid function reference".to_string()));
+                }
+            }
+        }
+        LuaValueKind::CFunction => 256,
+        _ => {
+            return Err(LuaError::RuntimeError(format!(
+                "attempt to call a {} value",
+                func.type_name()
+            )));
+        }
+    };
+
+    // Create new frame at same location
+    let frame_id = vm.next_frame_id;
+    vm.next_frame_id += 1;
+
+    vm.ensure_stack_capacity(old_base + max_stack_size);
+
+    // Copy arguments to frame base
+    for (i, arg) in args.iter().enumerate() {
+        vm.register_stack[old_base + i] = *arg;
+    }
+
+    let new_frame = LuaCallFrame::new_lua_function(
+        frame_id,
+        func,
+        old_base,
+        max_stack_size,
+        0,
+        return_count,
+    );
+    vm.frames.push(new_frame);
+
+    Ok(DispatchAction::Call)
+}
+
+/// RETURN0
+/// return (no values)
+pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
+    vm.frames.pop().ok_or_else(|| {
+        LuaError::RuntimeError("RETURN0 with no frame on stack".to_string())
+    })?;
+
+    vm.return_values.clear();
+    
+    Ok(DispatchAction::Return)
+}
+
+/// RETURN1 A
+/// return R[A]
+pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+
+    let frame = vm.frames.pop().ok_or_else(|| {
+        LuaError::RuntimeError("RETURN1 with no frame on stack".to_string())
+    })?;
+
+    let base_ptr = frame.base_ptr;
+
+    vm.return_values.clear();
+    if base_ptr + a < vm.register_stack.len() {
+        vm.return_values.push(vm.register_stack[base_ptr + a]);
+    }
+
+    // Copy return value to caller's registers if needed
+    if !vm.frames.is_empty() {
+        let caller_frame = vm.current_frame();
+        let result_reg = caller_frame.get_result_reg();
+        let caller_base = caller_frame.base_ptr;
+
+        if !vm.return_values.is_empty() {
+            vm.register_stack[caller_base + result_reg] = vm.return_values[0];
+        }
+    }
 
     Ok(DispatchAction::Return)
 }

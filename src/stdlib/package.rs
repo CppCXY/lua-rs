@@ -201,7 +201,7 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let func = vm.create_function(std::rc::Rc::new(chunk), vec![]);
 
     // Call the function
-    let (success, results) = vm.protected_call(func, vec![]);
+    let (success, results) = vm.protected_call(func, vec![])?;
 
     if !success {
         let error_msg = unsafe {

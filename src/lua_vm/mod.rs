@@ -57,9 +57,6 @@ pub struct LuaVM {
     // Main thread representation (for coroutine.running() in main thread)
     pub main_thread_value: Option<LuaValue>,
 
-    // Yield flag: set when a coroutine yields
-    pub(crate) yielding: bool,
-
     // String metatable (shared by all strings) - stored as TableId in LuaValue
     pub(crate) string_metatable: Option<LuaValue>,
 
@@ -82,7 +79,6 @@ impl LuaVM {
             current_thread: None,
             current_thread_value: None,
             main_thread_value: None, // Will be initialized lazily
-            yielding: false,
             string_metatable: None,
             object_pool: ObjectPool::new(),
         };
@@ -125,8 +121,13 @@ impl LuaVM {
         // Register all constants in the chunk with GC
         self.register_chunk_constants(&chunk);
 
-        // Create main function in object pool
-        let main_func_value = self.create_function(chunk.clone(), Vec::new());
+        // Create upvalue for _ENV (global table)
+        // Main chunks in Lua 5.4 always have _ENV as upvalue[0]
+        let env_upvalue = LuaUpvalue::new_closed(self.globals);
+        let upvalues = vec![env_upvalue];
+
+        // Create main function in object pool with _ENV upvalue
+        let main_func_value = self.create_function(chunk.clone(), upvalues);
 
         // Create initial call frame using unified stack
         let frame_id = self.next_frame_id;
@@ -263,7 +264,15 @@ impl LuaVM {
             self.current_frame_mut().pc += 1;
 
             // Dispatch instruction using the dispatcher module
-            let action = dispatch_instruction(self, instr)?;
+            let action = match dispatch_instruction(self, instr) {
+                Ok(action) => action,
+                Err(LuaError::Yield(_)) => {
+                    // Coroutine yielded via CFunction (e.g., coroutine.yield)
+                    // Convert to Yield action
+                    DispatchAction::Yield
+                }
+                Err(e) => return Err(e),
+            };
 
             // Handle dispatch action
             match action {
@@ -281,20 +290,14 @@ impl LuaVM {
                     }
                 }
                 DispatchAction::Yield => {
-                    // Coroutine yielded, return control to caller
-                    // The caller (coroutine.resume) will handle the yield values
-                    return Ok(LuaValue::nil()); // Placeholder, actual yield handling is complex
+                    // Coroutine yielded - return control to resume_thread
+                    // yield_values should already be set in the current thread
+                    return Ok(LuaValue::nil());
                 }
                 DispatchAction::Call => {
                     // TODO: Handle function call (CALL instruction will set this)
                     // For now, just continue
                 }
-            }
-
-            // Check for yield flag (legacy support)
-            if self.yielding {
-                self.yielding = false;
-                return Ok(LuaValue::nil());
             }
         }
     }
@@ -452,10 +455,6 @@ impl LuaVM {
         let saved_upvalues = std::mem::take(&mut self.open_upvalues);
         let saved_frame_id = self.next_frame_id;
         let saved_thread = self.current_thread.take();
-        let saved_yielding = self.yielding;
-
-        // Reset yielding flag
-        self.yielding = false;
 
         let is_first_resume = {
             let thread = thread_rc.borrow();
@@ -484,7 +483,14 @@ impl LuaVM {
                 .get(0)
                 .cloned()
                 .unwrap_or(LuaValue::nil());
-            self.call_function_internal(func, args)
+            match self.call_function_internal(func, args) {
+                Ok(values) => Ok(values),
+                Err(LuaError::Yield(values)) => {
+                    // Function yielded - this is expected
+                    Ok(values)
+                }
+                Err(e) => Err(e),
+            }
         } else {
             // Resumed from yield:
             // Use saved CALL instruction info to properly store return values
@@ -528,12 +534,11 @@ impl LuaVM {
             self.run().map(|v| vec![v])
         };
 
-        // Check if thread yielded (use yielding flag, not yield_values)
-        let did_yield = self.yielding;
-        // let yield_values = {
-        //     let thread = thread_rc.borrow();
-        //     thread.yield_values.clone()
-        // };
+        // Check if thread yielded by examining thread's yield_values
+        let did_yield = {
+            let thread = thread_rc.borrow();
+            !thread.yield_values.is_empty()
+        };
 
         // Save thread state back
         let final_result = if did_yield {
@@ -579,20 +584,19 @@ impl LuaVM {
         self.next_frame_id = saved_frame_id;
         self.current_thread = saved_thread;
         self.current_thread_value = None; // Clear after resume completes
-        self.yielding = saved_yielding;
 
         final_result
     }
 
     /// Yield from current coroutine
+    /// Returns Err(LuaError::Yield) which will be caught by run() loop
     pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
         if let Some(thread_rc) = &self.current_thread {
             // Store yield values in the thread
-            thread_rc.borrow_mut().yield_values = values;
+            thread_rc.borrow_mut().yield_values = values.clone();
             thread_rc.borrow_mut().status = CoroutineStatus::Suspended;
-            // Set yielding flag to interrupt execution
-            self.yielding = true;
-            Ok(())
+            // Return Yield "error" to unwind the call stack
+            Err(LuaError::Yield(values))
         } else {
             Err(LuaError::RuntimeError(
                 "attempt to yield from outside a coroutine".to_string(),
@@ -600,9 +604,10 @@ impl LuaVM {
         }
     }
 
-    /// Get value from table with metatable support
-    /// Handles __index metamethod
-    pub fn table_get(&mut self, lua_table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+    /// Get value from table with metatable support (__index metamethod)
+    /// Use this for GETTABLE, GETFIELD, GETI instructions
+    /// For raw access without metamethods, use table_get_raw() instead
+    pub fn table_get_with_meta(&mut self, lua_table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
         // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
         if let Some(ptr) = lua_table_value.as_table_ptr() {
             // SAFETY: Pointer is valid as long as table exists in ObjectPool
@@ -639,7 +644,7 @@ impl LuaVM {
 
                     if let Some(index_val) = index_value {
                         match index_val.kind() {
-                            LuaValueKind::Table => return self.table_get(&index_val, key),
+                            LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
                             LuaValueKind::CFunction | LuaValueKind::Function => {
                                 let args = vec![lua_table_value.clone(), key.clone()];
                                 match self.call_metamethod(&index_val, &args) {
@@ -660,7 +665,7 @@ impl LuaVM {
 
                     if let Some(index_val) = index_value {
                         match index_val.kind() {
-                            LuaValueKind::Table => return self.table_get(&index_val, key),
+                            LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
                             LuaValueKind::CFunction | LuaValueKind::Function => {
                                 let args = vec![lua_table_value.clone(), key.clone()];
                                 match self.call_metamethod(&index_val, &args) {
@@ -714,7 +719,7 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table
-                    LuaValueKind::Table => return self.table_get(&index_val, key),
+                    LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
 
                     // __index is a function - call it with (table, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
@@ -758,7 +763,7 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table
-                    LuaValueKind::Table => return self.table_get(&index_val, key),
+                    LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
 
                     // __index is a function - call it with (userdata, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
@@ -791,7 +796,7 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table (this is the common case for strings)
-                    LuaValueKind::Table => return self.table_get(&index_val, key),
+                    LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
                     // __index is a function - call it with (string, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
                         let args = vec![string_val.clone(), key.clone()];
@@ -808,9 +813,10 @@ impl LuaVM {
         None
     }
 
-    /// Set value in table with metatable support
-    /// Handles __newindex metamethod
-    pub fn table_set(
+    /// Set value in table with metatable support (__newindex metamethod)
+    /// Use this for SETTABLE, SETFIELD, SETI instructions
+    /// For raw set without metamethods, use table_set_raw() instead
+    pub fn table_set_with_meta(
         &mut self,
         lua_table_val: LuaValue,
         key: LuaValue,
@@ -862,7 +868,7 @@ impl LuaVM {
                 if let Some(newindex_val) = newindex_value {
                     match newindex_val.kind() {
                         LuaValueKind::Table => {
-                            return self.table_set(newindex_val, key, value);
+                            return self.table_set_with_meta(newindex_val, key, value);
                         }
                         LuaValueKind::CFunction | LuaValueKind::Function => {
                             let args = vec![lua_table_val, key, value];
@@ -927,7 +933,7 @@ impl LuaVM {
                 match newindex_val.kind() {
                     // __newindex is a table - set in that table
                     LuaValueKind::Table => {
-                        return self.table_set(newindex_val, key, value);
+                        return self.table_set_with_meta(newindex_val, key, value);
                     }
                     // __newindex is a function - call it with (table, key, value)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
@@ -1089,35 +1095,10 @@ impl LuaVM {
                     let _instr = chunk.code[pc];
                     self.frames[frame_idx].pc += 1;
 
-                    // Decode and execute
-                    // let opcode = Instruction::get_opcode(instr);
-
-                    // Special handling for Return opcode
-                    // if let OpCode::Return = opcode {
-                    //     match self.op_return(instr) {
-                    //         Ok(_val) => {
-                    //             // Return values are now in self.return_values
-                    //             break Ok(());
-                    //         }
-                    //         Err(e) => {
-                    //             if self.frames.len() > initial_frame_count {
-                    //                 self.frames.pop();
-                    //             }
-                    //             break Err(e);
-                    //         }
-                    //     }
-                    // }
-
-                    // Execute the instruction
-                    todo!();
-
-                    // if let Err(e) = step_result {
-                    //     // Pop the frame on error
-                    //     if self.frames.len() > initial_frame_count {
-                    //         self.frames.pop();
-                    //     }
-                    //     break Err(e);
-                    // }
+                    // Execute through dispatcher
+                    // TODO: This needs to be integrated with the main run() loop
+                    // For now, call_metamethod should use call_function_internal
+                    todo!("call_metamethod needs refactoring to use dispatcher");
                 };
 
                 match exec_result {
@@ -1168,6 +1149,37 @@ impl LuaVM {
         // Close each upvalue
         for upvalue in upvalues_to_close.iter() {
             // Get the value from the stack before closing
+            let value = upvalue.get_value(&self.frames, &self.register_stack);
+            upvalue.close(value);
+        }
+
+        // Remove closed upvalues from the open list
+        self.open_upvalues.retain(|uv| uv.is_open());
+    }
+    
+    /// Close all open upvalues at or above the given stack position
+    /// Used by RETURN (k bit) and CLOSE instructions
+    pub fn close_upvalues_from(&mut self, stack_pos: usize) {
+        let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self
+            .open_upvalues
+            .iter()
+            .filter(|uv| {
+                // Check if this upvalue points to stack_pos or higher
+                for frame in self.frames.iter() {
+                    for reg_idx in 0..frame.top {
+                        let absolute_pos = frame.base_ptr + reg_idx;
+                        if absolute_pos >= stack_pos && uv.points_to(frame.frame_id, reg_idx) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect();
+
+        // Close each upvalue
+        for upvalue in upvalues_to_close.iter() {
             let value = upvalue.get_value(&self.frames, &self.register_stack);
             upvalue.close(value);
         }
@@ -1455,7 +1467,7 @@ impl LuaVM {
                     };
                     if let Some(metatable) = metatable {
                         let key = self.create_string(event);
-                        self.table_get(&metatable, &key)
+                        self.table_get_with_meta(&metatable, &key)
                     } else {
                         None
                     }
@@ -1685,7 +1697,8 @@ impl LuaVM {
     }
 
     /// Execute a function with protected call (pcall semantics)
-    pub fn protected_call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> (bool, Vec<LuaValue>) {
+    /// Note: Yields are NOT caught by pcall - they propagate through
+    pub fn protected_call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save current state
         let initial_frame_count = self.frames.len();
 
@@ -1695,10 +1708,14 @@ impl LuaVM {
         match result {
             Ok(return_values) => {
                 // Success: return true and the return values
-                (true, return_values)
+                Ok((true, return_values))
+            }
+            Err(LuaError::Yield(values)) => {
+                // Yield is not an error - propagate it
+                Err(LuaError::Yield(values))
             }
             Err(error_msg) => {
-                // Error: clean up frames and return false with error message
+                // Real error: clean up frames and return false with error message
                 // Simply clear all open upvalues to avoid dangling references
                 self.open_upvalues.clear();
 
@@ -1710,18 +1727,19 @@ impl LuaVM {
                 // Return error without traceback for now (can add later)
                 let error_str = self.create_string(&format!("{}", error_msg));
 
-                (false, vec![error_str])
+                Ok((false, vec![error_str]))
             }
         }
     }
 
     /// Protected call with error handler
+    /// Note: Yields are NOT caught by xpcall - they propagate through
     pub fn protected_call_with_handler(
         &mut self,
         func: LuaValue,
         args: Vec<LuaValue>,
         err_handler: LuaValue,
-    ) -> (bool, Vec<LuaValue>) {
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
@@ -1732,7 +1750,11 @@ impl LuaVM {
         self.error_handler = old_handler;
 
         match result {
-            Ok(values) => (true, values),
+            Ok(values) => Ok((true, values)),
+            Err(LuaError::Yield(values)) => {
+                // Yield is not an error - propagate it
+                Err(LuaError::Yield(values))
+            }
             Err(err_msg) => {
                 self.open_upvalues.clear();
 
@@ -1743,19 +1765,24 @@ impl LuaVM {
                 let handler_result = self.call_function_internal(err_handler, vec![err_str]);
 
                 match handler_result {
-                    Ok(handler_values) => (false, handler_values),
+                    Ok(handler_values) => Ok((false, handler_values)),
+                    Err(LuaError::Yield(values)) => {
+                        // Yield from error handler - propagate it
+                        Err(LuaError::Yield(values))
+                    }
                     Err(_) => {
                         let err_str =
                             self.create_string(&format!("Error in error handler: {}", err_msg));
-                        (false, vec![err_str])
+                        Ok((false, vec![err_str]))
                     }
                 }
             }
         }
     }
 
-    /// Internal helper to call a function
-    fn call_function_internal(
+    /// Internal helper to call a function (used by pcall/xpcall and coroutines)
+    /// For regular function calls, the CALL instruction in dispatcher should be used
+    pub(crate) fn call_function_internal(
         &mut self,
         func: LuaValue,
         args: Vec<LuaValue>,
@@ -1812,7 +1839,12 @@ impl LuaVM {
 
                 // Call CFunction - ensure frame is always popped even on error
                 let result = match cfunc(self) {
-                    Ok(r) => r,
+                    Ok(r) => Ok(r),
+                    Err(LuaError::Yield(values)) => {
+                        // CFunction yielded - this is valid for coroutine.yield
+                        // Don't pop frame, just return the yield
+                        return Err(LuaError::Yield(values));
+                    }
                     Err(e) => {
                         self.frames.pop();
                         return Err(e);
@@ -1821,7 +1853,7 @@ impl LuaVM {
 
                 self.frames.pop();
 
-                Ok(result.all_values())
+                Ok(result?.all_values())
             }
             LuaValueKind::Function => {
                 let lua_func_id = func.as_function_id().unwrap();
@@ -1860,7 +1892,7 @@ impl LuaVM {
                 self.frames.push(new_frame);
 
                 // Execute instructions until frame returns
-                let exec_result = loop {
+                let exec_result: LuaResult<()> = loop {
                     if self.frames.len() <= initial_frame_count {
                         // Frame has been popped (function returned)
                         break Ok(());
@@ -1885,106 +1917,34 @@ impl LuaVM {
                         break Ok(());
                     }
 
-                    let _instr = chunk.code[pc];
+                    let instr = chunk.code[pc];
                     self.frames[frame_idx].pc += 1;
 
-                    // Decode and execute
-                    // let opcode = Instruction::get_opcode(instr);
-
-                    // // Special handling for Return opcode
-                    // if let OpCode::Return = opcode {
-                    //     match self.op_return(instr) {
-                    //         Ok(_val) => {
-                    //             // Return values are now in self.return_values
-                    //             break Ok(());
-                    //         }
-                    //         Err(e) => {
-                    //             if self.frames.len() > initial_frame_count {
-                    //                 self.frames.pop();
-                    //             }
-                    //             break Err(e);
-                    //         }
-                    //     }
-                    // }
-
-                    // // Execute the instruction
-                    // let step_result = match opcode {
-                    //     OpCode::Move => self.op_move(instr),
-                    //     OpCode::LoadK => self.op_loadk(instr),
-                    //     OpCode::LoadI => self.op_loadi(instr),
-                    //     OpCode::LoadBool => self.op_loadbool(instr),
-                    //     OpCode::LoadNil => self.op_loadnil(instr),
-                    //     OpCode::GetGlobal => self.op_getglobal(instr),
-                    //     OpCode::SetGlobal => self.op_setglobal(instr),
-                    //     OpCode::GetTable => self.op_gettable(instr),
-                    //     OpCode::SetTable => self.op_settable(instr),
-                    //     OpCode::GetTableI => self.op_gettable_i(instr),
-                    //     OpCode::SetTableI => self.op_settable_i(instr),
-                    //     OpCode::GetTableK => self.op_gettable_k(instr),
-                    //     OpCode::SetTableK => self.op_settable_k(instr),
-                    //     OpCode::NewTable => self.op_newtable(instr),
-                    //     OpCode::Call => self.op_call(instr),
-                    //     OpCode::Add => self.op_add(instr),
-                    //     OpCode::Sub => self.op_sub(instr),
-                    //     OpCode::Mul => self.op_mul(instr),
-                    //     OpCode::Div => self.op_div(instr),
-                    //     OpCode::Mod => self.op_mod(instr),
-                    //     OpCode::Pow => self.op_pow(instr),
-                    //     OpCode::AddI => self.op_addi(instr),
-                    //     OpCode::SubI => self.op_subi(instr),
-                    //     OpCode::MulI => self.op_muli(instr),
-                    //     OpCode::DivI => self.op_divi(instr),
-                    //     OpCode::ModI => self.op_modi(instr),
-                    //     OpCode::PowI => self.op_powi(instr),
-                    //     OpCode::IDivI => self.op_idivi(instr),
-                    //     OpCode::Unm => self.op_unm(instr),
-                    //     OpCode::Not => self.op_not(instr),
-                    //     OpCode::Len => self.op_len(instr),
-                    //     OpCode::Concat => self.op_concat(instr),
-                    //     OpCode::Jmp => self.op_jmp(instr),
-                    //     OpCode::Eq => self.op_eq(instr),
-                    //     OpCode::Lt => self.op_lt(instr),
-                    //     OpCode::Le => self.op_le(instr),
-                    //     OpCode::Ne => self.op_ne(instr),
-                    //     OpCode::Gt => self.op_gt(instr),
-                    //     OpCode::Ge => self.op_ge(instr),
-                    //     OpCode::EqI => self.op_eqi(instr),
-                    //     OpCode::LtI => self.op_lti(instr),
-                    //     OpCode::LeI => self.op_lei(instr),
-                    //     OpCode::GtI => self.op_gti(instr),
-                    //     OpCode::GeI => self.op_gei(instr),
-                    //     OpCode::And => self.op_and(instr),
-                    //     OpCode::Or => self.op_or(instr),
-                    //     OpCode::BAnd => self.op_band(instr),
-                    //     OpCode::BOr => self.op_bor(instr),
-                    //     OpCode::BXor => self.op_bxor(instr),
-                    //     OpCode::Shl => self.op_shl(instr),
-                    //     OpCode::Shr => self.op_shr(instr),
-                    //     OpCode::BNot => self.op_bnot(instr),
-                    //     OpCode::IDiv => self.op_idiv(instr),
-                    //     OpCode::ForPrep => self.op_forprep(instr),
-                    //     OpCode::ForLoop => self.op_forloop(instr),
-                    //     OpCode::Test => self.op_test(instr),
-                    //     OpCode::TestSet => self.op_testset(instr),
-                    //     OpCode::Closure => self.op_closure(instr),
-                    //     OpCode::GetUpval => self.op_getupval(instr),
-                    //     OpCode::SetUpval => self.op_setupval(instr),
-                    //     OpCode::VarArg => self.op_vararg(instr),
-                    //     OpCode::SetList => self.op_setlist(instr),
-                    //     _ => Err(format!("Unimplemented opcode: {:?}", opcode)),
-                    // };
-
-                    // if let Err(e) = step_result {
-                    //     // Pop the frame on error
-                    //     if self.frames.len() > initial_frame_count {
-                    //         self.frames.pop();
-                    //     }
-                    //     break Err(e);
-                    // }
-
-                    // Check if yielding
-                    if self.yielding {
-                        break Ok(());
+                    // Dispatch instruction
+                    match crate::lua_vm::dispatcher::dispatch_instruction(self, instr) {
+                        Ok(action) => {
+                            use crate::lua_vm::dispatcher::DispatchAction;
+                            match action {
+                                DispatchAction::Continue => {
+                                    // Continue to next instruction
+                                },
+                                DispatchAction::Return => {
+                                    // Frame will be popped, loop will exit
+                                },
+                                DispatchAction::Yield => {
+                                    // Yield detected - propagate it up
+                                    break Err(LuaError::Yield(self.return_values.clone()));
+                                },
+                                DispatchAction::Call => {
+                                    // CALL instruction already set up the frame
+                                    // Continue execution in the new frame
+                                },
+                            }
+                        },
+                        Err(e) => {
+                            // Real error occurred
+                            break Err(e);
+                        }
                     }
                 };
 
