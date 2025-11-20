@@ -9,12 +9,36 @@ use super::DispatchAction;
 /// R[A] := {} (size = B,C)
 pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
-    let _b = Instruction::get_b(instr);
-    let _c = Instruction::get_c(instr);
+    let b = Instruction::get_b(instr);
+    let c = Instruction::get_c(instr);
     let _k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
+    let frame = vm.current_frame_mut();
     let base_ptr = frame.base_ptr;
+    
+    // NEWTABLE is always followed by an EXTRAARG instruction in Lua 5.4
+    // PC has already been incremented to point to EXTRAARG
+    let pc = frame.pc;
+    frame.pc += 1; // Skip the EXTRAARG instruction
+    
+    let func_ptr = frame
+        .get_function_ptr()
+        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+    
+    let func = unsafe { &*func_ptr };
+    let func_ref = func.borrow();
+    let chunk = &func_ref.chunk;
+    
+    let extra_arg = if pc < chunk.code.len() {
+        Instruction::get_ax(chunk.code[pc])
+    } else {
+        0
+    };
+
+    // Calculate array size hint and hash size hint
+    // These are size hints for preallocation (we currently ignore them)
+    let _array_size = if b > 0 { b - 1 } else { extra_arg };
+    let _hash_size = c;
 
     // Create new table (ignore size hints for now)
     let table = vm.create_table();

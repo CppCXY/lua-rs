@@ -1098,3 +1098,153 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     vm.register_stack[base_ptr + a] = result;
     Ok(DispatchAction::Continue)
 }
+
+/// Get metamethod name for binary operation
+fn get_binop_metamethod(op: u8) -> &'static str {
+    match op {
+        0 => "__add",
+        1 => "__sub",
+        2 => "__mul",
+        3 => "__mod",
+        4 => "__pow",
+        5 => "__div",
+        6 => "__idiv",
+        7 => "__band",
+        8 => "__bor",
+        9 => "__bxor",
+        10 => "__shl",
+        11 => "__shr",
+        12 => "__concat",
+        13 => "__eq",
+        14 => "__lt",
+        15 => "__le",
+        _ => "__unknown",
+    }
+}
+
+/// MmBin: Metamethod binary operation (register, register)
+pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let c = Instruction::get_c(instr) as usize;
+    let k = Instruction::get_k(instr);
+    
+    let base_ptr = vm.current_frame().base_ptr;
+    let rb = vm.register_stack[base_ptr + b];
+    let rc = vm.register_stack[base_ptr + c];
+    
+    let metamethod_name = get_binop_metamethod(k as u8);
+    let mm_key = vm.create_string(metamethod_name);
+    
+    // Try to get metamethod from first operand's metatable
+    let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
+        vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+    } else if let Some(mt) = vm.table_get_metatable(&rc) {
+        vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+    } else {
+        LuaValue::nil()
+    };
+    
+    if metamethod.is_nil() {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to perform arithmetic on {} and {}",
+            rb.type_name(),
+            rc.type_name()
+        )));
+    }
+    
+    // Call metamethod
+    let args = vec![rb, rc];
+    let result = vm.call_metamethod(&metamethod, &args)?
+        .unwrap_or(LuaValue::nil());
+    vm.register_stack[base_ptr + a] = result;
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// MmBinI: Metamethod binary operation (register, immediate)
+pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError> {
+    let a = Instruction::get_a(instr) as usize;
+    let sb = Instruction::get_sb(instr) as usize;
+    let c = Instruction::get_c(instr);
+    let k = Instruction::get_k(instr);
+    
+    let base_ptr = vm.current_frame().base_ptr;
+    let rb = vm.register_stack[base_ptr + sb];
+    let rc = LuaValue::integer(c as i64);
+    
+    let metamethod_name = get_binop_metamethod(k as u8);
+    let mm_key = vm.create_string(metamethod_name);
+    
+    // Try to get metamethod from operand's metatable
+    let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
+        vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+    } else {
+        LuaValue::nil()
+    };
+    
+    if metamethod.is_nil() {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to perform arithmetic on {} and integer",
+            rb.type_name()
+        )));
+    }
+    
+    // Call metamethod
+    let args = vec![rb, rc];
+    let result = vm.call_metamethod(&metamethod, &args)?
+        .unwrap_or(LuaValue::nil());
+    vm.register_stack[base_ptr + a] = result;
+    
+    Ok(DispatchAction::Continue)
+}
+
+/// MmBinK: Metamethod binary operation (register, constant)
+pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let c = Instruction::get_c(instr) as usize;
+    let k = Instruction::get_k(instr);
+    
+    let frame = vm.current_frame();
+    let func_ptr = frame
+        .get_function_ptr()
+        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+    let func = unsafe { &*func_ptr };
+    let func_ref = func.borrow();
+    let chunk = &func_ref.chunk;
+    let base_ptr = frame.base_ptr;
+    
+    let rb = vm.register_stack[base_ptr + b];
+    let rc = chunk.constants.get(c).copied().ok_or_else(|| {
+        LuaError::RuntimeError(format!("Constant index out of bounds: {}", c))
+    })?;
+    
+    let metamethod_name = get_binop_metamethod(k as u8);
+    let mm_key = vm.create_string(metamethod_name);
+    
+    // Try to get metamethod from operands' metatables
+    let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
+        vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+    } else if let Some(mt) = vm.table_get_metatable(&rc) {
+        vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+    } else {
+        LuaValue::nil()
+    };
+    
+    if metamethod.is_nil() {
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to perform arithmetic on {} and {}",
+            rb.type_name(),
+            rc.type_name()
+        )));
+    }
+    
+    // Call metamethod
+    let args = vec![rb, rc];
+    let result = vm.call_metamethod(&metamethod, &args)?
+        .unwrap_or(LuaValue::nil());
+    vm.register_stack[base_ptr + a] = result;
+    
+    Ok(DispatchAction::Continue)
+}

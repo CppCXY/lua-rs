@@ -56,6 +56,21 @@ pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     Ok(DispatchAction::Continue)
 }
 
+/// LFALSESKIP A
+/// R[A] := false; pc++
+pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    let a = Instruction::get_a(instr) as usize;
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+
+    vm.register_stack[base_ptr + a] = LuaValue::boolean(false);
+    
+    // Skip next instruction
+    vm.current_frame_mut().pc += 1;
+
+    Ok(DispatchAction::Continue)
+}
+
 /// LOADTRUE A
 /// R[A] := true
 pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
@@ -164,6 +179,15 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     vm.register_stack[base_ptr + a] = constant;
 
     Ok(DispatchAction::Continue)
+}
+
+/// ExtraArg: Extra argument for LOADKX and other instructions
+pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> Result<DispatchAction, LuaError> {
+    // EXTRAARG is consumed by the preceding instruction (like LOADKX)
+    // It should never be executed directly
+    Err(LuaError::RuntimeError(
+        "EXTRAARG should not be executed directly".to_string()
+    ))
 }
 
 /// MOVE A B

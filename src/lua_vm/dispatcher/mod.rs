@@ -38,6 +38,7 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAct
         OpCode::VarargPrep => exec_varargprep(vm, instr),
         OpCode::LoadNil => exec_loadnil(vm, instr),
         OpCode::LoadFalse => exec_loadfalse(vm, instr),
+        OpCode::LFalseSkip => exec_lfalseskip(vm, instr),
         OpCode::LoadTrue => exec_loadtrue(vm, instr),
         OpCode::LoadI => exec_loadi(vm, instr),
         OpCode::LoadF => exec_loadf(vm, instr),
@@ -73,6 +74,11 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAct
         OpCode::BXor => exec_bxor(vm, instr),
         OpCode::Shl => exec_shl(vm, instr),
         OpCode::Shr => exec_shr(vm, instr),
+        
+        // Metamethod binary operations
+        OpCode::MmBin => exec_mmbin(vm, instr),
+        OpCode::MmBinI => exec_mmbini(vm, instr),
+        OpCode::MmBinK => exec_mmbink(vm, instr),
         
         // Bitwise operations (with constant)
         OpCode::BAndK => exec_bandk(vm, instr),
@@ -140,7 +146,10 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAct
         OpCode::Return0 => exec_return0(vm, instr),
         OpCode::Return1 => exec_return1(vm, instr),
         
-        // TODO: Add more instruction handlers
+        // Extra argument
+        OpCode::ExtraArg => exec_extraarg(vm, instr),
+        
+        // All instructions implemented!
         _ => {
             Err(LuaError::RuntimeError(format!(
                 "Unimplemented opcode: {:?} (0x{:02x})",

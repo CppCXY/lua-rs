@@ -78,7 +78,10 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             }
             OpCode::GetTable => format!("GETTABLE {} {} {}", a, b, c),
             OpCode::SetTable => format!("SETTABLE {} {} {}", a, b, c),
-            OpCode::NewTable => format!("NEWTABLE {} {} {}", a, b, c),
+            OpCode::NewTable => {
+                let k_str = if k { "k" } else { "" };
+                format!("NEWTABLE {} {} {}{}", a, b, c, k_str)
+            }
             OpCode::Self_ => {
                 let k_str = if k { "k" } else { "" };
                 format!("SELF {} {} {}{}", a, b, c, k_str)
