@@ -1,7 +1,9 @@
-// Expression compilation - Using strong-typed AST nodes
+// Expression compilation - Using ExpDesc system (Lua 5.4 compatible)
 
 use super::Compiler;
 use super::helpers::*;
+use super::expdesc::*;
+use super::exp2reg::*;
 use crate::compiler::compile_block;
 use crate::lua_value::UpvalueDesc;
 use crate::lua_value::{Chunk, LuaValue};
@@ -17,11 +19,437 @@ use emmylua_parser::{
     LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
 };
 
-/// Compile any expression and return the register containing the result
+//======================================================================================
+// NEW API: ExpDesc-based expression compilation (Lua 5.4 compatible)
+//======================================================================================
+
+/// Core function: Compile expression and return ExpDesc
+/// This is the NEW primary API that replaces the old u32-based compile_expr
+pub fn compile_expr_desc(c: &mut Compiler, expr: &LuaExpr) -> Result<ExpDesc, String> {
+    match expr {
+        LuaExpr::LiteralExpr(e) => compile_literal_expr_desc(c, e),
+        LuaExpr::NameExpr(e) => compile_name_expr_desc(c, e),
+        LuaExpr::BinaryExpr(e) => compile_binary_expr_desc(c, e),
+        LuaExpr::UnaryExpr(e) => compile_unary_expr_desc(c, e),
+        LuaExpr::ParenExpr(e) => compile_paren_expr_desc(c, e),
+        LuaExpr::CallExpr(e) => compile_call_expr_desc(c, e),
+        LuaExpr::IndexExpr(e) => compile_index_expr_desc(c, e),
+        LuaExpr::TableExpr(e) => compile_table_expr_desc(c, e),
+        LuaExpr::ClosureExpr(e) => compile_closure_expr_desc(c, e),
+    }
+}
+
+//======================================================================================
+// OLD API: Backward compatibility wrappers
+//======================================================================================
+
+/// OLD API: Compile any expression and return the register containing the result
+/// This is now a WRAPPER around compile_expr_desc() + exp_to_any_reg()
 /// If dest is Some(reg), try to compile directly into that register to avoid extra Move
 pub fn compile_expr(c: &mut Compiler, expr: &LuaExpr) -> Result<u32, String> {
     compile_expr_to(c, expr, None)
 }
+
+//======================================================================================
+// NEW IMPLEMENTATIONS: ExpDesc-based expression compilation
+//======================================================================================
+
+/// Helper: Ensure ExpDesc constant is in constant table and return its index
+fn ensure_constant(c: &mut Compiler, e: &ExpDesc) -> Result<u32, String> {
+    match e.kind {
+        ExpKind::VKInt => {
+            let val = LuaValue::integer(e.ival);
+            Ok(add_constant_dedup(c, val))
+        }
+        ExpKind::VKFlt => {
+            let val = LuaValue::number(e.nval);
+            Ok(add_constant_dedup(c, val))
+        }
+        ExpKind::VK => {
+            Ok(e.info) // Already in constant table
+        }
+        _ => Err(format!("Cannot get constant index for {:?}", e.kind))
+    }
+}
+
+/// NEW: Compile literal expression (returns ExpDesc)
+fn compile_literal_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaLiteralExpr,
+) -> Result<ExpDesc, String> {
+    let literal_token = expr
+        .get_literal()
+        .ok_or("Literal expression missing token")?;
+    
+    match literal_token {
+        LuaLiteralToken::Bool(b) => {
+            if b.is_true() {
+                Ok(ExpDesc::new_true())
+            } else {
+                Ok(ExpDesc::new_false())
+            }
+        }
+        LuaLiteralToken::Nil(_) => {
+            Ok(ExpDesc::new_nil())
+        }
+        LuaLiteralToken::Number(num) => {
+            if !num.is_float() {
+                let int_val = num.get_int_value();
+                // Use VKInt for integers
+                Ok(ExpDesc::new_int(int_val))
+            } else {
+                let float_val = num.get_float_value();
+                // Use VKFlt for floats
+                Ok(ExpDesc::new_float(float_val))
+            }
+        }
+        LuaLiteralToken::String(s) => {
+            // Add string to constant table
+            let lua_string = create_string_value(c, &s.get_value());
+            let const_idx = add_constant_dedup(c, lua_string);
+            Ok(ExpDesc::new_k(const_idx))
+        }
+        LuaLiteralToken::Dots(_) => {
+            // Variable arguments: ... 
+            // Allocate register and emit VARARG
+            let reg = alloc_register(c);
+            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 2, 0));
+            Ok(ExpDesc::new_nonreloc(reg))
+        }
+        _ => {
+            Err("Unsupported literal type".to_string())
+        }
+    }
+}
+
+/// NEW: Compile name expression (returns ExpDesc)
+fn compile_name_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaNameExpr,
+) -> Result<ExpDesc, String> {
+    let name = expr.get_name_text().unwrap_or("".to_string());
+
+    // Check if it's a local variable
+    if let Some(local) = resolve_local(c, &name) {
+        // Local variables: use VLocal
+        // vidx is the index in the current function's locals array
+        return Ok(ExpDesc {
+            kind: ExpKind::VLocal,
+            info: local.register,
+            ival: 0,
+            nval: 0.0,
+            ind: IndexInfo { t: 0, idx: 0 },
+            var: VarInfo { ridx: local.register, vidx: local.register as usize },
+            t: 0,
+            f: 0,
+        });
+    }
+
+    // Try to resolve as upvalue
+    if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
+        return Ok(ExpDesc {
+            kind: ExpKind::VUpval,
+            info: upvalue_index as u32,
+            ival: 0,
+            nval: 0.0,
+            ind: IndexInfo { t: 0, idx: 0 },
+            var: VarInfo { ridx: 0, vidx: 0 },
+            t: 0,
+            f: 0,
+        });
+    }
+
+    // It's a global variable - return VIndexUp
+    // _ENV is at upvalue index 0 (standard Lua convention)
+    let lua_string = create_string_value(c, &name);
+    let key_const_idx = add_constant_dedup(c, lua_string);
+    Ok(ExpDesc {
+        kind: ExpKind::VIndexUp,
+        info: 0,
+        ival: 0,
+        nval: 0.0,
+        ind: IndexInfo { t: 0, idx: key_const_idx },
+        var: VarInfo { ridx: 0, vidx: 0 },
+        t: 0,
+        f: 0,
+    })
+}
+
+/// NEW: Compile binary expression (returns ExpDesc)
+/// This is the CRITICAL optimization - uses delayed code generation
+fn compile_binary_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaBinaryExpr,
+) -> Result<ExpDesc, String> {
+    // Get operands and operator
+    let (left, right) = expr.get_exprs().ok_or("Binary expression missing operands")?;
+    let op = expr.get_op_token().ok_or("Binary expression missing operator")?;
+    let op_kind = op.get_op();
+
+    // For now, use simplified implementation that discharges to registers
+    // TODO: Add constant folding, immediate operands, etc.
+    
+    // Compile left operand to ExpDesc
+    let mut left_desc = compile_expr_desc(c, &left)?;
+    
+    // Discharge left to any register (this will allocate if needed)
+    let left_reg = exp_to_any_reg(c, &mut left_desc);
+    
+    // Determine if we can reuse left's register
+    // We can only reuse if left_reg is a temporary register (>= nactvar)
+    // If left_reg < nactvar, it's an active local variable - DO NOT modify!
+    let nactvar = nvarstack(c) as u32;
+    let can_reuse_left = left_reg >= nactvar;
+    
+    // Compile right operand to ExpDesc
+    let mut right_desc = compile_expr_desc(c, &right)?;
+    
+    // Check if we can use RK (constant in K table) instructions
+    // For MUL/DIV/MOD/POW, if right is a constant, use *K variant
+    // Check BEFORE discharging to register
+    let can_use_rk = matches!(right_desc.kind, ExpKind::VKInt | ExpKind::VKFlt | ExpKind::VK);
+    
+    // For arithmetic operations, check if right is a small integer constant
+    // and can use immediate instruction (takes precedence over RK)
+    let use_immediate = if let ExpKind::VKInt = right_desc.kind {
+        let int_val = right_desc.ival;
+        int_val >= -256 && int_val <= 255
+    } else {
+        false
+    };
+    
+    // Discharge right to register only if not using constant optimization
+    let right_reg = if use_immediate {
+        // Use immediate instruction - no need for right_reg
+        0 // Placeholder, won't be used
+    } else if can_use_rk {
+        // Use RK instruction - no need for right_reg
+        0 // Placeholder, won't be used
+    } else {
+        exp_to_any_reg(c, &mut right_desc)
+    };
+    
+    // Handle immediate instructions for ADD/SUB
+    if use_immediate && matches!(op_kind, BinaryOperator::OpAdd | BinaryOperator::OpSub) {
+        let int_val = right_desc.ival;
+        // Use immediate instruction
+        let imm = if int_val < 0 {
+            (int_val + 512) as u32
+        } else {
+            int_val as u32
+        };
+        
+        // Allocate result register (can't reuse left if it's a local variable)
+        let result_reg = if can_reuse_left {
+            left_reg
+        } else {
+            alloc_register(c)
+        };
+        
+        match op_kind {
+            BinaryOperator::OpAdd => {
+                emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm));
+                emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 6, false));
+                return Ok(ExpDesc::new_nonreloc(result_reg));
+            }
+            BinaryOperator::OpSub => {
+                emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, (512 - imm) & 0x1ff));
+                emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 7, false));
+                return Ok(ExpDesc::new_nonreloc(result_reg));
+            }
+            _ => unreachable!()
+        }
+    }
+    
+    // Determine result register - will be set in each branch
+    let result_reg;
+    
+    match op_kind {
+        BinaryOperator::OpAdd => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Add, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpSub => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Sub, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpMul => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            if can_use_rk {
+                // Right is constant, use MULK
+                let const_idx = ensure_constant(c, &right_desc)?;
+                emit(c, Instruction::encode_abc(OpCode::MulK, result_reg, left_reg, const_idx));
+                emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 8, false));
+            } else {
+                emit(c, Instruction::encode_abc(OpCode::Mul, result_reg, left_reg, right_reg));
+            }
+        }
+        BinaryOperator::OpDiv => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            if can_use_rk {
+                let const_idx = ensure_constant(c, &right_desc)?;
+                emit(c, Instruction::encode_abc(OpCode::DivK, result_reg, left_reg, const_idx));
+                emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 11, false));  // TM_DIV = 11
+            } else {
+                emit(c, Instruction::encode_abc(OpCode::Div, result_reg, left_reg, right_reg));
+            }
+        }
+        BinaryOperator::OpIDiv => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            if can_use_rk {
+                let const_idx = ensure_constant(c, &right_desc)?;
+                emit(c, Instruction::encode_abc(OpCode::IDivK, result_reg, left_reg, const_idx));
+                emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 10, false));
+            } else {
+                emit(c, Instruction::encode_abc(OpCode::IDiv, result_reg, left_reg, right_reg));
+            }
+        }
+        BinaryOperator::OpMod => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            if can_use_rk {
+                let const_idx = ensure_constant(c, &right_desc)?;
+                emit(c, Instruction::encode_abc(OpCode::ModK, result_reg, left_reg, const_idx));
+                emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 9, false));  // TM_MOD = 9
+            } else {
+                emit(c, Instruction::encode_abc(OpCode::Mod, result_reg, left_reg, right_reg));
+            }
+        }
+        BinaryOperator::OpPow => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            if can_use_rk {
+                let const_idx = ensure_constant(c, &right_desc)?;
+                emit(c, Instruction::encode_abc(OpCode::PowK, result_reg, left_reg, const_idx));
+                emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 10, false));  // TM_POW = 10
+            } else {
+                emit(c, Instruction::encode_abc(OpCode::Pow, result_reg, left_reg, right_reg));
+            }
+        }
+        BinaryOperator::OpBAnd => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::BAnd, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpBOr => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::BOr, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpBXor => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::BXor, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpShl => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Shl, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpShr => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Shr, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpConcat => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpEq => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Eq, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpNe => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Eq, result_reg, left_reg, right_reg));
+            // NEQ is EQ with negated result - handled by control flow
+        }
+        BinaryOperator::OpLt => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Lt, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpLe => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            emit(c, Instruction::encode_abc(OpCode::Le, result_reg, left_reg, right_reg));
+        }
+        BinaryOperator::OpGt => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            // GT is LT with swapped operands
+            emit(c, Instruction::encode_abc(OpCode::Lt, result_reg, right_reg, left_reg));
+        }
+        BinaryOperator::OpGe => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            // GE is LE with swapped operands
+            emit(c, Instruction::encode_abc(OpCode::Le, result_reg, right_reg, left_reg));
+        }
+        BinaryOperator::OpAnd | BinaryOperator::OpOr => {
+            // Boolean operators need special handling with jumps
+            // For now, fallback to simple approach
+            return Err("Boolean operators not yet implemented in ExpDesc mode".to_string());
+        }
+        BinaryOperator::OpNop => {
+            return Err("Invalid binary operator OpNop".to_string());
+        }
+    }
+    
+    // Free the right register if it's temporary
+    free_exp(c, &right_desc);
+    
+    // Result is in left_reg (which we reused)
+    Ok(ExpDesc::new_nonreloc(result_reg))
+}
+
+/// NEW: Compile unary expression (stub - uses old implementation)
+fn compile_unary_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaUnaryExpr,
+) -> Result<ExpDesc, String> {
+    // For now, call old implementation
+    let reg = compile_unary_expr_to(c, expr, None)?;
+    Ok(ExpDesc::new_nonreloc(reg))
+}
+
+/// NEW: Compile parenthesized expression (stub)
+fn compile_paren_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaParenExpr,
+) -> Result<ExpDesc, String> {
+    let reg = compile_paren_expr_to(c, expr, None)?;
+    Ok(ExpDesc::new_nonreloc(reg))
+}
+
+/// NEW: Compile function call (stub)
+fn compile_call_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaCallExpr,
+) -> Result<ExpDesc, String> {
+    let reg = compile_call_expr_to(c, expr, None)?;
+    Ok(ExpDesc::new_nonreloc(reg))
+}
+
+/// NEW: Compile index expression (stub)
+fn compile_index_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaIndexExpr,
+) -> Result<ExpDesc, String> {
+    let reg = compile_index_expr_to(c, expr, None)?;
+    Ok(ExpDesc::new_nonreloc(reg))
+}
+
+/// NEW: Compile table constructor (stub)
+fn compile_table_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaTableExpr,
+) -> Result<ExpDesc, String> {
+    let reg = compile_table_expr_to(c, expr, None)?;
+    Ok(ExpDesc::new_nonreloc(reg))
+}
+
+/// NEW: Compile closure/function expression (stub)
+fn compile_closure_expr_desc(
+    c: &mut Compiler,
+    expr: &LuaClosureExpr,
+) -> Result<ExpDesc, String> {
+    let reg = compile_closure_expr_to(c, expr, None, false)?;
+    Ok(ExpDesc::new_nonreloc(reg))
+}
+
+//======================================================================================
+// OLD IMPLEMENTATIONS: Keep for backward compatibility
+//======================================================================================
 
 /// Compile expression to a specific destination register if possible
 pub fn compile_expr_to(c: &mut Compiler, expr: &LuaExpr, dest: Option<u32>) -> Result<u32, String> {

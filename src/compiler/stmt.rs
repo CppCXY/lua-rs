@@ -144,6 +144,8 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
 
 /// Compile local variable declaration
 fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), String> {
+    use super::expr::compile_expr_desc;
+    use super::exp2reg::exp_to_next_reg;
     use emmylua_parser::LuaExpr;
 
     let names: Vec<_> = stat.get_local_name_list().collect();
@@ -155,13 +157,11 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
     if !exprs.is_empty() {
         // Compile all expressions except the last one
         for expr in exprs.iter().take(exprs.len().saturating_sub(1)) {
-            // Allocate a new register for each variable
-            let dest_reg = alloc_register(c);
-            let result_reg = compile_expr_to(c, expr, Some(dest_reg))?;
-            if result_reg != dest_reg {
-                emit_move(c, dest_reg, result_reg);
-            }
-            regs.push(dest_reg);
+            // NEW: Use ExpDesc system to compile expression to freereg
+            let mut e = compile_expr_desc(c, expr)?;
+            exp_to_next_reg(c, &mut e);
+            let result_reg = e.get_register().ok_or("Expression has no register")?;
+            regs.push(result_reg);
         }
 
         // Handle the last expression specially if we need more values
@@ -229,12 +229,11 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                 }
             } else {
                 // Non-call expression
-                let dest_reg = alloc_register(c);
-                let result_reg = compile_expr_to(c, last_expr, Some(dest_reg))?;
-                if result_reg != dest_reg {
-                    emit_move(c, dest_reg, result_reg);
-                }
-                regs.push(dest_reg);
+                // NEW: Use ExpDesc system
+                let mut e = compile_expr_desc(c, last_expr)?;
+                exp_to_next_reg(c, &mut e);
+                let result_reg = e.get_register().ok_or("Expression has no register")?;
+                regs.push(result_reg);
             }
         }
     }
@@ -287,7 +286,8 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
 /// Compile assignment statement
 fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
-    use super::expr::compile_expr_to;
+    use super::expr::{compile_expr_to, compile_expr_desc};
+    use super::exp2reg::exp_to_next_reg;
     use emmylua_parser::LuaIndexKey;
 
     // Get vars and expressions from children
@@ -307,7 +307,13 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                     return Err(format!("attempt to assign to const variable '{}'", name));
                 }
                 // Local variable - compile expression directly to its register
-                compile_expr_to(c, &exprs[0], Some(local.register))?;
+                // NEW: Use ExpDesc system!
+                let mut e = compile_expr_desc(c, &exprs[0])?;
+                exp_to_next_reg(c, &mut e);
+                // If result is not in target register, emit move
+                if e.get_register() != Some(local.register) {
+                    emit_move(c, local.register, e.get_register().unwrap());
+                }
                 return Ok(());
             }
 
@@ -411,18 +417,23 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             }
         }
 
-        // OPTIMIZATION: If last expr and all are local vars, compile to target directly
+        // NEW: Use ExpDesc system to compile expressions
+        // This is THE KEY FIX that eliminates extra register allocation!
         let reg = if is_last && all_locals && val_regs.len() + 1 == vars.len() {
             // Last value can go directly to its target
             if let Some(target_reg) = target_regs[val_regs.len()] {
+                // Use old implementation for targeted compilation
                 compile_expr_to(c, expr, Some(target_reg))?;
                 target_reg
             } else {
                 compile_expr(c, expr)?
             }
         } else {
-            // Compile to next free register (let expression allocate its own register)
-            compile_expr(c, expr)?
+            // CRITICAL OPTIMIZATION: Use exp_to_next_reg instead of manual allocation!
+            // This ensures we allocate exactly one register per expression
+            let mut e = compile_expr_desc(c, expr)?;
+            exp_to_next_reg(c, &mut e);
+            e.get_register().ok_or("Expression has no register")?
         };
         val_regs.push(reg);
     }
