@@ -1,5 +1,7 @@
 // Compiler helper functions
 
+use emmylua_parser::{LuaExpr, LuaLiteralToken};
+
 use super::{Compiler, Local, ScopeChain};
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
@@ -305,7 +307,10 @@ pub fn emit_loadf(c: &mut Compiler, dest: u32, value: f64) -> Option<usize> {
         let int_val = value as i32;
         if int_val as f64 == value {
             if int_val >= -(Instruction::OFFSET_SBX) && int_val <= Instruction::OFFSET_SBX {
-                return Some(emit(c, Instruction::encode_asbx(OpCode::LoadF, dest, int_val)));
+                return Some(emit(
+                    c,
+                    Instruction::encode_asbx(OpCode::LoadF, dest, int_val),
+                ));
             }
         }
     }
@@ -340,8 +345,6 @@ pub fn emit_move(c: &mut Compiler, dest: u32, src: u32) {
 
 /// Try to compile expression as a constant, returns Some(const_idx) if successful
 pub fn try_expr_as_constant(c: &mut Compiler, expr: &emmylua_parser::LuaExpr) -> Option<u32> {
-    use emmylua_parser::{LuaExpr, LuaLiteralExpr, LuaLiteralToken};
-    
     // Only handle literal expressions that can be constants
     if let LuaExpr::LiteralExpr(lit_expr) = expr {
         if let Some(literal_token) = lit_expr.get_literal() {

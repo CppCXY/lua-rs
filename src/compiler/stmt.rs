@@ -7,9 +7,9 @@ use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
-    BinaryOperator, LuaAssignStat, LuaBinaryExpr, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr,
-    LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLiteralExpr,
-    LuaLiteralToken, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
+    BinaryOperator, LuaAssignStat, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat,
+    LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLiteralToken, LuaLocalStat,
+    LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
 };
 
 /// Check if a block contains only a single unconditional jump statement (break/return only)
@@ -19,10 +19,7 @@ fn is_single_jump_block(block: &LuaBlock) -> bool {
     if stats.len() != 1 {
         return false;
     }
-    matches!(
-        stats[0],
-        LuaStat::BreakStat(_) | LuaStat::ReturnStat(_)
-    )
+    matches!(stats[0], LuaStat::BreakStat(_) | LuaStat::ReturnStat(_))
 }
 
 /// Try to compile binary expression as immediate comparison for control flow
@@ -62,26 +59,41 @@ fn try_compile_immediate_comparison(
                         //   C=0: skip next if FALSE (normal if-then: true executes then-block)
                         //   C=1: skip next if TRUE (inverted: true skips the jump, false executes jump)
                         let c_param = if invert { 1 } else { 0 };
-                        
+
                         match op_kind {
                             BinaryOperator::OpLt => {
-                                emit(c, Instruction::encode_abc(OpCode::LtI, left_reg, imm, c_param));
+                                emit(
+                                    c,
+                                    Instruction::encode_abc(OpCode::LtI, left_reg, imm, c_param),
+                                );
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpLe => {
-                                emit(c, Instruction::encode_abc(OpCode::LeI, left_reg, imm, c_param));
+                                emit(
+                                    c,
+                                    Instruction::encode_abc(OpCode::LeI, left_reg, imm, c_param),
+                                );
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpGt => {
-                                emit(c, Instruction::encode_abc(OpCode::GtI, left_reg, imm, c_param));
+                                emit(
+                                    c,
+                                    Instruction::encode_abc(OpCode::GtI, left_reg, imm, c_param),
+                                );
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpGe => {
-                                emit(c, Instruction::encode_abc(OpCode::GeI, left_reg, imm, c_param));
+                                emit(
+                                    c,
+                                    Instruction::encode_abc(OpCode::GeI, left_reg, imm, c_param),
+                                );
                                 return Ok(Some(left_reg));
                             }
                             BinaryOperator::OpEq => {
-                                emit(c, Instruction::encode_abc(OpCode::EqI, left_reg, imm, c_param));
+                                emit(
+                                    c,
+                                    Instruction::encode_abc(OpCode::EqI, left_reg, imm, c_param),
+                                );
                                 return Ok(Some(left_reg));
                             }
                             _ => {}
@@ -219,16 +231,19 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
     if regs.len() < names.len() {
         let first_nil_reg = alloc_register(c);
         let nil_count = names.len() - regs.len();
-        
+
         // Allocate remaining registers
         for _ in 1..nil_count {
             alloc_register(c);
         }
-        
+
         // Emit single LOADNIL instruction for all nil values
         // Format: LOADNIL A B - loads nil into R(A)..R(A+B)
-        emit(c, Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0));
-        
+        emit(
+            c,
+            Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0),
+        );
+
         // Add all nil registers to regs
         for i in 0..nil_count {
             regs.push(first_nil_reg + i as u32);
@@ -269,22 +284,23 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 return Ok(());
             }
         }
-        
+
         // OPTIMIZATION: For table.field = constant, use SetField with RK
         if let LuaVarExpr::IndexExpr(index_expr) = &vars[0] {
             if let Some(LuaIndexKey::Name(name_token)) = index_expr.get_index_key() {
                 // Try to compile value as constant
                 if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
                     // Compile table expression
-                    let prefix_expr = index_expr.get_prefix_expr()
+                    let prefix_expr = index_expr
+                        .get_prefix_expr()
                         .ok_or("Index expression missing table")?;
                     let table_reg = compile_expr(c, &prefix_expr)?;
-                    
+
                     // Get field name as constant
                     let field_name = name_token.get_name_text().to_string();
                     let lua_str = create_string_value(c, &field_name);
                     let key_idx = add_constant_dedup(c, lua_str);
-                    
+
                     // Emit SetField with k=1 (value is constant)
                     if const_idx <= Instruction::MAX_C && key_idx <= Instruction::MAX_B {
                         emit(
@@ -294,7 +310,7 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                                 table_reg,
                                 key_idx,
                                 const_idx,
-                                true,  // k=1: C is constant index
+                                true, // k=1: C is constant index
                             ),
                         );
                         return Ok(());
@@ -309,9 +325,9 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
     // 1. Get target registers for all variables
     // 2. Compile expressions to temps, but last value can go to its target directly
     // 3. Emit moves in reverse order to avoid conflicts
-    
+
     let mut target_regs = Vec::new();
-    
+
     // Collect target registers for local variables
     let mut all_locals = true;
     for var in vars.iter() {
@@ -325,10 +341,10 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
         target_regs.push(None);
         all_locals = false;
     }
-    
+
     // Compile expressions
     let mut val_regs = Vec::new();
-    
+
     for (i, expr) in exprs.iter().enumerate() {
         let is_last = i == exprs.len() - 1;
 
@@ -370,19 +386,25 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
     if val_regs.len() < vars.len() {
         let nil_count = vars.len() - val_regs.len();
         let first_nil_reg = alloc_register(c);
-        
+
         // Allocate remaining registers
         for _ in 1..nil_count {
             alloc_register(c);
         }
-        
+
         // Emit LOADNIL (batch)
         if nil_count == 1 {
-            emit(c, Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, 0, 0));
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, 0, 0),
+            );
         } else {
-            emit(c, Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0));
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0),
+            );
         }
-        
+
         for i in 0..nil_count {
             val_regs.push(first_nil_reg + i as u32);
         }
@@ -405,13 +427,13 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
         }
     }
 
-    // Free temporary registers  
+    // Free temporary registers
     if all_locals && !val_regs.is_empty() {
         // Find all target registers (min and max)
         let targets: Vec<u32> = target_regs.iter().filter_map(|&r| r).collect();
         if !targets.is_empty() {
             let max_target = *targets.iter().max().unwrap();
-            
+
             // Reset next_register to just after the last target register
             // This allows temporary registers to be reused
             c.next_register = max_target + 1;
@@ -541,8 +563,10 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
         // Check if then-block contains only a single jump (break/goto/return)
         // If so, invert comparison to optimize away the jump instruction
         let then_body = stat.get_block();
-        let invert = then_body.as_ref().map_or(false, |b| is_single_jump_block(b));
-        
+        let invert = then_body
+            .as_ref()
+            .map_or(false, |b| is_single_jump_block(b));
+
         // Try immediate comparison optimization (like GTI, LEI, etc.)
         let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, invert)? {
             // Immediate comparison emitted
@@ -551,7 +575,7 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
                 // The jump directly replaces the single jump statement (break/goto/return)
                 // So we emit the jump and compile the single statement manually
                 let jump_pos = emit_jump(c, OpCode::Jmp);
-                
+
                 // Extract and handle the single jump statement
                 if let Some(body) = then_body {
                     let stats: Vec<_> = body.get_stats().collect();
@@ -565,11 +589,13 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
                                 // Compile return normally
                                 compile_return_stat(c, ret_stat)?;
                             }
-                            _ => unreachable!("is_single_jump_block should only return true for break/return")
+                            _ => unreachable!(
+                                "is_single_jump_block should only return true for break/return"
+                            ),
                         }
                     }
                 }
-                
+
                 // No elseif/else for inverted single-jump blocks
                 return Ok(());
             } else {
@@ -580,8 +606,11 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
             // Standard path: compile expression + Test
             let cond_reg = compile_expr(c, &cond)?;
             let test_c = if invert { 1 } else { 0 };
-            emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, test_c));
-            
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::Test, cond_reg, 0, test_c),
+            );
+
             if invert {
                 // Same inverted optimization logic for Test instruction
                 let jump_pos = emit_jump(c, OpCode::Jmp);
@@ -595,13 +624,15 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
                             LuaStat::ReturnStat(ret_stat) => {
                                 compile_return_stat(c, ret_stat)?;
                             }
-                            _ => unreachable!("is_single_jump_block should only return true for break/return")
+                            _ => unreachable!(
+                                "is_single_jump_block should only return true for break/return"
+                            ),
                         }
                     }
                 }
                 return Ok(());
             }
-            
+
             emit_jump(c, OpCode::Jmp)
         };
 
