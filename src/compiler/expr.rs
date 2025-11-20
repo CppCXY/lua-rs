@@ -377,16 +377,25 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpAdd => {
                             // Compile left operand first to get its register
                             let left_reg = compile_expr(c, &left)?;
-                            // Allocate result register (could be same as left_reg if dest specified)
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            // If dest is specified and different from left_reg, emit MOVE after operation
+                            // Otherwise, reuse left_reg as result
+                            let result_reg = left_reg;
                             emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm));
                             // Emit MMBINI for metamethod call (TM_ADD = 6)
                             emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 6, false));
+                            
+                            // If caller wants result in a different register, emit MOVE
+                            if let Some(dest_reg) = dest {
+                                if dest_reg != result_reg {
+                                    emit_move(c, dest_reg, result_reg);
+                                    return Ok(dest_reg);
+                                }
+                            }
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpSub => {
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
                             let neg_imm = if int_val < 0 {
                                 ((-int_val) % 512) as u32
@@ -402,7 +411,7 @@ fn compile_binary_expr_to(
                             // For MulK, need to add constant to constant table
                             let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use MulK for constant operand
                             emit(c, Instruction::create_abck(OpCode::MulK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_MUL = 8)
@@ -412,7 +421,7 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpMod => {
                             let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use ModK for constant operand
                             emit(c, Instruction::create_abck(OpCode::ModK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_MOD = 9)
@@ -422,7 +431,7 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpPow => {
                             let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use PowK for constant operand
                             emit(c, Instruction::create_abck(OpCode::PowK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_POW = 10)
@@ -432,7 +441,7 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpDiv => {
                             let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use DivK for constant operand
                             emit(c, Instruction::create_abck(OpCode::DivK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_DIV = 11)
@@ -442,7 +451,7 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpIDiv => {
                             let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use IDivK for constant operand
                             emit(c, Instruction::create_abck(OpCode::IDivK, result_reg, left_reg, const_idx, false));
                             // Emit MMBINK for metamethod call (TM_IDIV = 12)
@@ -451,7 +460,7 @@ fn compile_binary_expr_to(
                         }
                         BinaryOperator::OpShr => {
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use ShrI for immediate right shift
                             emit(c, Instruction::encode_abc(OpCode::ShrI, result_reg, left_reg, imm));
                             // Emit MMBINI for metamethod call (TM_SHR = 17)
@@ -460,7 +469,7 @@ fn compile_binary_expr_to(
                         }
                         BinaryOperator::OpShl => {
                             let left_reg = compile_expr(c, &left)?;
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                            let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use ShlI for immediate left shift
                             // Note: ShlI uses negated immediate: sC << R[B] where sC is the immediate
                             // To shift left by N, we use -N as the immediate
@@ -707,7 +716,7 @@ pub fn compile_call_expr_with_returns_and_dest(
             let func_reg = dest.unwrap_or_else(|| alloc_register(c));
             
             // Ensure func_reg+1 is allocated for self parameter
-            while c.next_register <= func_reg + 1 {
+            while c.freereg <= func_reg + 1 {
                 alloc_register(c);
             }
             
@@ -745,7 +754,6 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
     } else {
         // Regular call: compile function expression
-        // For now, don't try to optimize with dest - let compile_expr handle it naturally
         compile_expr(c, &prefix_expr)?
     };
     
@@ -837,7 +845,7 @@ pub fn compile_call_expr_with_returns_and_dest(
                 for (j, &reg) in call_arg_regs.iter().enumerate() {
                     let target = call_args_start + j as u32;
                     if reg != target {
-                        while c.next_register <= target {
+                        while c.freereg <= target {
                             alloc_register(c);
                         }
                         emit_move(c, target, reg);
@@ -885,7 +893,7 @@ pub fn compile_call_expr_with_returns_and_dest(
     // If arguments are not in consecutive registers, we need to move them
     if need_move {
         // Reserve registers for arguments
-        while c.next_register < args_start + arg_regs.len() as u32 {
+        while c.freereg < args_start + arg_regs.len() as u32 {
             alloc_register(c);
         }
         
@@ -923,7 +931,7 @@ pub fn compile_call_expr_with_returns_and_dest(
     // If num_returns == 0, CALL discards all returns, free register is func_reg
     // If num_returns > 0, return values are in func_reg .. func_reg + num_returns - 1
     // So next free register should be func_reg + num_returns
-    c.next_register = func_reg + num_returns as u32;
+    c.freereg = func_reg + num_returns as u32;
 
     Ok(func_reg)
 }
@@ -1131,7 +1139,7 @@ fn compile_table_expr_to(
                 
                 // Regular array element: load to consecutive register
                 let target_reg = values_start + array_idx;
-                while c.next_register <= target_reg {
+                while c.freereg <= target_reg {
                     alloc_register(c);
                 }
                 let value_reg = compile_expr_to(c, &value_expr, Some(target_reg))?;
@@ -1318,7 +1326,7 @@ fn compile_table_expr_to(
             Instruction::encode_abc(OpCode::SetList, reg, 0, c_param),
         );
         
-        c.next_register = reg + 1;
+        c.freereg = reg + 1;
         return Ok(reg);
     }
     
@@ -1326,7 +1334,7 @@ fn compile_table_expr_to(
         // Call as last element - for now treat as single value
         // TODO: handle multiple return values properly
         let target_reg = values_start + array_idx;
-        while c.next_register <= target_reg {
+        while c.freereg <= target_reg {
             alloc_register(c);
         }
         // Simplified: just count as one more array element
@@ -1355,7 +1363,7 @@ fn compile_table_expr_to(
 
     // Free temporary registers used during table construction
     // Reset to table_reg + 1 to match luac's register allocation behavior
-    c.next_register = reg + 1;
+    c.freereg = reg + 1;
 
     Ok(reg)
 }
@@ -1579,7 +1587,8 @@ pub fn compile_closure_expr_to(
 
     func_compiler.chunk.param_count = regular_param_count + param_offset;
     func_compiler.chunk.is_vararg = has_vararg;
-    func_compiler.next_register = (regular_param_count + param_offset) as u32;
+    func_compiler.freereg = (regular_param_count + param_offset) as u32;
+    func_compiler.nactvar = (regular_param_count + param_offset) as usize;
 
     // Emit VarargPrep instruction if function accepts varargs
     // VARARGPREP A: A = number of fixed parameters (not counting ...)
@@ -1615,7 +1624,7 @@ pub fn compile_closure_expr_to(
         }
     }
 
-    func_compiler.chunk.max_stack_size = func_compiler.next_register as usize;
+    func_compiler.chunk.max_stack_size = func_compiler.freereg as usize;
 
     // Store upvalue information from scope_chain
     let upvalues = func_compiler.scope_chain.borrow().upvalues.clone();
@@ -1642,8 +1651,8 @@ pub fn compile_closure_expr_to(
 
     // Emit Closure instruction - use dest if provided
     let dest_reg = dest.unwrap_or_else(|| {
-        let r = c.next_register;
-        c.next_register += 1;
+        let r = c.freereg;
+        c.freereg += 1;
         r
     });
 

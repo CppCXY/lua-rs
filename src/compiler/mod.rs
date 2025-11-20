@@ -46,7 +46,8 @@ impl ScopeChain {
 pub struct Compiler<'a> {
     pub(crate) chunk: Chunk,
     pub(crate) scope_depth: usize,
-    pub(crate) next_register: u32,
+    pub(crate) freereg: u32,     // First free register (replaces next_register)
+    pub(crate) nactvar: usize,   // Number of active local variables
     pub(crate) loop_stack: Vec<LoopInfo>,
     pub(crate) labels: Vec<Label>,       // Label definitions
     pub(crate) gotos: Vec<GotoInfo>,     // Pending goto statements
@@ -99,7 +100,8 @@ impl<'a> Compiler<'a> {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
-            next_register: 0,
+            freereg: 0,
+            nactvar: 0,
             loop_stack: Vec::new(),
             labels: Vec::new(),
             gotos: Vec::new(),
@@ -115,7 +117,8 @@ impl<'a> Compiler<'a> {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
-            next_register: 0,
+            freereg: 0,
+            nactvar: 0,
             loop_stack: Vec::new(),
             labels: Vec::new(),
             gotos: Vec::new(),
@@ -193,7 +196,7 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     //
     // Looking at luac output, for main chunks it uses: RETURN freereg 1 1
     // Main chunk always uses regular RETURN (not Return0), with k=1
-    let freereg = c.next_register;
+    let freereg = c.freereg;
     emit(c, Instruction::create_abck(OpCode::Return, freereg, 1, 0, true));
     Ok(())
 }

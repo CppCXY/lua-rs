@@ -86,21 +86,63 @@ pub fn try_add_constant_k(c: &mut Compiler, value: LuaValue) -> Option<u32> {
 }
 
 /// Allocate a new register
+/// Lua equivalent: luaK_reserveregs(fs, 1)
+#[track_caller]
 pub fn alloc_register(c: &mut Compiler) -> u32 {
-    let reg = c.next_register;
-    c.next_register += 1;
-    if c.next_register as usize > c.chunk.max_stack_size {
-        c.chunk.max_stack_size = c.next_register as usize;
+    let reg = c.freereg;
+    c.freereg += 1;
+    if c.freereg as usize > c.chunk.max_stack_size {
+        c.chunk.max_stack_size = c.freereg as usize;
     }
     reg
 }
 
-/// Free a register (simple implementation)
+/// Reserve N consecutive registers
+/// Lua equivalent: luaK_reserveregs(fs, n)
 #[allow(dead_code)]
-pub fn free_register(c: &mut Compiler) {
-    if c.next_register > 0 {
-        c.next_register -= 1;
+pub fn reserve_registers(c: &mut Compiler, n: u32) {
+    c.freereg += n;
+    if c.freereg as usize > c.chunk.max_stack_size {
+        c.chunk.max_stack_size = c.freereg as usize;
     }
+}
+
+/// Free a register (only if >= nactvar)
+/// Lua equivalent: freereg(fs, reg)
+#[allow(dead_code)]
+pub fn free_register(c: &mut Compiler, reg: u32) {
+    // Only free if register is beyond the active local variables
+    // This matches Lua's: if (reg >= luaY_nvarstack(fs)) fs->freereg--;
+    if reg >= nvarstack(c) && reg == c.freereg - 1 {
+        c.freereg -= 1;
+    }
+}
+
+/// Free two registers in proper order
+/// Lua equivalent: freeregs(fs, r1, r2)
+#[allow(dead_code)]
+pub fn free_registers(c: &mut Compiler, r1: u32, r2: u32) {
+    if r1 > r2 {
+        free_register(c, r1);
+        free_register(c, r2);
+    } else {
+        free_register(c, r2);
+        free_register(c, r1);
+    }
+}
+
+/// Reset freereg to number of active local variables
+/// Lua equivalent: fs->freereg = luaY_nvarstack(fs)
+pub fn reset_freereg(c: &mut Compiler) {
+    c.freereg = nvarstack(c);
+}
+
+/// Get the number of registers used by active local variables
+/// Lua equivalent: luaY_nvarstack(fs)
+pub fn nvarstack(c: &Compiler) -> u32 {
+    // Count non-const locals in current scope
+    // For simplicity, we use nactvar as the count
+    c.nactvar as u32
 }
 
 /// Add a local variable to the current scope
@@ -118,6 +160,11 @@ pub fn add_local_with_attrs(c: &mut Compiler, name: String, register: u32, is_co
         is_to_be_closed,
     };
     c.scope_chain.borrow_mut().locals.push(local);
+    
+    // Increment nactvar for non-const locals
+    if !is_const {
+        c.nactvar += 1;
+    }
     
     // Emit TBC instruction for to-be-closed variables
     if is_to_be_closed {
@@ -253,17 +300,23 @@ pub fn end_scope(c: &mut Compiler) {
     // Before closing the scope, emit CLOSE instruction for to-be-closed variables
     // Find the minimum register of all to-be-closed variables in the current scope
     let mut min_tbc_reg: Option<u32> = None;
+    let mut removed_count = 0usize;
     {
         let scope = c.scope_chain.borrow();
         for local in scope.locals.iter().rev() {
             if local.depth > c.scope_depth {
                 break; // Only check current scope
             }
-            if local.depth == c.scope_depth && local.is_to_be_closed {
-                min_tbc_reg = Some(match min_tbc_reg {
-                    None => local.register,
-                    Some(min_reg) => min_reg.min(local.register),
-                });
+            if local.depth == c.scope_depth {
+                if local.is_to_be_closed {
+                    min_tbc_reg = Some(match min_tbc_reg {
+                        None => local.register,
+                        Some(min_reg) => min_reg.min(local.register),
+                    });
+                }
+                if !local.is_const {
+                    removed_count += 1;
+                }
             }
         }
     }
@@ -274,10 +327,18 @@ pub fn end_scope(c: &mut Compiler) {
     }
     
     c.scope_depth -= 1;
+    
+    // Decrease nactvar by number of removed non-const locals
+    c.nactvar = c.nactvar.saturating_sub(removed_count);
+    
     c.scope_chain
         .borrow_mut()
         .locals
         .retain(|l| l.depth <= c.scope_depth);
+    
+    // Reset freereg after removing locals
+    reset_freereg(c);
+    
     // Clear labels from the scope being closed
     clear_scope_labels(c);
 }

@@ -113,7 +113,7 @@ fn try_compile_immediate_comparison(
 
 /// Compile any statement
 pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
-    match stat {
+    let result = match stat {
         LuaStat::LocalStat(s) => compile_local_stat(c, s),
         LuaStat::AssignStat(s) => compile_assign_stat(c, s),
         LuaStat::CallExprStat(s) => compile_call_stat(c, s),
@@ -131,7 +131,15 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
         LuaStat::FuncStat(s) => compile_function_stat(c, s),
         LuaStat::LocalFuncStat(s) => compile_local_function_stat(c, s),
         _ => Ok(()), // Other statements not yet implemented
+    };
+    
+    // After each statement, reset freereg to active local variables
+    // This matches Lua's: fs->freereg = luaY_nvarstack(fs);
+    if result.is_ok() {
+        reset_freereg(c);
     }
+    
+    result
 }
 
 /// Compile local variable declaration
@@ -204,7 +212,7 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                     let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
 
                     // Ensure next_register is past all return registers
-                    while c.next_register < base_reg + remaining_vars as u32 {
+                    while c.freereg < base_reg + remaining_vars as u32 {
                         alloc_register(c);
                     }
 
@@ -410,19 +418,11 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 compile_expr_to(c, expr, Some(target_reg))?;
                 target_reg
             } else {
-                let temp_reg = alloc_register(c);
-                compile_expr_to(c, expr, Some(temp_reg))?;
-                temp_reg
+                compile_expr(c, expr)?
             }
-        } else if !all_locals && val_regs.is_empty() {
-            // For global variable assignment, use R(0) for first expression
-            compile_expr_to(c, expr, Some(0))?;
-            0
         } else {
-            // Compile to temporary register
-            let temp_reg = alloc_register(c);
-            compile_expr_to(c, expr, Some(temp_reg))?;
-            temp_reg
+            // Compile to next free register (let expression allocate its own register)
+            compile_expr(c, expr)?
         };
         val_regs.push(reg);
     }
@@ -504,31 +504,6 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
 
             compile_var_expr(c, var, val_regs[i])?;
         }
-    }
-
-    // Free temporary registers
-    // For local variables, reset to after the last local
-    // For global variables, reset to 0 (or after locals in current scope)
-    if all_locals && !val_regs.is_empty() {
-        // Find all target registers (min and max)
-        let targets: Vec<u32> = target_regs.iter().filter_map(|&r| r).collect();
-        if !targets.is_empty() {
-            let max_target = *targets.iter().max().unwrap();
-
-            // Reset next_register to just after the last target register
-            // This allows temporary registers to be reused
-            c.next_register = max_target + 1;
-        }
-    } else if !all_locals {
-        // Global variable assignment: free all temporary registers
-        // Find the highest register used by local variables in current scope
-        let max_local_reg = c.scope_chain.borrow().locals
-            .iter()
-            .filter(|l| l.depth == c.scope_depth)
-            .map(|l| l.register)
-            .max();
-        
-        c.next_register = max_local_reg.map(|r| r + 1).unwrap_or(0);
     }
 
     Ok(())
@@ -626,7 +601,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     let num_exprs = exprs.len();
 
     // Make sure we have enough registers allocated
-    while c.next_register < base_reg + num_exprs as u32 {
+    while c.freereg < base_reg + num_exprs as u32 {
         alloc_register(c);
     }
 
@@ -1011,7 +986,7 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     end_scope(c);
 
     // Free the 4 loop control registers (base, limit, step, var)
-    c.next_register = base_reg;
+    c.freereg = base_reg;
 
     Ok(())
 }
@@ -1249,8 +1224,8 @@ fn compile_local_function_stat(
         .ok_or("local function statement missing function body")?;
 
     // Declare the local variable first (for recursion support)
-    let func_reg = c.next_register;
-    c.next_register += 1;
+    let func_reg = c.freereg;
+    c.freereg += 1;
 
     c.scope_chain.borrow_mut().locals.push(Local {
         name: func_name.clone(),
@@ -1262,14 +1237,14 @@ fn compile_local_function_stat(
     c.chunk.locals.push(func_name);
 
     // Save and restore next_register to compile closure into func_reg
-    let saved_next = c.next_register;
-    c.next_register = func_reg;
+    let saved_next = c.freereg;
+    c.freereg = func_reg;
 
     // Compile the closure
     let closure_reg = compile_closure_expr(c, &closure, false)?;
 
     // Restore next_register (should be func_reg + 1)
-    c.next_register = saved_next.max(closure_reg + 1);
+    c.freereg = saved_next.max(closure_reg + 1);
 
     // Move closure to the local variable register if different
     if closure_reg != func_reg {
