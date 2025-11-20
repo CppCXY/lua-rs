@@ -42,14 +42,15 @@ fn try_compile_immediate_comparison(
             if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
                 if !num.is_float() {
                     let int_val = num.get_int_value();
-                    // Use signed 9-bit immediate: range [-256, 255]
-                    if int_val >= -256 && int_val <= 255 {
+                    // Lua 5.4 immediate comparisons use signed sB field (8 bits): range [-128, 127]
+                    // But encoded as unsigned in instruction, so range is [0, 255] with wraparound
+                    if int_val >= -128 && int_val <= 127 {
                         // Compile left operand
                         let left_reg = compile_expr(c, &left)?;
 
-                        // Encode immediate value (9 bits)
+                        // Encode immediate value as unsigned 8-bit (with two's complement for negatives)
                         let imm = if int_val < 0 {
-                            (int_val + 512) as u32
+                            ((int_val + 256) & 0xFF) as u32
                         } else {
                             int_val as u32
                         };
@@ -283,6 +284,23 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 compile_expr_to(c, &exprs[0], Some(local.register))?;
                 return Ok(());
             }
+            
+            // OPTIMIZATION: global = constant -> SETTABUP with k=1
+            if resolve_upvalue_from_chain(c, &name).is_none() {
+                // It's a global, check if value is constant
+                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
+                    let lua_str = create_string_value(c, &name);
+                    let key_idx = add_constant_dedup(c, lua_str);
+                    
+                    if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
+                        emit(
+                            c,
+                            Instruction::create_abck(OpCode::SetTabUp, 0, key_idx, const_idx, true),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         // OPTIMIZATION: For table.field = constant, use SetField with RK
@@ -421,8 +439,34 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
             }
         }
     } else {
-        // Not all locals: compile normally
+        // Not all locals: compile normally with RK optimization for globals
         for (i, var) in vars.iter().enumerate() {
+            // Special case: global variable assignment with constant value
+            if let LuaVarExpr::NameExpr(name_expr) = var {
+                let name = name_expr.get_name_text().unwrap_or("".to_string());
+                
+                // Check if it's NOT a local (i.e., it's a global)
+                if resolve_local(c, &name).is_none() && resolve_upvalue_from_chain(c, &name).is_none() {
+                    // It's a global - try to use RK optimization
+                    // Check if value_reg contains a recently loaded constant
+                    if i < exprs.len() {
+                        if let Some(const_idx) = try_expr_as_constant(c, &exprs[i]) {
+                            // Use SETTABUP with k=1 (both key and value are constants)
+                            let lua_str = create_string_value(c, &name);
+                            let key_idx = add_constant_dedup(c, lua_str);
+                            
+                            if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
+                                emit(
+                                    c,
+                                    Instruction::create_abck(OpCode::SetTabUp, 0, key_idx, const_idx, true),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            
             compile_var_expr(c, var, val_regs[i])?;
         }
     }
@@ -733,21 +777,33 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
     // Mark loop start
     let loop_start = c.chunk.code.len();
 
-    // OPTIMIZATION: Try to compile condition as immediate comparison (skip Test instruction)
     let cond = stat
         .get_condition_expr()
         .ok_or("while statement missing condition")?;
 
-    // Check if condition is immediate comparison pattern: var < constant
-    let end_jump = if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond, false)? {
-        // Success! Generated LtI/LeI/GtI etc that skips next instruction if FALSE
-        // Now emit jump to exit when comparison fails
-        emit_jump(c, OpCode::Jmp)
+    // OPTIMIZATION: while true -> infinite loop (no condition check)
+    let is_infinite_loop = if let LuaExpr::LiteralExpr(lit) = &cond {
+        if let Some(LuaLiteralToken::Bool(b)) = lit.get_literal() {
+            b.is_true()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let end_jump = if is_infinite_loop {
+        // Infinite loop: no condition check, no exit jump
+        // Just compile body and jump back
+        None
+    } else if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond, false)? {
+        // OPTIMIZATION: immediate comparison (e.g., i < 10)
+        Some(emit_jump(c, OpCode::Jmp))
     } else {
         // Standard path: compile expression + Test
         let cond_reg = compile_expr(c, &cond)?;
         emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-        emit_jump(c, OpCode::Jmp)
+        Some(emit_jump(c, OpCode::Jmp))
     };
 
     // Compile body
@@ -759,8 +815,10 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
     let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
     emit(c, Instruction::create_sj(OpCode::Jmp, -jump_offset));
 
-    // Patch end jump
-    patch_jump(c, end_jump);
+    // Patch end jump (if exists)
+    if let Some(jump_pos) = end_jump {
+        patch_jump(c, jump_pos);
+    }
 
     // End loop (patches all break statements)
     end_loop(c);

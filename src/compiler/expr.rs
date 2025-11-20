@@ -198,6 +198,38 @@ fn compile_binary_expr_to(
     let op = expr.get_op_token().ok_or("error")?;
     let op_kind = op.get_op();
 
+    // CONSTANT FOLDING for boolean literals (and, or)
+    if matches!(op_kind, BinaryOperator::OpAnd | BinaryOperator::OpOr) {
+        // Check if left operand is a boolean literal
+        if let LuaExpr::LiteralExpr(left_lit) = &left {
+            if let Some(LuaLiteralToken::Bool(b)) = left_lit.get_literal() {
+                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                
+                if op_kind == BinaryOperator::OpAnd {
+                    // true and X -> X, false and X -> false
+                    if b.is_true() {
+                        // Result is right operand
+                        return compile_expr_to(c, &right, Some(result_reg));
+                    } else {
+                        // Result is false
+                        emit(c, Instruction::encode_abc(OpCode::LoadFalse, result_reg, 0, 0));
+                        return Ok(result_reg);
+                    }
+                } else {
+                    // true or X -> true, false or X -> X
+                    if b.is_true() {
+                        // Result is true
+                        emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
+                        return Ok(result_reg);
+                    } else {
+                        // Result is right operand
+                        return compile_expr_to(c, &right, Some(result_reg));
+                    }
+                }
+            }
+        }
+    }
+
     // CONSTANT FOLDING: Check if both operands are numeric constants (including nested expressions)
     // This matches luac behavior: 1+1 -> 2, 1+2*3 -> 7, etc.
     // Use try_eval_const_int to recursively evaluate constant expressions
@@ -491,14 +523,66 @@ fn compile_unary_expr_to(
     expr: &LuaUnaryExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    // Get operand from children
-    let operand = expr.get_expr().ok_or("Unary expression missing operand")?;
-    let operand_reg = compile_expr(c, &operand)?;
     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
 
     // Get operator from text
     let op_token = expr.get_op_token().ok_or("error")?;
     let op_kind = op_token.get_op();
+
+    let operand = expr.get_expr().ok_or("Unary expression missing operand")?;
+
+    // Constant folding optimizations
+    if let LuaExpr::LiteralExpr(lit_expr) = &operand {
+        match lit_expr.get_literal() {
+            Some(LuaLiteralToken::Number(num_token)) => {
+                if op_kind == UnaryOperator::OpUnm {
+                    // Negative number literal: emit LOADI/LOADK with negated value
+                    if !num_token.is_float() {
+                        let int_val = num_token.get_int_value();
+                        let neg_val = -int_val;
+                        
+                        // Use LOADI for small integers
+                        if let Some(_) = emit_loadi(c, result_reg, neg_val) {
+                            return Ok(result_reg);
+                        }
+                    }
+                    
+                    // For floats or large integers, use constant
+                    let num_val = if num_token.is_float() {
+                        LuaValue::number(-num_token.get_float_value())
+                    } else {
+                        LuaValue::integer(-num_token.get_int_value())
+                    };
+                    let const_idx = add_constant(c, num_val);
+                    emit_loadk(c, result_reg, const_idx);
+                    return Ok(result_reg);
+                }
+            }
+            Some(LuaLiteralToken::Bool(b)) => {
+                if op_kind == UnaryOperator::OpNot {
+                    // not true -> LOADFALSE, not false -> LOADTRUE
+                    if b.is_true() {
+                        emit(c, Instruction::encode_abc(OpCode::LoadFalse, result_reg, 0, 0));
+                    } else {
+                        emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
+                    }
+                    return Ok(result_reg);
+                }
+            }
+            Some(LuaLiteralToken::Nil(_)) => {
+                if op_kind == UnaryOperator::OpNot {
+                    // not nil -> LOADTRUE
+                    emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
+                    return Ok(result_reg);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Regular unary operation
+    let operand_reg = compile_expr(c, &operand)?;
+
     match op_kind {
         UnaryOperator::OpBNot => {
             emit(
@@ -1000,65 +1084,19 @@ fn compile_table_expr_to(
         return Ok(reg);
     }
 
-    // Array part: consecutive value-only fields from the start
-    let array_end = array_count;
-
-    // Process array part with SETLIST optimization
-    if array_end > 0 {
-        const BATCH_SIZE: usize = 50; // Lua uses LFIELDS_PER_FLUSH = 50
-        let mut batch_start = 0;
-        
-        while batch_start < array_end {
-            let batch_end = (batch_start + BATCH_SIZE).min(array_end);
-            let batch_count = batch_end - batch_start;
-            
-            // Compile all values in this batch to consecutive registers
-            let values_start = reg + 1;
-            
-            for (i, field) in fields[batch_start..batch_end].iter().enumerate() {
-                let target_reg = values_start + i as u32;
-                
-                // Ensure we have enough registers allocated
-                while c.next_register <= target_reg {
-                    alloc_register(c);
-                }
-                
-                if let Some(value_expr) = field.get_value_expr() {
-                    let value_reg = compile_expr_to(c, &value_expr, Some(target_reg))?;
-                    if value_reg != target_reg {
-                        emit_move(c, target_reg, value_reg);
-                    }
-                } else {
-                    emit_load_nil(c, target_reg);
-                }
-            }
-            
-            // Emit SETLIST to set table[batch_start+1..batch_end] = R(reg+1)..R(reg+batch_count)
-            // SETLIST A B C: for i=1,B do table[C*50+i] = R(A+i) end
-            // A = table register
-            // B = number of elements (0 means "up to top of stack")
-            // C = batch number (0 for first 50, 1 for next 50, etc.)
-            let c_param = (batch_start / BATCH_SIZE) as u32;
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::SetList, reg, batch_count as u32, c_param),
-            );
-            
-            // Free temporary registers used for array values
-            // After SETLIST, the values have been copied into the table,
-            // so we can reuse these registers. Reset to reg+1 to match luac behavior.
-            c.next_register = reg + 1;
-            
-            batch_start = batch_end;
-        }
-    }
-
-    // Process remaining fields (hash part or special cases)
-    for (field_idx, field) in fields.iter().enumerate().skip(array_end) {
+    // Track array indices that need to be processed
+    let mut array_idx = 0;
+    let values_start = reg + 1;
+    let mut has_vararg_at_end = false;
+    let mut has_call_at_end = false;
+    
+    // Process all fields in source order
+    // Array elements are loaded to registers, hash fields are set immediately
+    for (field_idx, field) in fields.iter().enumerate() {
         let is_last_field = field_idx == fields.len() - 1;
 
         if field.is_value_field() {
-            // This must be ... or call as last element
+            // Array element or special case (vararg/call at end)
             if let Some(value_expr) = field.get_value_expr() {
                 let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
                     if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
@@ -1066,38 +1104,29 @@ fn compile_table_expr_to(
 
                 if is_last_field && is_dots {
                     // VarArg expansion: {...} or {a, b, ...}
-                    let vararg_start = reg + 1;
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::Vararg, vararg_start, 0, 0),
-                    );
-                    
-                    // SetList with B=0 (all remaining values), C=array_end/50
-                    let c_param = (array_end / 50) as u32;
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::SetList, reg, 0, c_param),
-                    );
+                    // Will be handled after all hash fields
+                    has_vararg_at_end = true;
+                    continue;
                 } else if is_last_field && is_call {
                     // Call as last element: returns multiple values
-                    if let LuaExpr::CallExpr(_call_expr) = &value_expr {
-                        // Compile call to return all values starting at reg+1
-                        // For now, use simplified approach
-                        let value_reg = compile_expr(c, &value_expr)?;
-                        
-                        // Single value case - fall back to SetTable
-                        let array_index = (array_end + 1) as i64;
-                        let key_const = add_constant(c, LuaValue::integer(array_index));
-                        let key_reg = alloc_register(c);
-                        emit_load_constant(c, key_reg, key_const);
-                        emit(
-                            c,
-                            Instruction::encode_abc(OpCode::SetTable, reg, key_reg, value_reg),
-                        );
-                    }
+                    // Will be handled after all hash fields
+                    has_call_at_end = true;
+                    continue;
                 }
+                
+                // Regular array element: load to consecutive register
+                let target_reg = values_start + array_idx;
+                while c.next_register <= target_reg {
+                    alloc_register(c);
+                }
+                let value_reg = compile_expr_to(c, &value_expr, Some(target_reg))?;
+                if value_reg != target_reg {
+                    emit_move(c, target_reg, value_reg);
+                }
+                array_idx += 1;
             }
         } else {
+            // Hash field: process immediately with SETFIELD/SETI/SETTABLE
             let Some(field_key) = field.get_field_key() else {
                 continue;
             };
@@ -1256,6 +1285,56 @@ fn compile_table_expr_to(
                 c,
                 Instruction::create_abck(OpCode::SetTable, reg, key_reg, value_operand, use_constant),
             );
+        }
+    }
+
+    // Handle vararg or call at end (after all hash fields)
+    if has_vararg_at_end {
+        // VarArg expansion: {...} or {a, b, ...}
+        emit(
+            c,
+            Instruction::encode_abc(OpCode::Vararg, values_start + array_idx, 0, 0),
+        );
+        
+        // SetList with B=0 (all remaining values)
+        let c_param = (array_idx as usize / 50) as u32;
+        emit(
+            c,
+            Instruction::encode_abc(OpCode::SetList, reg, 0, c_param),
+        );
+        
+        c.next_register = reg + 1;
+        return Ok(reg);
+    }
+    
+    if has_call_at_end {
+        // Call as last element - for now treat as single value
+        // TODO: handle multiple return values properly
+        let target_reg = values_start + array_idx;
+        while c.next_register <= target_reg {
+            alloc_register(c);
+        }
+        // Simplified: just count as one more array element
+        array_idx += 1;
+    }
+
+    // Emit SETLIST for all array elements at the end
+    // Process in batches of 50 (LFIELDS_PER_FLUSH)
+    if array_idx > 0 {
+        const BATCH_SIZE: u32 = 50;
+        let mut batch_start = 0;
+        
+        while batch_start < array_idx {
+            let batch_end = (batch_start + BATCH_SIZE).min(array_idx);
+            let batch_count = batch_end - batch_start;
+            let c_param = (batch_start / BATCH_SIZE) as u32;
+            
+            emit(
+                c,
+                Instruction::encode_abc(OpCode::SetList, reg, batch_count, c_param),
+            );
+            
+            batch_start = batch_end;
         }
     }
 

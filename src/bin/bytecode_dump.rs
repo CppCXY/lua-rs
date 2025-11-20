@@ -61,7 +61,10 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::GetUpval => format!("GETUPVAL {} {}", a, b),
             OpCode::SetUpval => format!("SETUPVAL {} {}", a, b),
             OpCode::GetTabUp => format!("GETTABUP {} {} {}", a, b, c),
-            OpCode::SetTabUp => format!("SETTABUP {} {} {}", a, b, c),
+            OpCode::SetTabUp => {
+                let k_str = if k { " k" } else { "" };
+                format!("SETTABUP {} {} {}{}", a, b, c, k_str)
+            }
             OpCode::GetField => {
                 let k_str = if k { " k" } else { "" };
                 format!("GETFIELD {} {} {}{}", a, b, c, k_str)
@@ -100,7 +103,27 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Eq => format!("EQ {} {} {}", a, b, k as u32),
             OpCode::Lt => format!("LT {} {} {}", a, b, k as u32),
             OpCode::Le => format!("LE {} {} {}", a, b, k as u32),
-            OpCode::EqI => format!("EQI {} {} {}", a, sbx, k as u32),
+            OpCode::EqI => {
+                // B field is signed 8-bit integer
+                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
+                format!("EQI {} {} {}", a, imm, k as u32)
+            }
+            OpCode::LtI => {
+                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
+                format!("LTI {} {} {}", a, imm, k as u32)
+            }
+            OpCode::LeI => {
+                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
+                format!("LEI {} {} {}", a, imm, k as u32)
+            }
+            OpCode::GtI => {
+                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
+                format!("GTI {} {} {}", a, imm, k as u32)
+            }
+            OpCode::GeI => {
+                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
+                format!("GEI {} {} {}", a, imm, k as u32)
+            }
             OpCode::ForLoop => format!("FORLOOP {} {}", a, bx),
             OpCode::ForPrep => format!("FORPREP {} {}", a, bx),
             OpCode::TForPrep => format!("TFORPREP {} {}", a, bx),
