@@ -3,8 +3,10 @@
 mod lua_call_frame;
 mod lua_error;
 mod opcode;
+mod dispatcher;
 
 use crate::gc::GC;
+use dispatcher::{dispatch_instruction, DispatchAction};
 use crate::lua_value::{
     Chunk, CoroutineStatus, LuaFunction, LuaString, LuaTable, LuaThread, LuaUpvalue, LuaValue,
     LuaValueKind,
@@ -20,7 +22,7 @@ pub type LuaResult<T> = Result<T, LuaError>;
 
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
-    globals: LuaValue,
+    pub(crate) globals: LuaValue,
 
     // Call stack
     pub frames: Vec<LuaCallFrame>,
@@ -29,22 +31,22 @@ pub struct LuaVM {
     pub register_stack: Vec<LuaValue>,
 
     // Garbage collector
-    gc: GC,
+    pub(crate) gc: GC,
 
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
 
     // Open upvalues list (for closing when frames exit)
-    open_upvalues: Vec<Rc<LuaUpvalue>>,
+    pub(crate) open_upvalues: Vec<Rc<LuaUpvalue>>,
 
     // Next frame ID (for tracking frames)
-    next_frame_id: usize,
+    pub(crate) next_frame_id: usize,
 
     // Error handling state
     pub error_handler: Option<LuaValue>, // Current error handler for xpcall
 
     // FFI state
-    ffi_state: crate::ffi::FFIState,
+    pub(crate) ffi_state: crate::ffi::FFIState,
 
     // Current running thread (for coroutine.running())
     pub current_thread: Option<Rc<RefCell<LuaThread>>>,
@@ -56,10 +58,10 @@ pub struct LuaVM {
     pub main_thread_value: Option<LuaValue>,
 
     // Yield flag: set when a coroutine yields
-    yielding: bool,
+    pub(crate) yielding: bool,
 
     // String metatable (shared by all strings) - stored as TableId in LuaValue
-    string_metatable: Option<LuaValue>,
+    pub(crate) string_metatable: Option<LuaValue>,
 
     // Object pool for unified object management (new architecture)
     pub(crate) object_pool: crate::object_pool::ObjectPool,
@@ -96,11 +98,13 @@ impl LuaVM {
 
     // Register access helpers for unified stack architecture
     #[inline(always)]
+    #[allow(dead_code)]
     fn get_register(&self, base_ptr: usize, reg: usize) -> LuaValue {
         self.register_stack[base_ptr + reg]
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn set_register(&mut self, base_ptr: usize, reg: usize, value: LuaValue) {
         self.register_stack[base_ptr + reg] = value;
     }
@@ -116,6 +120,7 @@ impl LuaVM {
         let _ = lib_registry::create_standard_registry().load_all(self);
     }
 
+    /// Execute a chunk directly (convenience method)
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<LuaValue> {
         // Register all constants in the chunk with GC
         self.register_chunk_constants(&chunk);
@@ -152,6 +157,54 @@ impl LuaVM {
         Ok(result)
     }
 
+    /// Call a function value (for testing and runtime calls)
+    pub fn call_function(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<LuaValue> {
+        // Clear previous state
+        self.register_stack.clear();
+        self.frames.clear();
+        self.open_upvalues.clear();
+
+        // Get function pointer
+        let func_ptr = func
+            .as_function_ptr()
+            .ok_or_else(|| LuaError::RuntimeError("Not a function".to_string()))?;
+
+        let func_obj = unsafe { &*func_ptr };
+        let func_ref = func_obj.borrow();
+
+        // Register chunk constants
+        self.register_chunk_constants(&func_ref.chunk);
+
+        // Setup stack and frame
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+
+        let base_ptr = 0; // Start from beginning of cleared stack
+        let max_stack = func_ref.chunk.max_stack_size;
+        let required_size = max_stack; // Need at least max_stack registers
+        
+        // Initialize stack with nil values
+        self.register_stack.resize(required_size, LuaValue::nil());
+
+        // Copy arguments to registers
+        for (i, arg) in args.iter().enumerate() {
+            if i < max_stack {
+                self.register_stack[base_ptr + i] = *arg;
+            }
+        }
+
+        drop(func_ref);
+
+        let frame = LuaCallFrame::new_lua_function(frame_id, func, base_ptr, max_stack, 0, 0);
+
+        self.frames.push(frame);
+
+        // Execute
+        let result = self.run()?;
+
+        Ok(result)
+    }
+
     pub fn execute_string(&mut self, source: &str) -> LuaResult<LuaValue> {
         let chunk = self.compile(source)?;
         self.execute(Rc::new(chunk))
@@ -169,18 +222,91 @@ impl LuaVM {
         Ok(chunk)
     }
 
+    /// Main execution loop - interprets bytecode instructions
+    /// Returns the final return value from the chunk
     fn run(&mut self) -> LuaResult<LuaValue> {
-        todo!()
+        loop {
+            // Check if we have any frames to execute
+            if self.frames.is_empty() {
+                // Execution finished
+                return Ok(self.return_values.first().copied().unwrap_or(LuaValue::nil()));
+            }
+
+            // Get current frame and chunk
+            let frame = self.current_frame();
+            let func_ptr = frame
+                .get_function_ptr()
+                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+
+            // Safety: func_ptr is valid as long as the function exists in object_pool
+            let func = unsafe { &*func_ptr };
+            let func_ref = func.borrow();
+            let chunk = &func_ref.chunk;
+
+            // Check PC bounds
+            let pc = frame.pc;
+            if pc >= chunk.code.len() {
+                return Err(LuaError::RuntimeError(format!(
+                    "PC out of bounds: {} >= {}",
+                    pc,
+                    chunk.code.len()
+                )));
+            }
+
+            // Fetch instruction
+            let instr = chunk.code[pc];
+
+            // Drop borrows before executing instruction
+            drop(func_ref);
+
+            // Increment PC (some instructions will modify it)
+            self.current_frame_mut().pc += 1;
+
+            // Dispatch instruction using the dispatcher module
+            let action = dispatch_instruction(self, instr)?;
+
+            // Handle dispatch action
+            match action {
+                DispatchAction::Continue => {
+                    // Continue to next instruction
+                }
+                DispatchAction::Return => {
+                    // Function returned, check if execution is done
+                    if self.frames.is_empty() {
+                        return Ok(self
+                            .return_values
+                            .first()
+                            .copied()
+                            .unwrap_or(LuaValue::nil()));
+                    }
+                }
+                DispatchAction::Yield => {
+                    // Coroutine yielded, return control to caller
+                    // The caller (coroutine.resume) will handle the yield values
+                    return Ok(LuaValue::nil()); // Placeholder, actual yield handling is complex
+                }
+                DispatchAction::Call => {
+                    // TODO: Handle function call (CALL instruction will set this)
+                    // For now, just continue
+                }
+            }
+
+            // Check for yield flag (legacy support)
+            if self.yielding {
+                self.yielding = false;
+                return Ok(LuaValue::nil());
+            }
+        }
     }
 
     // Helper methods
     #[inline(always)]
-    fn current_frame(&self) -> &LuaCallFrame {
+    pub(crate) fn current_frame(&self) -> &LuaCallFrame {
         unsafe { self.frames.last().unwrap_unchecked() }
     }
 
     #[inline(always)]
-    fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
+    pub(crate) fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
         unsafe { self.frames.last_mut().unwrap_unchecked() }
     }
 
@@ -269,6 +395,8 @@ impl LuaVM {
             resume_values: Vec::new(),
             yield_call_reg: None,
             yield_call_nret: None,
+            yield_pc: None,
+            yield_frame_id: None,
         };
 
         let thread_rc = Rc::new(RefCell::new(thread));
@@ -958,7 +1086,7 @@ impl LuaVM {
                         break Ok(());
                     }
 
-                    let instr = chunk.code[pc];
+                    let _instr = chunk.code[pc];
                     self.frames[frame_idx].pc += 1;
 
                     // Decode and execute
@@ -1017,6 +1145,7 @@ impl LuaVM {
 
     /// Close all open upvalues for a specific frame
     /// Called when a frame exits to move values from stack to heap
+    #[allow(dead_code)]
     fn close_upvalues(&mut self, frame_id: usize) {
         // Find all open upvalues pointing to this frame
         let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self
@@ -1190,6 +1319,7 @@ impl LuaVM {
 
     /// Helper: Get chunk from current frame's function (for hot path)
     #[inline]
+    #[allow(dead_code)]
     fn get_current_chunk(&self) -> Result<std::rc::Rc<Chunk>, String> {
         let frame = self.current_frame();
         if let Some(func_ref) = self.get_function(&frame.function_value) {
@@ -1201,6 +1331,7 @@ impl LuaVM {
 
     /// Helper: Get upvalue from current frame's function
     #[inline]
+    #[allow(dead_code)]
     fn get_current_upvalue(&self, index: usize) -> Result<std::rc::Rc<LuaUpvalue>, String> {
         let frame = self.current_frame();
         if let Some(func_ref) = self.get_function(&frame.function_value) {
@@ -1351,6 +1482,7 @@ impl LuaVM {
     }
 
     /// Call a binary metamethod (like __add, __sub, etc.)
+    #[allow(dead_code)]
     fn call_binop_metamethod(
         &mut self,
         left: &LuaValue,
@@ -1371,6 +1503,7 @@ impl LuaVM {
     }
 
     /// Call a unary metamethod (like __unm, __bnot, etc.)
+    #[allow(dead_code)]
     fn call_unop_metamethod(
         &mut self,
         value: &LuaValue,
@@ -1385,6 +1518,7 @@ impl LuaVM {
     }
 
     /// Generic method to call a metamethod with given arguments
+    #[allow(dead_code)]
     fn call_metamethod_with_args(
         &mut self,
         metamethod: LuaValue,
@@ -1751,7 +1885,7 @@ impl LuaVM {
                         break Ok(());
                     }
 
-                    let instr = chunk.code[pc];
+                    let _instr = chunk.code[pc];
                     self.frames[frame_idx].pc += 1;
 
                     // Decode and execute
