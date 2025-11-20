@@ -573,7 +573,7 @@ fn compile_call_expr_to(
 }
 
 /// Compile a call expression with specified number of expected return values and optional dest
-fn compile_call_expr_with_returns_and_dest(
+pub fn compile_call_expr_with_returns_and_dest(
     c: &mut Compiler,
     expr: &LuaCallExpr,
     num_returns: usize,
@@ -1482,6 +1482,18 @@ pub fn compile_closure_expr_to(
     func_compiler.chunk.param_count = regular_param_count + param_offset;
     func_compiler.chunk.is_vararg = has_vararg;
     func_compiler.next_register = (regular_param_count + param_offset) as u32;
+
+    // Emit VarargPrep instruction if function accepts varargs
+    // VARARGPREP A: A = number of fixed parameters (not counting ...)
+    if has_vararg {
+        let varargprep_instr = Instruction::encode_abc(
+            OpCode::VarargPrep,
+            (regular_param_count + param_offset) as u32,
+            0,
+            0,
+        );
+        func_compiler.chunk.code.push(varargprep_instr);
+    }
 
     // Compile function body (skip if empty)
     if has_body {

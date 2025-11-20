@@ -1,6 +1,6 @@
 // Statement compilation
 
-use super::expr::{compile_call_expr, compile_expr, compile_expr_to, compile_var_expr};
+use super::expr::{compile_call_expr, compile_expr, compile_expr_to, compile_var_expr, compile_call_expr_with_returns_and_dest};
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
 use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr};
@@ -517,11 +517,21 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         }
     }
 
-    // Allocate consecutive registers for all return values
-    // For main chunk, return values should start at R(0)
-    // For functions, they can start at the first available register
-    // But to match luac behavior, we should try to use R(0) when possible
-    let base_reg = 0; // Start from R(0) to match luac
+    // Check if last expression is varargs (...) or function call - these can return multiple values
+    let last_is_multret = if let Some(last_expr) = exprs.last() {
+        matches!(last_expr, LuaExpr::CallExpr(_))
+            || matches!(last_expr, LuaExpr::LiteralExpr(lit) if matches!(
+                lit.get_literal(),
+                Some(emmylua_parser::LuaLiteralToken::Dots(_))
+            ))
+    } else {
+        false
+    };
+
+    // Base register for return values
+    // Lua 5.4: returns should not overlap with parameters
+    // Use first available clean register beyond parameters
+    let base_reg = c.chunk.param_count as u32;
     let num_exprs = exprs.len();
 
     // Make sure we have enough registers allocated
@@ -529,8 +539,8 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         alloc_register(c);
     }
 
-    // Compile all expressions into consecutive registers starting from base_reg
-    for (i, expr) in exprs.iter().enumerate() {
+    // Compile all expressions except the last one
+    for (i, expr) in exprs.iter().take(if last_is_multret && num_exprs > 0 { num_exprs - 1 } else { num_exprs }).enumerate() {
         let target_reg = base_reg + i as u32;
         let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
         if src_reg != target_reg {
@@ -538,7 +548,29 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         }
     }
 
-    // Emit return: B = num_values + 1
+    // Handle last expression specially if it's varargs or call
+    if last_is_multret && num_exprs > 0 {
+        let last_expr = exprs.last().unwrap();
+        let last_target_reg = base_reg + (num_exprs - 1) as u32;
+        
+        if let LuaExpr::LiteralExpr(lit) = last_expr {
+            if matches!(lit.get_literal(), Some(emmylua_parser::LuaLiteralToken::Dots(_))) {
+                // Varargs: emit VARARG with B=0 (all out)
+                emit(c, Instruction::encode_abc(OpCode::Vararg, last_target_reg, 0, 0));
+                // Return with B=0 (all out)
+                emit(c, Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true));
+                return Ok(());
+            }
+        } else if let LuaExpr::CallExpr(call_expr) = last_expr {
+            // Call expression: compile with "all out" mode
+            compile_call_expr_with_returns_and_dest(c, call_expr, 0, Some(last_target_reg))?;
+            // Return with B=0 (all out)
+            emit(c, Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true));
+            return Ok(());
+        }
+    }
+
+    // Normal return with fixed number of values
     // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1, k = 1
     emit(
         c,
@@ -562,8 +594,9 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
     if let Some(cond) = stat.get_condition_expr() {
         // Check if then-block contains only a single jump (break/goto/return)
         // If so, invert comparison to optimize away the jump instruction
+        // BUT: Only if there are no else/elseif clauses (otherwise we need to compile them)
         let then_body = stat.get_block();
-        let invert = then_body
+        let invert = !has_branches && then_body
             .as_ref()
             .map_or(false, |b| is_single_jump_block(b));
 
