@@ -192,7 +192,7 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     // - k = depends on whether we have upvalues to close
     //
     // Looking at luac output, for main chunks it uses: RETURN freereg 1 1
-    // where the last 1 is actually the k bit set
+    // Main chunk always uses regular RETURN (not Return0), with k=1
     let freereg = c.next_register;
     emit(c, Instruction::create_abck(OpCode::Return, freereg, 1, 0, true));
     Ok(())

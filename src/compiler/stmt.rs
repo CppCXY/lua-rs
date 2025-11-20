@@ -550,8 +550,8 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     let exprs = stat.get_expr_list().collect::<Vec<_>>();
 
     if exprs.is_empty() {
-        // return (no values)
-        emit(c, Instruction::encode_abc(OpCode::Return, 0, 1, 0));
+        // return (no values) - use Return0 optimization
+        emit(c, Instruction::encode_abc(OpCode::Return0, 0, 0, 0));
         return Ok(());
     }
 
@@ -682,11 +682,17 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     }
 
     // Normal return with fixed number of values
-    // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1, k = 1
-    emit(
-        c,
-        Instruction::create_abck(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0, true),
-    );
+    // Use optimized Return0/Return1 when possible
+    if num_exprs == 1 {
+        // return single_value - use Return1 optimization
+        emit(c, Instruction::encode_abc(OpCode::Return1, base_reg, 0, 0));
+    } else {
+        // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1, k = 1
+        emit(
+            c,
+            Instruction::create_abck(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0, true),
+        );
+    }
 
     Ok(())
 }

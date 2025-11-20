@@ -66,8 +66,8 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 format!("SETTABUP {} {} {}{}", a, b, c, k_str)
             }
             OpCode::GetField => {
-                let k_str = if k { "k" } else { "" };
-                format!("GETFIELD {} {} {}{}", a, b, c, k_str)
+                // GETFIELD never shows k suffix (field name is always from constant table)
+                format!("GETFIELD {} {} {}", a, b, c)
             }
             OpCode::SetField => {
                 let k_str = if k { "k" } else { "" };
@@ -93,16 +93,22 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Mul => format!("MUL {} {} {}", a, b, c),
             OpCode::MulK => format!("MULK {} {} {}", a, b, c),
             OpCode::Div => format!("DIV {} {} {}", a, b, c),
-            OpCode::Concat => format!("CONCAT {} {} {}", a, b, c),
+            OpCode::Concat => format!("CONCAT {} {}", a, c),
             OpCode::Call => format!("CALL {} {} {}", a, b, c),
             OpCode::TailCall => {
                 let k_str = if k { " 1" } else { " 0" };
                 format!("TAILCALL {} {}{}", a, b, k_str)
             }
             OpCode::Return => {
-                let k_str = if k { " 1" } else { " 0" };
-                format!("RETURN {} {}{}", a, b, k_str)
+                // k=0: show "0k", k=1: show "1" (no k suffix)
+                if k {
+                    format!("RETURN {} {} 1", a, b)
+                } else {
+                    format!("RETURN {} {} 0k", a, b)
+                }
             }
+            OpCode::Return0 => format!("RETURN0"),
+            OpCode::Return1 => format!("RETURN1 {}", a),
             OpCode::Closure => format!("CLOSURE {} {}", a, bx),
             OpCode::Jmp => format!("JMP {}", Instruction::get_sj(instr)),
             OpCode::Eq => format!("EQ {} {} {}", a, b, k as u32),
@@ -137,9 +143,19 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::ForPrep => format!("FORPREP {} {}", a, sbx),
             OpCode::TForPrep => format!("TFORPREP {} {}", a, sbx),
             OpCode::TForLoop => format!("TFORLOOP {} {}", a, c),
-            OpCode::MmBin => format!("MMBIN {} {} {} {}", a, b, c, k as u32),
-            OpCode::MmBinI => format!("MMBINI {} {} {} {}", a, b, c, k as u32),
-            OpCode::MmBinK => format!("MMBINK {} {} {} {}", a, b, c, k as u32),
+            OpCode::MmBin => {
+                // MMBIN only shows 3 parameters (a, b, c) - k flag is not displayed
+                format!("MMBIN {} {} {}", a, b, c)
+            }
+            OpCode::MmBinI => {
+                // MMBINI shows 4 parameters including k flag
+                format!("MMBINI {} {} {} {}", a, b, c, k as u32)
+            }
+            OpCode::MmBinK => {
+                // MMBINK shows k flag as 4th parameter
+                format!("MMBINK {} {} {} {}", a, b, c, k as u32)
+            }
+            OpCode::Len => format!("LEN {} {}", a, b),
             OpCode::ExtraArg => format!("EXTRAARG {}", bx),
             OpCode::Tbc => format!("TBC {}", a),
             OpCode::Close => format!("CLOSE {}", a),

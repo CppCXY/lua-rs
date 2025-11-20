@@ -1600,11 +1600,19 @@ pub fn compile_closure_expr_to(
     }
 
     // Add implicit return if needed
-    if func_compiler.chunk.code.is_empty()
-        || Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap()) != OpCode::Return
-    {
-        let ret_instr = Instruction::encode_abc(OpCode::Return, 0, 1, 0);
+    // Lua 5.4 ALWAYS adds a final RETURN0 at the end of functions for safety
+    // This serves as a fallthrough in case execution reaches the end
+    if func_compiler.chunk.code.is_empty() {
+        // Empty function - use Return0
+        let ret_instr = Instruction::encode_abc(OpCode::Return0, 0, 0, 0);
         func_compiler.chunk.code.push(ret_instr);
+    } else {
+        let last_opcode = Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap());
+        if last_opcode != OpCode::Return0 {
+            // Always add final Return0 for fallthrough protection
+            let ret_instr = Instruction::encode_abc(OpCode::Return0, 0, 0, 0);
+            func_compiler.chunk.code.push(ret_instr);
+        }
     }
 
     func_compiler.chunk.max_stack_size = func_compiler.next_register as usize;
