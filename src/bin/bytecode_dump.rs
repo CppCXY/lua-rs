@@ -99,7 +99,7 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Mul => format!("MUL {} {} {}", a, b, c),
             OpCode::MulK => format!("MULK {} {} {}", a, b, c),
             OpCode::Div => format!("DIV {} {} {}", a, b, c),
-            OpCode::Concat => format!("CONCAT {} {}", a, c),
+            OpCode::Concat => format!("CONCAT {} {}", a, b),
             OpCode::Call => format!("CALL {} {} {}", a, b, c),
             OpCode::TailCall => {
                 let k_str = if k { " 1" } else { " 0" };

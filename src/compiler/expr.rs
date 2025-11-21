@@ -192,6 +192,12 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
 
     // Discharge left to any register (this will allocate if needed)
     let left_reg = exp_to_any_reg(c, &mut left_desc);
+    
+    // CRITICAL: Ensure freereg is at least left_reg+1 to prevent right expression
+    // from overwriting left's register during nested compilation
+    if c.freereg <= left_reg {
+        c.freereg = left_reg + 1;
+    }
 
     // Determine if we can reuse left's register
     // We can only reuse if left_reg is a temporary register (>= nactvar)
@@ -220,12 +226,10 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
     };
 
     // Discharge right to register only if not using constant optimization
-    let right_reg = if use_immediate {
-        // Use immediate instruction - no need for right_reg
-        0 // Placeholder, won't be used
-    } else if can_use_rk {
-        // Use RK instruction - no need for right_reg
-        0 // Placeholder, won't be used
+    let right_reg = if use_immediate || can_use_rk {
+        // Will use immediate or RK instruction - discharge might not be needed
+        // But still discharge for safety, will be optimized by instruction selection
+        exp_to_any_reg(c, &mut right_desc)
     } else {
         exp_to_any_reg(c, &mut right_desc)
     };
@@ -512,35 +516,32 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
         }
         BinaryOperator::OpConcat => {
             // CONCAT A B: concatenate R[A] to R[A+B], result in R[A]
-            // Strategy: Ensure left and right are in consecutive registers
+            // CRITICAL: CONCAT reads all operands BEFORE writing result to R[A]
+            // So it's ALWAYS safe to reuse left_reg, even if it's a local variable!
+            // The instruction will read R[A]'s old value, then overwrite it with the result.
             
-            // Check if left_reg and right_reg are already consecutive
-            if right_reg == left_reg + 1 && can_reuse_left {
-                // Perfect case: already consecutive and left can be reused
+            // Check if operands are already consecutive
+            if right_reg == left_reg + 1 {
+                // Perfect case: operands are consecutive, reuse left for result
                 result_reg = left_reg;
-                let b_offset = 1; // right is at left+1
-                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, b_offset, 0));
+                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, 1, 0));
+                // CRITICAL: freereg should be result_reg + 1, not beyond right_reg
+                // because CONCAT consumes the right operand
+                c.freereg = result_reg + 1;
             } else {
-                // Need to arrange registers
-                // Allocate a base register for the result
-                result_reg = alloc_register(c);
-                let right_target = result_reg + 1;
+                // Need to arrange right to be consecutive with left
+                result_reg = left_reg;
+                let right_target = left_reg + 1;
                 
-                // Ensure we have space for both operands
-                if c.freereg <= right_target {
+                // Allocate right_target if needed
+                while c.freereg <= right_target {
                     alloc_register(c);
                 }
                 
-                // Move operands to consecutive positions
-                if left_reg != result_reg {
-                    emit_move(c, result_reg, left_reg);
-                }
-                if right_reg != right_target {
-                    emit_move(c, right_target, right_reg);
-                }
-                
-                // Emit CONCAT: B=1 means concat R[A] and R[A+1]
+                emit_move(c, right_target, right_reg);
                 emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, 1, 0));
+                // Reset freereg to result_reg + 1
+                c.freereg = result_reg + 1;
             }
         }
         BinaryOperator::OpEq => {
@@ -1325,7 +1326,52 @@ fn compile_binary_expr_to(
         BinaryOperator::OpBXor => (OpCode::BXor, Some(TagMethod::BXor)),
         BinaryOperator::OpShl => (OpCode::Shl, Some(TagMethod::Shl)),
         BinaryOperator::OpShr => (OpCode::Shr, Some(TagMethod::Shr)),
-        BinaryOperator::OpConcat => (OpCode::Concat, None), // No MMBIN for concat
+        BinaryOperator::OpConcat => {
+            // CONCAT has special instruction format: CONCAT A B
+            // Concatenates R[A] through R[A+B] (B+1 values), result in R[A]
+            // Unlike other binary ops, it needs consecutive registers
+            
+            // CRITICAL: CONCAT reads all operands BEFORE writing, so safe to reuse left_reg
+            // Check if left and right are already consecutive
+            if right_reg == left_reg + 1 {
+                // Perfect: already consecutive, can use directly
+                let concat_reg = left_reg;
+                emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
+                // Return left_reg as result (CONCAT modifies R[A] in place)
+                if let Some(d) = dest {
+                    if d != concat_reg {
+                        emit_move(c, d, concat_reg);
+                    }
+                    return Ok(d);
+                } else {
+                    return Ok(concat_reg);
+                }
+            } else {
+                // Need to arrange into consecutive registers
+                // Use result_reg (or alloc new) as base
+                let concat_reg = dest.unwrap_or_else(|| {
+                    // Prefer reusing left_reg if possible
+                    left_reg
+                });
+                let right_target = concat_reg + 1;
+                
+                // Ensure right_target is available
+                while c.freereg <= right_target {
+                    alloc_register(c);
+                }
+                
+                // Move operands to consecutive positions
+                if left_reg != concat_reg {
+                    emit_move(c, concat_reg, left_reg);
+                }
+                if right_reg != right_target {
+                    emit_move(c, right_target, right_reg);
+                }
+                
+                emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
+                return Ok(concat_reg);
+            }
+        }
         
         // Comparison operators need special handling - they don't produce values directly
         // Instead, they skip the next instruction if the comparison is true
