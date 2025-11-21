@@ -1672,7 +1672,46 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
     } else {
         // Regular call: compile function expression
-        compile_expr(c, &prefix_expr)?
+        let temp_func_reg = compile_expr(c, &prefix_expr)?;
+        
+        // CRITICAL FIX: When function call returns values and will be used in an expression,
+        // we need to avoid overwriting the function value itself.
+        // 
+        // Example: `f()` where f is in R[0] - if we call directly, return value overwrites f!
+        // Solution: If temp_func_reg is an "old" register (< freereg when we started),
+        // move the function to a new register first.
+        // 
+        // However, we need to distinguish:
+        // - `f = load(...)` - first assignment, can reuse register ✓
+        // - `assert(f() == 30)` - f exists, must preserve it ✓
+        //
+        // The key insight: If dest is specified, caller wants a specific target.
+        // If dest is NOT specified AND we need returns, allocate fresh register to be safe.
+        let func_reg = if let Some(d) = dest {
+            // Caller specified a destination - use it
+            if d != temp_func_reg {
+                emit(c, Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0));
+            }
+            d
+        } else if num_returns > 0 {
+            // No dest specified, but need return values - this is expression context!
+            // Check if temp_func_reg was "just allocated" (== freereg-1)
+            // If so, we can reuse it. Otherwise, allocate a new one.
+            if temp_func_reg + 1 == c.freereg {
+                // Function was just loaded into a fresh register - safe to reuse
+                temp_func_reg
+            } else {
+                // Function is in an "old" register - must preserve it!
+                let new_reg = alloc_register(c);
+                emit(c, Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0));
+                new_reg
+            }
+        } else {
+            // No return values needed - can reuse temp_func_reg
+            temp_func_reg
+        };
+        
+        func_reg
     };
 
     // Compile arguments into consecutive registers

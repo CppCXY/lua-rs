@@ -52,18 +52,25 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         let caller_base = caller_frame.base_ptr;
         
         // Copy return values to result registers
-        if num_results == usize::MAX {
-            // Multiple return values expected
+        let actual_returns = if num_results == usize::MAX {
+            // Multiple return values expected - copy all
             for (i, value) in vm.return_values.iter().enumerate() {
                 vm.register_stack[caller_base + result_reg + i] = *value;
             }
+            vm.return_values.len()
         } else {
             // Fixed number of return values
             for i in 0..num_results {
                 let value = vm.return_values.get(i).copied().unwrap_or(LuaValue::nil());
                 vm.register_stack[caller_base + result_reg + i] = value;
             }
-        }
+            num_results
+        };
+        
+        // CRITICAL: Update caller's top to point after the return values
+        // This is how Lua communicates variable return counts to the next instruction
+        // (e.g., CALL with B=0 will use this top to determine argument count)
+        vm.current_frame_mut().top = result_reg + actual_returns;
     }
 
     // Handle upvalue closing (k bit)
@@ -632,11 +639,17 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// RETURN0
 /// return (no values)
 pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
-    vm.frames.pop().ok_or_else(|| {
+    let frame = vm.frames.pop().ok_or_else(|| {
         LuaError::RuntimeError("RETURN0 with no frame on stack".to_string())
     })?;
 
     vm.return_values.clear();
+    
+    // Update caller's top to indicate 0 return values
+    if !vm.frames.is_empty() {
+        let result_reg = frame.get_result_reg();
+        vm.current_frame_mut().top = result_reg; // No return values, so top = result_reg + 0
+    }
     
     Ok(DispatchAction::Return)
 }
@@ -665,6 +678,9 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         if !vm.return_values.is_empty() {
             vm.register_stack[caller_base + result_reg] = vm.return_values[0];
         }
+        
+        // Update caller's top to indicate 1 return value
+        vm.current_frame_mut().top = result_reg + 1;
     }
 
     Ok(DispatchAction::Return)
