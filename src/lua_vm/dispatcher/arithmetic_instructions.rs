@@ -325,20 +325,30 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let result = if let Some(l) = left.as_integer() {
+    // Try integer operation first
+    if let Some(l) = left.as_integer() {
         if let Some(sum) = l.checked_add(sc as i64) {
-            LuaValue::integer(sum)
+            // Integer operation succeeded, skip fallback
+            vm.register_stack[base_ptr + a] = LuaValue::integer(sum);
+            vm.current_frame_mut().pc += 1;
+            return Ok(DispatchAction::Continue);
         } else {
-            LuaValue::number(l as f64 + sc as f64)
+            // Integer overflow, convert to float
+            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 + sc as f64);
+            return Ok(DispatchAction::Continue);
         }
-    } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!("attempt to add {} with number", left.type_name()))
-        })?;
-        LuaValue::number(l_float + sc as f64)
-    };
-
-    vm.register_stack[base_ptr + a] = result;
+    }
+    
+    // Try float operation
+    if let Some(l) = left.as_number() {
+        // Float operation succeeded, skip fallback
+        vm.register_stack[base_ptr + a] = LuaValue::number(l + sc as f64);
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
+    
+    // Not a number, fallthrough to MMBINI without setting result
+    
     Ok(DispatchAction::Continue)
 }
 
@@ -366,31 +376,30 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
+    // Try integer operation
+    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         if let Some(sum) = l.checked_add(r) {
-            LuaValue::integer(sum)
+            // Integer operation succeeded, skip fallback
+            vm.register_stack[base_ptr + a] = LuaValue::integer(sum);
+            vm.current_frame_mut().pc += 1;
+            return Ok(DispatchAction::Continue);
         } else {
-            LuaValue::number(l as f64 + r as f64)
+            // Integer overflow, convert to float
+            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 + r as f64);
+            return Ok(DispatchAction::Continue);
         }
-    } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to add {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        let r_float = constant.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to add {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        LuaValue::number(l_float + r_float)
-    };
-
-    vm.register_stack[base_ptr + a] = result;
+    }
+    
+    // Try float operation
+    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+        // Float operation succeeded, skip fallback
+        vm.register_stack[base_ptr + a] = LuaValue::number(l + r);
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
+    
+    // Not numbers, fallthrough to MMBIN
+    
     Ok(DispatchAction::Continue)
 }
 
@@ -417,31 +426,25 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
+    // Try integer operation
+    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         if let Some(diff) = l.checked_sub(r) {
-            LuaValue::integer(diff)
+            vm.register_stack[base_ptr + a] = LuaValue::integer(diff);
+            vm.current_frame_mut().pc += 1;
+            return Ok(DispatchAction::Continue);
         } else {
-            LuaValue::number(l as f64 - r as f64)
+            // Integer overflow, convert to float
+            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 - r as f64);
+            return Ok(DispatchAction::Continue);
         }
-    } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to subtract {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        let r_float = constant.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to subtract {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        LuaValue::number(l_float - r_float)
-    };
-
-    vm.register_stack[base_ptr + a] = result;
+    }
+    
+    // Try float operation
+    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+        vm.register_stack[base_ptr + a] = LuaValue::number(l - r);
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
     Ok(DispatchAction::Continue)
 }
 
@@ -468,31 +471,25 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
+    // Try integer operation
+    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         if let Some(prod) = l.checked_mul(r) {
-            LuaValue::integer(prod)
+            vm.register_stack[base_ptr + a] = LuaValue::integer(prod);
+            vm.current_frame_mut().pc += 1;
+            return Ok(DispatchAction::Continue);
         } else {
-            LuaValue::number(l as f64 * r as f64)
+            // Integer overflow, convert to float
+            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 * r as f64);
+            return Ok(DispatchAction::Continue);
         }
-    } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to multiply {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        let r_float = constant.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to multiply {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        LuaValue::number(l_float * r_float)
-    };
-
-    vm.register_stack[base_ptr + a] = result;
+    }
+    
+    // Try float operation
+    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+        vm.register_stack[base_ptr + a] = LuaValue::number(l * r);
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
     Ok(DispatchAction::Continue)
 }
 
@@ -519,33 +516,25 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
+    // Try integer operation
+    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         if r == 0 {
             return Err(LuaError::RuntimeError(
                 "attempt to perform 'n%0'".to_string(),
             ));
         }
-        LuaValue::integer(l.rem_euclid(r))
-    } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to perform modulo on {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        let r_float = constant.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to perform modulo on {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        let result = l_float - (l_float / r_float).floor() * r_float;
-        LuaValue::number(result)
-    };
-
-    vm.register_stack[base_ptr + a] = result;
+        vm.register_stack[base_ptr + a] = LuaValue::integer(l.rem_euclid(r));
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
+    
+    // Try float operation
+    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+        let result = l - (l / r).floor() * r;
+        vm.register_stack[base_ptr + a] = LuaValue::number(result);
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
     Ok(DispatchAction::Continue)
 }
 
@@ -658,32 +647,24 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
+    // Try integer operation
+    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         if r == 0 {
             return Err(LuaError::RuntimeError(
                 "attempt to divide by zero".to_string(),
             ));
         }
-        LuaValue::integer(l.div_euclid(r))
-    } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to divide {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        let r_float = constant.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to divide {} with {}",
-                left.type_name(),
-                constant.type_name()
-            ))
-        })?;
-        LuaValue::number((l_float / r_float).floor())
-    };
-
-    vm.register_stack[base_ptr + a] = result;
+        vm.register_stack[base_ptr + a] = LuaValue::integer(l.div_euclid(r));
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
+    
+    // Try float operation
+    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+        vm.register_stack[base_ptr + a] = LuaValue::number((l / r).floor());
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
+    }
     Ok(DispatchAction::Continue)
 }
 
@@ -872,21 +853,34 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
-    let r_int = constant.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            constant.type_name()
-        ))
-    })?;
+    // Try to get integer from left operand (may convert from float)
+    let l_int = if let Some(i) = left.as_integer() {
+        i
+    } else if let Some(f) = left.as_number() {
+        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            f as i64
+        } else {
+            return Ok(DispatchAction::Continue);
+        }
+    } else {
+        return Ok(DispatchAction::Continue);
+    };
+    
+    // Try to get integer from constant
+    let r_int = if let Some(i) = constant.as_integer() {
+        i
+    } else if let Some(f) = constant.as_number() {
+        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            f as i64
+        } else {
+            return Ok(DispatchAction::Continue);
+        }
+    } else {
+        return Ok(DispatchAction::Continue);
+    };
 
-    let result = LuaValue::integer(l_int & r_int);
-    vm.register_stack[base_ptr + a] = result;
+    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int & r_int);
+    vm.current_frame_mut().pc += 1;
     Ok(DispatchAction::Continue)
 }
 
@@ -913,21 +907,34 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
-    let r_int = constant.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            constant.type_name()
-        ))
-    })?;
+    // Try to get integer from left operand (may convert from float)
+    let l_int = if let Some(i) = left.as_integer() {
+        i
+    } else if let Some(f) = left.as_number() {
+        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            f as i64
+        } else {
+            return Ok(DispatchAction::Continue);
+        }
+    } else {
+        return Ok(DispatchAction::Continue);
+    };
+    
+    // Try to get integer from constant
+    let r_int = if let Some(i) = constant.as_integer() {
+        i
+    } else if let Some(f) = constant.as_number() {
+        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            f as i64
+        } else {
+            return Ok(DispatchAction::Continue);
+        }
+    } else {
+        return Ok(DispatchAction::Continue);
+    };
 
-    let result = LuaValue::integer(l_int | r_int);
-    vm.register_stack[base_ptr + a] = result;
+    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int | r_int);
+    vm.current_frame_mut().pc += 1;
     Ok(DispatchAction::Continue)
 }
 
@@ -954,21 +961,34 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
-    let r_int = constant.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            constant.type_name()
-        ))
-    })?;
+    // Try to get integer from left operand (may convert from float)
+    let l_int = if let Some(i) = left.as_integer() {
+        i
+    } else if let Some(f) = left.as_number() {
+        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            f as i64
+        } else {
+            return Ok(DispatchAction::Continue);
+        }
+    } else {
+        return Ok(DispatchAction::Continue);
+    };
+    
+    // Try to get integer from constant
+    let r_int = if let Some(i) = constant.as_integer() {
+        i
+    } else if let Some(f) = constant.as_number() {
+        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            f as i64
+        } else {
+            return Ok(DispatchAction::Continue);
+        }
+    } else {
+        return Ok(DispatchAction::Continue);
+    };
 
-    let result = LuaValue::integer(l_int ^ r_int);
-    vm.register_stack[base_ptr + a] = result;
+    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int ^ r_int);
+    vm.current_frame_mut().pc += 1;
     Ok(DispatchAction::Continue)
 }
 
@@ -1165,15 +1185,19 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError
 /// MmBinI: Metamethod binary operation (register, immediate)
 pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError> {
     let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr) as usize;
+    let sb = Instruction::get_sb(instr);  // Signed immediate value (as in ADDI)
     let c = Instruction::get_c(instr);
     let k = Instruction::get_k(instr);
     
     let base_ptr = vm.current_frame().base_ptr;
-    let rb = vm.register_stack[base_ptr + sb];
-    let rc = LuaValue::integer(c as i64);
     
-    let metamethod_name = get_binop_metamethod(k as u8);
+    // From compiler: create_abck(OpCode::MmBinI, left_reg, imm, TagMethod, false)
+    // So: A = left_reg (operand), B = imm (immediate value encoded), C = tagmethod
+    
+    let rb = vm.register_stack[base_ptr + a];  // A contains the operand register content
+    let rc = LuaValue::integer(sb as i64);  // B field contains the immediate value
+    
+    let metamethod_name = get_binop_metamethod(c as u8);
     let mm_key = vm.create_string(metamethod_name);
     
     // Try to get metamethod from operand's metatable
@@ -1185,13 +1209,14 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     
     if metamethod.is_nil() {
         return Err(LuaError::RuntimeError(format!(
-            "attempt to perform arithmetic on {} and integer",
-            rb.type_name()
+            "attempt to perform arithmetic on {} and {}",
+            rb.type_name(),
+            rc.type_name()
         )));
     }
     
     // Call metamethod
-    let args = vec![rb, rc];
+    let args = if k { vec![rc, rb] } else { vec![rb, rc] };
     let result = vm.call_metamethod(&metamethod, &args)?
         .unwrap_or(LuaValue::nil());
     vm.register_stack[base_ptr + a] = result;

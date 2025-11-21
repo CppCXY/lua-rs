@@ -233,12 +233,8 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
     // Handle immediate instructions for ADD/SUB
     if use_immediate && matches!(op_kind, BinaryOperator::OpAdd | BinaryOperator::OpSub) {
         let int_val = right_desc.ival;
-        // Use immediate instruction
-        let imm = if int_val < 0 {
-            (int_val + 512) as u32
-        } else {
-            int_val as u32
-        };
+        // Use immediate instruction with sC field encoding (add OFFSET_SC = 127)
+        let imm = ((int_val + 127) & 0xff) as u32;
 
         // Allocate result register (can't reuse left if it's a local variable)
         let result_reg = if can_reuse_left {
@@ -266,13 +262,15 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 return Ok(ExpDesc::new_nonreloc(result_reg));
             }
             BinaryOperator::OpSub => {
+                // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
+                let neg_imm = ((-int_val + 127) & 0xff) as u32;
                 emit(
                     c,
                     Instruction::encode_abc(
                         OpCode::AddI,
                         result_reg,
                         left_reg,
-                        (512 - imm) & 0x1ff,
+                        neg_imm,
                     ),
                 );
                 emit(
@@ -1273,12 +1271,12 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpLt | BinaryOperator::OpLe |
                         BinaryOperator::OpGt | BinaryOperator::OpGe => {
                             let left_reg = compile_expr(c, &left)?;
-                            // For comparison with immediate, result MUST be in same register as operand
-                            // because comparison instructions don't produce values, they only test
-                            let result_reg = left_reg;
+                            // Allocate a new register for the boolean result
+                            // (can't reuse left_reg because comparison needs the original value)
+                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                             
                             // Use immediate comparison instruction with boolean result pattern
-                            return compile_comparison_imm_to_bool(c, op_kind, result_reg, int_val as i32);
+                            return compile_comparison_imm_to_bool(c, op_kind, left_reg, result_reg, int_val as i32);
                         }
                         _ => {}
                     }
@@ -1394,18 +1392,20 @@ fn compile_comparison_to_bool(
     // So we use k=1 (skip if true) with the JMP pattern
     let k = if negate { false } else { true };  // k=1 for normal comparison
     
+    // EQ A B k: compare R[A] with R[B]
+    // Note: comparison instructions don't produce results, they only test and skip
     emit(
         c,
-        Instruction::create_abck(cmp_opcode, result_reg, op1, op2, k),
+        Instruction::create_abck(cmp_opcode, op1, op2, 0, k),
     );
     
     // JMP over LFALSESKIP (offset = 1)
     emit(c, Instruction::create_sj(OpCode::Jmp, 1));
     
-    // LFALSESKIP: load false and skip next instruction
+    // LFALSESKIP: load false into result register and skip next instruction
     emit(c, Instruction::encode_abc(OpCode::LFalseSkip, result_reg, 0, 0));
     
-    // LOADTRUE: load true
+    // LOADTRUE: load true into result register
     emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
     
     Ok(result_reg)
@@ -1416,6 +1416,7 @@ fn compile_comparison_to_bool(
 fn compile_comparison_imm_to_bool(
     c: &mut Compiler,
     op_kind: BinaryOperator,
+    operand_reg: u32,
     result_reg: u32,
     imm_val: i32,
 ) -> Result<u32, String> {
@@ -1432,20 +1433,15 @@ fn compile_comparison_imm_to_bool(
         _ => unreachable!(),
     };
     
-    // Encode immediate value as unsigned 8-bit (will be interpreted as signed)
-    let imm = if imm_val < 0 {
-        ((imm_val + 256) & 0xFF) as u32
-    } else {
-        (imm_val & 0xFF) as u32
-    };
+    // Encode immediate value with OFFSET_SC = 127
+    let imm = ((imm_val + 127) & 0xFF) as u32;
     
     let k = if negate { false } else { true };
     
     // EQI A sB k: compare R[A] with immediate sB, k controls skip behavior
-    // The result register holds the operand AND will hold the boolean result
     emit(
         c,
-        Instruction::create_abck(cmp_opcode, result_reg, imm, 0, k),
+        Instruction::create_abck(cmp_opcode, operand_reg, imm, 0, k),
     );
     
     // JMP over LFALSESKIP (offset = 1)

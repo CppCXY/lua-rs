@@ -148,14 +148,6 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAct
         
         // Extra argument
         OpCode::ExtraArg => exec_extraarg(vm, instr),
-        
-        // All instructions implemented!
-        _ => {
-            Err(LuaError::RuntimeError(format!(
-                "Unimplemented opcode: {:?} (0x{:02x})",
-                opcode, opcode as u8
-            )))
-        }
     }
 }
 
