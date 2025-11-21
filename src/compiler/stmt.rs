@@ -6,7 +6,7 @@ use super::expr::{
 };
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
-use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr};
+use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr, compile_closure_expr_to};
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
@@ -1267,21 +1267,11 @@ fn compile_local_function_stat(
     });
     c.chunk.locals.push(func_name);
 
-    // Save and restore next_register to compile closure into func_reg
-    let saved_next = c.freereg;
-    c.freereg = func_reg;
-
-    // Compile the closure
-    let closure_reg = compile_closure_expr(c, &closure, false)?;
-
-    // Restore next_register (should be func_reg + 1)
-    c.freereg = saved_next.max(closure_reg + 1);
-
-    // Move closure to the local variable register if different
-    if closure_reg != func_reg {
-        let move_instr = Instruction::encode_abc(OpCode::Move, func_reg, closure_reg, 0);
-        c.chunk.code.push(move_instr);
-    }
+    // Compile the closure - use dest=Some(func_reg) to ensure it goes to the correct register
+    let closure_reg = compile_closure_expr_to(c, &closure, Some(func_reg), false)?;
+    
+    // Sanity check: closure should be compiled to func_reg
+    debug_assert_eq!(closure_reg, func_reg, "Closure should be compiled to func_reg");
 
     Ok(())
 }

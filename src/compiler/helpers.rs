@@ -91,6 +91,10 @@ pub fn try_add_constant_k(c: &mut Compiler, value: LuaValue) -> Option<u32> {
 pub fn alloc_register(c: &mut Compiler) -> u32 {
     let reg = c.freereg;
     c.freereg += 1;
+    // Track peak freereg for max_stack_size
+    if c.freereg > c.peak_freereg {
+        c.peak_freereg = c.freereg;
+    }
     if c.freereg as usize > c.chunk.max_stack_size {
         c.chunk.max_stack_size = c.freereg as usize;
     }
@@ -351,6 +355,9 @@ pub fn end_scope(c: &mut Compiler) {
 
 /// Get a global variable (Lua 5.4 uses _ENV upvalue)
 pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
+    // Ensure _ENV is in upvalue[0]
+    ensure_env_upvalue(c);
+    
     let lua_str = create_string_value(c, name);
     let const_idx = add_constant_dedup(c, lua_str);
     // GetTabUp: R(A) := UpValue[B][K(C)]
@@ -363,6 +370,9 @@ pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
 
 /// Set a global variable (Lua 5.4 uses _ENV upvalue)
 pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
+    // Ensure _ENV is in upvalue[0]
+    ensure_env_upvalue(c);
+    
     let lua_str = create_string_value(c, name);
     let const_idx = add_constant_dedup(c, lua_str);
     // SetTabUp: UpValue[A][K(B)] := RK(C)
@@ -371,6 +381,46 @@ pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
         c,
         Instruction::create_abck(OpCode::SetTabUp, 0, const_idx, src_reg, false),
     );
+}
+
+/// Ensure _ENV is in upvalue[0]
+fn ensure_env_upvalue(c: &mut Compiler) {
+    let scope = c.scope_chain.borrow();
+    
+    // Check if _ENV is already the first upvalue
+    if !scope.upvalues.is_empty() && scope.upvalues[0].name == "_ENV" {
+        return;
+    }
+    
+    // Check if _ENV exists anywhere in upvalues
+    if scope.upvalues.iter().any(|uv| uv.name == "_ENV") {
+        // _ENV exists but not at index 0 - this is a problem
+        // In standard Lua, _ENV should always be upvalue[0]
+        // For now, we'll just return and let it fail
+        // TODO: Reorder upvalues to put _ENV at index 0
+        return;
+    }
+    
+    // _ENV doesn't exist - need to resolve it from parent
+    drop(scope);
+    
+    // Try to resolve _ENV from parent scope chain
+    if let Some(_env_idx) = resolve_upvalue_from_chain(c, "_ENV") {
+        // Successfully added _ENV to upvalues
+        // Make sure it's at index 0
+        let mut scope = c.scope_chain.borrow_mut();
+        let env_uv = scope.upvalues.iter()
+            .position(|uv| uv.name == "_ENV")
+            .map(|idx| scope.upvalues.remove(idx));
+        
+        if let Some(env_uv) = env_uv {
+            scope.upvalues.insert(0, env_uv);
+        }
+    } else {
+        // Can't resolve _ENV from parent - this means we're in top-level chunk
+        // Top-level chunk should have _ENV as upvalue[0] from VM initialization
+        // We don't need to add it here
+    }
 }
 
 /// Emit LoadK/LoadKX instruction (Lua 5.4 style)

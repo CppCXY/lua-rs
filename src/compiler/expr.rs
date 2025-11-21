@@ -703,7 +703,8 @@ fn compile_literal_expr(
             }
         }
         LuaLiteralToken::String(s) => {
-            let lua_string = create_string_value(c, &s.get_value());
+            let string_val = s.get_value();
+            let lua_string = create_string_value(c, &string_val);
             let const_idx = add_constant_dedup(c, lua_string);
             emit_loadk(c, reg, const_idx);
         }
@@ -2634,7 +2635,7 @@ pub fn compile_closure_expr_to(
         }
     }
 
-    func_compiler.chunk.max_stack_size = func_compiler.freereg as usize;
+    func_compiler.chunk.max_stack_size = func_compiler.peak_freereg as usize;
 
     // Store upvalue information from scope_chain
     let upvalues = func_compiler.scope_chain.borrow().upvalues.clone();
