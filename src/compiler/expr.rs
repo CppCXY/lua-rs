@@ -1855,14 +1855,16 @@ pub fn compile_call_expr_with_returns_and_dest(
     }
 
     // If arguments are not in consecutive registers, we need to move them
+    // CRITICAL FIX: Move from back to front to avoid overwriting!
     if need_move {
         // Reserve registers for arguments
         while c.freereg < args_start + arg_regs.len() as u32 {
             alloc_register(c);
         }
 
-        // Move arguments to correct positions
-        for (i, &arg_reg) in arg_regs.iter().enumerate() {
+        // Move arguments to correct positions FROM BACK TO FRONT to avoid overwriting
+        for i in (0..arg_regs.len()).rev() {
+            let arg_reg = arg_regs[i];
             let target_reg = args_start + i as u32;
             if arg_reg != target_reg {
                 emit_move(c, target_reg, arg_reg);

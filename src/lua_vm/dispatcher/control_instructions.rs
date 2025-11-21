@@ -439,11 +439,23 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let func = vm.register_stack[base + a];
 
     // Determine argument count
+    // CRITICAL: In Lua, when B != 0, CALL sets its own top (doesn't use frame.top)
+    // When B == 0, it uses the top set by the previous instruction (e.g., another CALL)
     let arg_count = if b == 0 {
-        // Use all values from R[A+1] to top
+        // Use all values from R[A+1] to current top
+        // This top was set by the previous instruction (usually a CALL with C=0)
         let frame = vm.current_frame();
-        frame.top - (a + 1)
+        if frame.top > a + 1 {
+            frame.top - (a + 1)
+        } else {
+            0
+        }
     } else {
+        // Fixed argument count: B-1
+        // We IGNORE frame.top here - B specifies the exact number of arguments
+        // AND we update frame.top to reflect the call boundary
+        // This matches Lua's: L->top.p = ra + b
+        vm.current_frame_mut().top = a + b;
         b - 1
     };
 

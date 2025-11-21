@@ -204,6 +204,7 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             // Check if last expression is a function call (which might return multiple values)
             else if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
+                    // CRITICAL FIX: Don't fill with nil first! Let the call return directly.
                     // Use compile_call_expr_with_returns to handle multi-return
                     let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
 
@@ -216,10 +217,24 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                     for i in 0..remaining_vars {
                         regs.push(base_reg + i as u32);
                     }
+                    
+                    // Skip the "fill with nil" section below since call provides all values
+                    // Define locals immediately and return
+                    for (i, name) in names.iter().enumerate() {
+                        if let Some(name_token) = name.get_name_token() {
+                            let name_text = name_token.get_name_text().to_string();
+                            let mut is_const = false;
+                            let mut is_to_be_closed = false;
+                            if let Some(attr_token) = name.get_attrib() {
+                                is_const = attr_token.is_const();
+                                is_to_be_closed = attr_token.is_close();
+                            }
+                            add_local_with_attrs(c, name_text, regs[i], is_const, is_to_be_closed);
+                        }
+                    }
+                    return Ok(());
                 } else {
                     // Single value needed
-                    // OPTIMIZATION: For call expressions, don't allocate dest first
-                    // Let the call use whatever register it needs, then use that as the local's register
                     let result_reg = compile_call_expr_with_returns(c, call_expr, 1)?;
                     regs.push(result_reg);
                 }
