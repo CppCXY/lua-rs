@@ -4,7 +4,7 @@
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
 
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
-use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
+use crate::lua_value::{LuaValue, LuaValueKind, MultiValue, LuaUpvalue};
 use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 
 pub fn create_basic_lib() -> LibraryModule {
@@ -719,7 +719,12 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Compile the code using VM's string pool
     match vm.compile(&code) {
         Ok(chunk) => {
-            let func = vm.create_function(std::rc::Rc::new(chunk), vec![]);
+            // Create upvalue for _ENV (global table)
+            // Loaded chunks need _ENV as upvalue[0]
+            let env_upvalue = LuaUpvalue::new_closed(vm.globals);
+            let upvalues = vec![env_upvalue];
+            
+            let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
             Ok(MultiValue::single(func))
         }
         Err(e) => {

@@ -50,7 +50,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         let result_reg = caller_frame.get_result_reg();
         let num_results = caller_frame.get_num_results();
         let caller_base = caller_frame.base_ptr;
-
+        
         // Copy return values to result registers
         if num_results == usize::MAX {
             // Multiple return values expected
@@ -507,11 +507,19 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             let frame_id = vm.next_frame_id;
             vm.next_frame_id += 1;
 
+            // Ensure source argument registers are accessible
+            let max_src_reg = base + a + 1 + arg_count;
+            if max_src_reg > vm.register_stack.len() {
+                vm.ensure_stack_capacity(max_src_reg);
+            }
+
             let new_base = vm.register_stack.len();
-            vm.ensure_stack_capacity(new_base + max_stack_size);
+            // Ensure new frame can hold at least the arguments
+            let actual_stack_size = max_stack_size.max(arg_count);
+            vm.ensure_stack_capacity(new_base + actual_stack_size);
 
             // Initialize registers with nil
-            for i in 0..max_stack_size {
+            for i in 0..actual_stack_size {
                 vm.register_stack[new_base + i] = crate::LuaValue::nil();
             }
 
@@ -525,7 +533,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 frame_id,
                 func,
                 new_base,
-                max_stack_size,
+                actual_stack_size,
                 a, // result_reg: where to store return values
                 return_count,
             );
@@ -643,17 +651,16 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     })?;
 
     let base_ptr = frame.base_ptr;
+    let result_reg = frame.get_result_reg();
 
     vm.return_values.clear();
     if base_ptr + a < vm.register_stack.len() {
         vm.return_values.push(vm.register_stack[base_ptr + a]);
     }
-
+    
     // Copy return value to caller's registers if needed
     if !vm.frames.is_empty() {
-        let caller_frame = vm.current_frame();
-        let result_reg = caller_frame.get_result_reg();
-        let caller_base = caller_frame.base_ptr;
+        let caller_base = vm.current_frame().base_ptr;
 
         if !vm.return_values.is_empty() {
             vm.register_stack[caller_base + result_reg] = vm.return_values[0];
