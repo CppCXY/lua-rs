@@ -1023,12 +1023,8 @@ fn compile_binary_expr_to(
                 let int_val = num.get_int_value();
                 // Use signed 9-bit immediate: range [-256, 255]
                 if int_val >= -256 && int_val <= 255 {
-                    // Encode immediate value (9 bits)
-                    let imm = if int_val < 0 {
-                        (int_val + 512) as u32
-                    } else {
-                        int_val as u32
-                    };
+                    // Encode immediate value for sC field (8-bit signed with OFFSET_SC)
+                    let imm = ((int_val + 127) & 0xff) as u32;
 
                     // Try immediate arithmetic instructions
                     // Only compile left operand if we actually use immediate instruction
@@ -1062,11 +1058,8 @@ fn compile_binary_expr_to(
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
-                            let neg_imm = if int_val < 0 {
-                                ((-int_val) % 512) as u32
-                            } else {
-                                (512 - (int_val % 512)) as u32
-                            };
+                            // Encode -int_val with OFFSET_SC
+                            let neg_imm = ((-int_val + 127) & 0xff) as u32;
                             emit(
                                 c,
                                 Instruction::encode_abc(

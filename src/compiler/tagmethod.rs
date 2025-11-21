@@ -6,6 +6,7 @@
 /// Tag method events for metamethods
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
+#[allow(unused)]
 pub enum TagMethod {
     Index = 0,    // __index
     NewIndex = 1, // __newindex

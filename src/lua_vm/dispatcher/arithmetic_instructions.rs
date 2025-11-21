@@ -21,13 +21,8 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let right = vm.register_stack[base_ptr + c];
 
     let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        // Integer addition with overflow check
-        if let Some(sum) = l.checked_add(r) {
-            LuaValue::integer(sum)
-        } else {
-            // Overflow: convert to float
-            LuaValue::number(l as f64 + r as f64)
-        }
+        // Integer addition with wraparound semantics
+        LuaValue::integer(l.wrapping_add(r))
     } else {
         // Float addition
         let l_float = left.as_number().ok_or_else(|| {
@@ -64,11 +59,7 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let right = vm.register_stack[base_ptr + c];
 
     let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        if let Some(diff) = l.checked_sub(r) {
-            LuaValue::integer(diff)
-        } else {
-            LuaValue::number(l as f64 - r as f64)
-        }
+        LuaValue::integer(l.wrapping_sub(r))
     } else {
         let l_float = left.as_number().ok_or_else(|| {
             LuaError::RuntimeError(format!(
@@ -104,11 +95,7 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let right = vm.register_stack[base_ptr + c];
 
     let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        if let Some(prod) = l.checked_mul(r) {
-            LuaValue::integer(prod)
-        } else {
-            LuaValue::number(l as f64 * r as f64)
-        }
+        LuaValue::integer(l.wrapping_mul(r))
     } else {
         let l_float = left.as_number().ok_or_else(|| {
             LuaError::RuntimeError(format!(
@@ -327,16 +314,10 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     // Try integer operation first
     if let Some(l) = left.as_integer() {
-        if let Some(sum) = l.checked_add(sc as i64) {
-            // Integer operation succeeded, skip fallback
-            vm.register_stack[base_ptr + a] = LuaValue::integer(sum);
-            vm.current_frame_mut().pc += 1;
-            return Ok(DispatchAction::Continue);
-        } else {
-            // Integer overflow, convert to float
-            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 + sc as f64);
-            return Ok(DispatchAction::Continue);
-        }
+        // Integer operation with wraparound, skip fallback
+        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(sc as i64));
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
     }
     
     // Try float operation
@@ -378,16 +359,10 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
-        if let Some(sum) = l.checked_add(r) {
-            // Integer operation succeeded, skip fallback
-            vm.register_stack[base_ptr + a] = LuaValue::integer(sum);
-            vm.current_frame_mut().pc += 1;
-            return Ok(DispatchAction::Continue);
-        } else {
-            // Integer overflow, convert to float
-            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 + r as f64);
-            return Ok(DispatchAction::Continue);
-        }
+        // Integer operation with wraparound, skip fallback
+        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(r));
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
     }
     
     // Try float operation
@@ -428,15 +403,9 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
-        if let Some(diff) = l.checked_sub(r) {
-            vm.register_stack[base_ptr + a] = LuaValue::integer(diff);
-            vm.current_frame_mut().pc += 1;
-            return Ok(DispatchAction::Continue);
-        } else {
-            // Integer overflow, convert to float
-            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 - r as f64);
-            return Ok(DispatchAction::Continue);
-        }
+        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_sub(r));
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
     }
     
     // Try float operation
@@ -473,15 +442,9 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
-        if let Some(prod) = l.checked_mul(r) {
-            vm.register_stack[base_ptr + a] = LuaValue::integer(prod);
-            vm.current_frame_mut().pc += 1;
-            return Ok(DispatchAction::Continue);
-        } else {
-            // Integer overflow, convert to float
-            vm.register_stack[base_ptr + a] = LuaValue::number(l as f64 * r as f64);
-            return Ok(DispatchAction::Continue);
-        }
+        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_mul(r));
+        vm.current_frame_mut().pc += 1;
+        return Ok(DispatchAction::Continue);
     }
     
     // Try float operation

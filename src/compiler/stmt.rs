@@ -51,12 +51,8 @@ fn try_compile_immediate_comparison(
                         // Compile left operand
                         let left_reg = compile_expr(c, &left)?;
 
-                        // Encode immediate value as unsigned 8-bit (with two's complement for negatives)
-                        let imm = if int_val < 0 {
-                            ((int_val + 256) & 0xFF) as u32
-                        } else {
-                            int_val as u32
-                        };
+                        // Encode immediate value with OFFSET_SC (same as ADDI/etc)
+                        let imm = ((int_val + 127) & 0xFF) as u32;
 
                         // Emit immediate comparison
                         // C parameter controls skip behavior:
@@ -698,8 +694,16 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
         // Check if then-block contains only a single jump (break/goto/return)
         // If so, invert comparison to optimize away the jump instruction
         // BUT: Only if there are no else/elseif clauses (otherwise we need to compile them)
+        // NOTE: For break statements, we DON'T invert because the JMP IS the break itself
         let then_body = stat.get_block();
+        let is_single_break = then_body.as_ref().map_or(false, |b| {
+            let stats: Vec<_> = b.get_stats().collect();
+            stats.len() == 1 && matches!(stats[0], LuaStat::BreakStat(_))
+        });
+        
+        // Only invert for return statements, not for break
         let invert = !has_branches
+            && !is_single_break
             && then_body
                 .as_ref()
                 .map_or(false, |b| is_single_jump_block(b));
@@ -1113,22 +1117,23 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
         }
     }
 
-    // Update control_var for next iteration
-    emit_move(c, control_var_reg, call_base);
+    // Update control_var for next iteration (use first return value, which is the new index)
+    if !var_regs.is_empty() {
+        emit_move(c, control_var_reg, var_regs[0]);
+    }
 
     // Check if first return value is nil (end of iteration)
-    let is_nil_reg = alloc_register(c);
     let nil_const = add_constant(c, LuaValue::nil());
-    let nil_reg = alloc_register(c);
-    emit_load_constant(c, nil_reg, nil_const);
 
+    // Use EQK to compare with constant nil (k=1: skip if NOT equal)
+    // When i==nil, is_equal=TRUE, TRUE!=1 is FALSE, don't skip, execute JMP (exit)
+    // When i!=nil, is_equal=FALSE, FALSE!=1 is TRUE, skip JMP (continue loop)
     emit(
         c,
-        Instruction::encode_abc(OpCode::Eq, is_nil_reg, var_regs[0], nil_reg),
+        Instruction::create_abck(OpCode::EqK, var_regs[0], nil_const, 0, true),
     );
-
-    // If first value is nil, exit loop
-    emit(c, Instruction::encode_abc(OpCode::Test, is_nil_reg, 0, 1));
+    
+    // If equal (i.e., first value is nil), exit loop
     let end_jump = emit_jump(c, OpCode::Jmp);
 
     // Compile loop body
