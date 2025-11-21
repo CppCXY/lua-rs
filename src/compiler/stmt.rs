@@ -140,29 +140,39 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
 
 /// Compile local variable declaration
 fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), String> {
-    use super::exp2reg::exp_to_next_reg;
-    use super::expr::compile_expr_desc;
+    use super::expr::{compile_expr_to, compile_call_expr_with_returns_and_dest};
     use emmylua_parser::LuaExpr;
 
     let names: Vec<_> = stat.get_local_name_list().collect();
     let exprs: Vec<_> = stat.get_value_exprs().collect();
 
-    // Compile init expressions
+    // CRITICAL FIX: Pre-allocate registers for local variables
+    // This ensures expressions compile into the correct target registers
+    // Example: `local a = f()` should place f's result directly into a's register
+    let base_reg = c.freereg;
+    let num_vars = names.len();
+    
+    // Pre-allocate registers for all local variables
+    for _ in 0..num_vars {
+        alloc_register(c);
+    }
+    
+    // Now compile init expressions into the pre-allocated registers
     let mut regs = Vec::new();
 
     if !exprs.is_empty() {
         // Compile all expressions except the last one
-        for expr in exprs.iter().take(exprs.len().saturating_sub(1)) {
-            // NEW: Use ExpDesc system to compile expression to freereg
-            let mut e = compile_expr_desc(c, expr)?;
-            exp_to_next_reg(c, &mut e);
-            let result_reg = e.get_register().ok_or("Expression has no register")?;
+        for (i, expr) in exprs.iter().take(exprs.len().saturating_sub(1)).enumerate() {
+            let target_reg = base_reg + i as u32;
+            // Compile expression with target register specified
+            let result_reg = compile_expr_to(c, expr, Some(target_reg))?;
             regs.push(result_reg);
         }
 
         // Handle the last expression specially if we need more values
         if let Some(last_expr) = exprs.last() {
-            let remaining_vars = names.len().saturating_sub(regs.len());
+            let remaining_vars = num_vars.saturating_sub(regs.len());
+            let target_base = base_reg + regs.len() as u32;
 
             // Check if last expression is ... (varargs) which should expand
             let is_dots = if let LuaExpr::LiteralExpr(lit_expr) = last_expr {
@@ -175,16 +185,8 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             };
 
             if is_dots && remaining_vars > 0 {
-                // Varargs expansion: generate VarArg instruction with B=0 (all varargs)
-                // or B=remaining_vars+1 (specific number)
-                let base_reg = alloc_register(c);
-
-                // Allocate registers for all remaining variables
-                for _i in 1..remaining_vars {
-                    alloc_register(c);
-                }
-
-                // VarArg instruction: R(base_reg)..R(base_reg+remaining_vars-1) = ...
+                // Varargs expansion: generate VarArg instruction into pre-allocated registers
+                // VarArg instruction: R(target_base)..R(target_base+remaining_vars-1) = ...
                 // B = remaining_vars + 1 (or 0 for all)
                 let b_value = if remaining_vars == 1 {
                     2
@@ -193,33 +195,26 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                 };
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::Vararg, base_reg, b_value, 0),
+                    Instruction::encode_abc(OpCode::Vararg, target_base, b_value, 0),
                 );
 
                 // Add all registers
                 for i in 0..remaining_vars {
-                    regs.push(base_reg + i as u32);
+                    regs.push(target_base + i as u32);
                 }
             }
             // Check if last expression is a function call (which might return multiple values)
             else if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
-                    // CRITICAL FIX: Don't fill with nil first! Let the call return directly.
-                    // Use compile_call_expr_with_returns to handle multi-return
-                    let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
-
-                    // Ensure next_register is past all return registers
-                    while c.freereg < base_reg + remaining_vars as u32 {
-                        alloc_register(c);
-                    }
+                    // Multi-return call: compile with dest = target_base
+                    let result_base = compile_call_expr_with_returns_and_dest(c, call_expr, remaining_vars, Some(target_base))?;
 
                     // Add all return registers
                     for i in 0..remaining_vars {
-                        regs.push(base_reg + i as u32);
+                        regs.push(result_base + i as u32);
                     }
                     
-                    // Skip the "fill with nil" section below since call provides all values
-                    // Define locals immediately and return
+                    // Define locals and return
                     for (i, name) in names.iter().enumerate() {
                         if let Some(name_token) = name.get_name_token() {
                             let name_text = name_token.get_name_text().to_string();
@@ -234,16 +229,13 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                     }
                     return Ok(());
                 } else {
-                    // Single value needed
-                    let result_reg = compile_call_expr_with_returns(c, call_expr, 1)?;
+                    // Single value: compile with dest = target_base
+                    let result_reg = compile_expr_to(c, last_expr, Some(target_base))?;
                     regs.push(result_reg);
                 }
             } else {
-                // Non-call expression
-                // NEW: Use ExpDesc system
-                let mut e = compile_expr_desc(c, last_expr)?;
-                exp_to_next_reg(c, &mut e);
-                let result_reg = e.get_register().ok_or("Expression has no register")?;
+                // Non-call expression: compile with dest = target_base
+                let result_reg = compile_expr_to(c, last_expr, Some(target_base))?;
                 regs.push(result_reg);
             }
         }

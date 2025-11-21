@@ -1764,16 +1764,25 @@ pub fn compile_call_expr_with_returns_and_dest(
             if d != temp_func_reg {
                 emit(c, Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0));
             }
+            // CRITICAL: Reset freereg to just past func_reg
+            // This ensures arguments compile into consecutive registers starting from func_reg+1
+            c.freereg = d + 1;
             d
         } else if num_returns > 0 {
             // No dest specified, but need return values - this is expression context!
-            // Check if temp_func_reg was "just allocated" (== freereg-1)
-            // If so, we can reuse it. Otherwise, allocate a new one.
-            if temp_func_reg + 1 == c.freereg {
-                // Function was just loaded into a fresh register - safe to reuse
+            // CRITICAL: Must preserve local variables!
+            // Check if temp_func_reg is a local variable (< nactvar)
+            let nactvar = c.nactvar as u32;
+            if temp_func_reg < nactvar {
+                // Function is a local variable - must preserve it!
+                let new_reg = alloc_register(c);
+                emit(c, Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0));
+                new_reg
+            } else if temp_func_reg + 1 == c.freereg {
+                // Function was just loaded into a fresh temporary register - safe to reuse
                 temp_func_reg
             } else {
-                // Function is in an "old" register - must preserve it!
+                // Function is in an "old" temporary register - must preserve it!
                 let new_reg = alloc_register(c);
                 emit(c, Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0));
                 new_reg
