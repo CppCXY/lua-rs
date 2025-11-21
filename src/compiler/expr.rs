@@ -1268,8 +1268,18 @@ fn compile_binary_expr_to(
                             );
                             return Ok(result_reg);
                         }
-                        // Immediate comparison - NOT IMPLEMENTED YET
-                        // (would need conditional skip logic in control flow statements)
+                        // Immediate comparison operators - generate boolean result
+                        BinaryOperator::OpEq | BinaryOperator::OpNe |
+                        BinaryOperator::OpLt | BinaryOperator::OpLe |
+                        BinaryOperator::OpGt | BinaryOperator::OpGe => {
+                            let left_reg = compile_expr(c, &left)?;
+                            // For comparison with immediate, result MUST be in same register as operand
+                            // because comparison instructions don't produce values, they only test
+                            let result_reg = left_reg;
+                            
+                            // Use immediate comparison instruction with boolean result pattern
+                            return compile_comparison_imm_to_bool(c, op_kind, result_reg, int_val as i32);
+                        }
                         _ => {}
                     }
                 }
@@ -1299,12 +1309,17 @@ fn compile_binary_expr_to(
         BinaryOperator::OpShl => (OpCode::Shl, Some(TagMethod::Shl)),
         BinaryOperator::OpShr => (OpCode::Shr, Some(TagMethod::Shr)),
         BinaryOperator::OpConcat => (OpCode::Concat, None), // No MMBIN for concat
-        BinaryOperator::OpEq => (OpCode::Eq, None),
-        BinaryOperator::OpLt => (OpCode::Lt, None),
-        BinaryOperator::OpLe => (OpCode::Le, None),
-        BinaryOperator::OpNe => (OpCode::Eq, None), // Lua 5.4: Use Eq with negated k
-        BinaryOperator::OpGt => (OpCode::Lt, None), // Lua 5.4: Use Lt with swapped operands
-        BinaryOperator::OpGe => (OpCode::Le, None), // Lua 5.4: Use Le with swapped operands
+        
+        // Comparison operators need special handling - they don't produce values directly
+        // Instead, they skip the next instruction if the comparison is true
+        // We need to generate: CMP + JMP + LFALSESKIP + LOADTRUE pattern
+        BinaryOperator::OpEq | BinaryOperator::OpNe |
+        BinaryOperator::OpLt | BinaryOperator::OpLe |
+        BinaryOperator::OpGt | BinaryOperator::OpGe => {
+            // Handle comparison operators with proper boolean result generation
+            return compile_comparison_to_bool(c, op_kind, left_reg, right_reg, result_reg);
+        }
+        
         BinaryOperator::OpAnd => (OpCode::TestSet, None), // Lua 5.4: Use TestSet for short-circuit
         BinaryOperator::OpOr => (OpCode::TestSet, None), // Lua 5.4: Use TestSet for short-circuit
         _ => return Err(format!("Unsupported binary operator: {:?}", op_kind)),
@@ -1324,6 +1339,124 @@ fn compile_binary_expr_to(
         );
     }
 
+    Ok(result_reg)
+}
+
+/// Compile comparison operator to produce boolean result
+/// Generates: CMP + JMP + LFALSESKIP + LOADTRUE pattern
+fn compile_comparison_to_bool(
+    c: &mut Compiler,
+    op_kind: BinaryOperator,
+    left_reg: u32,
+    right_reg: u32,
+    result_reg: u32,
+) -> Result<u32, String> {
+    
+    // Pattern: CMP with k=1 (skip if true) + JMP to true_label + LFALSESKIP + LOADTRUE
+    // If comparison is true: skip JMP, execute LFALSESKIP (skip LOADTRUE), wait that's wrong...
+    // Actually: CMP with k=1 (skip if true) means "skip next if comparison IS true"
+    // So: CMP(k=1) + JMP(to after_false) + LFALSESKIP + LOADTRUE
+    // If true: skip JMP, go to LFALSESKIP... no that's still wrong.
+    
+    // Let me trace luac output again:
+    // EQI 0 8 1      # if (R[0] == 8) != 1 then skip; which means: if R[0] != 8 then skip
+    // JMP 1          # jump over LFALSESKIP
+    // LFALSESKIP 0   # R[0] = false, skip LOADTRUE
+    // LOADTRUE 0     # R[0] = true
+    
+    // So when R[0] == 8:
+    //   - EQI: condition is true, DON'T skip (k=1 means skip if result != 1)
+    //   - Execute JMP: jump to LOADTRUE
+    //   - Execute LOADTRUE: R[0] = true ✓
+    
+    // When R[0] != 8:
+    //   - EQI: condition is false, skip JMP
+    //   - Execute LFALSESKIP: R[0] = false, skip LOADTRUE ✓
+    
+    let (cmp_opcode, swap_operands, negate) = match op_kind {
+        BinaryOperator::OpEq => (OpCode::Eq, false, false),
+        BinaryOperator::OpNe => (OpCode::Eq, false, true),
+        BinaryOperator::OpLt => (OpCode::Lt, false, false),
+        BinaryOperator::OpLe => (OpCode::Le, false, false),
+        BinaryOperator::OpGt => (OpCode::Lt, true, false),  // a > b == b < a
+        BinaryOperator::OpGe => (OpCode::Le, true, false),  // a >= b == b <= a
+        _ => unreachable!(),
+    };
+    
+    let (op1, op2) = if swap_operands {
+        (right_reg, left_reg)
+    } else {
+        (left_reg, right_reg)
+    };
+    
+    // k=1 means "skip if comparison is true", k=0 means "skip if comparison is false"
+    // For boolean result, we want: if true -> set true, if false -> set false
+    // So we use k=1 (skip if true) with the JMP pattern
+    let k = if negate { false } else { true };  // k=1 for normal comparison
+    
+    emit(
+        c,
+        Instruction::create_abck(cmp_opcode, result_reg, op1, op2, k),
+    );
+    
+    // JMP over LFALSESKIP (offset = 1)
+    emit(c, Instruction::create_sj(OpCode::Jmp, 1));
+    
+    // LFALSESKIP: load false and skip next instruction
+    emit(c, Instruction::encode_abc(OpCode::LFalseSkip, result_reg, 0, 0));
+    
+    // LOADTRUE: load true
+    emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
+    
+    Ok(result_reg)
+}
+
+/// Compile comparison operator with immediate value to produce boolean result
+/// Generates: CMPI + JMP + LFALSESKIP + LOADTRUE pattern
+fn compile_comparison_imm_to_bool(
+    c: &mut Compiler,
+    op_kind: BinaryOperator,
+    result_reg: u32,
+    imm_val: i32,
+) -> Result<u32, String> {
+    // Immediate comparison instructions: EQI, LTI, LEI, GTI, GEI
+    // Pattern same as register comparison: CMPI(k=1) + JMP + LFALSESKIP + LOADTRUE
+    
+    let (cmp_opcode, negate) = match op_kind {
+        BinaryOperator::OpEq => (OpCode::EqI, false),
+        BinaryOperator::OpNe => (OpCode::EqI, true),
+        BinaryOperator::OpLt => (OpCode::LtI, false),
+        BinaryOperator::OpLe => (OpCode::LeI, false),
+        BinaryOperator::OpGt => (OpCode::GtI, false),
+        BinaryOperator::OpGe => (OpCode::GeI, false),
+        _ => unreachable!(),
+    };
+    
+    // Encode immediate value as unsigned 8-bit (will be interpreted as signed)
+    let imm = if imm_val < 0 {
+        ((imm_val + 256) & 0xFF) as u32
+    } else {
+        (imm_val & 0xFF) as u32
+    };
+    
+    let k = if negate { false } else { true };
+    
+    // EQI A sB k: compare R[A] with immediate sB, k controls skip behavior
+    // The result register holds the operand AND will hold the boolean result
+    emit(
+        c,
+        Instruction::create_abck(cmp_opcode, result_reg, imm, 0, k),
+    );
+    
+    // JMP over LFALSESKIP (offset = 1)
+    emit(c, Instruction::create_sj(OpCode::Jmp, 1));
+    
+    // LFALSESKIP: load false and skip next instruction
+    emit(c, Instruction::encode_abc(OpCode::LFalseSkip, result_reg, 0, 0));
+    
+    // LOADTRUE: load true
+    emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
+    
     Ok(result_reg)
 }
 
