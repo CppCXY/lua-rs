@@ -193,26 +193,7 @@ pub fn resolve_local<'a>(c: &'a Compiler, name: &str) -> Option<Local> {
     scope.locals.iter().rev().find(|l| l.name == name).cloned()
 }
 
-/// Add an upvalue to the current compiler's upvalue list
-/// Returns the index of the upvalue in the list
-pub fn add_upvalue(c: &mut Compiler, name: String, is_local: bool, index: u32) -> usize {
-    let mut scope = c.scope_chain.borrow_mut();
-
-    // Check if we already have this upvalue
-    for (i, uv) in scope.upvalues.iter().enumerate() {
-        if uv.name == name && uv.is_local == is_local && uv.index == index {
-            return i;
-        }
-    }
-
-    // Add new upvalue
-    scope.upvalues.push(super::Upvalue {
-        name,
-        is_local,
-        index,
-    });
-    scope.upvalues.len() - 1
-}
+// add_upvalue function removed - logic inlined into resolve_upvalue_from_chain
 
 /// Resolve an upvalue by searching parent scopes through the scope chain
 /// This is called when a variable is not found in local scope
@@ -236,9 +217,19 @@ pub fn resolve_upvalue_from_chain(c: &mut Compiler, name: &str) -> Option<usize>
 
     // Resolve from parent scope - this returns info about where the variable was found
     let (is_local, index) = resolve_in_parent_scope(&parent, name)?;
-
+    
     // Add upvalue to current scope
-    let upvalue_index = add_upvalue(c, name.to_string(), is_local, index);
+    // Simply append in the order of first reference (Lua 5.4 behavior)
+    let upvalue_index = {
+        let mut scope = c.scope_chain.borrow_mut();
+        scope.upvalues.push(super::Upvalue {
+            name: name.to_string(),
+            is_local,
+            index,
+        });
+        scope.upvalues.len() - 1
+    };
+    
     Some(upvalue_index)
 }
 
@@ -358,31 +349,47 @@ pub fn end_scope(c: &mut Compiler) {
 
 /// Get a global variable (Lua 5.4 uses _ENV upvalue)
 pub fn emit_get_global(c: &mut Compiler, name: &str, dest_reg: u32) {
-    // Ensure _ENV is in upvalue[0]
+    // Ensure _ENV upvalue exists
     ensure_env_upvalue(c);
+    
+    // Find _ENV's actual index in upvalues
+    let env_index = {
+        let scope = c.scope_chain.borrow();
+        scope.upvalues.iter()
+            .position(|uv| uv.name == "_ENV")
+            .expect("_ENV upvalue should exist after ensure_env_upvalue")
+    };
     
     let lua_str = create_string_value(c, name);
     let const_idx = add_constant_dedup(c, lua_str);
     // GetTabUp: R(A) := UpValue[B][K(C)]
-    // B=0 is _ENV upvalue, C is constant index, k=1
+    // B is _ENV's upvalue index, C is constant index, k=1
     emit(
         c,
-        Instruction::create_abck(OpCode::GetTabUp, dest_reg, 0, const_idx, true),
+        Instruction::create_abck(OpCode::GetTabUp, dest_reg, env_index as u32, const_idx, true),
     );
 }
 
 /// Set a global variable (Lua 5.4 uses _ENV upvalue)
 pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
-    // Ensure _ENV is in upvalue[0]
+    // Ensure _ENV upvalue exists
     ensure_env_upvalue(c);
+    
+    // Find _ENV's actual index in upvalues
+    let env_index = {
+        let scope = c.scope_chain.borrow();
+        scope.upvalues.iter()
+            .position(|uv| uv.name == "_ENV")
+            .expect("_ENV upvalue should exist after ensure_env_upvalue")
+    };
     
     let lua_str = create_string_value(c, name);
     let const_idx = add_constant_dedup(c, lua_str);
     // SetTabUp: UpValue[A][K(B)] := RK(C)
-    // A=0 is _ENV upvalue, B is constant index (key name), C is source register, k=0 (C is register, not constant)
+    // A is _ENV's upvalue index, B is constant index (k=1), C is source register
     emit(
         c,
-        Instruction::create_abck(OpCode::SetTabUp, 0, const_idx, src_reg, false),
+        Instruction::create_abck(OpCode::SetTabUp, env_index as u32, const_idx, src_reg, true),
     );
 }
 
@@ -390,17 +397,9 @@ pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
 fn ensure_env_upvalue(c: &mut Compiler) {
     let scope = c.scope_chain.borrow();
     
-    // Check if _ENV is already the first upvalue
-    if !scope.upvalues.is_empty() && scope.upvalues[0].name == "_ENV" {
-        return;
-    }
-    
     // Check if _ENV exists anywhere in upvalues
     if scope.upvalues.iter().any(|uv| uv.name == "_ENV") {
-        // _ENV exists but not at index 0 - this is a problem
-        // In standard Lua, _ENV should always be upvalue[0]
-        // For now, we'll just return and let it fail
-        // TODO: Reorder upvalues to put _ENV at index 0
+        // _ENV already exists - no need to add it again
         return;
     }
     
@@ -408,17 +407,10 @@ fn ensure_env_upvalue(c: &mut Compiler) {
     drop(scope);
     
     // Try to resolve _ENV from parent scope chain
+    // This will add _ENV to upvalues in the order of first reference (Lua 5.4 behavior)
     if let Some(_env_idx) = resolve_upvalue_from_chain(c, "_ENV") {
         // Successfully added _ENV to upvalues
-        // Make sure it's at index 0
-        let mut scope = c.scope_chain.borrow_mut();
-        let env_uv = scope.upvalues.iter()
-            .position(|uv| uv.name == "_ENV")
-            .map(|idx| scope.upvalues.remove(idx));
-        
-        if let Some(env_uv) = env_uv {
-            scope.upvalues.insert(0, env_uv);
-        }
+        // No reordering needed - Lua 5.4 uses natural reference order
     } else {
         // Can't resolve _ENV from parent - this means we're in top-level chunk
         // Top-level chunk should have _ENV as upvalue[0] from VM initialization

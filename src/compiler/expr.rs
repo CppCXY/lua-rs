@@ -511,18 +511,37 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             );
         }
         BinaryOperator::OpConcat => {
-            result_reg = if can_reuse_left {
-                left_reg
+            // CONCAT A B: concatenate R[A] to R[A+B], result in R[A]
+            // Strategy: Ensure left and right are in consecutive registers
+            
+            // Check if left_reg and right_reg are already consecutive
+            if right_reg == left_reg + 1 && can_reuse_left {
+                // Perfect case: already consecutive and left can be reused
+                result_reg = left_reg;
+                let b_offset = 1; // right is at left+1
+                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, b_offset, 0));
             } else {
-                alloc_register(c)
-            };
-            // CONCAT A B: concatenate values from R[A] to R[A+B]
-            // B is the offset from A, not an absolute register
-            let b_offset = right_reg - result_reg;
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Concat, result_reg, b_offset, 0),
-            );
+                // Need to arrange registers
+                // Allocate a base register for the result
+                result_reg = alloc_register(c);
+                let right_target = result_reg + 1;
+                
+                // Ensure we have space for both operands
+                if c.freereg <= right_target {
+                    alloc_register(c);
+                }
+                
+                // Move operands to consecutive positions
+                if left_reg != result_reg {
+                    emit_move(c, result_reg, left_reg);
+                }
+                if right_reg != right_target {
+                    emit_move(c, right_target, right_reg);
+                }
+                
+                // Emit CONCAT: B=1 means concat R[A] and R[A+1]
+                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, 1, 0));
+            }
         }
         BinaryOperator::OpEq => {
             result_reg = if can_reuse_left {
@@ -734,11 +753,8 @@ fn compile_name_expr_to(
     // Get the identifier name
     let name = expr.get_name_text().unwrap_or("".to_string());
 
-    eprintln!("[compile_name_expr_to] name={}, dest={:?}, freereg={}", name, dest, c.freereg);
-
     // Check if it's a local variable
     if let Some(local) = resolve_local(c, &name) {
-        eprintln!("[compile_name_expr_to] Found local: register={}", local.register);
         // If local is already in dest register, no move needed
         if let Some(dest_reg) = dest {
             if local.register != dest_reg {
@@ -751,7 +767,6 @@ fn compile_name_expr_to(
 
     // Try to resolve as upvalue from parent scope chain
     if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
-        eprintln!("[compile_name_expr_to] Found upvalue: index={}", upvalue_index);
         let reg = dest.unwrap_or_else(|| alloc_register(c));
         let instr = Instruction::encode_abc(OpCode::GetUpval, reg, upvalue_index as u32, 0);
         c.chunk.code.push(instr);
@@ -759,9 +774,7 @@ fn compile_name_expr_to(
     }
 
     // It's a global variable
-    eprintln!("[compile_name_expr_to] Global variable");
     let reg = dest.unwrap_or_else(|| alloc_register(c));
-    eprintln!("[compile_name_expr_to] Allocated reg={}, new freereg={}", reg, c.freereg);
     emit_get_global(c, &name, reg);
     Ok(reg)
 }

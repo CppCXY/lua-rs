@@ -327,6 +327,17 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 }
                 return Ok(());
             }
+            
+            // Check if it's an upvalue assignment
+            if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
+                // Compile expression to a temporary register
+                let value_reg = compile_expr(c, &exprs[0])?;
+                // Emit SETUPVAL to copy value to upvalue
+                emit(c, Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0));
+                // Note: We don't free the register here to maintain compatibility
+                // Standard Lua may reuse it, but we need more careful analysis
+                return Ok(());
+            }
 
             // OPTIMIZATION: global = constant -> SETTABUP with k=1
             if resolve_upvalue_from_chain(c, &name).is_none() {
