@@ -179,6 +179,23 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
         }
     }
 
+    // Show locals if any
+    if !chunk.locals.is_empty() {
+        println!("\n{}locals:", indent);
+        for (i, name) in chunk.locals.iter().enumerate() {
+            println!("{}  {} = {} (register {})", indent, i, name, i);
+        }
+    }
+
+    // Show upvalues if any
+    if chunk.upvalue_count > 0 {
+        println!("\n{}upvalues ({}):", indent, chunk.upvalue_count);
+        for (i, uv) in chunk.upvalue_descs.iter().enumerate() {
+            let uv_type = if uv.is_local { "local" } else { "upvalue" };
+            println!("{}  {} = {} index={}", indent, i, uv_type, uv.index);
+        }
+    }
+
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
         println!();

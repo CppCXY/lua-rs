@@ -334,11 +334,20 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // xpcall(f, msgh, arg1, arg2, ...) -> status, result or error
 
+    eprintln!("[lua_xpcall] Called");
+    let all_args = get_args(vm);
+    eprintln!("[lua_xpcall] Total args: {}", all_args.len());
+    for (i, arg) in all_args.iter().enumerate() {
+        eprintln!("[lua_xpcall] Arg {}: {:?}", i, arg.kind());
+    }
+
     // Get the function to call (argument 0)
     let func = require_arg(vm, 0, "xpcall")?;
+    eprintln!("[lua_xpcall] func type: {:?}", func.kind());
 
     // Get the error handler (argument 1)
     let err_handler = require_arg(vm, 1, "xpcall")?;
+    eprintln!("[lua_xpcall] err_handler type: {:?}", err_handler.kind());
 
     // Get all arguments after the function and error handler
     let all_args = get_args(vm);

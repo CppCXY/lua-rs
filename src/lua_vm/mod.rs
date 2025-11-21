@@ -1740,29 +1740,44 @@ impl LuaVM {
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        eprintln!("[xpcall] protected_call_with_handler called");
+        eprintln!("[xpcall] err_handler type: {:?}", err_handler.kind());
+        
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
         let initial_frame_count = self.frames.len();
+        eprintln!("[xpcall] initial_frame_count: {}", initial_frame_count);
 
         let result = self.call_function_internal(func, args);
+        eprintln!("[xpcall] call_function_internal result: {:?}", result.is_ok());
 
         self.error_handler = old_handler;
 
         match result {
-            Ok(values) => Ok((true, values)),
+            Ok(values) => {
+                eprintln!("[xpcall] Success, returning {} values", values.len());
+                Ok((true, values))
+            }
             Err(LuaError::Yield(values)) => {
+                eprintln!("[xpcall] Yield encountered");
                 // Yield is not an error - propagate it
                 Err(LuaError::Yield(values))
             }
             Err(err_msg) => {
-                self.open_upvalues.clear();
-
+                eprintln!("[xpcall] Error encountered: {:?}", err_msg);
+                
+                // Clean up frames created by the failed function call
                 while self.frames.len() > initial_frame_count {
-                    self.frames.pop();
+                    let frame = self.frames.pop().unwrap();
+                    // Close upvalues belonging to this frame
+                    self.close_upvalues_from(frame.base_ptr);
                 }
+                
+                eprintln!("[xpcall] Calling error handler");
                 let err_str = self.create_string(&format!("{}", err_msg));
                 let handler_result = self.call_function_internal(err_handler, vec![err_str]);
+                eprintln!("[xpcall] Handler result: {:?}", handler_result.is_ok());
 
                 match handler_result {
                     Ok(handler_values) => Ok((false, handler_values)),
@@ -1945,6 +1960,7 @@ impl LuaVM {
                         },
                         Err(e) => {
                             // Real error occurred
+                            eprintln!("[call_function_internal] Error during execution: {:?}", e);
                             break Err(e);
                         }
                     }
@@ -1955,9 +1971,13 @@ impl LuaVM {
                         // Get return values
                         let result = self.return_values.clone();
                         self.return_values.clear();
+                        eprintln!("[call_function_internal] Lua function returned {} values", result.len());
                         Ok(result)
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        eprintln!("[call_function_internal] Returning error: {:?}", e);
+                        Err(e)
+                    },
                 }
             }
             _ => Err(LuaError::RuntimeError(

@@ -229,13 +229,20 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         LuaError::RuntimeError(format!("Invalid constant index: {}", c))
     })?;
 
+    eprintln!("[exec_gettabup] A={}, B={} (upvalue), C={} (constant)", a, b, c);
+    eprintln!("[exec_gettabup] Key: {:?}", key);
+    eprintln!("[exec_gettabup] Function has {} upvalues", func_ref.upvalues.len());
+    
     let upvalue = func_ref.upvalues.get(b).ok_or_else(|| {
         LuaError::RuntimeError(format!("Invalid upvalue index: {}", b))
     })?;
 
     let table = upvalue.get_value(&vm.frames, &vm.register_stack);
+    eprintln!("[exec_gettabup] Table type: {:?}", table.kind());
 
     let value = vm.table_get_with_meta(&table, &key).unwrap_or(crate::LuaValue::nil());
+    eprintln!("[exec_gettabup] Result value type: {:?}", value.kind());
+    
     vm.register_stack[base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)

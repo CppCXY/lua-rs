@@ -1257,6 +1257,7 @@ fn compile_local_function_stat(
     // Declare the local variable first (for recursion support)
     let func_reg = c.freereg;
     c.freereg += 1;
+    c.nactvar += 1; // Increment active variable count
 
     c.scope_chain.borrow_mut().locals.push(Local {
         name: func_name.clone(),

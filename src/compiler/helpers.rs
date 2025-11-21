@@ -163,13 +163,16 @@ pub fn add_local_with_attrs(
     is_to_be_closed: bool,
 ) {
     let local = Local {
-        name,
+        name: name.clone(),
         depth: c.scope_depth,
         register,
         is_const,
         is_to_be_closed,
     };
     c.scope_chain.borrow_mut().locals.push(local);
+    
+    // Add to chunk's locals list for debugging/introspection
+    c.chunk.locals.push(name);
 
     // Increment nactvar for non-const locals
     if !is_const {

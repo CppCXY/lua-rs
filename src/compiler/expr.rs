@@ -516,9 +516,12 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             } else {
                 alloc_register(c)
             };
+            // CONCAT A B: concatenate values from R[A] to R[A+B]
+            // B is the offset from A, not an absolute register
+            let b_offset = right_reg - result_reg;
             emit(
                 c,
-                Instruction::encode_abc(OpCode::Concat, result_reg, left_reg, right_reg),
+                Instruction::encode_abc(OpCode::Concat, result_reg, b_offset, 0),
             );
         }
         BinaryOperator::OpEq => {
@@ -731,8 +734,11 @@ fn compile_name_expr_to(
     // Get the identifier name
     let name = expr.get_name_text().unwrap_or("".to_string());
 
+    eprintln!("[compile_name_expr_to] name={}, dest={:?}, freereg={}", name, dest, c.freereg);
+
     // Check if it's a local variable
     if let Some(local) = resolve_local(c, &name) {
+        eprintln!("[compile_name_expr_to] Found local: register={}", local.register);
         // If local is already in dest register, no move needed
         if let Some(dest_reg) = dest {
             if local.register != dest_reg {
@@ -745,6 +751,7 @@ fn compile_name_expr_to(
 
     // Try to resolve as upvalue from parent scope chain
     if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
+        eprintln!("[compile_name_expr_to] Found upvalue: index={}", upvalue_index);
         let reg = dest.unwrap_or_else(|| alloc_register(c));
         let instr = Instruction::encode_abc(OpCode::GetUpval, reg, upvalue_index as u32, 0);
         c.chunk.code.push(instr);
@@ -752,7 +759,9 @@ fn compile_name_expr_to(
     }
 
     // It's a global variable
+    eprintln!("[compile_name_expr_to] Global variable");
     let reg = dest.unwrap_or_else(|| alloc_register(c));
+    eprintln!("[compile_name_expr_to] Allocated reg={}, new freereg={}", reg, c.freereg);
     emit_get_global(c, &name, reg);
     Ok(reg)
 }
@@ -1896,12 +1905,18 @@ pub fn compile_call_expr_with_returns_and_dest(
         Instruction::encode_abc(OpCode::Call, func_reg, b_param, c_param),
     );
 
-    // After CALL: adjust next_register based on return values
+    // After CALL: adjust freereg based on return values
     // CALL places return values starting at func_reg
-    // If num_returns == 0, CALL discards all returns, free register is func_reg
+    // If num_returns == 0, CALL discards all returns
     // If num_returns > 0, return values are in func_reg .. func_reg + num_returns - 1
-    // So next free register should be func_reg + num_returns
-    c.freereg = func_reg + num_returns as u32;
+    //
+    // CRITICAL: freereg can only be set to func_reg + num_returns if that's >= nactvar
+    // We cannot reclaim registers occupied by active local variables!
+    let new_freereg = func_reg + num_returns as u32;
+    if new_freereg >= c.nactvar as u32 {
+        c.freereg = new_freereg;
+    }
+    // If new_freereg < nactvar, keep freereg unchanged (locals are still alive)
 
     Ok(func_reg)
 }
@@ -2674,6 +2689,9 @@ pub fn compile_closure_expr_to(
 
     let closure_instr = Instruction::encode_abx(OpCode::Closure, dest_reg, chunk_index as u32);
     c.chunk.code.push(closure_instr);
+
+    // Note: Upvalue initialization is handled by the VM's exec_closure function
+    // using the upvalue_descs from the child chunk. No additional instructions needed.
 
     Ok(dest_reg)
 }
