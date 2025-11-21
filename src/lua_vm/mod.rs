@@ -279,6 +279,10 @@ impl LuaVM {
                 DispatchAction::Continue => {
                     // Continue to next instruction
                 }
+                DispatchAction::Skip(n) => {
+                    // Skip N additional instructions (PC already incremented by 1)
+                    self.current_frame_mut().pc += n;
+                }
                 DispatchAction::Return => {
                     // Function returned, check if execution is done
                     if self.frames.is_empty() {
@@ -1944,6 +1948,10 @@ impl LuaVM {
                             match action {
                                 DispatchAction::Continue => {
                                     // Continue to next instruction
+                                },
+                                DispatchAction::Skip(n) => {
+                                    // Skip N additional instructions
+                                    self.frames[frame_idx].pc += n;
                                 },
                                 DispatchAction::Return => {
                                     // Frame will be popped, loop will exit

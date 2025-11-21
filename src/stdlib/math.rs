@@ -123,20 +123,24 @@ fn math_max(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         ));
     }
 
-    let mut max = args[0].as_number().ok_or_else(|| {
+    // Keep the original value and its index to preserve type (integer vs float)
+    let mut max_idx = 0;
+    let mut max_val = args[0].as_number().ok_or_else(|| {
         LuaError::RuntimeError("bad argument to 'math.max' (number expected)".to_string())
     })?;
 
-    for arg in args.iter().skip(1) {
+    for (i, arg) in args.iter().enumerate().skip(1) {
         let val = arg.as_number().ok_or_else(|| {
             LuaError::RuntimeError("bad argument to 'math.max' (number expected)".to_string())
         })?;
-        if val > max {
-            max = val;
+        if val > max_val {
+            max_val = val;
+            max_idx = i;
         }
     }
 
-    Ok(MultiValue::single(LuaValue::float(max)))
+    // Return the original value (preserves integer/float type)
+    Ok(MultiValue::single(args[max_idx]))
 }
 
 fn math_min(vm: &mut LuaVM) -> LuaResult<MultiValue> {
@@ -148,20 +152,24 @@ fn math_min(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         ));
     }
 
-    let mut min = args[0].as_number().ok_or_else(|| {
+    // Keep the original value and its index to preserve type (integer vs float)
+    let mut min_idx = 0;
+    let mut min_val = args[0].as_number().ok_or_else(|| {
         LuaError::RuntimeError("bad argument to 'math.min' (number expected)".to_string())
     })?;
 
-    for arg in args.iter().skip(1) {
+    for (i, arg) in args.iter().enumerate().skip(1) {
         let val = arg.as_number().ok_or_else(|| {
             LuaError::RuntimeError("bad argument to 'math.min' (number expected)".to_string())
         })?;
-        if val < min {
-            min = val;
+        if val < min_val {
+            min_val = val;
+            min_idx = i;
         }
     }
 
-    Ok(MultiValue::single(LuaValue::float(min)))
+    // Return the original value (preserves integer/float type)
+    Ok(MultiValue::single(args[min_idx]))
 }
 
 fn math_modf(vm: &mut LuaVM) -> LuaResult<MultiValue> {

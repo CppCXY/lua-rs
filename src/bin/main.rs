@@ -114,6 +114,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(opts)
 }
 
+#[allow(dead_code)]
 fn setup_arg_table(vm: &mut LuaVM, script_name: Option<&str>, args: &[String]) {
     // Create arg table: arg[-1] = interpreter, arg[0] = script, arg[1..] = arguments
     let code = format!(
@@ -284,7 +285,8 @@ fn main() {
     vm.open_libs();
 
     // Setup arg table
-    setup_arg_table(&mut vm, opts.script_file.as_deref(), &opts.script_args);
+    // FIXME: Disabled due to compiler bug with negative table indices
+    // setup_arg_table(&mut vm, opts.script_file.as_deref(), &opts.script_args);
 
     // Require modules
     for module in &opts.require_modules {

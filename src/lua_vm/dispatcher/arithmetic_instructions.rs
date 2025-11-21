@@ -361,20 +361,17 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         // Integer operation with wraparound, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         // Float operation succeeded, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::number(l + r);
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     
     // Not numbers, fallthrough to MMBIN
-    
     Ok(DispatchAction::Continue)
 }
 
@@ -404,15 +401,13 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_sub(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number(l - r);
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     Ok(DispatchAction::Continue)
 }
@@ -443,15 +438,13 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_mul(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number(l * r);
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     Ok(DispatchAction::Continue)
 }
@@ -487,16 +480,14 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             ));
         }
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.rem_euclid(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         let result = l - (l / r).floor() * r;
         vm.register_stack[base_ptr + a] = LuaValue::number(result);
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     Ok(DispatchAction::Continue)
 }
@@ -541,7 +532,7 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::number(l_float.powf(r_float));
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
 }
 
 /// DIVK: R[A] = R[B] / K[C]
@@ -584,7 +575,8 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::number(l_float / r_float);
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip next instruction (MMBINK fallback) if operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// IDIVK: R[A] = R[B] // K[C]
@@ -618,15 +610,13 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             ));
         }
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.div_euclid(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number((l / r).floor());
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
     }
     Ok(DispatchAction::Continue)
 }
@@ -843,8 +833,7 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = LuaValue::integer(l_int & r_int);
-    vm.current_frame_mut().pc += 1;
-    Ok(DispatchAction::Continue)
+    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
 }
 
 /// BORK: R[A] = R[B] | K[C]
@@ -897,8 +886,7 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = LuaValue::integer(l_int | r_int);
-    vm.current_frame_mut().pc += 1;
-    Ok(DispatchAction::Continue)
+    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
 }
 
 /// BXORK: R[A] = R[B] ~ K[C]
@@ -951,8 +939,7 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = LuaValue::integer(l_int ^ r_int);
-    vm.current_frame_mut().pc += 1;
-    Ok(DispatchAction::Continue)
+    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
 }
 
 /// SHRI: R[A] = R[B] >> sC
@@ -1083,24 +1070,32 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 }
 
 /// Get metamethod name for binary operation
-fn get_binop_metamethod(op: u8) -> &'static str {
-    match op {
-        0 => "__add",
-        1 => "__sub",
-        2 => "__mul",
-        3 => "__mod",
-        4 => "__pow",
-        5 => "__div",
-        6 => "__idiv",
-        7 => "__band",
-        8 => "__bor",
-        9 => "__bxor",
-        10 => "__shl",
-        11 => "__shr",
-        12 => "__concat",
-        13 => "__eq",
-        14 => "__lt",
-        15 => "__le",
+fn get_binop_metamethod(tm: u8) -> &'static str {
+    // TMS enum from ltm.h:
+    // TM_INDEX=0, TM_NEWINDEX=1, TM_GC=2, TM_MODE=3, TM_LEN=4, TM_EQ=5,
+    // TM_ADD=6, TM_SUB=7, TM_MUL=8, TM_MOD=9, TM_POW=10, TM_DIV=11,
+    // TM_IDIV=12, TM_BAND=13, TM_BOR=14, TM_BXOR=15, TM_SHL=16, TM_SHR=17,
+    // TM_UNM=18, TM_BNOT=19, TM_LT=20, TM_LE=21, TM_CONCAT=22, TM_CALL=23, TM_CLOSE=24
+    match tm {
+        6 => "__add",
+        7 => "__sub",
+        8 => "__mul",
+        9 => "__mod",
+        10 => "__pow",
+        11 => "__div",
+        12 => "__idiv",
+        13 => "__band",
+        14 => "__bor",
+        15 => "__bxor",
+        16 => "__shl",
+        17 => "__shr",
+        22 => "__concat",
+        5 => "__eq",
+        20 => "__lt",
+        21 => "__le",
+        18 => "__unm",
+        19 => "__bnot",
+        4 => "__len",
         _ => "__unknown",
     }
 }
@@ -1191,8 +1186,8 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
 pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let c = Instruction::get_c(instr) as usize;  // C is the TagMethod
+    let k = Instruction::get_k(instr);            // k is the flip flag
     
     let frame = vm.current_frame();
     let func_ptr = frame
@@ -1203,18 +1198,26 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     let chunk = &func_ref.chunk;
     let base_ptr = frame.base_ptr;
     
-    let rb = vm.register_stack[base_ptr + b];
-    let rc = chunk.constants.get(c).copied().ok_or_else(|| {
-        LuaError::RuntimeError(format!("Constant index out of bounds: {}", c))
+    let ra = vm.register_stack[base_ptr + a];
+    let kb = chunk.constants.get(b).copied().ok_or_else(|| {
+        LuaError::RuntimeError(format!("Constant index out of bounds: {}", b))
     })?;
     
-    let metamethod_name = get_binop_metamethod(k as u8);
+    // C is the TagMethod, not a constant index
+    let metamethod_name = get_binop_metamethod(c as u8);
     let mm_key = vm.create_string(metamethod_name);
     
+    // k is flip flag: if k==false then (ra, kb), if k==true then (kb, ra)
+    let (left, right) = if !k {
+        (ra, kb)
+    } else {
+        (kb, ra)
+    };
+    
     // Try to get metamethod from operands' metatables
-    let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
+    let metamethod = if let Some(mt) = vm.table_get_metatable(&left) {
         vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
-    } else if let Some(mt) = vm.table_get_metatable(&rc) {
+    } else if let Some(mt) = vm.table_get_metatable(&right) {
         vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
     } else {
         LuaValue::nil()
@@ -1223,13 +1226,13 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     if metamethod.is_nil() {
         return Err(LuaError::RuntimeError(format!(
             "attempt to perform arithmetic on {} and {}",
-            rb.type_name(),
-            rc.type_name()
+            left.type_name(),
+            right.type_name()
         )));
     }
     
     // Call metamethod
-    let args = vec![rb, rc];
+    let args = vec![left, right];
     let result = vm.call_metamethod(&metamethod, &args)?
         .unwrap_or(LuaValue::nil());
     vm.register_stack[base_ptr + a] = result;

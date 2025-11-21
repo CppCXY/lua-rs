@@ -39,22 +39,17 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
     
-    eprintln!("[exec_setupval] A={}, B={}, base_ptr={}", a, b, base_ptr);
-    
     let func_ptr = frame.get_function_ptr().ok_or_else(|| {
         LuaError::RuntimeError("Not a Lua function".to_string())
     })?;
     let func = unsafe { &*func_ptr };
     let func_ref = func.borrow();
-
-    eprintln!("[exec_setupval] Function has {} upvalues", func_ref.upvalues.len());
     
     let upvalue = func_ref.upvalues.get(b).ok_or_else(|| {
         LuaError::RuntimeError(format!("Invalid upvalue index: {}", b))
     })?;
 
     let value = vm.register_stack[base_ptr + a];
-    eprintln!("[exec_setupval] Setting upvalue[{}] to {:?}", b, value);
     
     upvalue.set_value(&mut vm.frames, &mut vm.register_stack, value);
 
@@ -101,14 +96,9 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let mut upvalues = Vec::new();
     let mut new_open_upvalues = Vec::new();
     
-    eprintln!("[exec_closure] Creating closure with {} upvalues", upvalue_descs.len());
-    
-    for (i, desc) in upvalue_descs.iter().enumerate() {
-        eprintln!("[exec_closure] Upvalue[{}]: is_local={}, index={}", i, desc.is_local, desc.index);
-        
+    for (_i, desc) in upvalue_descs.iter().enumerate() {
         if desc.is_local {
             // Upvalue refers to a register in current function
-            eprintln!("[exec_closure] Creating upvalue for register {} in frame {}", desc.index, frame.frame_id);
             
             // Check if this upvalue is already open
             let existing_index = vm.open_upvalues.iter()

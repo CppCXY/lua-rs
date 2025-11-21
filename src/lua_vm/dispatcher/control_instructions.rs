@@ -438,9 +438,6 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // Get function from R[A]
     let func = vm.register_stack[base + a];
 
-    eprintln!("[exec_call] A={}, B={} (args+1), C={} (rets+1)", a, b, c);
-    eprintln!("[exec_call] Function type: {:?}", func.kind());
-
     // Determine argument count
     // CRITICAL: In Lua, when B != 0, CALL sets its own top (doesn't use frame.top)
     // When B == 0, it uses the top set by the previous instruction (e.g., another CALL)
@@ -471,7 +468,6 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     match func.kind() {
         LuaValueKind::CFunction => {
-            eprintln!("[exec_call] Handling CFunction with {} args", arg_count);
             
             // Call C function immediately
             let cfunc = func.as_cfunction().unwrap();
@@ -490,8 +486,6 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 vm.register_stack[call_base + i + 1] = vm.register_stack[base + a + 1 + i];
             }
             
-            eprintln!("[exec_call] Creating temp frame at base {}", call_base);
-            
             let temp_frame = LuaCallFrame::new_c_function(
                 frame_id,
                 vm.current_frame().function_value,
@@ -501,9 +495,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             );
             
             vm.frames.push(temp_frame);
-            eprintln!("[exec_call] Calling CFunction...");
             let result = cfunc(vm)?;
-            eprintln!("[exec_call] CFunction returned");
             vm.frames.pop();
             
             // Store return values
