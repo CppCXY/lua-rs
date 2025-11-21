@@ -1863,7 +1863,9 @@ impl LuaVM {
                     let lua_func_ref = self.object_pool.get_function(lua_func_id).ok_or(
                         LuaError::RuntimeError("Invalid function reference".to_string()),
                     )?;
-                    lua_func_ref.borrow().chunk.max_stack_size
+                    let size = lua_func_ref.borrow().chunk.max_stack_size;
+                    // Ensure at least 1 register for function body
+                    if size == 0 { 1 } else { size }
                 };
 
                 // For Lua function, use similar logic to call_metamethod

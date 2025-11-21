@@ -51,8 +51,8 @@ fn try_compile_immediate_comparison(
                         // Compile left operand
                         let left_reg = compile_expr(c, &left)?;
 
-                        // Encode immediate value with OFFSET_SC (same as ADDI/etc)
-                        let imm = ((int_val + 127) & 0xFF) as u32;
+                        // Encode immediate value with OFFSET_SB = 128 for signed B field
+                        let imm = ((int_val + 128) & 0xFF) as u32;
 
                         // Emit immediate comparison
                         // C parameter controls skip behavior:

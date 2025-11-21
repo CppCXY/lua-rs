@@ -510,13 +510,22 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 vm.register_stack[base + a + i] = value;
             }
             
+            // CRITICAL: Update caller's top to indicate how many values were returned
+            // This is essential for variable returns (C=0) so the next instruction knows
+            // how many values are available (e.g., CALL with B=0)
+            vm.current_frame_mut().top = a + num_returns;
+            
             Ok(DispatchAction::Continue)
         },
         LuaValueKind::Function => {
             // Get max_stack_size from function before creating frame
             let func_id = func.as_function_id().unwrap();
             let max_stack_size = match vm.object_pool.get_function(func_id) {
-                Some(func_ref) => func_ref.borrow().chunk.max_stack_size,
+                Some(func_ref) => {
+                    let size = func_ref.borrow().chunk.max_stack_size;
+                    // Ensure at least 1 register for function body
+                    if size == 0 { 1 } else { size }
+                },
                 None => {
                     return Err(LuaError::RuntimeError("Invalid function reference".to_string()));
                 }

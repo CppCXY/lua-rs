@@ -1263,13 +1263,16 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpEq | BinaryOperator::OpNe |
                         BinaryOperator::OpLt | BinaryOperator::OpLe |
                         BinaryOperator::OpGt | BinaryOperator::OpGe => {
-                            let left_reg = compile_expr(c, &left)?;
-                            // Allocate a new register for the boolean result
-                            // (can't reuse left_reg because comparison needs the original value)
-                            let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                            
-                            // Use immediate comparison instruction with boolean result pattern
-                            return compile_comparison_imm_to_bool(c, op_kind, left_reg, result_reg, int_val as i32);
+                            // Comparison instructions use sB field: range [-128, 127]
+                            if int_val >= -128 && int_val <= 127 {
+                                let left_reg = compile_expr(c, &left)?;
+                                // Allocate a new register for the boolean result
+                                // (can't reuse left_reg because comparison needs the original value)
+                                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                                
+                                // Use immediate comparison instruction with boolean result pattern
+                                return compile_comparison_imm_to_bool(c, op_kind, left_reg, result_reg, int_val as i32);
+                            }
                         }
                         _ => {}
                     }
@@ -1426,8 +1429,8 @@ fn compile_comparison_imm_to_bool(
         _ => unreachable!(),
     };
     
-    // Encode immediate value with OFFSET_SC = 127
-    let imm = ((imm_val + 127) & 0xFF) as u32;
+    // Encode immediate value with OFFSET_SB = 128 for signed B field
+    let imm = ((imm_val + 128) & 0xFF) as u32;
     
     let k = if negate { false } else { true };
     

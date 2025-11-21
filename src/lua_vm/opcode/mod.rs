@@ -224,6 +224,7 @@ impl Instruction {
     pub const MAX_SJ: u32 = (1 << Self::SIZE_SJ) - 1;
 
     // Offsets for signed arguments
+    pub const OFFSET_SB: i32 = 128; // For signed B field (-128 to 127)
     pub const OFFSET_SBX: i32 = (Self::MAX_BX >> 1) as i32;
     pub const OFFSET_SJ: i32 = (Self::MAX_SJ >> 1) as i32;
     pub const OFFSET_SC: i32 = (Self::MAX_C >> 1) as i32;
@@ -282,7 +283,7 @@ impl Instruction {
 
     #[inline(always)]
     pub fn get_sb(i: u32) -> i32 {
-        Self::get_b(i) as i32 - Self::OFFSET_SC
+        Self::get_b(i) as i32 - Self::OFFSET_SB
     }
 
     #[inline(always)]
