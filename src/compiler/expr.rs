@@ -1997,7 +1997,18 @@ fn compile_index_expr_to(
         .ok_or("Index expression missing table")?;
     let table_reg = compile_expr(c, &prefix_expr)?;
 
-    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+    // Lua optimization: reuse table_reg if:
+    // 1. No specific dest is requested
+    // 2. table_reg is a temporary (>= freereg - 1, meaning it was just allocated)
+    // This generates GETFIELD A B C where A=B (overwrites the table with the result)
+    let can_reuse_table = table_reg + 1 == c.freereg;
+    let result_reg = dest.unwrap_or_else(|| {
+        if can_reuse_table {
+            table_reg
+        } else {
+            alloc_register(c)
+        }
+    });
 
     // Get index key and emit optimized instruction if possible
     let key = expr.get_index_key().ok_or("Index expression missing key")?;
