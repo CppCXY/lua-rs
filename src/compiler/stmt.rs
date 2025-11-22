@@ -426,9 +426,16 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
         let reg = if is_last && all_locals && val_regs.len() + 1 == vars.len() {
             // Last value can go directly to its target
             if let Some(target_reg) = target_regs[val_regs.len()] {
-                // Use old implementation for targeted compilation
-                compile_expr_to(c, expr, Some(target_reg))?;
-                target_reg
+                // CRITICAL: compile_expr_to may NOT honor dest if it's unsafe!
+                // Always use the returned register value
+                let result_reg = compile_expr_to(c, expr, Some(target_reg))?;
+                // If result ended up in different register, move it
+                if result_reg != target_reg {
+                    emit_move(c, target_reg, result_reg);
+                    target_reg
+                } else {
+                    result_reg
+                }
             } else {
                 compile_expr(c, expr)?
             }

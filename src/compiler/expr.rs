@@ -690,6 +690,9 @@ fn compile_literal_expr(
     dest: Option<u32>,
 ) -> Result<u32, String> {
     let reg = dest.unwrap_or_else(|| alloc_register(c));
+    
+    // Ensure max_stack_size can accommodate this register
+    ensure_register(c, reg);
 
     let literal_token = expr
         .get_literal()
@@ -1853,8 +1856,17 @@ pub fn compile_call_expr_with_returns_and_dest(
     let mut arg_regs = Vec::new();
     let mut last_arg_is_call_all_out = false;
 
+    // CRITICAL: Compile arguments directly to their target positions
+    // This is how standard Lua ensures arguments are in consecutive registers
+    // Each argument should be compiled to args_start + i
     for (i, arg_expr) in arg_exprs.iter().enumerate() {
         let is_last = i == arg_exprs.len() - 1;
+        let arg_dest = args_start + i as u32;
+
+        // Ensure max_stack_size can accommodate this register
+        if arg_dest as usize >= c.chunk.max_stack_size {
+            c.chunk.max_stack_size = (arg_dest + 1) as usize;
+        }
 
         // OPTIMIZATION: If last argument is a call, use "all out" mode
         // Use recursive compile_call_expr_with_returns to support method calls (SELF instruction)
@@ -1967,7 +1979,8 @@ pub fn compile_call_expr_with_returns_and_dest(
             }
         }
 
-        let arg_reg = compile_expr(c, arg_expr)?;
+        // Compile argument directly to its target position
+        let arg_reg = compile_expr_to(c, arg_expr, Some(arg_dest))?;
         arg_regs.push(arg_reg);
     }
 
@@ -2797,7 +2810,13 @@ pub fn compile_closure_expr_to(
         }
     }
 
-    func_compiler.chunk.max_stack_size = func_compiler.peak_freereg as usize;
+    // Set max_stack_size to the maximum of peak_freereg and current max_stack_size
+    // peak_freereg tracks registers allocated via alloc_register()
+    // but max_stack_size may be higher due to direct register usage via dest parameter
+    func_compiler.chunk.max_stack_size = std::cmp::max(
+        func_compiler.peak_freereg as usize,
+        func_compiler.chunk.max_stack_size
+    );
 
     // Store upvalue information from scope_chain
     let upvalues = func_compiler.scope_chain.borrow().upvalues.clone();

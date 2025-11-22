@@ -111,6 +111,15 @@ pub fn reserve_registers(c: &mut Compiler, n: u32) {
     }
 }
 
+/// Ensure a specific register is available (update max_stack_size if needed)
+/// This should be called when using a register directly without alloc_register
+pub fn ensure_register(c: &mut Compiler, reg: u32) {
+    let min_stack = (reg + 1) as usize;
+    if min_stack > c.chunk.max_stack_size {
+        c.chunk.max_stack_size = min_stack;
+    }
+}
+
 /// Free a register (only if >= nactvar)
 /// Lua equivalent: freereg(fs, reg)
 #[allow(dead_code)]
