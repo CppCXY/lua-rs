@@ -547,24 +547,50 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             let new_base = vm.register_stack.len();
             // Ensure new frame can hold at least the arguments
             let actual_stack_size = max_stack_size.max(arg_count);
-            vm.ensure_stack_capacity(new_base + actual_stack_size);
+            
+            // For vararg functions, we need extra space to store varargs beyond max_stack_size
+            // Check if this is a vararg function by looking at the chunk
+            let is_vararg = match vm.object_pool.get_function(func_id) {
+                Some(func_ref) => func_ref.borrow().chunk.is_vararg,
+                None => false,
+            };
+            
+            let total_stack_size = if is_vararg && arg_count > 0 {
+                // Allocate space for: max_stack_size + varargs
+                actual_stack_size + arg_count
+            } else {
+                actual_stack_size
+            };
+            
+            vm.ensure_stack_capacity(new_base + total_stack_size);
 
             // Initialize registers with nil
-            for i in 0..actual_stack_size {
+            for i in 0..total_stack_size {
                 vm.register_stack[new_base + i] = crate::LuaValue::nil();
             }
 
-            // Copy arguments to new frame
-            for i in 0..arg_count {
-                vm.register_stack[new_base + i] = vm.register_stack[base + a + 1 + i];
+            if is_vararg && arg_count > 0 {
+                // For vararg functions, copy arguments BEYOND max_stack_size
+                // so they won't be overwritten by local variables
+                let vararg_base = new_base + actual_stack_size;
+                for i in 0..arg_count {
+                    vm.register_stack[vararg_base + i] = vm.register_stack[base + a + 1 + i];
+                }
+            } else {
+                // Regular function: copy arguments to R[0], R[1], ...
+                for i in 0..arg_count {
+                    vm.register_stack[new_base + i] = vm.register_stack[base + a + 1 + i];
+                }
             }
 
             // Create and push new frame
+            // IMPORTANT: For vararg functions, top should reflect actual arg count, not max_stack_size
+            // VARARGPREP will use this to determine the number of varargs
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
                 func,
                 new_base,
-                actual_stack_size,
+                arg_count, // top = number of arguments passed
                 a, // result_reg: where to store return values
                 return_count,
             );
