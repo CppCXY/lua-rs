@@ -1,12 +1,18 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
+mod exp2reg;
+mod expdesc;
 mod expr;
 mod helpers;
 mod stmt;
+mod tagmethod;
+
+pub(crate) use tagmethod::TagMethod;
 
 use crate::lua_value::Chunk;
+use crate::lua_value::UpvalueDesc;
 use crate::lua_vm::LuaVM;
-use crate::opcode::{Instruction, OpCode};
+use crate::lua_vm::{Instruction, OpCode};
 // use crate::optimizer::optimize_constants;  // Disabled for now
 use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
 use helpers::*;
@@ -46,7 +52,9 @@ impl ScopeChain {
 pub struct Compiler<'a> {
     pub(crate) chunk: Chunk,
     pub(crate) scope_depth: usize,
-    pub(crate) next_register: u32,
+    pub(crate) freereg: u32,   // First free register (replaces next_register)
+    pub(crate) peak_freereg: u32, // Peak value of freereg (for max_stack_size)
+    pub(crate) nactvar: usize, // Number of active local variables
     pub(crate) loop_stack: Vec<LoopInfo>,
     pub(crate) labels: Vec<Label>,       // Label definitions
     pub(crate) gotos: Vec<GotoInfo>,     // Pending goto statements
@@ -70,6 +78,8 @@ pub(crate) struct Local {
     pub name: String,
     pub depth: usize,
     pub register: u32,
+    pub is_const: bool,        // <const> attribute
+    pub is_to_be_closed: bool, // <close> attribute
 }
 
 /// Loop information for break statements
@@ -97,7 +107,9 @@ impl<'a> Compiler<'a> {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
-            next_register: 0,
+            freereg: 0,
+            peak_freereg: 0,
+            nactvar: 0,
             loop_stack: Vec::new(),
             labels: Vec::new(),
             gotos: Vec::new(),
@@ -113,7 +125,9 @@ impl<'a> Compiler<'a> {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
-            next_register: 0,
+            freereg: 0,
+            peak_freereg: 0,
+            nactvar: 0,
             loop_stack: Vec::new(),
             labels: Vec::new(),
             gotos: Vec::new(),
@@ -162,6 +176,28 @@ impl<'a> Compiler<'a> {
 
 /// Compile a chunk (root node)
 fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
+    // Lua 5.4: Every chunk has _ENV as upvalue[0] for accessing globals
+    // Add _ENV upvalue descriptor to the chunk and scope chain
+    c.chunk.upvalue_descs.push(UpvalueDesc {
+        is_local: true,  // Main chunk's _ENV is provided by VM
+        index: 0,
+    });
+    c.chunk.upvalue_count = 1;
+    
+    // Add _ENV to scope chain so child functions can resolve it
+    c.scope_chain.borrow_mut().upvalues.push(Upvalue {
+        name: "_ENV".to_string(),
+        is_local: true,
+        index: 0,
+    });
+    
+    // Emit VARARGPREP at the beginning - Lua 5.4 always emits this for main chunks
+    // It adjusts vararg parameters for functions that accept ... (varargs)
+    // For non-vararg functions, nparams = param_count; for vararg functions, nparams is used
+    // Main chunks are always considered vararg (param_count = 0, is_vararg = true)
+    c.chunk.is_vararg = true;
+    emit(c, Instruction::encode_abc(OpCode::VarargPrep, 0, 0, 0));
+
     if let Some(block) = chunk.get_block() {
         compile_block(c, &block)?;
     }
@@ -170,7 +206,25 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     check_unresolved_gotos(c)?;
 
     // Emit return at the end
-    emit(c, Instruction::encode_abc(OpCode::Return, 0, 1, 0));
+    // Lua 5.4: RETURN instruction format: RETURN A B C k
+    // A = first register to return (usually 0 or freereg)
+    // B = number of values to return + 1 (1 means 0 returns, 2 means 1 return, 0 means return to top)
+    // C = is vararg flag (main chunks are vararg, so C should be > 0)
+    // k = needs to close upvalues
+    //
+    // For main chunk final return:
+    // - A should be the current free register (or 0 if no registers used)
+    // - B = 1 (return 0 values)
+    // - C = 1 (chunk is vararg, need to correct func - actually encoded in k bit + C field)
+    // - k = depends on whether we have upvalues to close
+    //
+    // Looking at luac output, for main chunks it uses: RETURN freereg 1 1
+    // Main chunk always uses regular RETURN (not Return0), with k=1
+    let freereg = c.freereg;
+    emit(
+        c,
+        Instruction::create_abck(OpCode::Return, freereg, 1, 0, true),
+    );
     Ok(())
 }
 
@@ -187,13 +241,13 @@ fn optimize_chunk(chunk: Chunk) -> Chunk {
     // Optimizer temporarily disabled - causes issues with loops
     // The simple constant folder doesn't handle control flow correctly
     // Need proper basic block analysis before enabling optimizations
-    
+
     // Return chunk unchanged
     chunk
-    
+
     /* Disabled optimizer code:
     let (optimized_code, optimized_constants) = optimize_constants(&chunk.code, &chunk.constants);
-    
+
     Chunk {
         code: optimized_code,
         constants: optimized_constants,

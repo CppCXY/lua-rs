@@ -3,7 +3,7 @@
 use crate::ffi;
 use crate::lib_registry::{LibraryEntry, LibraryModule};
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_ffi_lib() -> LibraryModule {
     LibraryModule {
@@ -43,56 +43,56 @@ fn create_ffi_c_namespace(vm: &mut LuaVM) -> LuaValue {
     table
 }
 
-fn ffi_c_index_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_c_index_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_c_index(vm)
 }
 
 // Wrapper functions that call the actual FFI implementations
 
-fn ffi_cdef_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_cdef_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_cdef(vm)
 }
 
-fn ffi_new_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_new_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_new(vm)
 }
 
-fn ffi_typeof_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_typeof_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_typeof(vm)
 }
 
-fn ffi_cast_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_cast_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_cast(vm)
 }
 
-fn ffi_sizeof_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_sizeof_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_sizeof(vm)
 }
 
-fn ffi_alignof_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_alignof_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_alignof(vm)
 }
 
-fn ffi_offsetof_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_offsetof_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_offsetof(vm)
 }
 
-fn ffi_istype_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_istype_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_istype(vm)
 }
 
-fn ffi_load_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_load_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_load(vm)
 }
 
-fn ffi_string_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_string_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_string(vm)
 }
 
-fn ffi_copy_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_copy_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_copy(vm)
 }
 
-fn ffi_fill_wrapper(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn ffi_fill_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     ffi::ffi_fill(vm)
 }

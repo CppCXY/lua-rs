@@ -3,7 +3,7 @@
 
 use crate::lib_registry::{LibraryModule, get_arg, require_arg};
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 
 pub fn create_table_lib() -> LibraryModule {
     crate::lib_module!("table", {
@@ -18,20 +18,26 @@ pub fn create_table_lib() -> LibraryModule {
 }
 
 /// table.concat(list [, sep [, i [, j]]]) - Concatenate table elements
-fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.concat")?;
 
     let sep_value = get_arg(vm, 1);
     let sep = match sep_value {
         Some(v) => vm
             .get_string(&v)
-            .ok_or_else(|| "bad argument #2 to 'table.concat' (string expected)".to_string())?
+            .ok_or_else(|| {
+                LuaError::RuntimeError(
+                    "bad argument #2 to 'table.concat' (string expected)".to_string(),
+                )
+            })?
             .as_str()
             .to_string(),
         None => "".to_string(),
     };
 
-    let table_ref = vm.get_table(&table_val).ok_or("Invalid table")?;
+    let table_ref = vm
+        .get_table(&table_val)
+        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     let len = table_ref.borrow().len();
 
     let i = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
@@ -49,10 +55,10 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
             if let Some(s) = value.as_string() {
                 parts.push(s.as_str().to_string());
             } else {
-                return Err(format!(
+                return Err(LuaError::RuntimeError(format!(
                     "bad value at index {} in 'table.concat' (string expected)",
                     idx
-                ));
+                )));
             }
         }
     }
@@ -62,11 +68,13 @@ fn table_concat(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// table.insert(list, [pos,] value) - Insert element
-fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn table_insert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.insert")?;
     let argc = crate::lib_registry::arg_count(vm);
 
-    let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
+    let table_ref_cell = vm
+        .get_table(&table_val)
+        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     let mut table_ref = table_ref_cell.borrow_mut();
     let len = table_ref.len();
 
@@ -78,29 +86,37 @@ fn table_insert(vm: &mut LuaVM) -> Result<MultiValue, String> {
         // table.insert(list, pos, value)
         let pos = require_arg(vm, 1, "table.insert")?
             .as_integer()
-            .ok_or_else(|| "bad argument #2 to 'table.insert' (number expected)".to_string())?;
+            .ok_or_else(|| {
+                LuaError::RuntimeError(
+                    "bad argument #2 to 'table.insert' (number expected)".to_string(),
+                )
+            })?;
 
         let value = require_arg(vm, 2, "table.insert")?;
 
         if pos < 1 || pos > len as i64 + 1 {
-            return Err(format!(
+            return Err(LuaError::RuntimeError(format!(
                 "bad argument #2 to 'table.insert' (position out of bounds)"
-            ));
+            )));
         }
 
         table_ref.insert_array_at(pos as usize - 1, value)?;
     } else {
-        return Err("wrong number of arguments to 'table.insert'".to_string());
+        return Err(LuaError::RuntimeError(
+            "wrong number of arguments to 'table.insert'".to_string(),
+        ));
     }
 
     Ok(MultiValue::empty())
 }
 
 /// table.remove(list [, pos]) - Remove element
-fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn table_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.remove")?;
 
-    let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
+    let table_ref_cell = vm
+        .get_table(&table_val)
+        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     let mut table_ref = table_ref_cell.borrow_mut();
     let len = table_ref.len();
 
@@ -113,9 +129,9 @@ fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
         .unwrap_or(len as i64);
 
     if pos < 1 || pos > len as i64 {
-        return Err(format!(
+        return Err(LuaError::RuntimeError(format!(
             "bad argument #2 to 'table.remove' (position out of bounds)"
-        ));
+        )));
     }
 
     let removed = table_ref.remove_array_at(pos as usize - 1)?;
@@ -123,27 +139,34 @@ fn table_remove(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// table.move(a1, f, e, t [, a2]) - Move elements
-fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn table_move(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let src_val = require_arg(vm, 0, "table.move")?;
 
     let f = require_arg(vm, 1, "table.move")?
         .as_integer()
-        .ok_or_else(|| "bad argument #2 to 'table.move' (number expected)".to_string())?;
+        .ok_or_else(|| {
+            LuaError::RuntimeError("bad argument #2 to 'table.move' (number expected)".to_string())
+        })?;
 
     let e = require_arg(vm, 2, "table.move")?
         .as_integer()
-        .ok_or_else(|| "bad argument #3 to 'table.move' (number expected)".to_string())?;
-
+        .ok_or_else(|| {
+            LuaError::RuntimeError("bad argument #3 to 'table.move' (number expected)".to_string())
+        })?;
     let t = require_arg(vm, 3, "table.move")?
         .as_integer()
-        .ok_or_else(|| "bad argument #4 to 'table.move' (number expected)".to_string())?;
+        .ok_or_else(|| {
+            LuaError::RuntimeError("bad argument #4 to 'table.move' (number expected)".to_string())
+        })?;
 
     let dst_value = get_arg(vm, 4).unwrap_or_else(|| src_val.clone());
 
     // Copy elements
     let mut values = Vec::new();
     {
-        let src_ref_cell = vm.get_table(&src_val).ok_or("Invalid source table")?;
+        let src_ref_cell = vm
+            .get_table(&src_val)
+            .ok_or(LuaError::RuntimeError("Invalid source table".to_string()))?;
         let src_ref = src_ref_cell.borrow();
         for i in f..=e {
             let val = src_ref
@@ -154,9 +177,9 @@ fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
     }
 
     {
-        let dst_ref_cell = vm
-            .get_table(&dst_value)
-            .ok_or("Invalid destination table")?;
+        let dst_ref_cell = vm.get_table(&dst_value).ok_or(LuaError::RuntimeError(
+            "Invalid destination table".to_string(),
+        ))?;
         let mut dst_ref = dst_ref_cell.borrow_mut();
         for (offset, val) in values.into_iter().enumerate() {
             dst_ref.raw_set(LuaValue::integer(t + offset as i64), val);
@@ -167,12 +190,14 @@ fn table_move(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// table.pack(...) - Pack values into table
-fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn table_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let args = crate::lib_registry::get_args(vm);
     let table = vm.create_table();
     // Set 'n' field
     let n_key = vm.create_string("n");
-    let table_ref_cell = vm.get_table(&table).ok_or("Invalid table")?;
+    let table_ref_cell = vm
+        .get_table(&table)
+        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     let mut table_ref = table_ref_cell.borrow_mut();
 
     for (i, arg) in args.iter().enumerate() {
@@ -186,9 +211,11 @@ fn table_pack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// table.unpack(list [, i [, j]]) - Unpack table into values
-fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn table_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.unpack")?;
-    let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
+    let table_ref_cell = vm
+        .get_table(&table_val)
+        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     let table_ref = table_ref_cell.borrow();
     let len = table_ref.len();
 
@@ -210,13 +237,15 @@ fn table_unpack(vm: &mut LuaVM) -> Result<MultiValue, String> {
 }
 
 /// table.sort(list [, comp]) - Sort table in place
-fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.sort")?;
     let comp = get_arg(vm, 1);
 
     // Get array length and extract values
     let len = {
-        let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
+        let table_ref_cell = vm
+            .get_table(&table_val)
+            .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
         let table_ref = table_ref_cell.borrow();
         table_ref.len()
     };
@@ -228,7 +257,9 @@ fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
     // Extract values from array part [1..len]
     let mut values = Vec::with_capacity(len);
     {
-        let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
+        let table_ref_cell = vm
+            .get_table(&table_val)
+            .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
         let table_ref = table_ref_cell.borrow();
         for i in 1..=len {
             if let Some(val) = table_ref.get_int(i as i64) {
@@ -243,7 +274,9 @@ fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
     if comp.is_none() || comp.as_ref().map(|v| v.is_nil()).unwrap_or(true) {
         values.sort();
         // Write back sorted values
-        let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
+        let table_ref_cell = vm
+            .get_table(&table_val)
+            .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
         let mut table_ref = table_ref_cell.borrow_mut();
         for (i, val) in values.into_iter().enumerate() {
             table_ref.set_int((i + 1) as i64, val);
@@ -253,29 +286,40 @@ fn table_sort(vm: &mut LuaVM) -> Result<MultiValue, String> {
 
     let comp_func = comp.unwrap();
 
-    // Custom comparison using Lua function - insertion sort
-    for i in 1..values.len() {
-        let mut j = i;
-        while j > 0 {
-            // Call comparison function: comp(a, b) should return true if a < b
-            let args = vec![values[j].clone(), values[j - 1].clone()];
-            let result = match vm.call_metamethod(&comp_func, &args) {
-                Ok(Some(val)) => val.is_truthy(),
-                Ok(None) => false,
-                Err(e) => return Err(format!("error in sort comparison function: {}", e)),
-            };
-
-            if result {
-                values.swap(j, j - 1);
-                j -= 1;
-            } else {
-                break;
+    // Custom comparison using Lua function - use sort_by with comparator
+    // We need to use sort_by_cached_key or manual sort_by to handle comparison errors
+    values.sort_by(|a, b| {
+        // Call comparison function: comp(a, b) should return true if a < b
+        let args = vec![a.clone(), b.clone()];
+        match vm.call_function_internal(comp_func.clone(), args) {
+            Ok(results) => {
+                let result = results.get(0).map(|v| v.is_truthy()).unwrap_or(false);
+                if result {
+                    std::cmp::Ordering::Less
+                } else {
+                    // Need to check comp(b, a) to distinguish Equal from Greater
+                    let args_rev = vec![b.clone(), a.clone()];
+                    match vm.call_function_internal(comp_func.clone(), args_rev) {
+                        Ok(results_rev) => {
+                            let result_rev = results_rev.get(0).map(|v| v.is_truthy()).unwrap_or(false);
+                            if result_rev {
+                                std::cmp::Ordering::Greater
+                            } else {
+                                std::cmp::Ordering::Equal
+                            }
+                        }
+                        Err(_) => std::cmp::Ordering::Equal, // On error, treat as equal
+                    }
+                }
             }
+            Err(_) => std::cmp::Ordering::Equal, // On error, treat as equal
         }
-    }
+    });
 
     // Write back the sorted values
-    let table_ref_cell = vm.get_table(&table_val).ok_or("Invalid table")?;
+    let table_ref_cell = vm
+        .get_table(&table_val)
+        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     let mut table_ref = table_ref_cell.borrow_mut();
     for (i, val) in values.into_iter().enumerate() {
         table_ref.set_int((i + 1) as i64, val);

@@ -4,6 +4,7 @@
 // - No insertion_order vector needed - natural iteration order
 
 use crate::LuaVM;
+use crate::lua_vm::{LuaError, LuaResult};
 
 use super::LuaValue;
 use std::collections::hash_map::DefaultHasher;
@@ -466,10 +467,12 @@ impl LuaTable {
 
     /// Insert value at position in array part, shifting elements to the right
     /// Position is 0-indexed internally but Lua uses 1-indexed
-    pub fn insert_array_at(&mut self, pos: usize, value: LuaValue) -> Result<(), String> {
+    pub fn insert_array_at(&mut self, pos: usize, value: LuaValue) -> LuaResult<()> {
         let len = self.len();
         if pos > len {
-            return Err("insert position out of bounds".to_string());
+            return Err(LuaError::RuntimeError(
+                "insert position out of bounds".to_string(),
+            ));
         }
 
         // Ensure array is large enough
@@ -489,10 +492,12 @@ impl LuaTable {
 
     /// Remove value at position in array part, shifting elements to the left
     /// Position is 0-indexed internally but Lua uses 1-indexed
-    pub fn remove_array_at(&mut self, pos: usize) -> Result<LuaValue, String> {
+    pub fn remove_array_at(&mut self, pos: usize) -> LuaResult<LuaValue> {
         let len = self.len();
         if pos >= len {
-            return Err("remove position out of bounds".to_string());
+            return Err(LuaError::RuntimeError(
+                "remove position out of bounds".to_string(),
+            ));
         }
 
         let removed = self.array[pos].clone();

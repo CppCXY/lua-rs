@@ -12,27 +12,30 @@ A Lua 5.4 interpreter implemented in Rust, primarily developed through AI-assist
 
 ## Test Coverage
 
-Current test status: **124 out of 124 tests passing (100%)**
+Current test status: **133 out of 133 tests passing (100%)** ✅
 
 ### Performance
 
-**Overall**: 35-80% of native Lua 5.4.6 performance
+**Overall**: 30-80% of native Lua 5.4.6 performance
 
 **Highlights**:
-- 🏆 Hash tables: **200%** (2x faster than native!)
-- 🏆 string.gsub: **362%** (3.6x faster than native!)
-- ✅ String concatenation: **81%**
-- ✅ Array operations: **78%**
-- ✅ Table insertion: **71%**
-- ✅ Integer arithmetic: **77%**
+- 🏆 Hash tables: **198%** (2x faster than native!)
+- 🏆 string.gsub: **324%** (3.2x faster than native!)
+- ✅ String concatenation: **70%**
+- ✅ Table operations: **68%**
+- ✅ Array creation: **68%**
+- ✅ If-else control: **64%**
+- ✅ Vararg functions: **61%**
+- ✅ ipairs iteration: **57%**
 
-**Recent Optimizations**:
-- ✅ Fixed critical HashMap rehash pointer invalidation bug
-- ✅ LuaCallFrame size reduced by 58% (152→64 bytes)
-- ✅ Perfect cache line alignment (64 bytes)
-- ✅ Rc-wrapper ensures pointer stability
+**Recent Fixes** (November 23, 2025):
+- ✅ Fixed critical function call register allocation bug
+- ✅ For loops with function calls now work correctly (no infinite loops)
+- ✅ Recursion fully functional (factorial, fibonacci)
+- ✅ Nested function calls work perfectly
+- ✅ All 133 tests passing (100% correctness)
 
-See detailed analysis: [Performance Report](PERFORMANCE_REPORT.md) | [CallFrame Optimization](CALLFRAME_OPTIMIZATION_REPORT.md)
+See detailed analysis: [Performance Report](PERFORMANCE_REPORT.md)
 
 ### Implemented Features ✅
 
@@ -59,15 +62,14 @@ See detailed analysis: [Performance Report](PERFORMANCE_REPORT.md) | [CallFrame 
 ### Known Limitations ⚠️
 
 1. **Performance Bottlenecks**:
-   - Function calls: 35% of native (call frame overhead)
-   - Recursive calls: 23% of native (stack management)
-   - String length: 29% of native (implementation overhead)
-   - ipairs iteration: 42% of native (iterator overhead)
+   - Function calls: 38% of native (call frame overhead)
+   - String operations: 41-43% of native (string.len, string.sub)
+   - While/repeat loops: 40-41% of native (loop condition overhead)
 2. **No JIT**: Pure interpreter, no Just-In-Time compilation
 3. **Limited Optimization**: Minimal compile-time optimizations
 4. **No Debug Library**: Debug introspection not implemented
 
-**Note**: All major correctness issues have been fixed! ✅
+**Note**: All major correctness issues have been fixed! ✅ 100% test pass rate.
 
 ## Architecture
 

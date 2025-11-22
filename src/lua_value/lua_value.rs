@@ -5,8 +5,8 @@
 // [primary: u64][secondary: u64]
 //
 // Primary word encoding (type tag + ID for GC):
-// - 0x0000_0000_0000_0000 - 0x7FF7_FFFF_FFFF_FFFF: Float (IEEE 754, secondary unused)
-// - 0x7FF8_0000_0000_xxxx: Integer (low 32-bit unused, secondary = i64 value)
+// - 0x7FF7_0000_0000_xxxx: Float (secondary = f64 bits)
+// - 0x7FF8_0000_0000_xxxx: Integer (secondary = i64 value)
 // - 0x7FF9_0000_xxxx_xxxx: String (low 32-bit = StringId, secondary = *const LuaString)
 // - 0x7FFA_0000_xxxx_xxxx: Table (low 32-bit = TableId, secondary = *const RefCell<LuaTable>)
 // - 0x7FFB_0000_xxxx_xxxx: Function (low 32-bit = FunctionId, secondary = *const RefCell<LuaFunction>)
@@ -26,11 +26,14 @@
 use std::cell::RefCell;
 
 use crate::{
-    FunctionId, LuaString, StringId, UserdataId, lua_value::CFunction, object_pool::TableId,
+    FunctionId, LuaString, StringId, UserdataId,
+    lua_value::{CFunction, lua_thread::LuaThread},
+    object_pool::TableId,
 };
 use std::cmp::Ordering;
 
 // Primary word tags (high 16 bits for type, low 32 bits for ID)
+pub const TAG_FLOAT: u64 = 0x7FF7_0000_0000_0000;
 pub const TAG_INTEGER: u64 = 0x7FF8_0000_0000_0000;
 pub const TAG_STRING: u64 = 0x7FF9_0000_0000_0000;
 pub const TAG_TABLE: u64 = 0x7FFA_0000_0000_0000;
@@ -39,15 +42,16 @@ pub const TAG_USERDATA: u64 = 0x7FFC_0000_0000_0000;
 pub const TAG_BOOLEAN: u64 = 0x7FFD_0000_0000_0000;
 pub const TAG_NIL: u64 = 0x7FFE_0000_0000_0000;
 pub const TAG_CFUNCTION: u64 = 0x7FFF_0000_0000_0000;
-pub const TAG_THREAD: u64 = 0x7FF7_0000_0000_0000; // Use 0x7FF7 instead of conflicting with BOOLEAN
+pub const TAG_THREAD: u64 = 0x7FF6_0000_0000_0000;
 
 // Special values
 pub const VALUE_TRUE: u64 = TAG_BOOLEAN | 1;
 pub const VALUE_FALSE: u64 = TAG_BOOLEAN;
 pub const VALUE_NIL: u64 = TAG_NIL;
 
-// NaN detection (any value >= this is a tagged type)
-pub const NAN_BASE: u64 = 0x7FF7_0000_0000_0000; // Start from TAG_THREAD which is the lowest tag
+// NaN detection and float range
+pub const NAN_BASE: u64 = 0x7FF8_0000_0000_0000; // Start of NaN space where we put tags
+pub const NEGATIVE_ZERO: u64 = 0x8000_0000_0000_0000; // Start of negative numbers
 
 // Masks for ID extraction (low 32 bits)
 pub const ID_MASK: u64 = 0x0000_0000_FFFF_FFFF;
@@ -59,9 +63,9 @@ pub(crate) const POINTER_MASK: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 /// Hybrid NaN-boxed Lua value - 16 bytes (same as enum, but 3-6x faster)
 ///
 /// Layout: [primary: u64][secondary: u64]
-/// - Floats: stored in primary (IEEE 754), secondary unused
-/// - Integers: full i64 in secondary, tag in primary
-/// - Pointers: 48-bit address in secondary, type tag in primary
+/// - Floats: TAG_FLOAT in primary, f64 bits in secondary
+/// - Integers: TAG_INTEGER in primary, i64 value in secondary
+/// - Pointers: type tag in primary, pointer in secondary
 /// - Simple values: encoded in primary, secondary unused
 ///
 /// NOTE: All methods and traits (Clone/Drop/Debug/Default) are implemented in compat.rs
@@ -102,19 +106,9 @@ impl LuaValue {
 
     #[inline(always)]
     pub fn float(f: f64) -> Self {
-        let bits = f.to_bits();
-        // If it's actually a NaN (not just a negative number), canonicalize it
-        // We need to check if it's a real NaN using f.is_nan(), not just bits >= NAN_BASE
-        // because negative numbers have their sign bit set and will have bits >= NAN_BASE
-        let primary = if f.is_nan() {
-            // Canonicalize NaN to exactly NAN_BASE to distinguish from tagged values
-            NAN_BASE
-        } else {
-            bits
-        };
         LuaValue {
-            primary,
-            secondary: 0,
+            primary: TAG_FLOAT,
+            secondary: f.to_bits(), // Store f64 bits in secondary
         }
     }
 
@@ -215,7 +209,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub(crate) fn thread_ptr(ptr: *const RefCell<crate::lua_vm::LuaThread>) -> Self {
+    pub(crate) fn thread_ptr(ptr: *const RefCell<LuaThread>) -> Self {
         let addr = ptr as u64;
         debug_assert!(addr < (1u64 << 48), "Pointer too large");
         LuaValue {
@@ -253,24 +247,7 @@ impl LuaValue {
 
     #[inline(always)]
     pub const fn is_float(&self) -> bool {
-        // Float if NOT nil, bool, or any tagged type
-        // Special values: nil (0xFFFF_FFFF_FFFF_FFFF), true/false (0xFFFF...)
-        // Tagged types: 0x7FF8 to 0x7FFF in high 16 bits
-
-        // Fast path: if primary < NAN_BASE, definitely a float
-        if self.primary < NAN_BASE {
-            return true;
-        }
-
-        // Check if it's a negative float (0x8000... to 0xFFF7...)
-        // Negative floats: sign bit = 1, exponent != all 1's
-        // This excludes negative NaN (0xFFF8... to 0xFFFF...)
-        let high_bits = self.primary >> 48; // Top 16 bits
-        if high_bits >= 0x8000 && high_bits < 0xFFF8 {
-            return true; // Negative float
-        }
-
-        false
+        (self.primary & TYPE_MASK) == TAG_FLOAT
     }
 
     #[inline(always)]
@@ -324,10 +301,9 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_integer(&self) -> Option<i64> {
         if self.is_integer() {
-            // Full 64-bit integer stored directly!
             Some(self.secondary as i64)
         } else if self.is_float() {
-            let f = f64::from_bits(self.primary);
+            let f = f64::from_bits(self.secondary);
             // Lua 5.4 semantics: floats with zero fraction are integers
             if f.fract() == 0.0 && f.is_finite() {
                 Some(f as i64)
@@ -342,7 +318,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_float(&self) -> Option<f64> {
         if self.is_float() {
-            Some(f64::from_bits(self.primary))
+            Some(f64::from_bits(self.secondary))
         } else if self.is_integer() {
             Some(self.secondary as i64 as f64)
         } else {
@@ -352,10 +328,13 @@ impl LuaValue {
 
     #[inline(always)]
     pub fn as_number(&self) -> Option<f64> {
-        if let Some(i) = self.as_integer() {
-            Some(i as f64)
+        // Optimized: single type check, both types use secondary
+        if self.is_float() {
+            Some(f64::from_bits(self.secondary))
+        } else if self.is_integer() {
+            Some(self.secondary as i64 as f64)
         } else {
-            self.as_float()
+            None
         }
     }
 
@@ -441,9 +420,9 @@ impl LuaValue {
 
     /// UNSAFE: Get thread pointer (threads not yet migrated to object pool)
     #[inline]
-    pub unsafe fn as_thread_ptr(&self) -> Option<*const RefCell<crate::lua_vm::LuaThread>> {
+    pub unsafe fn as_thread_ptr(&self) -> Option<*const RefCell<LuaThread>> {
         if self.is_thread() {
-            Some((self.secondary & POINTER_MASK) as *const RefCell<crate::lua_vm::LuaThread>)
+            Some((self.secondary & POINTER_MASK) as *const RefCell<LuaThread>)
         } else {
             None
         }
@@ -579,22 +558,17 @@ impl LuaValue {
             return LuaValueKind::Boolean;
         }
 
-        // Check if it's a tagged type first (primary >= NAN_BASE)
-        if self.primary >= NAN_BASE {
-            // Check tagged types by masking
-            match self.primary & TYPE_MASK {
-                TAG_INTEGER => LuaValueKind::Integer,
-                TAG_STRING => LuaValueKind::String,
-                TAG_TABLE => LuaValueKind::Table,
-                TAG_FUNCTION => LuaValueKind::Function,
-                TAG_USERDATA => LuaValueKind::Userdata,
-                TAG_THREAD => LuaValueKind::Thread,
-                TAG_CFUNCTION => LuaValueKind::CFunction,
-                _ => LuaValueKind::Float, // Fallback
-            }
-        } else {
-            // It's a float (primary < NAN_BASE)
-            LuaValueKind::Float
+        // Check tagged types by masking
+        match self.primary & TYPE_MASK {
+            TAG_FLOAT => LuaValueKind::Float,
+            TAG_INTEGER => LuaValueKind::Integer,
+            TAG_STRING => LuaValueKind::String,
+            TAG_TABLE => LuaValueKind::Table,
+            TAG_FUNCTION => LuaValueKind::Function,
+            TAG_USERDATA => LuaValueKind::Userdata,
+            TAG_THREAD => LuaValueKind::Thread,
+            TAG_CFUNCTION => LuaValueKind::CFunction,
+            _ => LuaValueKind::Nil, // Fallback for special values
         }
     }
 }
@@ -681,6 +655,28 @@ impl PartialEq for LuaValue {
         // Fast path: exact bit match (works for all types including string IDs)
         if self.primary() == other.primary() && self.secondary() == other.secondary() {
             return true;
+        }
+
+        // Lua 5.4 semantics: integer and float with same numeric value are equal
+        // Check if one is integer and the other is float
+        if self.is_integer() && other.is_float() {
+            let int_val = self.as_integer().unwrap();
+            let float_val = other.as_float().unwrap();
+            // Check if float is an exact integer and values match
+            if float_val.fract() == 0.0 && float_val >= i64::MIN as f64 && float_val <= i64::MAX as f64 {
+                return int_val == float_val as i64;
+            }
+            return false;
+        }
+        
+        if self.is_float() && other.is_integer() {
+            let float_val = self.as_float().unwrap();
+            let int_val = other.as_integer().unwrap();
+            // Check if float is an exact integer and values match
+            if float_val.fract() == 0.0 && float_val >= i64::MIN as f64 && float_val <= i64::MAX as f64 {
+                return float_val as i64 == int_val;
+            }
+            return false;
         }
 
         // For ID-based architecture, same ID means same object

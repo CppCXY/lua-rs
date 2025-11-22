@@ -1,46 +1,29 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
 mod lua_call_frame;
+mod lua_error;
+mod opcode;
+mod dispatcher;
 
 use crate::gc::GC;
-use crate::lib_registry;
+use crate::lua_async::AsyncExecutor;
+use dispatcher::{dispatch_instruction, DispatchAction};
 use crate::lua_value::{
-    Chunk, LuaFunction, LuaString, LuaTable, LuaUpvalue, LuaValue, LuaValueKind,
+    Chunk, CoroutineStatus, LuaFunction, LuaString, LuaTable, LuaThread, LuaUpvalue, LuaValue,
+    LuaValueKind,
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
-use crate::opcode::{Instruction, OpCode};
+pub use crate::lua_vm::lua_error::LuaError;
+use crate::{ObjectPool, lib_registry};
+pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Coroutine status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoroutineStatus {
-    Suspended, // Created or yielded
-    Running,   // Currently executing
-    Normal,    // Resumed another coroutine
-    Dead,      // Finished or error
-}
-
-/// Lua Thread (coroutine)
-pub struct LuaThread {
-    pub status: CoroutineStatus,
-    pub frames: Vec<LuaCallFrame>,
-    pub register_stack: Vec<LuaValue>,
-    pub return_values: Vec<LuaValue>,
-    pub open_upvalues: Vec<Rc<LuaUpvalue>>,
-    pub next_frame_id: usize,
-    pub error_handler: Option<LuaValue>,
-    pub yield_values: Vec<LuaValue>,  // Values yielded from coroutine
-    pub resume_values: Vec<LuaValue>, // Values passed to resume() that yield should return
-    // For yield: store CALL instruction info to properly restore return values on resume
-    pub yield_call_reg: Option<usize>, // Register where return values should be stored (A param of CALL)
-    pub yield_call_nret: Option<usize>, // Number of expected return values (C-1 param of CALL)
-}
+pub type LuaResult<T> = Result<T, LuaError>;
 
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
-    globals: LuaValue,
+    pub(crate) globals: LuaValue,
 
     // Call stack
     pub frames: Vec<LuaCallFrame>,
@@ -49,22 +32,22 @@ pub struct LuaVM {
     pub register_stack: Vec<LuaValue>,
 
     // Garbage collector
-    gc: GC,
+    pub(crate) gc: GC,
 
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
 
     // Open upvalues list (for closing when frames exit)
-    open_upvalues: Vec<Rc<LuaUpvalue>>,
+    pub(crate) open_upvalues: Vec<Rc<LuaUpvalue>>,
 
     // Next frame ID (for tracking frames)
-    next_frame_id: usize,
+    pub(crate) next_frame_id: usize,
 
     // Error handling state
     pub error_handler: Option<LuaValue>, // Current error handler for xpcall
 
     // FFI state
-    ffi_state: crate::ffi::FFIState,
+    pub(crate) ffi_state: crate::ffi::FFIState,
 
     // Current running thread (for coroutine.running())
     pub current_thread: Option<Rc<RefCell<LuaThread>>>,
@@ -75,18 +58,14 @@ pub struct LuaVM {
     // Main thread representation (for coroutine.running() in main thread)
     pub main_thread_value: Option<LuaValue>,
 
-    // Yield flag: set when a coroutine yields
-    yielding: bool,
-
     // String metatable (shared by all strings) - stored as TableId in LuaValue
-    string_metatable: Option<LuaValue>,
+    pub(crate) string_metatable: Option<LuaValue>,
 
     // Object pool for unified object management (new architecture)
     pub(crate) object_pool: crate::object_pool::ObjectPool,
 
-    // Legacy string interning table (for compatibility during migration)
-    // TODO: Remove after full migration to object pool
-    string_table: HashMap<u64, *const LuaString>,
+    // Async executor for Lua-Rust async bridge
+    pub(crate) async_executor: AsyncExecutor,
 }
 
 impl LuaVM {
@@ -104,10 +83,9 @@ impl LuaVM {
             current_thread: None,
             current_thread_value: None,
             main_thread_value: None, // Will be initialized lazily
-            yielding: false,
             string_metatable: None,
-            object_pool: crate::object_pool::ObjectPool::new(),
-            string_table: HashMap::with_capacity(2048),
+            object_pool: ObjectPool::new(),
+            async_executor: AsyncExecutor::new(),
         };
 
         // Set _G to point to the global table itself
@@ -121,11 +99,13 @@ impl LuaVM {
 
     // Register access helpers for unified stack architecture
     #[inline(always)]
+    #[allow(dead_code)]
     fn get_register(&self, base_ptr: usize, reg: usize) -> LuaValue {
         self.register_stack[base_ptr + reg]
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn set_register(&mut self, base_ptr: usize, reg: usize, value: LuaValue) {
         self.register_stack[base_ptr + reg] = value;
     }
@@ -139,34 +119,23 @@ impl LuaVM {
 
     pub fn open_libs(&mut self) {
         let _ = lib_registry::create_standard_registry().load_all(self);
-
-        // Override coroutine.wrap with a Lua implementation
-        // because it needs to return a closure that captures the thread
-        let wrap_impl = r#"
-            local _create = coroutine.create
-            local _resume = coroutine.resume
-            coroutine.wrap = function(f)
-                local co = _create(f)
-                return function(...)
-                    local success, result = _resume(co, ...)
-                    if not success then
-                        error(result, 2)
-                    end
-                    return result
-                end
-            end
-        "#;
-        if let Err(e) = self.execute_string(wrap_impl) {
-            eprintln!("Warning: Failed to override coroutine.wrap: {}", e);
-        }
+        
+        // Register async functions
+        crate::stdlib::async_lib::register_async_functions(self);
     }
 
-    pub fn execute(&mut self, chunk: Rc<Chunk>) -> Result<LuaValue, String> {
+    /// Execute a chunk directly (convenience method)
+    pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<LuaValue> {
         // Register all constants in the chunk with GC
         self.register_chunk_constants(&chunk);
 
-        // Create main function in object pool
-        let main_func_value = self.create_function(chunk.clone(), Vec::new());
+        // Create upvalue for _ENV (global table)
+        // Main chunks in Lua 5.4 always have _ENV as upvalue[0]
+        let env_upvalue = LuaUpvalue::new_closed(self.globals);
+        let upvalues = vec![env_upvalue];
+
+        // Create main function in object pool with _ENV upvalue
+        let main_func_value = self.create_function(chunk.clone(), upvalues);
 
         // Create initial call frame using unified stack
         let frame_id = self.next_frame_id;
@@ -197,2518 +166,163 @@ impl LuaVM {
         Ok(result)
     }
 
-    pub fn execute_string(&mut self, source: &str) -> Result<LuaValue, String> {
+    /// Call a function value (for testing and runtime calls)
+    pub fn call_function(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<LuaValue> {
+        // Clear previous state
+        self.register_stack.clear();
+        self.frames.clear();
+        self.open_upvalues.clear();
+
+        // Get function pointer
+        let func_ptr = func
+            .as_function_ptr()
+            .ok_or_else(|| LuaError::RuntimeError("Not a function".to_string()))?;
+
+        let func_obj = unsafe { &*func_ptr };
+        let func_ref = func_obj.borrow();
+
+        // Register chunk constants
+        self.register_chunk_constants(&func_ref.chunk);
+
+        // Setup stack and frame
+        let frame_id = self.next_frame_id;
+        self.next_frame_id += 1;
+
+        let base_ptr = 0; // Start from beginning of cleared stack
+        let max_stack = func_ref.chunk.max_stack_size;
+        let required_size = max_stack; // Need at least max_stack registers
+        
+        // Initialize stack with nil values
+        self.register_stack.resize(required_size, LuaValue::nil());
+
+        // Copy arguments to registers
+        for (i, arg) in args.iter().enumerate() {
+            if i < max_stack {
+                self.register_stack[base_ptr + i] = *arg;
+            }
+        }
+
+        drop(func_ref);
+
+        let frame = LuaCallFrame::new_lua_function(frame_id, func, base_ptr, max_stack, 0, 0);
+
+        self.frames.push(frame);
+
+        // Execute
+        let result = self.run()?;
+
+        Ok(result)
+    }
+
+    pub fn execute_string(&mut self, source: &str) -> LuaResult<LuaValue> {
         let chunk = self.compile(source)?;
         self.execute(Rc::new(chunk))
     }
 
     /// Compile source code using VM's string pool
-    pub fn compile(&mut self, source: &str) -> Result<Chunk, String> {
+    pub fn compile(&mut self, source: &str) -> LuaResult<Chunk> {
         use crate::compiler::Compiler;
 
-        let chunk = Compiler::compile(self, source)?;
+        let chunk = match Compiler::compile(self, source) {
+            Ok(c) => c,
+            Err(e) => return Err(LuaError::CompileError(e)),
+        };
 
         Ok(chunk)
     }
 
-    fn run(&mut self) -> Result<LuaValue, String> {
-        let mut instruction_count = 0;
+    /// Main execution loop - interprets bytecode instructions
+    /// Returns the final return value from the chunk
+    fn run(&mut self) -> LuaResult<LuaValue> {
         loop {
-            // Check if coroutine is yielding
-            if self.yielding {
-                return Ok(LuaValue::nil());
-            }
-
+            // Check if we have any frames to execute
             if self.frames.is_empty() {
-                return Ok(LuaValue::nil());
+                // Execution finished
+                return Ok(self.return_values.first().copied().unwrap_or(LuaValue::nil()));
             }
 
-            // ULTRA-OPTIMIZED: 直接从 LuaValue.secondary 获取缓存的函数指针!
-            // 零 HashMap 查找,零额外缓存字段!
+            // Get current frame and chunk
             let frame = self.current_frame();
-            let pc = frame.pc;
-
-            // 直接使用 function_value 中缓存的指针
             let func_ptr = frame
                 .get_function_ptr()
-                .ok_or("Frame function is not a Lua function")?;
+                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
 
-            // SAFETY: func_ptr 来自 LuaValue.secondary,由 ObjectPool 保证有效
-            // 只要 frame 存在,函数就存在
-            let instr = unsafe {
-                let func_ref = &*func_ptr;
-                let func = func_ref.borrow();
+            // Safety: func_ptr is valid as long as the function exists in object_pool
+            let func = unsafe { &*func_ptr };
+            let func_ref = func.borrow();
+            let chunk = &func_ref.chunk;
 
-                if pc >= func.chunk.code.len() {
-                    // 函数执行完毕
-                    drop(func); // 释放 borrow
-                    self.frames.pop();
-                    continue;
+            // Check PC bounds
+            let pc = frame.pc;
+            if pc >= chunk.code.len() {
+                return Err(LuaError::RuntimeError(format!(
+                    "PC out of bounds: {} >= {}",
+                    pc,
+                    chunk.code.len()
+                )));
+            }
+
+            // Fetch instruction
+            let instr = chunk.code[pc];
+
+            // Drop borrows before executing instruction
+            drop(func_ref);
+
+            // Increment PC (some instructions will modify it)
+            self.current_frame_mut().pc += 1;
+
+            // Dispatch instruction using the dispatcher module
+            let action = match dispatch_instruction(self, instr) {
+                Ok(action) => action,
+                Err(LuaError::Yield(_)) => {
+                    // Coroutine yielded via CFunction (e.g., coroutine.yield)
+                    // Convert to Yield action
+                    DispatchAction::Yield
                 }
-
-                let instruction = func.chunk.code[pc];
-                drop(func); // 立即释放 borrow
-                instruction
+                Err(e) => return Err(e),
             };
 
-            self.frames.last_mut().unwrap().pc += 1;
-
-            let opcode = Instruction::get_opcode(instr);
-
-            // Periodic GC check (every 10000 instructions for better performance)
-            instruction_count += 1;
-            if instruction_count >= 10000 {
-                instruction_count = 0;
-                if self.gc.should_collect() {
-                    self.collect_garbage();
+            // Handle dispatch action
+            match action {
+                DispatchAction::Continue => {
+                    // Continue to next instruction
                 }
-            }
-
-            match opcode {
-                OpCode::Move => self.op_move(instr)?,
-                OpCode::LoadK => self.op_loadk(instr)?,
-                OpCode::LoadNil => self.op_loadnil(instr)?,
-                OpCode::LoadI => self.op_loadi(instr)?,
-                OpCode::LoadBool => self.op_loadbool(instr)?,
-                OpCode::NewTable => self.op_newtable(instr)?,
-                OpCode::GetTable => self.op_gettable(instr)?,
-                OpCode::SetTable => self.op_settable(instr)?,
-                OpCode::GetTableI => self.op_gettable_i(instr)?,
-                OpCode::SetTableI => self.op_settable_i(instr)?,
-                OpCode::GetTableK => self.op_gettable_k(instr)?,
-                OpCode::SetTableK => self.op_settable_k(instr)?,
-                OpCode::Add => self.op_add(instr)?,
-                OpCode::Sub => self.op_sub(instr)?,
-                OpCode::Mul => self.op_mul(instr)?,
-                OpCode::Div => self.op_div(instr)?,
-                OpCode::Mod => self.op_mod(instr)?,
-                OpCode::Pow => self.op_pow(instr)?,
-                OpCode::Unm => self.op_unm(instr)?,
-                OpCode::AddI => self.op_addi(instr)?,
-                OpCode::SubI => self.op_subi(instr)?,
-                OpCode::MulI => self.op_muli(instr)?,
-                OpCode::ModI => self.op_modi(instr)?,
-                OpCode::PowI => self.op_powi(instr)?,
-                OpCode::DivI => self.op_divi(instr)?,
-                OpCode::IDivI => self.op_idivi(instr)?,
-                OpCode::Not => self.op_not(instr)?,
-                OpCode::Len => self.op_len(instr)?,
-                OpCode::Eq => self.op_eq(instr)?,
-                OpCode::Lt => self.op_lt(instr)?,
-                OpCode::Le => self.op_le(instr)?,
-                OpCode::Ne => self.op_ne(instr)?,
-                OpCode::Gt => self.op_gt(instr)?,
-                OpCode::Ge => self.op_ge(instr)?,
-                OpCode::EqI => self.op_eqi(instr)?,
-                OpCode::LtI => self.op_lti(instr)?,
-                OpCode::LeI => self.op_lei(instr)?,
-                OpCode::GtI => self.op_gti(instr)?,
-                OpCode::GeI => self.op_gei(instr)?,
-                OpCode::And => self.op_and(instr)?,
-                OpCode::Or => self.op_or(instr)?,
-                OpCode::BAnd => self.op_band(instr)?,
-                OpCode::BOr => self.op_bor(instr)?,
-                OpCode::BXor => self.op_bxor(instr)?,
-                OpCode::Shl => self.op_shl(instr)?,
-                OpCode::Shr => self.op_shr(instr)?,
-                OpCode::BNot => self.op_bnot(instr)?,
-                OpCode::IDiv => self.op_idiv(instr)?,
-                OpCode::ForPrep => self.op_forprep(instr)?,
-                OpCode::ForLoop => self.op_forloop(instr)?,
-                OpCode::Jmp => self.op_jmp(instr)?,
-                OpCode::Test => self.op_test(instr)?,
-                OpCode::TestSet => self.op_testset(instr)?,
-                OpCode::Call => self.op_call(instr)?,
-                OpCode::TailCall => self.op_tailcall(instr)?,
-                OpCode::Return => {
-                    let result = self.op_return(instr)?;
+                DispatchAction::Skip(n) => {
+                    // Skip N additional instructions (PC already incremented by 1)
+                    self.current_frame_mut().pc += n;
+                }
+                DispatchAction::Return => {
+                    // Function returned, check if execution is done
                     if self.frames.is_empty() {
-                        return Ok(result);
+                        return Ok(self
+                            .return_values
+                            .first()
+                            .copied()
+                            .unwrap_or(LuaValue::nil()));
                     }
                 }
-                OpCode::GetUpval => self.op_getupval(instr)?,
-                OpCode::SetUpval => self.op_setupval(instr)?,
-                OpCode::Closure => self.op_closure(instr)?,
-                OpCode::Concat => self.op_concat(instr)?,
-                OpCode::GetGlobal => self.op_getglobal(instr)?,
-                OpCode::SetGlobal => self.op_setglobal(instr)?,
-                OpCode::VarArg => self.op_vararg(instr)?,
-                OpCode::SetList => self.op_setlist(instr)?,
-            }
-
-            // Check if yielding after executing instruction
-            if self.yielding {
-                return Ok(LuaValue::nil());
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn op_loadi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let sbx = Instruction::get_sbx(instr) as i64;
-
-        let base_ptr = self.current_frame().base_ptr;
-        unsafe {
-            *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(sbx);
-        }
-        Ok(())
-    }
-
-    // Opcode implementations
-    #[inline(always)]
-    fn op_move(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let base_ptr = self.current_frame().base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        unsafe {
-            let value = *self.register_stack.get_unchecked(base_ptr + b);
-            *self.register_stack.get_unchecked_mut(base_ptr + a) = value;
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn op_loadk(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let bx = Instruction::get_bx(instr) as usize;
-
-        // ULTRA-OPTIMIZED: 直接从 function_value 获取指针!
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let func_ptr = frame
-            .get_function_ptr()
-            .ok_or("Frame function is not a Lua function")?;
-
-        let constant = unsafe {
-            let func_ref = &*func_ptr;
-            let func = func_ref.borrow();
-            if bx >= func.chunk.constants.len() {
-                drop(func); // 释放 borrow 后再返回错误
-                return Err("Invalid constant index".to_string());
-            }
-            let const_value = *func.chunk.constants.get_unchecked(bx);
-            drop(func); // 立即释放 borrow
-            const_value
-        };
-
-        unsafe {
-            *self.register_stack.get_unchecked_mut(base_ptr + a) = constant;
-        }
-        Ok(())
-    }
-
-    fn op_loadnil(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let base_ptr = self.current_frame().base_ptr;
-        self.set_register(base_ptr, a, LuaValue::nil());
-        Ok(())
-    }
-
-    fn op_loadbool(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr);
-        let c = Instruction::get_c(instr);
-        let base_ptr = self.current_frame().base_ptr;
-        self.set_register(base_ptr, a, LuaValue::boolean(b != 0));
-        if c != 0 {
-            self.current_frame_mut().pc += 1;
-        }
-        Ok(())
-    }
-
-    fn op_newtable(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let table = self.create_table();
-        let base_ptr = self.current_frame().base_ptr;
-        self.set_register(base_ptr, a, table);
-        Ok(())
-    }
-
-    fn op_gettable(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Check types first to determine fast path
-        let table = self.get_register(base_ptr, b);
-        let key = self.get_register(base_ptr, c);
-
-        if table.is_table() {
-            // Use VM's table_get which handles metamethods
-            let value = self.table_get(&table, &key).unwrap_or(LuaValue::nil());
-            self.set_register(base_ptr, a, value);
-            return Ok(());
-        } else if table.is_userdata() {
-            // Handle userdata __index metamethod
-            let value = self.userdata_get(&table, &key).unwrap_or(LuaValue::nil());
-            self.set_register(base_ptr, a, value);
-            return Ok(());
-        } else if table.is_string() {
-            // Handle string indexing (uses string metatable)
-            let value = self.string_get(&table, &key).unwrap_or(LuaValue::nil());
-            self.set_register(base_ptr, a, value);
-            return Ok(());
-        }
-
-        Err("Attempt to index a non-table value".to_string())
-    }
-
-    fn op_settable(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Check types and get values
-        let val_a = self.get_register(base_ptr, a);
-        let val_b = self.get_register(base_ptr, b);
-        let val_c = self.get_register(base_ptr, c);
-
-        // Slow path: metamethods or non-table
-        if val_a.is_table() {
-            self.table_set(val_a, val_b, val_c)?;
-            Ok(())
-        } else {
-            Err("Attempt to index a non-table value".to_string())
-        }
-    }
-
-    /// Optimized: R(A) := R(B)[C] where C is a literal integer
-    #[inline]
-    fn op_gettable_i(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as i64;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let table = self.get_register(base_ptr, b);
-
-        // Optimized: use direct reference, no Rc clone
-        if table.is_table() {
-            // Fast path: direct integer access, no atomic ops
-            let value = self
-                .table_get(&table, &LuaValue::integer(c))
-                .unwrap_or(LuaValue::nil());
-            self.set_register(base_ptr, a, value);
-            Ok(())
-        } else {
-            Err("Attempt to index a non-table value".to_string())
-        }
-    }
-
-    /// Optimized: R(A)[B] := R(C) where B is a literal integer
-    #[inline]
-    fn op_settable_i(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as i64;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let table = self.get_register(base_ptr, a);
-        let value = self.get_register(base_ptr, c);
-
-        if table.is_table() {
-            self.table_set(table, LuaValue::integer(b), value)?;
-            Ok(())
-        } else {
-            Err("Attempt to index a non-table value".to_string())
-        }
-    }
-
-    /// Optimized: R(A) := R(B)[K(C)] where K(C) is a string constant
-    #[inline]
-    fn op_gettable_k(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let chunk = self.get_current_chunk()?;
-        let key = chunk.constants[c].clone();
-        let base_ptr = self.current_frame().base_ptr;
-        let table = self.get_register(base_ptr, b);
-
-        if table.is_table() {
-            // Not found or not a string key: use generic get with metamethods
-            let value = self.table_get(&table, &key).unwrap_or(LuaValue::nil());
-            self.set_register(base_ptr, a, value);
-            Ok(())
-        } else {
-            Err("Attempt to index a non-table value".to_string())
-        }
-    }
-
-    /// Optimized: R(A)[K(B)] := R(C) where K(B) is a string constant
-    #[inline]
-    fn op_settable_k(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let chunk = self.get_current_chunk()?;
-        let key = chunk.constants[b].clone();
-        let base_ptr = self.current_frame().base_ptr;
-        let table = self.get_register(base_ptr, a);
-        let value = self.get_register(base_ptr, c);
-
-        if table.is_table() {
-            // Fallback: use generic set with metamethods
-            self.table_set(table, key, value)?;
-            Ok(())
-        } else {
-            Err("Attempt to index a non-table value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_add(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        // Ultra-fast path: direct tag comparison (no kind() overhead)
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let right = self.register_stack.get_unchecked(base_ptr + c);
-
-            let left_tag = left.primary();
-            let right_tag = right.primary();
-
-            // Fast path: both integers (most common case)
-            if left_tag == crate::lua_value::TAG_INTEGER
-                && right_tag == crate::lua_value::TAG_INTEGER
-            {
-                let i = left.secondary() as i64;
-                let j = right.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i + j);
-                return Ok(());
-            }
-
-            // Helper: check if value is float (positive or negative)
-            #[inline(always)]
-            fn is_float_fast(tag: u64) -> bool {
-                if tag < crate::lua_value::NAN_BASE {
-                    true // Positive float
-                } else {
-                    let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8 // Negative float
+                DispatchAction::Yield => {
+                    // Coroutine yielded - return control to resume_thread
+                    // yield_values should already be set in the current thread
+                    return Ok(LuaValue::nil());
                 }
-            }
-
-            let left_is_float = is_float_fast(left_tag);
-            let right_is_float = is_float_fast(right_tag);
-            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
-            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
-
-            // Both floats (including negative floats)
-            if left_is_float && right_is_float {
-                let l = f64::from_bits(left_tag);
-                let r = f64::from_bits(right_tag);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l + r);
-                return Ok(());
-            }
-
-            // Mixed int/float - convert to float
-            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
-                let l = if left_is_int {
-                    left.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(left_tag)
-                };
-                let r = if right_is_int {
-                    right.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(right_tag)
-                };
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l + r);
-                return Ok(());
-            }
-        }
-
-        // Slow path: metamethods
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if self.call_binop_metamethod(&left, &right, "__add", a)? {
-            Ok(())
-        } else {
-            Err(format!(
-                "attempt to add non-number values ({:?} + {:?})",
-                left, right
-            ))
-        }
-    }
-
-    #[inline]
-    fn op_sub(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let right = self.register_stack.get_unchecked(base_ptr + c);
-
-            let left_tag = left.primary();
-            let right_tag = right.primary();
-
-            // Fast path: both integers
-            if left_tag == crate::lua_value::TAG_INTEGER
-                && right_tag == crate::lua_value::TAG_INTEGER
-            {
-                let i = left.secondary() as i64;
-                let j = right.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i - j);
-                return Ok(());
-            }
-
-            // Helper: check if value is float (positive or negative)
-            #[inline(always)]
-            fn is_float_fast(tag: u64) -> bool {
-                if tag < crate::lua_value::NAN_BASE {
-                    true
-                } else {
-                    let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8
-                }
-            }
-
-            let left_is_float = is_float_fast(left_tag);
-            let right_is_float = is_float_fast(right_tag);
-            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
-            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
-
-            // Both floats
-            if left_is_float && right_is_float {
-                let l = f64::from_bits(left_tag);
-                let r = f64::from_bits(right_tag);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l - r);
-                return Ok(());
-            }
-
-            // Mixed int/float
-            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
-                let l = if left_is_int {
-                    left.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(left_tag)
-                };
-                let r = if right_is_int {
-                    right.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(right_tag)
-                };
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l - r);
-                return Ok(());
-            }
-        }
-
-        // Slow path
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if self.call_binop_metamethod(&left, &right, "__sub", a)? {
-            Ok(())
-        } else {
-            Err(format!("attempt to subtract non-number values"))
-        }
-    }
-
-    // Immediate arithmetic instructions (Lua 5.4 optimization)
-    #[inline(always)]
-    fn op_addi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-
-        // Fast immediate decode: sign extend 9-bit to 64-bit
-        let imm = ((c as i32) << 23 >> 23) as i64;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-
-            // Fast path: integer only
-            if left.primary() == crate::lua_value::TAG_INTEGER {
-                let i = left.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i + imm);
-                return Ok(());
-            }
-        }
-
-        // Fallback: metamethods
-        let left = self.get_register(base_ptr, b);
-        let right = LuaValue::integer(imm);
-        if self.call_binop_metamethod(&left, &right, "__add", a)? {
-            Ok(())
-        } else {
-            Err("attempt to add non-number value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_subi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-
-        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let left_tag = left.primary();
-            
-            // Fast path: integer
-            if left_tag == crate::lua_value::TAG_INTEGER {
-                let i = left.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i - imm);
-                return Ok(());
-            }
-            
-            // Fast path: float
-            if left_tag < crate::lua_value::NAN_BASE {
-                let f = f64::from_bits(left_tag);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(f - imm as f64);
-                return Ok(());
-            }
-        }
-
-        let left = self.get_register(base_ptr, b);
-        let right = LuaValue::integer(imm);
-        if self.call_binop_metamethod(&left, &right, "__sub", a)? {
-            Ok(())
-        } else {
-            Err("attempt to subtract non-number value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_muli(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-
-        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let left_tag = left.primary();
-            
-            // Fast path: integer
-            if left_tag == crate::lua_value::TAG_INTEGER {
-                let i = left.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i * imm);
-                return Ok(());
-            }
-            
-            // Fast path: float
-            if left_tag < crate::lua_value::NAN_BASE {
-                let f = f64::from_bits(left_tag);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(f * imm as f64);
-                return Ok(());
-            }
-        }
-
-        let left = self.get_register(base_ptr, b);
-        let right = LuaValue::integer(imm);
-        if self.call_binop_metamethod(&left, &right, "__mul", a)? {
-            Ok(())
-        } else {
-            Err("attempt to multiply non-number value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_modi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-
-        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let left_tag = left.primary();
-            
-            // Fast path: integer
-            if left_tag == crate::lua_value::TAG_INTEGER {
-                let i = left.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i % imm);
-                return Ok(());
-            }
-            
-            // Fast path: float (Lua mod semantics)
-            if left_tag < crate::lua_value::NAN_BASE {
-                let x = f64::from_bits(left_tag);
-                let y = imm as f64;
-                let result = x - (x / y).floor() * y;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(result);
-                return Ok(());
-            }
-        }
-
-        let left = self.get_register(base_ptr, b);
-        let right = LuaValue::integer(imm);
-        if self.call_binop_metamethod(&left, &right, "__mod", a)? {
-            Ok(())
-        } else {
-            Err("attempt to mod non-number value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_powi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-
-        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Fast path: convert to float and use powf
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let left_tag = left.primary();
-            
-            // Integer base
-            if left_tag == crate::lua_value::TAG_INTEGER {
-                let base = left.secondary() as i64 as f64;
-                let result = base.powf(imm as f64);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(result);
-                return Ok(());
-            }
-            
-            // Float base
-            if left_tag < crate::lua_value::NAN_BASE {
-                let base = f64::from_bits(left_tag);
-                let result = base.powf(imm as f64);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(result);
-                return Ok(());
-            }
-        }
-
-        // Fallback: metamethods
-        let left = self.get_register(base_ptr, b);
-        let right = LuaValue::integer(imm);
-        if self.call_binop_metamethod(&left, &right, "__pow", a)? {
-            Ok(())
-        } else {
-            Err("attempt to pow non-number value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_divi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-
-        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Fast path: direct division for integers and floats
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let left_tag = left.primary();
-            
-            // Try integer division first
-            if left_tag == crate::lua_value::TAG_INTEGER {
-                let i = left.secondary() as i64;
-                let result = (i as f64) / (imm as f64);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(result);
-                return Ok(());
-            }
-            
-            // Try float division
-            if left_tag < crate::lua_value::NAN_BASE {
-                let f = f64::from_bits(left_tag);
-                let result = f / (imm as f64);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(result);
-                return Ok(());
-            }
-        }
-
-        // Slow path: metamethod
-        let left = self.get_register(base_ptr, b);
-        let right = LuaValue::integer(imm);
-        if self.call_binop_metamethod(&left, &right, "__div", a)? {
-            Ok(())
-        } else {
-            Err("attempt to divide non-number value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_idivi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-
-        let imm = if c >= 256 { (c as i64) - 512 } else { c as i64 };
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            if left.primary() == crate::lua_value::TAG_INTEGER {
-                let i = left.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i / imm);
-                return Ok(());
-            }
-        }
-
-        let left = self.get_register(base_ptr, b);
-        let right = LuaValue::integer(imm);
-        if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
-            Ok(())
-        } else {
-            Err("attempt to idiv non-number value".to_string())
-        }
-    }
-
-    #[inline]
-    fn op_mul(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let right = self.register_stack.get_unchecked(base_ptr + c);
-
-            let left_tag = left.primary();
-            let right_tag = right.primary();
-
-            // Fast path: both integers
-            if left_tag == crate::lua_value::TAG_INTEGER
-                && right_tag == crate::lua_value::TAG_INTEGER
-            {
-                let i = left.secondary() as i64;
-                let j = right.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(i * j);
-                return Ok(());
-            }
-
-            #[inline(always)]
-            fn is_float_fast(tag: u64) -> bool {
-                if tag < crate::lua_value::NAN_BASE {
-                    true
-                } else {
-                    let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8
-                }
-            }
-
-            let left_is_float = is_float_fast(left_tag);
-            let right_is_float = is_float_fast(right_tag);
-            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
-            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
-
-            // Both floats
-            if left_is_float && right_is_float {
-                let l = f64::from_bits(left_tag);
-                let r = f64::from_bits(right_tag);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l * r);
-                return Ok(());
-            }
-
-            // Mixed int/float
-            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
-                let l = if left_is_int {
-                    left.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(left_tag)
-                };
-                let r = if right_is_int {
-                    right.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(right_tag)
-                };
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l * r);
-                return Ok(());
-            }
-        }
-
-        // Slow path
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if self.call_binop_metamethod(&left, &right, "__mul", a)? {
-            Ok(())
-        } else {
-            Err(format!("attempt to multiply non-number values"))
-        }
-    }
-
-    #[inline]
-    fn op_div(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let right = self.register_stack.get_unchecked(base_ptr + c);
-
-            let left_tag = left.primary();
-            let right_tag = right.primary();
-
-            #[inline(always)]
-            fn is_float_fast(tag: u64) -> bool {
-                if tag < crate::lua_value::NAN_BASE {
-                    true
-                } else {
-                    let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8
-                }
-            }
-
-            let left_is_float = is_float_fast(left_tag);
-            let right_is_float = is_float_fast(right_tag);
-            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
-            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
-
-            // Division always returns float in Lua
-            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
-                let l = if left_is_int {
-                    left.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(left_tag)
-                };
-                let r = if right_is_int {
-                    right.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(right_tag)
-                };
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(l / r);
-                return Ok(());
-            }
-        }
-
-        // Slow path
-        let val_b = self.get_register(base_ptr, b);
-        let val_c = self.get_register(base_ptr, c);
-
-        if self.call_binop_metamethod(&val_b, &val_c, "__div", a)? {
-            Ok(())
-        } else {
-            Err(format!("attempt to divide non-number values"))
-        }
-    }
-
-    #[inline]
-    fn op_mod(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let val_b = self.get_register(base_ptr, b);
-        let val_c = self.get_register(base_ptr, c);
-
-        // Fast path
-        match (val_b.kind(), val_c.kind()) {
-            (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let i = val_b.as_integer().unwrap();
-                let j = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::integer(i % j));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = val_b.as_float().unwrap();
-                let r = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float(l % r));
-                return Ok(());
-            }
-            (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = val_b.as_integer().unwrap();
-                let f = val_c.as_float().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float((i as f64) % f));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = val_b.as_float().unwrap();
-                let i = val_c.as_integer().unwrap();
-                self.set_register(base_ptr, a, LuaValue::float(f % (i as f64)));
-                return Ok(());
-            }
-            _ => {}
-        }
-
-        // Slow path
-        let left = val_b;
-        let right = val_c;
-
-        if self.call_binop_metamethod(&left, &right, "__mod", a)? {
-            Ok(())
-        } else {
-            Err(format!("attempt to perform modulo on non-number values"))
-        }
-    }
-
-    fn op_pow(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        match (&left, &right) {
-            (l, r) if l.is_number() && r.is_number() => {
-                let l_num = l.as_number().unwrap();
-                let r_num = r.as_number().unwrap();
-                self.set_register(base_ptr, a, LuaValue::number(l_num.powf(r_num)));
-                Ok(())
-            }
-            _ => {
-                // Try __pow metamethod
-                if self.call_binop_metamethod(&left, &right, "__pow", a)? {
-                    Ok(())
-                } else {
-                    Err(format!("attempt to exponentiate non-number values"))
+                DispatchAction::Call => {
+                    // TODO: Handle function call (CALL instruction will set this)
+                    // For now, just continue
                 }
             }
         }
-    }
-
-    #[inline(always)]
-    fn op_unm(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        unsafe {
-            let val = self.register_stack.get_unchecked(base_ptr + b);
-            let tag = val.primary();
-
-            // Fast path: integer negation
-            if tag == crate::lua_value::TAG_INTEGER {
-                let i = val.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::integer(-i);
-                return Ok(());
-            }
-
-            // Fast path: float negation (including negative floats)
-            #[inline(always)]
-            fn is_float_fast(tag: u64) -> bool {
-                if tag < crate::lua_value::NAN_BASE {
-                    true
-                } else {
-                    let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8
-                }
-            }
-
-            if is_float_fast(tag) {
-                let f = f64::from_bits(tag);
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(-f);
-                return Ok(());
-            }
-        }
-
-        // Slow path: metamethod
-        let val = self.get_register(base_ptr, b);
-
-        // Slow path: need to clone for metamethod
-        let value = val;
-        if self.call_unop_metamethod(&value, "__unm", a)? {
-            Ok(())
-        } else {
-            Err(format!("attempt to negate non-number value"))
-        }
-    }
-
-    #[inline]
-    fn op_idiv(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let val_b = self.get_register(base_ptr, b);
-        let val_c = self.get_register(base_ptr, c);
-
-        // Fast path
-        match (val_b.kind(), val_c.kind()) {
-            (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                let i = val_b.as_integer().unwrap();
-                let j = val_c.as_integer().unwrap();
-                if j == 0 {
-                    return Err("attempt to divide by zero".to_string());
-                }
-                self.set_register(base_ptr, a, LuaValue::integer(i / j));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Float) => {
-                let l = val_b.as_float().unwrap();
-                let r = val_c.as_float().unwrap();
-                let result = (l / r).floor();
-                self.set_register(base_ptr, a, LuaValue::integer(result as i64));
-                return Ok(());
-            }
-            (LuaValueKind::Integer, LuaValueKind::Float) => {
-                let i = val_b.as_integer().unwrap();
-                let f = val_c.as_float().unwrap();
-                let result = (i as f64 / f).floor();
-                self.set_register(base_ptr, a, LuaValue::integer(result as i64));
-                return Ok(());
-            }
-            (LuaValueKind::Float, LuaValueKind::Integer) => {
-                let f = val_b.as_float().unwrap();
-                let i = val_c.as_integer().unwrap();
-                let result = (f / i as f64).floor();
-                self.set_register(base_ptr, a, LuaValue::integer(result as i64));
-                return Ok(());
-            }
-            _ => {}
-        }
-
-        // Slow path
-        let left = val_b;
-        let right = val_c;
-
-        if self.call_binop_metamethod(&left, &right, "__idiv", a)? {
-            Ok(())
-        } else {
-            Err(format!(
-                "attempt to perform integer division on non-number values"
-            ))
-        }
-    }
-
-    #[inline(always)]
-    fn op_not(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let value = self.get_register(base_ptr, b).is_truthy();
-        self.set_register(base_ptr, a, LuaValue::boolean(!value));
-        Ok(())
-    }
-
-    fn op_len(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let value = self.get_register(base_ptr, b);
-
-        // ULTRA-OPTIMIZED: Direct string length access via cached pointer
-        // String.len() is O(1) as String internally caches length
-        if value.is_string() {
-            if let Some(ptr) = value.as_string_ptr_direct() {
-                // SAFETY: Pointer is valid as long as value exists
-                unsafe {
-                    let len = (*ptr).as_str().len() as i64;
-                    self.set_register(base_ptr, a, LuaValue::integer(len));
-                    return Ok(());
-                }
-            }
-        }
-
-        // Try __len metamethod for tables
-        if value.is_table() {
-            if self.call_unop_metamethod(&value, "__len", a)? {
-                return Ok(());
-            }
-
-            // No __len metamethod, use raw length
-            if let Some(table_id) = value.as_table_id() {
-                let table = self
-                    .object_pool
-                    .get_table(table_id)
-                    .ok_or("Missing table")?;
-                let len = table.borrow().len() as i64;
-                self.set_register(base_ptr, a, LuaValue::integer(len));
-                return Ok(());
-            }
-        }
-
-        Err("attempt to get length of a non-sequence value".to_string())
-    }
-
-    #[inline]
-    fn op_eq(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        // Fast path: direct comparison for primitives
-        let fast_result = {
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            let left = self.get_register(base_ptr, b);
-            let right = self.get_register(base_ptr, c);
-
-            match (left.kind(), right.kind()) {
-                (LuaValueKind::Nil, LuaValueKind::Nil) => Some(true),
-                (LuaValueKind::Boolean, LuaValueKind::Boolean) => {
-                    Some(left.as_bool().unwrap() == right.as_bool().unwrap())
-                }
-                (LuaValueKind::Integer, LuaValueKind::Integer) => {
-                    Some(left.as_integer().unwrap() == right.as_integer().unwrap())
-                }
-                (LuaValueKind::Float, LuaValueKind::Float) => {
-                    Some(left.as_float().unwrap() == right.as_float().unwrap())
-                }
-                (LuaValueKind::Integer, LuaValueKind::Float) => {
-                    let i = left.as_integer().unwrap();
-                    let f = right.as_float().unwrap();
-                    Some(i as f64 == f)
-                }
-                (LuaValueKind::Float, LuaValueKind::Integer) => {
-                    let f = left.as_float().unwrap();
-                    let i = right.as_integer().unwrap();
-                    Some(f == i as f64)
-                }
-                _ => None,
-            }
-        };
-
-        if let Some(result) = fast_result {
-            let frame = self.current_frame_mut();
-            let base_ptr = frame.base_ptr;
-            self.set_register(base_ptr, a, LuaValue::boolean(result));
-            return Ok(());
-        }
-
-        // Slow path: need to handle tables/strings/metamethods
-        let (left, right) = {
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            (
-                self.get_register(base_ptr, b),
-                self.get_register(base_ptr, c),
-            )
-        };
-
-        if self.values_equal(&left, &right) {
-            let frame = self.current_frame_mut();
-            let base_ptr = frame.base_ptr;
-            self.set_register(base_ptr, a, LuaValue::boolean(true));
-            return Ok(());
-        }
-
-        let left_mm = self.get_metamethod(&left, "__eq");
-        let right_mm = self.get_metamethod(&right, "__eq");
-
-        if let (Some(mm_left), Some(mm_right)) = (&left_mm, &right_mm) {
-            if self.values_equal(mm_left, mm_right) {
-                if self.call_binop_metamethod(&left, &right, "__eq", a)? {
-                    return Ok(());
-                }
-            }
-        }
-
-        let frame = self.current_frame_mut();
-        let base_ptr = frame.base_ptr;
-        self.set_register(base_ptr, a, LuaValue::boolean(false));
-        Ok(())
-    }
-
-    #[inline]
-    fn op_lt(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let right = self.register_stack.get_unchecked(base_ptr + c);
-
-            let left_tag = left.primary();
-            let right_tag = right.primary();
-
-            // Fast path: both integers
-            if left_tag == crate::lua_value::TAG_INTEGER
-                && right_tag == crate::lua_value::TAG_INTEGER
-            {
-                let l = left.secondary() as i64;
-                let r = right.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l < r);
-                return Ok(());
-            }
-
-            // Helper: check if value is float
-            #[inline(always)]
-            fn is_float_fast(tag: u64) -> bool {
-                if tag < crate::lua_value::NAN_BASE {
-                    true
-                } else {
-                    let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8
-                }
-            }
-
-            let left_is_float = is_float_fast(left_tag);
-            let right_is_float = is_float_fast(right_tag);
-            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
-            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
-
-            // Mixed int/float comparisons
-            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
-                let l = if left_is_int {
-                    left.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(left_tag)
-                };
-                let r = if right_is_int {
-                    right.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(right_tag)
-                };
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l < r);
-                return Ok(());
-            }
-        }
-
-        // Slow path: strings and metamethods
-        let val_b = self.get_register(base_ptr, b);
-        let val_c = self.get_register(base_ptr, c);
-
-        // Slow path: strings and metamethods
-        let left = val_b;
-        let right = val_c;
-
-        if let (Some(l), Some(r)) = (self.get_string(&left), self.get_string(&right)) {
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() < r.as_str()));
-            return Ok(());
-        }
-
-        if self.call_binop_metamethod(&left, &right, "__lt", a)? {
-            return Ok(());
-        }
-
-        Err("attempt to compare incompatible values".to_string())
-    }
-
-    #[inline]
-    fn op_le(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // SAFETY: Compiler guarantees indices are within bounds
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + b);
-            let right = self.register_stack.get_unchecked(base_ptr + c);
-
-            let left_tag = left.primary();
-            let right_tag = right.primary();
-
-            // Fast path: both integers
-            if left_tag == crate::lua_value::TAG_INTEGER
-                && right_tag == crate::lua_value::TAG_INTEGER
-            {
-                let l = left.secondary() as i64;
-                let r = right.secondary() as i64;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l <= r);
-                return Ok(());
-            }
-
-            #[inline(always)]
-            fn is_float_fast(tag: u64) -> bool {
-                if tag < crate::lua_value::NAN_BASE {
-                    true
-                } else {
-                    let high_bits = tag >> 48;
-                    high_bits >= 0x8000 && high_bits < 0xFFF8
-                }
-            }
-
-            let left_is_float = is_float_fast(left_tag);
-            let right_is_float = is_float_fast(right_tag);
-            let left_is_int = left_tag == crate::lua_value::TAG_INTEGER;
-            let right_is_int = right_tag == crate::lua_value::TAG_INTEGER;
-
-            // Mixed int/float comparisons
-            if (left_is_int || left_is_float) && (right_is_int || right_is_float) {
-                let l = if left_is_int {
-                    left.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(left_tag)
-                };
-                let r = if right_is_int {
-                    right.secondary() as i64 as f64
-                } else {
-                    f64::from_bits(right_tag)
-                };
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::boolean(l <= r);
-                return Ok(());
-            }
-        }
-
-        // Slow path: strings and metamethods
-        let val_b = self.get_register(base_ptr, b);
-        let val_c = self.get_register(base_ptr, c);
-
-        // Slow path
-        let left = val_b;
-        let right = val_c;
-
-        if let (Some(l), Some(r)) = (self.get_string(&left), self.get_string(&right)) {
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            self.set_register(base_ptr, a, LuaValue::boolean(l.as_str() <= r.as_str()));
-            return Ok(());
-        }
-
-        if self.call_binop_metamethod(&left, &right, "__le", a)? {
-            return Ok(());
-        }
-
-        if let Some(_) = self.get_metamethod(&left, "__lt") {
-            if self.call_binop_metamethod(&right, &left, "__lt", a)? {
-                let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
-                let result = self.get_register(base_ptr, a).is_truthy();
-                self.set_register(base_ptr, a, LuaValue::boolean(!result));
-                return Ok(());
-            }
-        }
-
-        Err("attempt to compare incompatible values".to_string())
-    }
-
-    // Immediate comparison instructions (Lua 5.4 optimization)
-    // Conditional skip mode: skip next instruction if comparison is FALSE
-    // A = register to compare, B = signed immediate value, C=1 for control flow mode
-    #[inline(always)]
-    fn op_lti(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr);
-        let c = Instruction::get_c(instr);
-
-        // Fast path: decode immediate inline (9-bit signed)
-        let imm = ((b as i32) << 23 >> 23) as i64; // Sign extend 9-bit to 64-bit
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + a);
-            if left.primary() == crate::lua_value::TAG_INTEGER {
-                let val = left.secondary() as i64;
-                let result = val < imm;
-                // Skip next instruction if (result != c)
-                // c=0 means: if true then skip (to enter loop body)
-                // c=1 means: if false then skip
-                if (result as u32) != c {
-                    self.current_frame_mut().pc += 1;
-                }
-                return Ok(());
-            }
-        }
-
-        Err("attempt to compare with non-integer".to_string())
-    }
-
-    #[inline(always)]
-    fn op_lei(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr);
-        let c = Instruction::get_c(instr);
-
-        let imm = ((b as i32) << 23 >> 23) as i64;
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + a);
-            if left.primary() == crate::lua_value::TAG_INTEGER {
-                let val = left.secondary() as i64;
-                let result = val <= imm;
-                if (result as u32) != c {
-                    self.current_frame_mut().pc += 1;
-                }
-                return Ok(());
-            }
-        }
-
-        Err("attempt to compare with non-integer".to_string())
-    }
-
-    #[inline(always)]
-    fn op_gti(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr);
-        let c = Instruction::get_c(instr);
-
-        let imm = ((b as i32) << 23 >> 23) as i64;
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + a);
-            if left.primary() == crate::lua_value::TAG_INTEGER {
-                let val = left.secondary() as i64;
-                let result = val > imm;
-                if (result as u32) != c {
-                    self.current_frame_mut().pc += 1;
-                }
-                return Ok(());
-            }
-        }
-
-        Err("attempt to compare with non-integer".to_string())
-    }
-
-    #[inline(always)]
-    fn op_gei(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr);
-        let c = Instruction::get_c(instr);
-
-        let imm = ((b as i32) << 23 >> 23) as i64;
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + a);
-            if left.primary() == crate::lua_value::TAG_INTEGER {
-                let val = left.secondary() as i64;
-                let result = val >= imm;
-                if (result as u32) != c {
-                    self.current_frame_mut().pc += 1;
-                }
-                return Ok(());
-            }
-        }
-
-        Err("attempt to compare with non-integer".to_string())
-    }
-
-    #[inline(always)]
-    fn op_eqi(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr);
-
-        let imm = ((b as i32) << 23 >> 23) as i64;
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let left = self.register_stack.get_unchecked(base_ptr + a);
-            if left.primary() == crate::lua_value::TAG_INTEGER {
-                let val = left.secondary() as i64;
-                if !(val == imm) {
-                    self.current_frame_mut().pc += 1;
-                }
-                return Ok(());
-            }
-        }
-
-        Err("attempt to compare with non-integer".to_string())
-    }
-
-    #[inline(always)]
-    #[inline]
-    fn op_jmp(&mut self, instr: u32) -> Result<(), String> {
-        let sbx = Instruction::get_sbx(instr);
-        let frame = self.current_frame_mut();
-        frame.pc = (frame.pc as i32 + sbx) as usize;
-        Ok(())
-    }
-
-    // Numeric for loop opcodes for optimal performance
-    // Lua 5.4 optimization: Pre-compute loop count in FORPREP
-    // R(A) = internal index, R(A+1) = loop counter (integers) or limit (floats)
-    // R(A+2) = step, R(A+3) = loop variable
-    #[inline]
-    fn op_forprep(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let sbx = Instruction::get_sbx(instr);
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let init_val = self.register_stack.get_unchecked(base_ptr + a);
-            let limit_val = self.register_stack.get_unchecked(base_ptr + a + 1);
-            let step_val = self.register_stack.get_unchecked(base_ptr + a + 2);
-
-            let init_tag = init_val.primary();
-            let limit_tag = limit_val.primary();
-            let step_tag = step_val.primary();
-
-            // Fast path: All integers (most loops)
-            if init_tag == crate::lua_value::TAG_INTEGER
-                && limit_tag == crate::lua_value::TAG_INTEGER
-                && step_tag == crate::lua_value::TAG_INTEGER
-            {
-                let init = init_val.secondary() as i64;
-                let limit = limit_val.secondary() as i64;
-                let step = step_val.secondary() as i64;
-
-                if step == 0 {
-                    return Err("'for' step is zero".to_string());
-                }
-
-                // Lua 5.4 optimization: compute loop count using unsigned arithmetic
-                let count = if step > 0 {
-                    // Ascending loop: count = ceil((limit - init) / step) + 1
-                    // Simplified: count = (limit - init + step) / step
-                    let diff = (limit as u64).wrapping_sub(init as u64);
-                    if step != 1 {
-                        (diff / (step as u64)) + 1
-                    } else {
-                        diff + 1 // Optimize common case step=1
-                    }
-                } else {
-                    // Descending loop: count = ceil((init - limit) / (-step)) + 1
-                    let diff = (init as u64).wrapping_sub(limit as u64);
-                    let neg_step = (-(step + 1)) as u64 + 1;
-                    (diff / neg_step) + 1
-                };
-
-                // Store loop count in R(A+1) instead of limit
-                *self.register_stack.get_unchecked_mut(base_ptr + a + 1) =
-                    LuaValue::integer(count as i64);
-                // Initialize index R(A) = init - step (pre-decrement for first FORLOOP)
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = 
-                    LuaValue::integer(init.wrapping_sub(step));
-                // Initialize loop variable R(A+3) = init - step (will be updated by FORLOOP)
-                *self.register_stack.get_unchecked_mut(base_ptr + a + 3) = 
-                    LuaValue::integer(init.wrapping_sub(step));
-
-                // Check if loop should run at all
-                if count == 0 {
-                    // Skip loop body
-                    let frame = self.current_frame_mut();
-                    frame.pc = (frame.pc as i32 + sbx + 1) as usize;
-                    return Ok(());
-                }
-            } else {
-                // Float path: at least one operand is float
-                let is_num = |tag: u64| {
-                    tag == crate::lua_value::TAG_INTEGER || tag < crate::lua_value::NAN_BASE
-                };
-
-                if !is_num(init_tag) || !is_num(limit_tag) || !is_num(step_tag) {
-                    return Err("'for' loop variables must be numbers".to_string());
-                }
-
-                let to_float = |val: &LuaValue, tag: u64| {
-                    if tag == crate::lua_value::TAG_INTEGER {
-                        val.secondary() as i64 as f64
-                    } else {
-                        f64::from_bits(tag)
-                    }
-                };
-
-                let init = to_float(init_val, init_tag);
-                let limit = to_float(limit_val, limit_tag);
-                let step = to_float(step_val, step_tag);
-
-                if step == 0.0 {
-                    return Err("'for' step is zero".to_string());
-                }
-
-                // Check if loop should run
-                let should_run = if step > 0.0 {
-                    init <= limit
-                } else {
-                    init >= limit
-                };
-
-                if !should_run {
-                    // Skip loop body
-                    let frame = self.current_frame_mut();
-                    frame.pc = (frame.pc as i32 + sbx + 1) as usize;
-                    return Ok(());
-                }
-
-                // For floats, keep limit in R(A+1), store internal index in R(A)
-                // Pre-decrement: R(A) = init - step (will be incremented in FORLOOP)
-                let pre_idx = init - step;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(pre_idx);
-                *self.register_stack.get_unchecked_mut(base_ptr + a + 3) = LuaValue::float(pre_idx);
-            }
-        }
-
-        // Jump forward to FORLOOP (not to loop body)
-        let frame = self.current_frame_mut();
-        frame.pc = (frame.pc as i32 + sbx) as usize;
-        Ok(())
-    }
-
-    // FORLOOP: Lua 5.4 optimized version using pre-computed loop count
-    // For integers: R(A+1) = loop counter (decrement each iteration)
-    // For floats: R(A+1) = limit (traditional comparison)
-    #[inline]
-    fn op_forloop(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let sbx = Instruction::get_sbx(instr);
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let idx_val = self.register_stack.get_unchecked(base_ptr + a);
-            let counter_val = self.register_stack.get_unchecked(base_ptr + a + 1);
-            let step_val = self.register_stack.get_unchecked(base_ptr + a + 2);
-
-            let idx_tag = idx_val.primary();
-            let counter_tag = counter_val.primary();
-            let step_tag = step_val.primary();
-
-            // Fast path: Integer loops (with pre-computed counter)
-            if idx_tag == crate::lua_value::TAG_INTEGER
-                && counter_tag == crate::lua_value::TAG_INTEGER
-                && step_tag == crate::lua_value::TAG_INTEGER
-            {
-                let idx = idx_val.secondary() as i64;
-                let mut count = counter_val.secondary() as i64;
-                let step = step_val.secondary() as i64;
-
-                // Check if iterations remain
-                if count > 0 {
-                    // Decrement counter (Lua 5.4 optimization!)
-                    count -= 1;
-                    *self.register_stack.get_unchecked_mut(base_ptr + a + 1) =
-                        LuaValue::integer(count);
-
-                    // Update index: idx += step
-                    let new_idx = idx.wrapping_add(step);
-                    *self.register_stack.get_unchecked_mut(base_ptr + a) =
-                        LuaValue::integer(new_idx);
-
-                    // Update loop variable R(A+3) = new_idx
-                    *self.register_stack.get_unchecked_mut(base_ptr + a + 3) =
-                        LuaValue::integer(new_idx);
-
-                    // Jump back to loop body
-                    let frame = self.current_frame_mut();
-                    frame.pc = (frame.pc as i32 + sbx) as usize;
-                }
-                return Ok(());
-            }
-
-            // Float path: Use traditional comparison (no pre-computed counter)
-            let is_num =
-                |tag: u64| tag == crate::lua_value::TAG_INTEGER || tag < crate::lua_value::NAN_BASE;
-
-            if is_num(idx_tag) && is_num(counter_tag) && is_num(step_tag) {
-                let to_float = |val: &LuaValue, tag: u64| {
-                    if tag == crate::lua_value::TAG_INTEGER {
-                        val.secondary() as i64 as f64
-                    } else {
-                        f64::from_bits(tag)
-                    }
-                };
-
-                let idx = to_float(idx_val, idx_tag);
-                let limit = to_float(counter_val, counter_tag); // For floats, R(A+1) is limit
-                let step = to_float(step_val, step_tag);
-
-                // Update index
-                let new_idx = idx + step;
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::float(new_idx);
-
-                // Check loop condition
-                let continue_loop = if step >= 0.0 {
-                    new_idx <= limit
-                } else {
-                    new_idx >= limit
-                };
-
-                if continue_loop {
-                    // Update loop variable
-                    *self.register_stack.get_unchecked_mut(base_ptr + a + 3) =
-                        LuaValue::float(new_idx);
-                    // Jump back
-                    let frame = self.current_frame_mut();
-                    frame.pc = (frame.pc as i32 + sbx) as usize;
-                }
-                return Ok(());
-            }
-        }
-
-        Err("'for' loop variables must be numbers".to_string())
-    }
-
-    #[inline]
-    fn op_test(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let c = Instruction::get_c(instr);
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Fast path: direct register access
-        unsafe {
-            let val = self.register_stack.get_unchecked(base_ptr + a);
-            let is_true = val.is_truthy();
-
-            if (is_true as u32) != c {
-                let frame = self.current_frame_mut();
-                frame.pc += 1;
-            }
-        }
-        Ok(())
-    }
-
-    #[inline]
-    fn op_testset(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr);
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        unsafe {
-            let val_b = *self.register_stack.get_unchecked(base_ptr + b);
-            let is_true = val_b.is_truthy();
-
-            if (is_true as u32) == c {
-                *self.register_stack.get_unchecked_mut(base_ptr + a) = val_b;
-            } else {
-                let frame = self.current_frame_mut();
-                frame.pc += 1;
-            }
-        }
-        Ok(())
-    }
-
-    fn op_call(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let func = self.register_stack[base_ptr + a];
-
-        // Fast path: Lua function (most common case)
-        if func.is_function() {
-            if let Some(lua_func_id) = func.as_function_id() {
-                let (max_stack_size, param_count, is_vararg) = {
-                    let func_ref = self
-                        .object_pool
-                        .get_function(lua_func_id)
-                        .ok_or("Missing function")?;
-                    let lua_func = func_ref.borrow();
-                    (
-                        lua_func.chunk.max_stack_size,
-                        lua_func.chunk.param_count,
-                        lua_func.chunk.is_vararg,
-                    )
-                };
-
-                let frame = self.current_frame();
-                let src_base = frame.base_ptr + a;
-                let top = frame.top;
-                let frame_base = frame.base_ptr;
-                let arg_count = if b == 0 { top - a - 1 } else { b - 1 };
-
-                let new_base = self.register_stack.len();
-
-                // For vararg functions, we need extra space for varargs after max_stack_size
-                let vararg_count = if arg_count > param_count {
-                    arg_count - param_count
-                } else {
-                    0
-                };
-                let total_size = max_stack_size + vararg_count;
-                self.ensure_stack_capacity(new_base + total_size);
-
-                // Copy only the regular parameters (not varargs)
-                let params_to_copy = arg_count.min(param_count);
-                for i in 0..params_to_copy {
-                    let src_idx = src_base + 1 + i;
-                    if src_idx < frame_base + top {
-                        let val = self.register_stack[src_idx];
-                        self.register_stack[new_base + i] = val;
-                    }
-                }
-
-                // If vararg function, copy extra args to the end of the frame
-                let vararg_base = if is_vararg && vararg_count > 0 {
-                    let vararg_start_in_stack = new_base + max_stack_size;
-                    for i in 0..vararg_count {
-                        let src_idx = src_base + 1 + param_count + i;
-                        if src_idx < frame_base + top {
-                            let val = self.register_stack[src_idx];
-                            self.register_stack[vararg_start_in_stack + i] = val;
-                        }
-                    }
-                    Some(vararg_start_in_stack)
-                } else {
-                    None
-                };
-
-                let frame_id = self.next_frame_id;
-                self.next_frame_id += 1;
-
-                let mut new_frame = LuaCallFrame::new_lua_function(
-                    frame_id,
-                    func,
-                    new_base,
-                    max_stack_size,
-                    a,
-                    if c == 0 { usize::MAX } else { c - 1 },
-                );
-
-                // Set up vararg information if function uses ...
-                if is_vararg && vararg_count > 0 {
-                    // vararg_start is now an ABSOLUTE index into register_stack
-                    new_frame.vararg_start = vararg_base.unwrap();
-                    new_frame.vararg_count = vararg_count as u16;
-                }
-
-                self.frames.push(new_frame);
-                return Ok(());
-            }
-        }
-
-        // Fast path: C function - ultra-optimized for iterators like ipairs
-        if func.is_cfunction() {
-            if let Some(cfunc) = func.as_cfunction() {
-                let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
-                let top = frame.top;
-
-                // Fast path for iterators (2-3 arguments)
-                let arg_count = if b == 0 { top - a } else { b };
-
-                // Allocate args directly on register stack to avoid Vec allocation
-                let cfunc_base = self.register_stack.len();
-                self.ensure_stack_capacity(cfunc_base + arg_count);
-
-                // Copy function and arguments directly
-                unsafe {
-                    // SAFETY: bounds checked by ensure_stack_capacity
-                    *self.register_stack.get_unchecked_mut(cfunc_base) = func;
-                    for i in 1..b {
-                        let src_idx = base_ptr + a + i;
-                        let val = if src_idx < base_ptr + top {
-                            *self.register_stack.get_unchecked(src_idx)
-                        } else {
-                            LuaValue::nil()
-                        };
-                        *self.register_stack.get_unchecked_mut(cfunc_base + i) = val;
-                    }
-                }
-
-                // Create temporary frame for CFunction
-                let frame_id = self.next_frame_id;
-                self.next_frame_id += 1;
-
-                let temp_frame = LuaCallFrame::new_c_function(
-                    frame_id,
-                    func,
-                    self.current_frame().pc,
-                    cfunc_base,
-                    arg_count,
-                );
-
-                self.frames.push(temp_frame);
-
-                // Call the CFunction
-                let multi_result = match cfunc(self) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        self.frames.pop();
-                        return Err(e);
-                    }
-                };
-
-                // Pop CFunction frame
-                self.frames.pop();
-
-                // Check if yielding
-                if self.yielding {
-                    if let Some(thread_rc) = &self.current_thread {
-                        let mut thread = thread_rc.borrow_mut();
-                        thread.yield_call_reg = Some(a);
-                        thread.yield_call_nret = Some(if c == 0 { usize::MAX } else { c - 1 });
-                    }
-                    return Ok(());
-                }
-
-                // Store return values efficiently
-                let all_returns = multi_result.all_values();
-                let num_returns = all_returns.len();
-                let num_expected = if c == 0 { num_returns } else { c - 1 };
-
-                let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
-                let top = frame.top;
-
-                // Fast path for single return value (common in iterators)
-                if num_returns == 1 && num_expected >= 1 && a < top {
-                    self.register_stack[base_ptr + a] = all_returns[0];
-                } else if num_returns == 2 && num_expected >= 2 {
-                    // Fast path for double return (ipairs returns index, value)
-                    if a < top {
-                        self.register_stack[base_ptr + a] = all_returns[0];
-                    }
-                    if a + 1 < top {
-                        self.register_stack[base_ptr + a + 1] = all_returns[1];
-                    }
-                } else {
-                    // General case
-                    for (i, value) in all_returns.into_iter().take(num_expected).enumerate() {
-                        if a + i < top {
-                            self.register_stack[base_ptr + a + i] = value;
-                        }
-                    }
-                    // Fill remaining with nil
-                    for i in num_returns..num_expected {
-                        if a + i < top {
-                            self.register_stack[base_ptr + a + i] = LuaValue::nil();
-                        }
-                    }
-                }
-
-                // CRITICAL: Truncate register stack to remove temporary C function registers
-                // The cfunc_base marks where we allocated temporary space for the C function
-                // We must restore the stack to its original size after writing return values
-                if cfunc_base < self.register_stack.len() {
-                    self.register_stack.truncate(cfunc_base);
-                }
-
-                return Ok(());
-            }
-        }
-
-        // TODO: Slow path: Check for __call metamethod on non-functions (tables, userdata)
-        // Requires implementing get_metamethod for non-table types
-        // Currently disabled as the get_metamethod method needs to be updated for ID-based system
-
-        Err("Attempt to call a non-function value".to_string())
-    }
-
-    /// Tail call optimization: reuse current frame instead of creating new one
-    fn op_tailcall(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let func = self.register_stack[base_ptr + a];
-
-        // Only Lua functions can use tail call optimization
-        // C functions execute immediately and return
-        if func.is_function() {
-            if let Some(lua_func_id) = func.as_function_id() {
-                let (max_stack_size, param_count, is_vararg) = {
-                    let func_ref = self
-                        .object_pool
-                        .get_function(lua_func_id)
-                        .ok_or("Missing function")?;
-                    let lua_func = func_ref.borrow();
-                    (
-                        lua_func.chunk.max_stack_size,
-                        lua_func.chunk.param_count,
-                        lua_func.chunk.is_vararg,
-                    )
-                };
-
-                let frame = self.current_frame();
-                let src_base = frame.base_ptr + a; // Function at base_ptr + a
-                let top = frame.top;
-                let current_base = frame.base_ptr;
-                let arg_count = if b == 0 { top - a - 1 } else { b - 1 };
-
-                // Calculate vararg info
-                let vararg_count = if arg_count > param_count {
-                    arg_count - param_count
-                } else {
-                    0
-                };
-                let total_size = max_stack_size + vararg_count;
-
-                // Ensure we have enough space at current_base
-                self.ensure_stack_capacity(current_base + total_size);
-
-                // CRITICAL: Copy arguments to temporary buffer first!
-                // Arguments start at src_base + 1 (after the function)
-                let mut temp_args: Vec<LuaValue> = Vec::with_capacity(arg_count);
-                for i in 0..arg_count {
-                    let src_idx = src_base + 1 + i;
-                    if src_idx < base_ptr + top {
-                        temp_args.push(self.register_stack[src_idx]);
-                    } else {
-                        temp_args.push(LuaValue::nil());
-                    }
-                }
-
-                // Now safely move arguments from temp buffer to current_base
-                // Copy regular parameters (not varargs)
-                let params_to_copy = arg_count.min(param_count);
-                for i in 0..params_to_copy {
-                    self.register_stack[current_base + i] = temp_args[i];
-                }
-
-                // Fill remaining params with nil
-                for i in params_to_copy..param_count {
-                    self.register_stack[current_base + i] = LuaValue::nil();
-                }
-
-                // Handle varargs if function is vararg
-                let vararg_base = if is_vararg && vararg_count > 0 {
-                    let vararg_start = current_base + max_stack_size;
-                    for i in 0..vararg_count {
-                        self.register_stack[vararg_start + i] = temp_args[param_count + i];
-                    }
-                    Some(vararg_start)
-                } else {
-                    None
-                };
-
-                // Update current frame in-place (tail call optimization!)
-                let frame = self.current_frame_mut();
-                frame.function_value = func;
-                frame.pc = 0; // Reset PC to start of new function
-                frame.top = max_stack_size;
-
-                // 不需要清除缓存 - function_value 已经包含新的指针!
-
-                if is_vararg && vararg_count > 0 {
-                    frame.vararg_start = vararg_base.unwrap();
-                    frame.vararg_count = vararg_count as u16;
-                } else {
-                    frame.vararg_start = 0;
-                    frame.vararg_count = 0;
-                }
-
-                // No new frame pushed - we reused the current one!
-                return Ok(());
-            }
-        }
-
-        // Fallback to regular call for C functions or non-functions
-        self.op_call(instr)
-    }
-
-    fn op_return(&mut self, instr: u32) -> Result<LuaValue, String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        // Collect return values
-        let num_returns = if b == 0 {
-            let frame = self.current_frame();
-            frame.top.saturating_sub(a)
-        } else {
-            b - 1
-        };
-
-        // Fast path: single return value (most common case)
-        let return_value = if num_returns == 1 {
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            if a < frame.top {
-                self.register_stack[base_ptr + a]
-            } else {
-                LuaValue::nil()
-            }
-        } else {
-            LuaValue::nil()
-        };
-
-        // Save caller info before popping
-        let caller_result_reg = self.current_frame().result_reg as usize;
-        let caller_num_results = self.current_frame().get_num_results();
-        let exiting_frame_id = self.current_frame().frame_id;
-        let exiting_base_ptr = self.current_frame().base_ptr;
-
-        // Close upvalues for the exiting frame
-        self.close_upvalues(exiting_frame_id);
-
-        // Pop frame
-        self.frames.pop();
-
-        // Always save return values to self.return_values for callers that need them
-        // (like call_function_internal)
-        self.return_values.clear();
-        let stack_top = self.register_stack.len().min(exiting_base_ptr + 100);
-        for i in 0..num_returns {
-            let idx = exiting_base_ptr + a + i;
-            if idx < stack_top {
-                self.return_values.push(self.register_stack[idx]);
-            } else {
-                self.return_values.push(LuaValue::nil());
-            }
-        }
-
-        // If this is the top-level return (no caller frame), we're done
-        if self.frames.is_empty() {
-            return Ok(return_value);
-        }
-
-        // Fast path: no return values or caller doesn't care
-        if num_returns == 0 {
-            return Ok(return_value);
-        }
-
-        // Store return values directly to caller's registers
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let top = frame.top;
-        let num_to_copy = caller_num_results.min(num_returns);
-
-        // Direct copy without intermediate Vec
-        for i in 0..num_to_copy {
-            if caller_result_reg + i < top && a + i < exiting_base_ptr + top {
-                let val = self.register_stack[exiting_base_ptr + a + i];
-                self.register_stack[base_ptr + caller_result_reg + i] = val;
-            }
-        }
-
-        // Fill remaining expected results with nil
-        if caller_num_results != usize::MAX {
-            for i in num_to_copy..caller_num_results {
-                if caller_result_reg + i < top {
-                    self.register_stack[base_ptr + caller_result_reg + i] = LuaValue::nil();
-                }
-            }
-        }
-
-        Ok(return_value)
-    }
-
-    fn op_getupval(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        let upvalue = self.get_current_upvalue(b)?;
-
-        // Get value from upvalue with access to register_stack
-        let value = upvalue.get_value(&self.frames, &self.register_stack);
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        self.set_register(base_ptr, a, value);
-
-        Ok(())
-    }
-
-    fn op_setupval(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let value = self.get_register(base_ptr, a);
-
-        let upvalue = self.get_current_upvalue(b)?;
-
-        // Set value to upvalue with access to register_stack
-        upvalue.set_value(&mut self.frames, &mut self.register_stack, value);
-
-        Ok(())
-    }
-
-    fn op_closure(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let bx = Instruction::get_bx(instr) as usize;
-
-        // Dynamically resolve parent function chunk and frame info
-        let (proto, parent_frame_id) = {
-            let frame = self.current_frame();
-            let parent_chunk = self.get_current_chunk()?;
-
-            // Get the child chunk (prototype)
-            if bx >= parent_chunk.child_protos.len() {
-                return Err(format!("Invalid prototype index: {}", bx));
-            }
-
-            (parent_chunk.child_protos[bx].clone(), frame.frame_id)
-        };
-
-        // Capture upvalues according to the prototype's upvalue descriptors
-        let mut upvalues = Vec::new();
-        for desc in &proto.upvalue_descs {
-            if desc.is_local {
-                // Capture from parent's register - create or reuse open upvalue
-                let register = desc.index as usize;
-
-                // Check if an open upvalue already exists for this location
-                let existing_upvalue = self
-                    .open_upvalues
-                    .iter()
-                    .find(|uv| uv.points_to(parent_frame_id, register))
-                    .cloned();
-
-                let upvalue = if let Some(uv) = existing_upvalue {
-                    // Reuse existing open upvalue
-                    uv
-                } else {
-                    // Create new open upvalue
-                    let uv = LuaUpvalue::new_open(parent_frame_id, register);
-                    self.open_upvalues.push(uv.clone());
-                    uv
-                };
-
-                upvalues.push(upvalue);
-            } else {
-                // Capture from parent's upvalue (share the same upvalue)
-                let upvalue = self.get_current_upvalue(desc.index as usize)?;
-                upvalues.push(upvalue);
-            }
-        }
-
-        // Create new function (closure)
-        let func = self.create_function(proto, upvalues);
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        self.set_register(base_ptr, a, func);
-
-        Ok(())
-    }
-
-    fn op_concat(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        // Binary concat with metamethod support
-        let (left, right) = {
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            (
-                self.get_register(base_ptr, b),
-                self.get_register(base_ptr, c),
-            )
-        };
-
-        // Try direct concatenation - use String capacity for efficiency
-        let mut result = String::new();
-        let mut success = false;
-
-        if let Some(s) = self.get_string(&left) {
-            result.push_str(s.as_str());
-            success = true;
-        } else if let Some(n) = left.as_number() {
-            result.push_str(&n.to_string());
-            success = true;
-        } else if let Some(val) = self.call_tostring_metamethod(&left)? {
-            if let Some(s) = self.get_string(&val) {
-                result.push_str(s.as_str());
-                success = true;
-            }
-        }
-
-        if success {
-            if let Some(s) = self.get_string(&right) {
-                result.push_str(s.as_str());
-            } else if let Some(n) = right.as_number() {
-                result.push_str(&n.to_string());
-            } else if let Some(val) = self.call_tostring_metamethod(&right)? {
-                if let Some(s) = self.get_string(&val) {
-                    result.push_str(s.as_str());
-                } else {
-                    success = false;
-                }
-            } else {
-                success = false;
-            }
-        }
-
-        if success {
-            let string = self.create_string(&result);
-            let frame = self.current_frame();
-            let base_ptr = frame.base_ptr;
-            self.set_register(base_ptr, a, string);
-            return Ok(());
-        }
-
-        // Try __concat metamethod
-        if self.call_binop_metamethod(&left, &right, "__concat", a)? {
-            return Ok(());
-        }
-
-        Err("attempt to concatenate incompatible values".to_string())
-    }
-
-    fn op_getglobal(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let bx = Instruction::get_bx(instr) as usize;
-
-        let chunk = self.get_current_chunk()?;
-        let name_val = &chunk.constants[bx];
-        let value = self.get_global_by_lua_value(&name_val);
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        match value {
-            Some(v) => {
-                self.set_register(base_ptr, a, v);
-                Ok(())
-            }
-            None => {
-                self.set_register(base_ptr, a, LuaValue::nil());
-                Ok(())
-            }
-        }
-    }
-
-    fn op_setglobal(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let bx = Instruction::get_bx(instr) as usize;
-
-        let chunk = self.get_current_chunk()?;
-        let name_val = chunk.constants[bx].clone();
-        let base_ptr = self.current_frame().base_ptr;
-        let value = self.get_register(base_ptr, a);
-
-        if let Some(name_str) = self.get_string(&name_val) {
-            let name = name_str.as_str().to_string(); // Clone the string to avoid borrow issues
-            self.set_global(&name, value);
-            Ok(())
-        } else {
-            Err("Invalid global name".to_string())
-        }
-    }
-
-    fn op_vararg(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let vararg_start = frame.vararg_start; // This is an ABSOLUTE index into register_stack
-        let vararg_count = frame.vararg_count as usize;
-
-        if b == 0 {
-            // Load all varargs
-            for i in 0..vararg_count {
-                let vararg_value = self.register_stack[vararg_start + i];
-                self.set_register(base_ptr, a + i, vararg_value);
-            }
-            // Update frame top to reflect loaded varargs (for SetList with B=0)
-            // Only increase top if needed, never decrease it
-            let frame = self.current_frame_mut();
-            let new_top = a + vararg_count;
-            if new_top > frame.top {
-                frame.top = new_top;
-            }
-        } else {
-            // Load (b-1) varargs
-            let count = b - 1;
-            for i in 0..count {
-                if i < vararg_count {
-                    let vararg_value = self.register_stack[vararg_start + i];
-                    self.set_register(base_ptr, a + i, vararg_value);
-                } else {
-                    // Pad with nil if not enough varargs
-                    self.set_register(base_ptr, a + i, LuaValue::nil());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn op_setlist(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize; // Table register
-        let b = Instruction::get_b(instr) as usize; // Number of elements (0 = to stack top)
-        let c = Instruction::get_c(instr) as usize; // Starting index in table (base)
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Get the table
-        let table_val = self.get_register(base_ptr, a);
-
-        if !table_val.is_table() {
-            return Err(format!("SetList: not a table, got {:?}", table_val));
-        }
-
-        // Optimized: use direct reference, no Rc clone needed for raw_set
-        let table_id = table_val.as_table_id().unwrap();
-        let table_ref = self
-            .object_pool
-            .get_table(table_id)
-            .ok_or("SetList: missing table")?;
-
-        // Determine how many elements to set
-        let count = if b == 0 {
-            // Use all remaining registers in the frame
-            let top = self.current_frame().top;
-            top - a - 1
-        } else {
-            b
-        };
-
-        // Set table elements: table[c + i] = R(a + i) for i = 1..count
-        for i in 0..count {
-            let value_reg = a + 1 + i;
-            let value = self.get_register(base_ptr, value_reg);
-            let key = LuaValue::integer((c + i + 1) as i64); // Lua arrays are 1-indexed
-            table_ref.borrow_mut().raw_set(key, value);
-        }
-
-        Ok(())
     }
 
     // Helper methods
     #[inline(always)]
-    fn current_frame(&self) -> &LuaCallFrame {
+    pub(crate) fn current_frame(&self) -> &LuaCallFrame {
         unsafe { self.frames.last().unwrap_unchecked() }
     }
 
     #[inline(always)]
-    fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
+    pub(crate) fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
         unsafe { self.frames.last_mut().unwrap_unchecked() }
-    }
-
-    pub fn values_equal(&self, left: &LuaValue, right: &LuaValue) -> bool {
-        left == right
     }
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
@@ -2796,6 +410,8 @@ impl LuaVM {
             resume_values: Vec::new(),
             yield_call_reg: None,
             yield_call_nret: None,
+            yield_pc: None,
+            yield_frame_id: None,
         };
 
         let thread_rc = Rc::new(RefCell::new(thread));
@@ -2811,12 +427,14 @@ impl LuaVM {
         &mut self,
         thread_val: LuaValue,
         args: Vec<LuaValue>,
-    ) -> Result<(bool, Vec<LuaValue>), String> {
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Extract Rc from LuaValue
         let thread_rc = unsafe {
-            let ptr = thread_val.as_thread_ptr().ok_or("invalid thread")?;
+            let ptr = thread_val
+                .as_thread_ptr()
+                .ok_or(LuaError::RuntimeError("invalid thread".to_string()))?;
             if ptr.is_null() {
-                return Err("invalid thread".to_string());
+                return Err(LuaError::RuntimeError("invalid thread".to_string()));
             }
             let rc = Rc::from_raw(ptr);
             let cloned = rc.clone();
@@ -2849,10 +467,6 @@ impl LuaVM {
         let saved_upvalues = std::mem::take(&mut self.open_upvalues);
         let saved_frame_id = self.next_frame_id;
         let saved_thread = self.current_thread.take();
-        let saved_yielding = self.yielding;
-
-        // Reset yielding flag
-        self.yielding = false;
 
         let is_first_resume = {
             let thread = thread_rc.borrow();
@@ -2881,7 +495,14 @@ impl LuaVM {
                 .get(0)
                 .cloned()
                 .unwrap_or(LuaValue::nil());
-            self.call_function_internal(func, args)
+            match self.call_function_internal(func, args) {
+                Ok(values) => Ok(values),
+                Err(LuaError::Yield(values)) => {
+                    // Function yielded - this is expected
+                    Ok(values)
+                }
+                Err(e) => Err(e),
+            }
         } else {
             // Resumed from yield:
             // Use saved CALL instruction info to properly store return values
@@ -2925,12 +546,14 @@ impl LuaVM {
             self.run().map(|v| vec![v])
         };
 
-        // Check if thread yielded (use yielding flag, not yield_values)
-        let did_yield = self.yielding;
-        // let yield_values = {
-        //     let thread = thread_rc.borrow();
-        //     thread.yield_values.clone()
-        // };
+        // Check if thread yielded by examining the result
+        let did_yield = match &result {
+            Ok(_) if !self.frames.is_empty() => {
+                // If frames are not empty after execution, it means we yielded
+                true
+            }
+            _ => false,
+        };
 
         // Save thread state back
         let final_result = if did_yield {
@@ -2963,7 +586,7 @@ impl LuaVM {
                 }
                 Err(e) => {
                     thread.status = CoroutineStatus::Dead;
-                    Ok((false, vec![self.create_string(&e)]))
+                    Ok((false, vec![self.create_string(&format!("{}", e))]))
                 }
             }
         };
@@ -2976,28 +599,120 @@ impl LuaVM {
         self.next_frame_id = saved_frame_id;
         self.current_thread = saved_thread;
         self.current_thread_value = None; // Clear after resume completes
-        self.yielding = saved_yielding;
 
         final_result
     }
 
     /// Yield from current coroutine
-    pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> Result<(), String> {
+    /// Returns Err(LuaError::Yield) which will be caught by run() loop
+    pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
         if let Some(thread_rc) = &self.current_thread {
             // Store yield values in the thread
-            thread_rc.borrow_mut().yield_values = values;
+            thread_rc.borrow_mut().yield_values = values.clone();
             thread_rc.borrow_mut().status = CoroutineStatus::Suspended;
-            // Set yielding flag to interrupt execution
-            self.yielding = true;
-            Ok(())
+            // Return Yield "error" to unwind the call stack
+            Err(LuaError::Yield(values))
         } else {
-            Err("attempt to yield from outside a coroutine".to_string())
+            Err(LuaError::RuntimeError(
+                "attempt to yield from outside a coroutine".to_string(),
+            ))
         }
     }
 
-    /// Get value from table with metatable support
-    /// Handles __index metamethod
-    pub fn table_get(&mut self, lua_table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+    /// Get value from table with metatable support (__index metamethod)
+    /// Use this for GETTABLE, GETFIELD, GETI instructions
+    /// For raw access without metamethods, use table_get_raw() instead
+    pub fn table_get_with_meta(&mut self, lua_table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        // Handle strings with metatable support
+        if lua_table_value.is_string() {
+            // Strings use a shared metatable
+            if let Some(string_mt) = self.get_string_metatable() {
+                let index_key = self.create_string("__index");
+                
+                // Get the __index field from string metatable
+                if let Some(index_table) = self.table_get_with_meta(&string_mt, &index_key) {
+                    // Look up the key in the __index table (the string library)
+                    return self.table_get_with_meta(&index_table, key);
+                }
+            }
+            return None;
+        }
+
+        // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
+        if let Some(ptr) = lua_table_value.as_table_ptr() {
+            // SAFETY: Pointer is valid as long as table exists in ObjectPool
+            let lua_table = unsafe { &*ptr };
+
+            // First try raw get
+            let value = {
+                let table = lua_table.borrow();
+                table.raw_get(key).unwrap_or(LuaValue::nil())
+            };
+
+            if !value.is_nil() {
+                return Some(value);
+            }
+
+            // Check for __index metamethod
+            let meta_value = {
+                let table = lua_table.borrow();
+                table.get_metatable()
+            };
+
+            if let Some(mt) = meta_value
+                && let Some(meta_id) = mt.as_table_id()
+            {
+                let index_key = self.create_string("__index");
+
+                // Try cached pointer for metatable too
+                if let Some(mt_ptr) = mt.as_table_ptr() {
+                    let metatable = unsafe { &*mt_ptr };
+                    let index_value = {
+                        let mt_borrowed = metatable.borrow();
+                        mt_borrowed.raw_get(&index_key)
+                    };
+
+                    if let Some(index_val) = index_value {
+                        match index_val.kind() {
+                            LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
+                            LuaValueKind::CFunction | LuaValueKind::Function => {
+                                let args = vec![lua_table_value.clone(), key.clone()];
+                                match self.call_metamethod(&index_val, &args) {
+                                    Ok(result) => return result,
+                                    Err(_) => return None,
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    // Fallback to ObjectPool lookup
+                    let metatable = self.object_pool.get_table(meta_id)?;
+                    let index_value = {
+                        let mt_borrowed = metatable.borrow();
+                        mt_borrowed.raw_get(&index_key)
+                    };
+
+                    if let Some(index_val) = index_value {
+                        match index_val.kind() {
+                            LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
+                            LuaValueKind::CFunction | LuaValueKind::Function => {
+                                let args = vec![lua_table_value.clone(), key.clone()];
+                                match self.call_metamethod(&index_val, &args) {
+                                    Ok(result) => return result,
+                                    Err(_) => return None,
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            return None;
+        }
+
+        // Slow path: no cached pointer, use ObjectPool lookup
         let Some(table_id) = lua_table_value.as_table_id() else {
             return None;
         };
@@ -3034,7 +749,7 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table
-                    LuaValueKind::Table => return self.table_get(&index_val, key),
+                    LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
 
                     // __index is a function - call it with (table, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
@@ -3078,7 +793,7 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table
-                    LuaValueKind::Table => return self.table_get(&index_val, key),
+                    LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
 
                     // __index is a function - call it with (userdata, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
@@ -3111,7 +826,7 @@ impl LuaVM {
             if let Some(index_val) = index_value {
                 match index_val.kind() {
                     // __index is a table - look up in that table (this is the common case for strings)
-                    LuaValueKind::Table => return self.table_get(&index_val, key),
+                    LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
                     // __index is a function - call it with (string, key)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
                         let args = vec![string_val.clone(), key.clone()];
@@ -3128,22 +843,89 @@ impl LuaVM {
         None
     }
 
-    /// Set value in table with metatable support
-    /// Handles __newindex metamethod
-    pub fn table_set(
+    /// Set value in table with metatable support (__newindex metamethod)
+    /// Use this for SETTABLE, SETFIELD, SETI instructions
+    /// For raw set without metamethods, use table_set_raw() instead
+    pub fn table_set_with_meta(
         &mut self,
         lua_table_val: LuaValue,
         key: LuaValue,
         value: LuaValue,
-    ) -> Result<(), String> {
+    ) -> LuaResult<()> {
+        // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
+        if let Some(ptr) = lua_table_val.as_table_ptr() {
+            // SAFETY: Pointer is valid as long as table exists in ObjectPool
+            let lua_table = unsafe { &*ptr };
+
+            // Check if key already exists
+            let has_key = {
+                let table = lua_table.borrow();
+                table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false)
+            };
+
+            if has_key {
+                // Key exists, use raw set
+                lua_table.borrow_mut().raw_set(key, value);
+                return Ok(());
+            }
+
+            // Key doesn't exist, check for __newindex metamethod
+            let meta_value = {
+                let table = lua_table.borrow();
+                table.get_metatable()
+            };
+
+            if let Some(mt) = meta_value
+                && let Some(table_id) = mt.as_table_id()
+            {
+                let newindex_key = self.create_string("__newindex");
+
+                // Try to use cached metatable pointer
+                let newindex_value = if let Some(mt_ptr) = mt.as_table_ptr() {
+                    let metatable = unsafe { &*mt_ptr };
+                    let mt_borrowed = metatable.borrow();
+                    mt_borrowed.raw_get(&newindex_key)
+                } else {
+                    // Fallback to ObjectPool lookup
+                    let metatable = self
+                        .object_pool
+                        .get_table(table_id)
+                        .ok_or(LuaError::RuntimeError("missing metatable".to_string()))?;
+                    let mt_borrowed = metatable.borrow();
+                    mt_borrowed.raw_get(&newindex_key)
+                };
+
+                if let Some(newindex_val) = newindex_value {
+                    match newindex_val.kind() {
+                        LuaValueKind::Table => {
+                            return self.table_set_with_meta(newindex_val, key, value);
+                        }
+                        LuaValueKind::CFunction | LuaValueKind::Function => {
+                            let args = vec![lua_table_val, key, value];
+                            match self.call_metamethod(&newindex_val, &args) {
+                                Ok(_) => return Ok(()),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // No metamethod, use raw set
+            lua_table.borrow_mut().raw_set(key, value);
+            return Ok(());
+        }
+
+        // Slow path: no cached pointer, use ObjectPool lookup
         let Some(table_id) = lua_table_val.as_table_id() else {
-            return Err("table_set: not a table".to_string());
+            return Err(LuaError::RuntimeError("table_set: not a table".to_string()));
         };
 
         let lua_table = self
             .object_pool
             .get_table(table_id)
-            .ok_or("invalid table")?;
+            .ok_or(LuaError::RuntimeError("invalid table".to_string()))?;
 
         // Check if key already exists
         let has_key = {
@@ -3170,7 +952,7 @@ impl LuaVM {
             let metatable = self
                 .object_pool
                 .get_table(table_id)
-                .ok_or("missing metatable")?;
+                .ok_or(LuaError::RuntimeError("missing metatable".to_string()))?;
 
             let newindex_value = {
                 let mt_borrowed = metatable.borrow();
@@ -3181,7 +963,7 @@ impl LuaVM {
                 match newindex_val.kind() {
                     // __newindex is a table - set in that table
                     LuaValueKind::Table => {
-                        return self.table_set(newindex_val, key, value);
+                        return self.table_set_with_meta(newindex_val, key, value);
                     }
                     // __newindex is a function - call it with (table, key, value)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
@@ -3199,7 +981,7 @@ impl LuaVM {
         let lua_table = self
             .object_pool
             .get_table(table_id)
-            .ok_or("invalid table")?;
+            .ok_or(LuaError::RuntimeError("invalid table".to_string()))?;
         // No metamethod or key doesn't exist, use raw set
         lua_table.borrow_mut().raw_set(key, value);
         Ok(())
@@ -3211,7 +993,7 @@ impl LuaVM {
         &mut self,
         func: &LuaValue,
         args: &[LuaValue],
-    ) -> Result<Option<LuaValue>, String> {
+    ) -> LuaResult<Option<LuaValue>> {
         match func.kind() {
             LuaValueKind::CFunction => {
                 let cfunc = func.as_cfunction().unwrap();
@@ -3278,7 +1060,7 @@ impl LuaVM {
                     let lua_func_ref = self
                         .object_pool
                         .get_function(lua_func_id)
-                        .ok_or("invalid function")?;
+                        .ok_or(LuaError::RuntimeError("invalid function".to_string()))?;
                     lua_func_ref.borrow().chunk.max_stack_size
                 };
 
@@ -3329,7 +1111,9 @@ impl LuaVM {
                     let chunk = if let Some(func_ref) = self.get_function(&function_value) {
                         func_ref.borrow().chunk.clone()
                     } else {
-                        break Err("Invalid function in frame".to_string());
+                        break Err(LuaError::RuntimeError(
+                            "Invalid function in frame".to_string(),
+                        ));
                     };
 
                     if pc >= chunk.code.len() {
@@ -3338,102 +1122,13 @@ impl LuaVM {
                         break Ok(());
                     }
 
-                    let instr = chunk.code[pc];
+                    let _instr = chunk.code[pc];
                     self.frames[frame_idx].pc += 1;
 
-                    // Decode and execute
-                    let opcode = Instruction::get_opcode(instr);
-
-                    // Special handling for Return opcode
-                    if let OpCode::Return = opcode {
-                        match self.op_return(instr) {
-                            Ok(_val) => {
-                                // Return values are now in self.return_values
-                                break Ok(());
-                            }
-                            Err(e) => {
-                                if self.frames.len() > initial_frame_count {
-                                    self.frames.pop();
-                                }
-                                break Err(e);
-                            }
-                        }
-                    }
-
-                    // Execute the instruction
-                    let step_result = match opcode {
-                        OpCode::Move => self.op_move(instr),
-                        OpCode::LoadK => self.op_loadk(instr),
-                        OpCode::LoadI => self.op_loadi(instr),
-                        OpCode::LoadBool => self.op_loadbool(instr),
-                        OpCode::LoadNil => self.op_loadnil(instr),
-                        OpCode::GetGlobal => self.op_getglobal(instr),
-                        OpCode::SetGlobal => self.op_setglobal(instr),
-                        OpCode::GetTable => self.op_gettable(instr),
-                        OpCode::SetTable => self.op_settable(instr),
-                        OpCode::GetTableI => self.op_gettable_i(instr),
-                        OpCode::SetTableI => self.op_settable_i(instr),
-                        OpCode::GetTableK => self.op_gettable_k(instr),
-                        OpCode::SetTableK => self.op_settable_k(instr),
-                        OpCode::NewTable => self.op_newtable(instr),
-                        OpCode::Call => self.op_call(instr),
-                        OpCode::Add => self.op_add(instr),
-                        OpCode::Sub => self.op_sub(instr),
-                        OpCode::Mul => self.op_mul(instr),
-                        OpCode::Div => self.op_div(instr),
-                        OpCode::Mod => self.op_mod(instr),
-                        OpCode::Pow => self.op_pow(instr),
-                        OpCode::AddI => self.op_addi(instr),
-                        OpCode::SubI => self.op_subi(instr),
-                        OpCode::MulI => self.op_muli(instr),
-                        OpCode::DivI => self.op_divi(instr),
-                        OpCode::ModI => self.op_modi(instr),
-                        OpCode::PowI => self.op_powi(instr),
-                        OpCode::IDivI => self.op_idivi(instr),
-                        OpCode::Unm => self.op_unm(instr),
-                        OpCode::Not => self.op_not(instr),
-                        OpCode::Len => self.op_len(instr),
-                        OpCode::Concat => self.op_concat(instr),
-                        OpCode::Jmp => self.op_jmp(instr),
-                        OpCode::Eq => self.op_eq(instr),
-                        OpCode::Lt => self.op_lt(instr),
-                        OpCode::Le => self.op_le(instr),
-                        OpCode::Gt => self.op_gt(instr),
-                        OpCode::Ge => self.op_ge(instr),
-                        OpCode::Ne => self.op_ne(instr),
-                        OpCode::EqI => self.op_eqi(instr),
-                        OpCode::LtI => self.op_lti(instr),
-                        OpCode::LeI => self.op_lei(instr),
-                        OpCode::GtI => self.op_gti(instr),
-                        OpCode::GeI => self.op_gei(instr),
-                        OpCode::And => self.op_and(instr),
-                        OpCode::Or => self.op_or(instr),
-                        OpCode::BAnd => self.op_band(instr),
-                        OpCode::BOr => self.op_bor(instr),
-                        OpCode::BXor => self.op_bxor(instr),
-                        OpCode::Shl => self.op_shl(instr),
-                        OpCode::Shr => self.op_shr(instr),
-                        OpCode::BNot => self.op_bnot(instr),
-                        OpCode::IDiv => self.op_idiv(instr),
-                        OpCode::ForPrep => self.op_forprep(instr),
-                        OpCode::ForLoop => self.op_forloop(instr),
-                        OpCode::Test => self.op_test(instr),
-                        OpCode::TestSet => self.op_testset(instr),
-                        OpCode::Closure => self.op_closure(instr),
-                        OpCode::GetUpval => self.op_getupval(instr),
-                        OpCode::SetUpval => self.op_setupval(instr),
-                        OpCode::VarArg => self.op_vararg(instr),
-                        OpCode::SetList => self.op_setlist(instr),
-                        _ => Err(format!("Unimplemented opcode: {:?}", opcode)),
-                    };
-
-                    if let Err(e) = step_result {
-                        // Pop the frame on error
-                        if self.frames.len() > initial_frame_count {
-                            self.frames.pop();
-                        }
-                        break Err(e);
-                    }
+                    // Execute through dispatcher
+                    // TODO: This needs to be integrated with the main run() loop
+                    // For now, call_metamethod should use call_function_internal
+                    todo!("call_metamethod needs refactoring to use dispatcher");
                 };
 
                 match exec_result {
@@ -3451,223 +1146,9 @@ impl LuaVM {
                     Err(e) => Err(e),
                 }
             }
-            _ => Err("Attempt to call a non-function value".to_string()),
-        }
-    }
-
-    // Additional comparison operators
-    fn op_ne(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        let result = !self.values_equal(&left, &right);
-        self.set_register(base_ptr, a, LuaValue::boolean(result));
-        Ok(())
-    }
-
-    fn op_gt(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self
-            .get_register(base_ptr, b)
-            .as_number()
-            .ok_or("Comparison on non-number")?;
-        let right = self
-            .get_register(base_ptr, c)
-            .as_number()
-            .ok_or("Comparison on non-number")?;
-
-        // Store boolean result in register A
-        self.set_register(base_ptr, a, LuaValue::boolean(left > right));
-        Ok(())
-    }
-
-    fn op_ge(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self
-            .get_register(base_ptr, b)
-            .as_number()
-            .ok_or("Comparison on non-number")?;
-        let right = self
-            .get_register(base_ptr, c)
-            .as_number()
-            .ok_or("Comparison on non-number")?;
-
-        // Store boolean result in register A
-        self.set_register(base_ptr, a, LuaValue::boolean(left >= right));
-        Ok(())
-    }
-
-    // Logical operators (short-circuit handled at compile time)
-    fn op_and(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Lua's 'and' returns first false value or last value
-        let left = self.get_register(base_ptr, b);
-        let result = if !left.is_truthy() {
-            left
-        } else {
-            self.get_register(base_ptr, c)
-        };
-        self.set_register(base_ptr, a, result);
-        Ok(())
-    }
-
-    fn op_or(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-
-        // Lua's 'or' returns first true value or last value
-        let left = self.get_register(base_ptr, b);
-        let result = if left.is_truthy() {
-            left
-        } else {
-            self.get_register(base_ptr, c)
-        };
-        self.set_register(base_ptr, a, result);
-        Ok(())
-    }
-
-    // Bitwise operators
-    fn op_band(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            self.set_register(base_ptr, a, LuaValue::integer(l & r));
-            Ok(())
-        } else if self.call_binop_metamethod(&left, &right, "__band", a)? {
-            Ok(())
-        } else {
-            Err("Bitwise operation requires integer".to_string())
-        }
-    }
-
-    fn op_bor(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            self.set_register(base_ptr, a, LuaValue::integer(l | r));
-            Ok(())
-        } else if self.call_binop_metamethod(&left, &right, "__bor", a)? {
-            Ok(())
-        } else {
-            Err("Bitwise operation requires integer".to_string())
-        }
-    }
-
-    fn op_bxor(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            self.set_register(base_ptr, a, LuaValue::integer(l ^ r));
-            Ok(())
-        } else if self.call_binop_metamethod(&left, &right, "__bxor", a)? {
-            Ok(())
-        } else {
-            Err("Bitwise operation requires integer".to_string())
-        }
-    }
-
-    fn op_shl(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            self.set_register(base_ptr, a, LuaValue::integer(l << (r as u32)));
-            Ok(())
-        } else if self.call_binop_metamethod(&left, &right, "__shl", a)? {
-            Ok(())
-        } else {
-            Err("Bitwise operation requires integer".to_string())
-        }
-    }
-
-    fn op_shr(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let left = self.get_register(base_ptr, b);
-        let right = self.get_register(base_ptr, c);
-
-        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            self.set_register(base_ptr, a, LuaValue::integer(l >> (r as u32)));
-            Ok(())
-        } else if self.call_binop_metamethod(&left, &right, "__shr", a)? {
-            Ok(())
-        } else {
-            Err("Bitwise operation requires integer".to_string())
-        }
-    }
-
-    fn op_bnot(&mut self, instr: u32) -> Result<(), String> {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-
-        let frame = self.current_frame();
-        let base_ptr = frame.base_ptr;
-        let value = self.get_register(base_ptr, b);
-
-        if let Some(i) = value.as_integer() {
-            self.set_register(base_ptr, a, LuaValue::integer(!i));
-            Ok(())
-        } else if self.call_unop_metamethod(&value, "__bnot", a)? {
-            Ok(())
-        } else {
-            Err("Bitwise operation requires integer".to_string())
+            _ => Err(LuaError::RuntimeError(
+                "Attempt to call a non-function value".to_string(),
+            )),
         }
     }
 
@@ -3675,6 +1156,7 @@ impl LuaVM {
 
     /// Close all open upvalues for a specific frame
     /// Called when a frame exits to move values from stack to heap
+    #[allow(dead_code)]
     fn close_upvalues(&mut self, frame_id: usize) {
         // Find all open upvalues pointing to this frame
         let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self
@@ -3697,6 +1179,37 @@ impl LuaVM {
         // Close each upvalue
         for upvalue in upvalues_to_close.iter() {
             // Get the value from the stack before closing
+            let value = upvalue.get_value(&self.frames, &self.register_stack);
+            upvalue.close(value);
+        }
+
+        // Remove closed upvalues from the open list
+        self.open_upvalues.retain(|uv| uv.is_open());
+    }
+    
+    /// Close all open upvalues at or above the given stack position
+    /// Used by RETURN (k bit) and CLOSE instructions
+    pub fn close_upvalues_from(&mut self, stack_pos: usize) {
+        let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self
+            .open_upvalues
+            .iter()
+            .filter(|uv| {
+                // Check if this upvalue points to stack_pos or higher
+                for frame in self.frames.iter() {
+                    for reg_idx in 0..frame.top {
+                        let absolute_pos = frame.base_ptr + reg_idx;
+                        if absolute_pos >= stack_pos && uv.points_to(frame.frame_id, reg_idx) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect();
+
+        // Close each upvalue
+        for upvalue in upvalues_to_close.iter() {
             let value = upvalue.get_value(&self.frames, &self.register_stack);
             upvalue.close(value);
         }
@@ -3737,7 +1250,18 @@ impl LuaVM {
 
     /// Create a new table in object pool
     pub fn create_table(&mut self) -> LuaValue {
+        // TODO: Auto GC causes severe performance regression
+        // Need to optimize GC algorithm before enabling
+        // if self.gc.should_collect() {
+        //     self.collect_garbage();
+        // }
+
         let id = self.object_pool.create_table();
+
+        // Register with GC for manual collection
+        self.gc
+            .register_object(id.0, crate::gc::GcObjectType::Table);
+
         // Get pointer from object pool for direct access
         let ptr = self
             .object_pool
@@ -3837,6 +1361,7 @@ impl LuaVM {
 
     /// Helper: Get chunk from current frame's function (for hot path)
     #[inline]
+    #[allow(dead_code)]
     fn get_current_chunk(&self) -> Result<std::rc::Rc<Chunk>, String> {
         let frame = self.current_frame();
         if let Some(func_ref) = self.get_function(&frame.function_value) {
@@ -3848,6 +1373,7 @@ impl LuaVM {
 
     /// Helper: Get upvalue from current frame's function
     #[inline]
+    #[allow(dead_code)]
     fn get_current_upvalue(&self, index: usize) -> Result<std::rc::Rc<LuaUpvalue>, String> {
         let frame = self.current_frame();
         if let Some(func_ref) = self.get_function(&frame.function_value) {
@@ -3971,7 +1497,7 @@ impl LuaVM {
                     };
                     if let Some(metatable) = metatable {
                         let key = self.create_string(event);
-                        self.table_get(&metatable, &key)
+                        self.table_get_with_meta(&metatable, &key)
                     } else {
                         None
                     }
@@ -3998,13 +1524,14 @@ impl LuaVM {
     }
 
     /// Call a binary metamethod (like __add, __sub, etc.)
+    #[allow(dead_code)]
     fn call_binop_metamethod(
         &mut self,
         left: &LuaValue,
         right: &LuaValue,
         event: &str,
         result_reg: usize,
-    ) -> Result<bool, String> {
+    ) -> LuaResult<bool> {
         // Try left operand's metamethod first
         let metamethod = self
             .get_metamethod(left, event)
@@ -4018,12 +1545,13 @@ impl LuaVM {
     }
 
     /// Call a unary metamethod (like __unm, __bnot, etc.)
+    #[allow(dead_code)]
     fn call_unop_metamethod(
         &mut self,
         value: &LuaValue,
         event: &str,
         result_reg: usize,
-    ) -> Result<bool, String> {
+    ) -> LuaResult<bool> {
         if let Some(mm) = self.get_metamethod(value, event) {
             self.call_metamethod_with_args(mm, vec![value.clone()], result_reg)
         } else {
@@ -4032,22 +1560,25 @@ impl LuaVM {
     }
 
     /// Generic method to call a metamethod with given arguments
+    #[allow(dead_code)]
     fn call_metamethod_with_args(
         &mut self,
         metamethod: LuaValue,
         args: Vec<LuaValue>,
         result_reg: usize,
-    ) -> Result<bool, String> {
+    ) -> LuaResult<bool> {
         match metamethod.kind() {
             LuaValueKind::Function => {
-                let func_id = metamethod.as_function_id().ok_or("Invalid function ID")?;
-                let max_stack_size = {
-                    let func_ref = self
-                        .object_pool
-                        .get_function(func_id)
-                        .ok_or("Invalid function reference")?;
-                    func_ref.borrow().chunk.max_stack_size
-                };
+                let func_id = metamethod
+                    .as_function_id()
+                    .ok_or(LuaError::RuntimeError("Invalid function ID".to_string()))?;
+                let max_stack_size =
+                    {
+                        let func_ref = self.object_pool.get_function(func_id).ok_or(
+                            LuaError::RuntimeError("Invalid function reference".to_string()),
+                        )?;
+                        func_ref.borrow().chunk.max_stack_size
+                    };
 
                 // Save current state
                 let frame_id = self.next_frame_id;
@@ -4132,7 +1663,7 @@ impl LuaVM {
     pub fn call_tostring_metamethod(
         &mut self,
         lua_table_value: &LuaValue,
-    ) -> Result<Option<LuaValue>, String> {
+    ) -> LuaResult<Option<LuaValue>> {
         // Check for __tostring metamethod
         if let Some(tostring_func) = self.get_metamethod(lua_table_value, "__tostring") {
             // Call the metamethod with the value as argument
@@ -4143,7 +1674,7 @@ impl LuaVM {
     }
 
     /// Convert a value to string, calling __tostring metamethod if present
-    pub fn value_to_string(&mut self, value: &LuaValue) -> Result<String, String> {
+    pub fn value_to_string(&mut self, value: &LuaValue) -> LuaResult<String> {
         // Handle string values directly
         if value.is_string() {
             if let Some(s) = self.get_string(value) {
@@ -4155,7 +1686,9 @@ impl LuaVM {
             if let Some(str) = self.get_string(&s) {
                 Ok(str.as_str().to_string())
             } else {
-                Err("`__tostring` metamethod did not return a string".to_string())
+                Err(LuaError::RuntimeError(
+                    "`__tostring` metamethod did not return a string".to_string(),
+                ))
             }
         } else {
             Ok(value.to_string_repr())
@@ -4194,7 +1727,8 @@ impl LuaVM {
     }
 
     /// Execute a function with protected call (pcall semantics)
-    pub fn protected_call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> (bool, Vec<LuaValue>) {
+    /// Note: Yields are NOT caught by pcall - they propagate through
+    pub fn protected_call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save current state
         let initial_frame_count = self.frames.len();
 
@@ -4204,10 +1738,14 @@ impl LuaVM {
         match result {
             Ok(return_values) => {
                 // Success: return true and the return values
-                (true, return_values)
+                Ok((true, return_values))
+            }
+            Err(LuaError::Yield(values)) => {
+                // Yield is not an error - propagate it
+                Err(LuaError::Yield(values))
             }
             Err(error_msg) => {
-                // Error: clean up frames and return false with error message
+                // Real error: clean up frames and return false with error message
                 // Simply clear all open upvalues to avoid dangling references
                 self.open_upvalues.clear();
 
@@ -4217,57 +1755,91 @@ impl LuaVM {
                 }
 
                 // Return error without traceback for now (can add later)
-                let error_str = self.create_string(&error_msg);
+                let error_str = self.create_string(&format!("{}", error_msg));
 
-                (false, vec![error_str])
+                Ok((false, vec![error_str]))
             }
         }
     }
 
     /// Protected call with error handler
+    /// Note: Yields are NOT caught by xpcall - they propagate through
     pub fn protected_call_with_handler(
         &mut self,
         func: LuaValue,
         args: Vec<LuaValue>,
         err_handler: LuaValue,
-    ) -> (bool, Vec<LuaValue>) {
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        eprintln!("[xpcall] protected_call_with_handler called");
+        eprintln!("[xpcall] err_handler type: {:?}", err_handler.kind());
+        
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
         let initial_frame_count = self.frames.len();
+        eprintln!("[xpcall] initial_frame_count: {}", initial_frame_count);
 
         let result = self.call_function_internal(func, args);
+        eprintln!("[xpcall] call_function_internal result: {:?}", result.is_ok());
 
         self.error_handler = old_handler;
 
         match result {
-            Ok(values) => (true, values),
+            Ok(values) => {
+                eprintln!("[xpcall] Success, returning {} values", values.len());
+                Ok((true, values))
+            }
+            Err(LuaError::Yield(values)) => {
+                eprintln!("[xpcall] Yield encountered");
+                // Yield is not an error - propagate it
+                Err(LuaError::Yield(values))
+            }
             Err(err_msg) => {
-                self.open_upvalues.clear();
-
+                eprintln!("[xpcall] Error encountered: {:?}", err_msg);
+                
+                // Clean up frames created by the failed function call
                 while self.frames.len() > initial_frame_count {
-                    self.frames.pop();
+                    let frame = self.frames.pop().unwrap();
+                    // Close upvalues belonging to this frame
+                    self.close_upvalues_from(frame.base_ptr);
                 }
-                let err_str = self.create_string(&err_msg);
-                let handler_result = self.call_function_internal(err_handler, vec![err_str]);
+                
+                eprintln!("[xpcall] Calling error handler");
+                // Extract the actual error message without the "Runtime Error: " prefix
+                let (err_value, err_display) = match &err_msg {
+                    LuaError::RuntimeError(msg) => (self.create_string(msg), format!("{}", err_msg)),
+                    LuaError::CompileError(msg) => (self.create_string(msg), format!("{}", err_msg)),
+                    _ => {
+                        let display = format!("{}", err_msg);
+                        (self.create_string(&display), display)
+                    }
+                };
+                let handler_result = self.call_function_internal(err_handler, vec![err_value]);
+                eprintln!("[xpcall] Handler result: {:?}", handler_result.is_ok());
 
                 match handler_result {
-                    Ok(handler_values) => (false, handler_values),
+                    Ok(handler_values) => Ok((false, handler_values)),
+                    Err(LuaError::Yield(values)) => {
+                        // Yield from error handler - propagate it
+                        Err(LuaError::Yield(values))
+                    }
                     Err(_) => {
-                        let err_str = self.create_string(&err_msg);
-                        (false, vec![err_str])
+                        let err_str =
+                            self.create_string(&format!("Error in error handler: {}", err_display));
+                        Ok((false, vec![err_str]))
                     }
                 }
             }
         }
     }
 
-    /// Internal helper to call a function
-    fn call_function_internal(
+    /// Internal helper to call a function (used by pcall/xpcall and coroutines)
+    /// For regular function calls, the CALL instruction in dispatcher should be used
+    pub(crate) fn call_function_internal(
         &mut self,
         func: LuaValue,
         args: Vec<LuaValue>,
-    ) -> Result<Vec<LuaValue>, String> {
+    ) -> LuaResult<Vec<LuaValue>> {
         match func.kind() {
             LuaValueKind::CFunction => {
                 let cfunc = func.as_cfunction().unwrap();
@@ -4320,7 +1892,12 @@ impl LuaVM {
 
                 // Call CFunction - ensure frame is always popped even on error
                 let result = match cfunc(self) {
-                    Ok(r) => r,
+                    Ok(r) => Ok(r),
+                    Err(LuaError::Yield(values)) => {
+                        // CFunction yielded - this is valid for coroutine.yield
+                        // Don't pop frame, just return the yield
+                        return Err(LuaError::Yield(values));
+                    }
                     Err(e) => {
                         self.frames.pop();
                         return Err(e);
@@ -4329,18 +1906,19 @@ impl LuaVM {
 
                 self.frames.pop();
 
-                Ok(result.all_values())
+                Ok(result?.all_values())
             }
             LuaValueKind::Function => {
                 let lua_func_id = func.as_function_id().unwrap();
 
                 // Get max_stack_size before entering the execution loop
                 let max_stack_size = {
-                    let lua_func_ref = self
-                        .object_pool
-                        .get_function(lua_func_id)
-                        .ok_or("Invalid function reference")?;
-                    lua_func_ref.borrow().chunk.max_stack_size
+                    let lua_func_ref = self.object_pool.get_function(lua_func_id).ok_or(
+                        LuaError::RuntimeError("Invalid function reference".to_string()),
+                    )?;
+                    let size = lua_func_ref.borrow().chunk.max_stack_size;
+                    // Ensure at least 1 register for function body
+                    if size == 0 { 1 } else { size }
                 };
 
                 // For Lua function, use similar logic to call_metamethod
@@ -4350,6 +1928,12 @@ impl LuaVM {
                 let new_base = self.register_stack.len();
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
+                // Initialize all registers with nil
+                for i in new_base..(new_base + max_stack_size) {
+                    self.register_stack[i] = LuaValue::nil();
+                }
+
+                // Copy arguments to registers
                 for (i, arg) in args.iter().enumerate() {
                     if i < max_stack_size {
                         self.register_stack[new_base + i] = arg.clone();
@@ -4369,7 +1953,7 @@ impl LuaVM {
                 self.frames.push(new_frame);
 
                 // Execute instructions until frame returns
-                let exec_result = loop {
+                let exec_result: LuaResult<()> = loop {
                     if self.frames.len() <= initial_frame_count {
                         // Frame has been popped (function returned)
                         break Ok(());
@@ -4383,7 +1967,9 @@ impl LuaVM {
                     let chunk = if let Some(func_ref) = self.get_function(&function_value) {
                         func_ref.borrow().chunk.clone()
                     } else {
-                        break Err("Invalid function in frame".to_string());
+                        break Err(LuaError::RuntimeError(
+                            "Invalid function in frame".to_string(),
+                        ));
                     };
 
                     if pc >= chunk.code.len() {
@@ -4395,103 +1981,36 @@ impl LuaVM {
                     let instr = chunk.code[pc];
                     self.frames[frame_idx].pc += 1;
 
-                    // Decode and execute
-                    let opcode = Instruction::get_opcode(instr);
-
-                    // Special handling for Return opcode
-                    if let OpCode::Return = opcode {
-                        match self.op_return(instr) {
-                            Ok(_val) => {
-                                // Return values are now in self.return_values
-                                break Ok(());
+                    // Dispatch instruction
+                    match crate::lua_vm::dispatcher::dispatch_instruction(self, instr) {
+                        Ok(action) => {
+                            use crate::lua_vm::dispatcher::DispatchAction;
+                            match action {
+                                DispatchAction::Continue => {
+                                    // Continue to next instruction
+                                },
+                                DispatchAction::Skip(n) => {
+                                    // Skip N additional instructions
+                                    self.frames[frame_idx].pc += n;
+                                },
+                                DispatchAction::Return => {
+                                    // Frame will be popped, loop will exit
+                                },
+                                DispatchAction::Yield => {
+                                    // Yield detected - propagate it up
+                                    break Err(LuaError::Yield(self.return_values.clone()));
+                                },
+                                DispatchAction::Call => {
+                                    // CALL instruction already set up the frame
+                                    // Continue execution in the new frame
+                                },
                             }
-                            Err(e) => {
-                                if self.frames.len() > initial_frame_count {
-                                    self.frames.pop();
-                                }
-                                break Err(e);
-                            }
+                        },
+                        Err(e) => {
+                            // Real error occurred
+                            eprintln!("[call_function_internal] Error during execution: {:?}", e);
+                            break Err(e);
                         }
-                    }
-
-                    // Execute the instruction
-                    let step_result = match opcode {
-                        OpCode::Move => self.op_move(instr),
-                        OpCode::LoadK => self.op_loadk(instr),
-                        OpCode::LoadI => self.op_loadi(instr),
-                        OpCode::LoadBool => self.op_loadbool(instr),
-                        OpCode::LoadNil => self.op_loadnil(instr),
-                        OpCode::GetGlobal => self.op_getglobal(instr),
-                        OpCode::SetGlobal => self.op_setglobal(instr),
-                        OpCode::GetTable => self.op_gettable(instr),
-                        OpCode::SetTable => self.op_settable(instr),
-                        OpCode::GetTableI => self.op_gettable_i(instr),
-                        OpCode::SetTableI => self.op_settable_i(instr),
-                        OpCode::GetTableK => self.op_gettable_k(instr),
-                        OpCode::SetTableK => self.op_settable_k(instr),
-                        OpCode::NewTable => self.op_newtable(instr),
-                        OpCode::Call => self.op_call(instr),
-                        OpCode::Add => self.op_add(instr),
-                        OpCode::Sub => self.op_sub(instr),
-                        OpCode::Mul => self.op_mul(instr),
-                        OpCode::Div => self.op_div(instr),
-                        OpCode::Mod => self.op_mod(instr),
-                        OpCode::Pow => self.op_pow(instr),
-                        OpCode::AddI => self.op_addi(instr),
-                        OpCode::SubI => self.op_subi(instr),
-                        OpCode::MulI => self.op_muli(instr),
-                        OpCode::DivI => self.op_divi(instr),
-                        OpCode::ModI => self.op_modi(instr),
-                        OpCode::PowI => self.op_powi(instr),
-                        OpCode::IDivI => self.op_idivi(instr),
-                        OpCode::Unm => self.op_unm(instr),
-                        OpCode::Not => self.op_not(instr),
-                        OpCode::Len => self.op_len(instr),
-                        OpCode::Concat => self.op_concat(instr),
-                        OpCode::Jmp => self.op_jmp(instr),
-                        OpCode::Eq => self.op_eq(instr),
-                        OpCode::Lt => self.op_lt(instr),
-                        OpCode::Le => self.op_le(instr),
-                        OpCode::Ne => self.op_ne(instr),
-                        OpCode::Gt => self.op_gt(instr),
-                        OpCode::Ge => self.op_ge(instr),
-                        OpCode::EqI => self.op_eqi(instr),
-                        OpCode::LtI => self.op_lti(instr),
-                        OpCode::LeI => self.op_lei(instr),
-                        OpCode::GtI => self.op_gti(instr),
-                        OpCode::GeI => self.op_gei(instr),
-                        OpCode::And => self.op_and(instr),
-                        OpCode::Or => self.op_or(instr),
-                        OpCode::BAnd => self.op_band(instr),
-                        OpCode::BOr => self.op_bor(instr),
-                        OpCode::BXor => self.op_bxor(instr),
-                        OpCode::Shl => self.op_shl(instr),
-                        OpCode::Shr => self.op_shr(instr),
-                        OpCode::BNot => self.op_bnot(instr),
-                        OpCode::IDiv => self.op_idiv(instr),
-                        OpCode::ForPrep => self.op_forprep(instr),
-                        OpCode::ForLoop => self.op_forloop(instr),
-                        OpCode::Test => self.op_test(instr),
-                        OpCode::TestSet => self.op_testset(instr),
-                        OpCode::Closure => self.op_closure(instr),
-                        OpCode::GetUpval => self.op_getupval(instr),
-                        OpCode::SetUpval => self.op_setupval(instr),
-                        OpCode::VarArg => self.op_vararg(instr),
-                        OpCode::SetList => self.op_setlist(instr),
-                        _ => Err(format!("Unimplemented opcode: {:?}", opcode)),
-                    };
-
-                    if let Err(e) = step_result {
-                        // Pop the frame on error
-                        if self.frames.len() > initial_frame_count {
-                            self.frames.pop();
-                        }
-                        break Err(e);
-                    }
-
-                    // Check if yielding
-                    if self.yielding {
-                        break Ok(());
                     }
                 };
 
@@ -4500,27 +2019,51 @@ impl LuaVM {
                         // Get return values
                         let result = self.return_values.clone();
                         self.return_values.clear();
+                        eprintln!("[call_function_internal] Lua function returned {} values", result.len());
                         Ok(result)
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        eprintln!("[call_function_internal] Returning error: {:?}", e);
+                        Err(e)
+                    },
                 }
             }
-            _ => Err("attempt to call a non-function value".to_string()),
+            _ => Err(LuaError::RuntimeError(
+                "attempt to call a non-function value".to_string(),
+            )),
         }
     }
-}
 
-// Cleanup: VM owns all strings in the string pool and must free them
-impl Drop for LuaVM {
-    fn drop(&mut self) {
-        // Free all interned strings in the string pool
-        // Note: GC will handle strings registered with it, but we need to handle
-        // strings that are only in the pool (though in practice they should all be registered)
-        for (_hash, ptr) in self.string_table.drain() {
-            // Check if this pointer is still valid (GC might have freed it)
-            // For safety, we just let GC handle all cleanup during final collection
-            // The string_table is just for lookup, GC owns the actual objects
-            let _ = ptr; // Just drop the reference
+    // Async bridge API: Call a registered async function (internal use)
+    pub fn async_call(&mut self, func_name: &str, args: Vec<LuaValue>, coroutine: LuaValue) -> LuaResult<u64> {
+        let task_id = self.async_executor.spawn_task(func_name, args, coroutine)?;
+        Ok(task_id)
+    }
+
+    // Poll all async tasks and resume completed coroutines
+    pub fn poll_async(&mut self) -> LuaResult<()> {
+        let completed_tasks = self.async_executor.collect_completed_tasks();
+        
+        for (_task_id, coroutine, result) in completed_tasks {
+            // Resume the coroutine with the result values
+            let values = result?;
+            let (_success, _resume_result) = self.resume_thread(coroutine, values)?;
         }
+        
+        Ok(())
+    }
+
+    // Register an async function callable from Lua
+    pub fn register_async_function<F, Fut>(&mut self, name: &str, func: F)
+    where
+        F: Fn(Vec<LuaValue>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = LuaResult<Vec<LuaValue>>> + Send + 'static,
+    {
+        self.async_executor.register_async_function(name.to_string(), func);
+    }
+
+    // Get the number of active async tasks
+    pub fn active_async_tasks(&self) -> usize {
+        self.async_executor.active_task_count()
     }
 }

@@ -84,15 +84,15 @@ pub struct ObjectPool {
 impl ObjectPool {
     pub fn new() -> Self {
         ObjectPool {
-            strings: HashMap::with_capacity(2048),
-            tables: HashMap::with_capacity(512),
-            userdata: HashMap::with_capacity(128),
-            functions: HashMap::with_capacity(512),
+            strings: HashMap::with_capacity(128),
+            tables: HashMap::with_capacity(16),
+            userdata: HashMap::with_capacity(0),
+            functions: HashMap::with_capacity(64),
             next_string_id: StringId(1), // 0 reserved for null/invalid
             next_table_id: TableId(1),
             next_userdata_id: UserdataId(1),
             next_function_id: FunctionId(1),
-            string_intern: HashMap::with_capacity(2048),
+            string_intern: HashMap::with_capacity(128),
             max_intern_length: 64,
         }
     }
@@ -269,6 +269,18 @@ impl ObjectPool {
 
     pub fn interned_string_count(&self) -> usize {
         self.string_intern.len()
+    }
+
+    // ============ GC Support ============
+
+    /// Shrink all hash maps to fit actual size (called after GC)
+    /// This reclaims memory from deleted entries and improves lookup performance
+    pub fn shrink_to_fit(&mut self) {
+        self.strings.shrink_to_fit();
+        self.tables.shrink_to_fit();
+        self.userdata.shrink_to_fit();
+        self.functions.shrink_to_fit();
+        self.string_intern.shrink_to_fit();
     }
 }
 

@@ -68,6 +68,9 @@ fn test_math_max_min() {
     "#,
     );
 
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -117,6 +120,9 @@ fn test_math_sin_cos_tan() {
     "#,
     );
 
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

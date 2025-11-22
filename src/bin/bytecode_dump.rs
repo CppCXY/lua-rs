@@ -1,6 +1,5 @@
-use lua_rs::Chunk;
-use lua_rs::LuaVM;
-use lua_rs::opcode::{Instruction, OpCode};
+use lua_rs::lua_vm::{Instruction, OpCode};
+use lua_rs::{Chunk, LuaVM};
 use std::env;
 use std::fs;
 
@@ -8,7 +7,6 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let source = if args.len() > 1 {
-        // Read from file
         let filename = &args[1];
         match fs::read_to_string(filename) {
             Ok(content) => {
@@ -28,88 +26,7 @@ fn main() {
     let mut vm = LuaVM::new();
     match vm.compile(&source) {
         Ok(chunk) => {
-            println!("=== Bytecode Analysis ===\n");
-            println!("Total instructions: {}", chunk.code.len());
-            println!("Constants: {}", chunk.constants.len());
-            println!("Registers used: ~{}", estimate_registers(&chunk));
-            println!("\nInstructions:");
-            println!("{:<4} {:<12} {:<40} {}", "PC", "OpCode", "Details", "Raw");
-            println!("{}", "-".repeat(80));
-
-            for (pc, &instr) in chunk.code.iter().enumerate() {
-                let opcode = Instruction::get_opcode(instr);
-                let a = Instruction::get_a(instr);
-                let b = Instruction::get_b(instr);
-                let c = Instruction::get_c(instr);
-                let bx = Instruction::get_bx(instr);
-                let sbx = Instruction::get_sbx(instr);
-
-                let details = match opcode {
-                    OpCode::Move => format!("R({}) := R({})", a, b),
-                    OpCode::LoadK => format!("R({}) := K({})", a, bx),
-                    OpCode::LoadI => format!("R({}) := {}", a, sbx),  // Load immediate integer
-                    OpCode::LoadNil => format!("R({}) := nil", a),
-                    OpCode::LoadBool => format!("R({}) := {}", a, b != 0),
-                    OpCode::Add => format!("R({}) := R({}) + R({})", a, b, c),
-                    OpCode::Sub => format!("R({}) := R({}) - R({})", a, b, c),
-                    OpCode::Mul => format!("R({}) := R({}) * R({})", a, b, c),
-                    OpCode::Div => format!("R({}) := R({}) / R({})", a, b, c),
-                    OpCode::Mod => format!("R({}) := R({}) % R({})", a, b, c),
-                    OpCode::IDiv => format!("R({}) := R({}) // R({})", a, b, c),
-                    OpCode::Pow => format!("R({}) := R({}) ^ R({})", a, b, c),
-                    OpCode::Unm => format!("R({}) := -R({})", a, b),
-                    OpCode::Not => format!("R({}) := not R({})", a, b),
-                    OpCode::Len => format!("R({}) := #R({})", a, b),
-                    OpCode::Concat => format!("R({}) := R({})..R({})", a, b, c),
-                    OpCode::Eq => format!("R({}) := R({}) == R({})", a, b, c),
-                    OpCode::Lt => format!("R({}) := R({}) < R({})", a, b, c),
-                    OpCode::Le => format!("R({}) := R({}) <= R({})", a, b, c),
-                    OpCode::Ne => format!("R({}) := R({}) ~= R({})", a, b, c),
-                    OpCode::Gt => format!("R({}) := R({}) > R({})", a, b, c),
-                    OpCode::Ge => format!("R({}) := R({}) >= R({})", a, b, c),
-                    OpCode::And => format!("R({}) := R({}) and R({})", a, b, c),
-                    OpCode::Or => format!("R({}) := R({}) or R({})", a, b, c),
-                    OpCode::Jmp => format!("PC += {} (-> {})", sbx, (pc as i32 + 1 + sbx)),
-                    OpCode::Test => format!("if not R({}) then PC++", a),
-                    OpCode::ForPrep => format!(
-                        "R({}) -= R({}+2); PC += {} (-> {})",
-                        a,
-                        a,
-                        sbx,
-                        (pc as i32 + 1 + sbx)
-                    ),
-                    OpCode::ForLoop => format!(
-                        "R({}) += R({}+2); if loop then PC += {} (-> {})",
-                        a,
-                        a,
-                        sbx,
-                        (pc as i32 + 1 + sbx)
-                    ),
-                    OpCode::Call => format!("R({})(R({})..R({}))", a, a + 1, a + b - 1),
-                    OpCode::Return => format!("return R({})", a),
-                    OpCode::GetTable => format!("R({}) := R({})[R({})]", a, b, c),
-                    OpCode::SetTable => format!("R({})[R({})] := R({})", a, b, c),
-                    OpCode::GetGlobal => format!("R({}) := _G[K({})]", a, bx),
-                    OpCode::SetGlobal => format!("_G[K({})] := R({})", bx, a),
-                    OpCode::GetUpval => format!("R({}) := UpValue[{}]", a, b),
-                    OpCode::SetUpval => format!("UpValue[{}] := R({})", b, a),
-                    OpCode::Closure => format!("R({}) := closure(PROTO[{}])", a, bx),
-                    _ => format!("A:{} B:{} C:{} Bx:{}", a, b, c, bx),
-                };
-
-                println!("{:<4} {:<12?} {:<40} 0x{:08x}", pc, opcode, details, instr);
-            }
-
-            if !chunk.constants.is_empty() {
-                println!("\nConstants:");
-                for (i, val) in chunk.constants.iter().enumerate() {
-                    println!("  K({:3}) = {:?}", i, val);
-                }
-            }
-
-            // Performance hints
-            println!("\n=== Performance Analysis ===");
-            analyze_performance(&chunk);
+            dump_chunk(&chunk, "main", 0);
         }
         Err(e) => {
             eprintln!("Compilation error: {}", e);
@@ -118,73 +35,195 @@ fn main() {
     }
 }
 
-fn estimate_registers(chunk: &Chunk) -> usize {
-    let mut max_reg = 0;
-    for &instr in &chunk.code {
-        let a = Instruction::get_a(instr) as usize;
-        let b = Instruction::get_b(instr) as usize;
-        let c = Instruction::get_c(instr) as usize;
-        max_reg = max_reg.max(a).max(b).max(c);
+fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
+    let indent = "  ".repeat(depth);
+
+    println!("{}=== {} ===", indent, name);
+    println!(
+        "{}params: {}, vararg: {}, max_stack: {}",
+        indent, chunk.param_count, chunk.is_vararg, chunk.max_stack_size
+    );
+    println!();
+
+    for (pc, &instr) in chunk.code.iter().enumerate() {
+        let opcode = Instruction::get_opcode(instr);
+        let a = Instruction::get_a(instr);
+        let b = Instruction::get_b(instr);
+        let c = Instruction::get_c(instr);
+        let bx = Instruction::get_bx(instr);
+        let sbx = Instruction::get_sbx(instr);
+        let k = Instruction::get_k(instr);
+
+        let detail = match opcode {
+            OpCode::VarargPrep => format!("VARARGPREP {}", a),
+            OpCode::Vararg => format!("VARARG {} {}", a, b),
+            OpCode::Move => format!("MOVE {} {}", a, b),
+            OpCode::LoadI => format!("LOADI {} {}", a, sbx),
+            OpCode::LoadK => format!("LOADK {} {}", a, bx),
+            OpCode::LoadNil => format!("LOADNIL {} {}", a, b),
+            OpCode::GetUpval => format!("GETUPVAL {} {}", a, b),
+            OpCode::SetUpval => format!("SETUPVAL {} {}", a, b),
+            OpCode::GetTabUp => format!("GETTABUP {} {} {}", a, b, c),
+            OpCode::SetTabUp => {
+                let k_str = if k { "k" } else { "" };
+                format!("SETTABUP {} {} {}{}", a, b, c, k_str)
+            }
+            OpCode::GetField => {
+                // GETFIELD never shows k suffix (field name is always from constant table)
+                format!("GETFIELD {} {} {}", a, b, c)
+            }
+            OpCode::SetField => {
+                let k_str = if k { "k" } else { "" };
+                format!("SETFIELD {} {} {}{}", a, b, c, k_str)
+            }
+            OpCode::GetTable => format!("GETTABLE {} {} {}", a, b, c),
+            OpCode::SetTable => format!("SETTABLE {} {} {}", a, b, c),
+            OpCode::NewTable => {
+                let k_str = if k { "k" } else { "" };
+                format!("NEWTABLE {} {} {}{}", a, b, c, k_str)
+            }
+            OpCode::Self_ => {
+                let k_str = if k { "k" } else { "" };
+                format!("SELF {} {} {}{}", a, b, c, k_str)
+            }
+            OpCode::Add => format!("ADD {} {} {}", a, b, c),
+            OpCode::AddI => {
+                // ADDI uses signed 8-bit immediate in sC field
+                let sc = Instruction::get_sc(instr);
+                format!("ADDI {} {} {}", a, b, sc)
+            }
+            OpCode::AddK => format!("ADDK {} {} {}", a, b, c),
+            OpCode::Sub => format!("SUB {} {} {}", a, b, c),
+            OpCode::SubK => format!("SUBK {} {} {}", a, b, c),
+            OpCode::Mul => format!("MUL {} {} {}", a, b, c),
+            OpCode::MulK => format!("MULK {} {} {}", a, b, c),
+            OpCode::Div => format!("DIV {} {} {}", a, b, c),
+            OpCode::Concat => format!("CONCAT {} {}", a, b),
+            OpCode::Call => format!("CALL {} {} {}", a, b, c),
+            OpCode::TailCall => {
+                let k_str = if k { " 1" } else { " 0" };
+                format!("TAILCALL {} {}{}", a, b, k_str)
+            }
+            OpCode::Return => {
+                // k=0: show "0k", k=1: show "1" (no k suffix)
+                if k {
+                    format!("RETURN {} {} 1", a, b)
+                } else {
+                    format!("RETURN {} {} 0k", a, b)
+                }
+            }
+            OpCode::Return0 => format!("RETURN0"),
+            OpCode::Return1 => format!("RETURN1 {}", a),
+            OpCode::Closure => format!("CLOSURE {} {}", a, bx),
+            OpCode::Jmp => format!("JMP {}", Instruction::get_sj(instr)),
+            OpCode::Eq => format!("EQ {} {} {}", a, b, k as u32),
+            OpCode::Lt => format!("LT {} {} {}", a, b, k as u32),
+            OpCode::Le => format!("LE {} {} {}", a, b, k as u32),
+            OpCode::EqI => {
+                // sB field is signed 8-bit integer
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("EQI {} {} {}", a, sb, k as u32)
+            }
+            OpCode::LtI => {
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("LTI {} {} {}", a, sb, k as u32)
+            }
+            OpCode::LeI => {
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("LEI {} {} {}", a, sb, k as u32)
+            }
+            OpCode::GtI => {
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("GTI {} {} {}", a, sb, k as u32)
+            }
+            OpCode::GeI => {
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("GEI {} {} {}", a, sb, k as u32)
+            }
+            OpCode::ForLoop => {
+                // FORLOOP uses unsigned Bx (backward jump distance)
+                format!("FORLOOP {} {}", a, bx)
+            }
+            OpCode::ForPrep => {
+                // FORPREP uses unsigned Bx (forward jump distance to skip loop)
+                format!("FORPREP {} {}", a, bx)
+            }
+            OpCode::TForPrep => format!("TFORPREP {} {}", a, sbx),
+            OpCode::TForLoop => format!("TFORLOOP {} {}", a, c),
+            OpCode::MmBin => {
+                // MMBIN only shows 3 parameters (a, b, c) - k flag is not displayed
+                format!("MMBIN {} {} {}", a, b, c)
+            }
+            OpCode::MmBinI => {
+                // MMBINI shows 4 parameters, B is signed
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("MMBINI {} {} {} {}", a, sb, c, k as u32)
+            }
+            OpCode::MmBinK => {
+                // MMBINK shows k flag as 4th parameter
+                format!("MMBINK {} {} {} {}", a, b, c, k as u32)
+            }
+            OpCode::Len => format!("LEN {} {}", a, b),
+            OpCode::GetI => {
+                // GETI A B sC: R[A] := R[B][sC]
+                let sc = Instruction::get_sc(instr);
+                format!("GetI {} {} {}", a, b, sc)
+            }
+            OpCode::SetI => {
+                // SETI A sB C/k: R[A][sB] := RK(C)
+                let sb = Instruction::get_sb(instr);
+                let k_str = if k { "k" } else { "" };
+                format!("SetI {} {} {}{}", a, sb, c, k_str)
+            }
+            OpCode::EqK => {
+                // EQK A B k: if ((R[A] == K[B]) ~= k) then pc++
+                let k_str = if k { "k" } else { "" };
+                format!("EqK {} {} {}{}", a, b, k as u32, k_str)
+            }
+            OpCode::SetList => {
+                // SETLIST A B C k: for i = 1, B do R[A][C+i] := R[A+i] end
+                let k_str = if k { "k" } else { "" };
+                format!("SetList {} {} {}{}", a, b, c, k_str)
+            }
+            OpCode::ExtraArg => format!("EXTRAARG {}", bx),
+            OpCode::Tbc => format!("TBC {}", a),
+            OpCode::Close => format!("CLOSE {}", a),
+            _ => format!("{:?} {} {} {}", opcode, a, b, c),
+        };
+
+        println!("{}{:4} {}", indent, pc + 1, detail);
     }
-    max_reg + 1
-}
 
-fn analyze_performance(chunk: &Chunk) {
-    let mut move_count = 0;
-    let mut loadk_count = 0;
-    let mut loadi_count = 0;
-    let mut arithmetic_count = 0;
-    let mut loop_count = 0;
-    let mut jump_count = 0;
-
-    for &instr in &chunk.code {
-        match Instruction::get_opcode(instr) {
-            OpCode::Move => move_count += 1,
-            OpCode::LoadK => loadk_count += 1,
-            OpCode::LoadI => loadi_count += 1,
-            OpCode::Add
-            | OpCode::Sub
-            | OpCode::Mul
-            | OpCode::Div
-            | OpCode::Mod
-            | OpCode::IDiv
-            | OpCode::Pow => arithmetic_count += 1,
-            OpCode::ForPrep | OpCode::ForLoop => loop_count += 1,
-            OpCode::Jmp => jump_count += 1,
-            _ => {}
+    // Show constants if any
+    if !chunk.constants.is_empty() {
+        println!("\n{}constants:", indent);
+        for (i, val) in chunk.constants.iter().enumerate() {
+            println!("{}  {} = {:?}", indent, i, val);
         }
     }
 
-    println!("Instruction Statistics:");
-    println!(
-        "  Move instructions:       {} ({:.1}%)",
-        move_count,
-        move_count as f64 / chunk.code.len() as f64 * 100.0
-    );
-    println!(
-        "  LoadK instructions:      {} ({:.1}%)",
-        loadk_count,
-        loadk_count as f64 / chunk.code.len() as f64 * 100.0
-    );
-    println!(
-        "  LoadI instructions:      {} ({:.1}%)",
-        loadi_count,
-        loadi_count as f64 / chunk.code.len() as f64 * 100.0
-    );
-    println!("  Arithmetic operations:   {}", arithmetic_count);
-    println!("  Loop control:            {}", loop_count);
-    println!("  Jumps:                   {}", jump_count);
-
-    if move_count > chunk.code.len() / 5 {
-        println!("\n⚠️  Warning: High percentage of Move instructions detected!");
-        println!("   Consider optimizing register allocation in the compiler.");
+    // Show locals if any
+    if !chunk.locals.is_empty() {
+        println!("\n{}locals:", indent);
+        for (i, name) in chunk.locals.iter().enumerate() {
+            println!("{}  {} = {} (register {})", indent, i, name, i);
+        }
     }
 
-    if loop_count > 0 {
-        println!("\n✓ Optimized for-loops detected (ForPrep/ForLoop)");
+    // Show upvalues if any
+    if chunk.upvalue_count > 0 {
+        println!("\n{}upvalues ({}):", indent, chunk.upvalue_count);
+        for (i, uv) in chunk.upvalue_descs.iter().enumerate() {
+            let uv_type = if uv.is_local { "local" } else { "upvalue" };
+            println!("{}  {} = {} index={}", indent, i, uv_type, uv.index);
+        }
     }
-    
-    if loadi_count > 0 {
-        println!("\n✓ LoadI optimization enabled ({} immediate loads)", loadi_count);
+
+    // Recursively dump child protos
+    if !chunk.child_protos.is_empty() {
+        println!();
+        for (i, child) in chunk.child_protos.iter().enumerate() {
+            dump_chunk(child, &format!("function <PROTO[{}]>", i), depth + 1);
+        }
     }
 }

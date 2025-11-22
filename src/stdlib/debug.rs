@@ -5,7 +5,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_debug_lib() -> LibraryModule {
     crate::lib_module!("debug", {
@@ -14,7 +14,7 @@ pub fn create_debug_lib() -> LibraryModule {
     })
 }
 
-fn debug_traceback(vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn debug_traceback(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Simple traceback
     let message = crate::lib_registry::get_arg(vm, 0).unwrap_or(LuaValue::nil());
     // .and_then(|v| v.as_lua_string())
@@ -25,7 +25,7 @@ fn debug_traceback(vm: &mut LuaVM) -> Result<MultiValue, String> {
     Ok(MultiValue::single(message))
 }
 
-fn debug_getinfo(_vm: &mut LuaVM) -> Result<MultiValue, String> {
+fn debug_getinfo(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub: return nil
     Ok(MultiValue::single(LuaValue::nil()))
 }

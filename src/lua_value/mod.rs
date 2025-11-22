@@ -1,9 +1,11 @@
 // Lua 5.4 compatible value representation with NaN-Boxing
 // 16 bytes, 3-6x faster than enum, full int64 support
 mod lua_table;
+mod lua_thread;
 mod lua_value;
 
 use crate::LuaVM;
+use crate::lua_vm::LuaResult;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,10 +16,12 @@ use std::rc::Rc;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
+pub use lua_thread::*;
 pub use lua_value::{
     LuaValue, LuaValueKind, NAN_BASE, TAG_BOOLEAN, TAG_CFUNCTION, TAG_FUNCTION, TAG_INTEGER,
     TAG_NIL, TAG_STRING, TAG_TABLE, TAG_USERDATA,
 };
+
 /// Multi-return values from Lua functions
 #[derive(Debug, Clone)]
 pub struct MultiValue {
@@ -47,7 +51,7 @@ impl MultiValue {
 }
 
 /// C Function type - Rust function callable from Lua
-pub type CFunction = fn(&mut LuaVM) -> Result<MultiValue, String>;
+pub type CFunction = fn(&mut LuaVM) -> LuaResult<MultiValue>;
 
 /// Lua string (immutable, interned with cached hash)
 #[derive(Debug, Clone)]

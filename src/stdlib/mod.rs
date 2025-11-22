@@ -11,3 +11,4 @@ pub mod package;
 pub mod string;
 pub mod table;
 pub mod utf8;
+pub mod async_lib;
