@@ -20,13 +20,22 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    // Fast path: both are integers (no float conversion check)
+    // Fast path 1: both are integers
     let result = if left.is_integer() && right.is_integer() {
         LuaValue::integer((left.secondary as i64).wrapping_add(right.secondary as i64))
-    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-        // Float path (handles integer->float conversion)
-        LuaValue::number(l + r)
-    } else {
+    }
+    // Fast path 2: both are floats (no conversion)
+    else if left.is_float() && right.is_float() {
+        LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
+    }
+    // Mixed: integer + float
+    else if left.is_integer() && right.is_float() {
+        LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
+    }
+    else if left.is_float() && right.is_integer() {
+        LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
+    }
+    else {
         return Err(LuaError::RuntimeError(format!(
             "attempt to add {} with {}",
             left.type_name(),
@@ -51,12 +60,22 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    // Fast path: both are integers
+    // Fast path 1: both are integers
     let result = if left.is_integer() && right.is_integer() {
         LuaValue::integer((left.secondary as i64).wrapping_sub(right.secondary as i64))
-    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-        LuaValue::number(l - r)
-    } else {
+    }
+    // Fast path 2: both are floats
+    else if left.is_float() && right.is_float() {
+        LuaValue::number(f64::from_bits(left.secondary) - f64::from_bits(right.secondary))
+    }
+    // Mixed: integer - float or float - integer
+    else if left.is_integer() && right.is_float() {
+        LuaValue::number((left.secondary as i64) as f64 - f64::from_bits(right.secondary))
+    }
+    else if left.is_float() && right.is_integer() {
+        LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
+    }
+    else {
         return Err(LuaError::RuntimeError(format!(
             "attempt to subtract {} with {}",
             left.type_name(),
@@ -81,12 +100,22 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    // Fast path: both are integers
+    // Fast path 1: both are integers
     let result = if left.is_integer() && right.is_integer() {
         LuaValue::integer((left.secondary as i64).wrapping_mul(right.secondary as i64))
-    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-        LuaValue::number(l * r)
-    } else {
+    }
+    // Fast path 2: both are floats
+    else if left.is_float() && right.is_float() {
+        LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
+    }
+    // Mixed: integer * float or float * integer
+    else if left.is_integer() && right.is_float() {
+        LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
+    }
+    else if left.is_float() && right.is_integer() {
+        LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
+    }
+    else {
         return Err(LuaError::RuntimeError(format!(
             "attempt to multiply {} with {}",
             left.type_name(),
