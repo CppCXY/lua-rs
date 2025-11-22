@@ -1712,6 +1712,10 @@ pub fn compile_call_expr_with_returns_and_dest(
         false
     };
 
+    // Track if we need to move return values back to original dest
+    let mut need_move_to_dest = false;
+    let original_dest = dest;
+
     // Handle method call with SELF instruction
     let func_reg = if is_method {
         if let LuaExpr::IndexExpr(index_expr) = &prefix_expr {
@@ -1776,15 +1780,41 @@ pub fn compile_call_expr_with_returns_and_dest(
         //
         // The key insight: If dest is specified, caller wants a specific target.
         // If dest is NOT specified AND we need returns, allocate fresh register to be safe.
+        
         let func_reg = if let Some(d) = dest {
             // Caller specified a destination - use it
-            if d != temp_func_reg {
-                emit(c, Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0));
+            // CRITICAL CHECK: Verify that arguments won't overwrite active local variables!
+            // Arguments will be placed at R[d+1], R[d+2], etc.
+            // If any of these overlap with active locals (< nactvar), we need to use a different register
+            let nactvar = c.nactvar as u32;
+            let args_start = d + 1;
+            
+            // Check if args_start would overwrite active locals
+            // Active locals occupy R[0] through R[nactvar-1]
+            // If args_start < nactvar, arguments would overwrite locals!
+            if args_start < nactvar {
+                // Conflict! Arguments would overwrite active locals
+                // Solution: Place function at freereg (after all locals) and move result back later
+                let new_func_reg = if c.freereg < nactvar {
+                    // Ensure freereg is at least nactvar
+                    c.freereg = nactvar;
+                    alloc_register(c)
+                } else {
+                    alloc_register(c)
+                };
+                emit(c, Instruction::encode_abc(OpCode::Move, new_func_reg, temp_func_reg, 0));
+                need_move_to_dest = true;  // Remember to move result back to original dest
+                new_func_reg
+            } else {
+                // No conflict - safe to use dest
+                if d != temp_func_reg {
+                    emit(c, Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0));
+                }
+                // CRITICAL: Reset freereg to just past func_reg
+                // This ensures arguments compile into consecutive registers starting from func_reg+1
+                c.freereg = d + 1;
+                d
             }
-            // CRITICAL: Reset freereg to just past func_reg
-            // This ensures arguments compile into consecutive registers starting from func_reg+1
-            c.freereg = d + 1;
-            d
         } else if num_returns > 0 {
             // No dest specified, but need return values - this is expression context!
             // CRITICAL: Must preserve local variables!
@@ -2002,6 +2032,17 @@ pub fn compile_call_expr_with_returns_and_dest(
         c.freereg = new_freereg;
     }
     // If new_freereg < nactvar, keep freereg unchanged (locals are still alive)
+
+    // If we had to move function to avoid conflicts, move return values back to original dest
+    if need_move_to_dest {
+        if let Some(d) = original_dest {
+            // Move return values from func_reg to original dest
+            for i in 0..num_returns {
+                emit_move(c, d + i as u32, func_reg + i as u32);
+            }
+            return Ok(d);
+        }
+    }
 
     Ok(func_reg)
 }
