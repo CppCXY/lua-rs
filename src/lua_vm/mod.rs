@@ -1805,8 +1805,16 @@ impl LuaVM {
                 }
                 
                 eprintln!("[xpcall] Calling error handler");
-                let err_str = self.create_string(&format!("{}", err_msg));
-                let handler_result = self.call_function_internal(err_handler, vec![err_str]);
+                // Extract the actual error message without the "Runtime Error: " prefix
+                let (err_value, err_display) = match &err_msg {
+                    LuaError::RuntimeError(msg) => (self.create_string(msg), format!("{}", err_msg)),
+                    LuaError::CompileError(msg) => (self.create_string(msg), format!("{}", err_msg)),
+                    _ => {
+                        let display = format!("{}", err_msg);
+                        (self.create_string(&display), display)
+                    }
+                };
+                let handler_result = self.call_function_internal(err_handler, vec![err_value]);
                 eprintln!("[xpcall] Handler result: {:?}", handler_result.is_ok());
 
                 match handler_result {
@@ -1817,7 +1825,7 @@ impl LuaVM {
                     }
                     Err(_) => {
                         let err_str =
-                            self.create_string(&format!("Error in error handler: {}", err_msg));
+                            self.create_string(&format!("Error in error handler: {}", err_display));
                         Ok((false, vec![err_str]))
                     }
                 }
