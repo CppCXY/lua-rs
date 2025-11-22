@@ -164,6 +164,27 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 format!("MMBINK {} {} {} {}", a, b, c, k as u32)
             }
             OpCode::Len => format!("LEN {} {}", a, b),
+            OpCode::GetI => {
+                // GETI A B sC: R[A] := R[B][sC]
+                let sc = Instruction::get_sc(instr);
+                format!("GetI {} {} {}", a, b, sc)
+            }
+            OpCode::SetI => {
+                // SETI A sB C/k: R[A][sB] := RK(C)
+                let sb = Instruction::get_sb(instr);
+                let k_str = if k { "k" } else { "" };
+                format!("SetI {} {} {}{}", a, sb, c, k_str)
+            }
+            OpCode::EqK => {
+                // EQK A B k: if ((R[A] == K[B]) ~= k) then pc++
+                let k_str = if k { "k" } else { "" };
+                format!("EqK {} {} {}{}", a, b, k as u32, k_str)
+            }
+            OpCode::SetList => {
+                // SETLIST A B C k: for i = 1, B do R[A][C+i] := R[A+i] end
+                let k_str = if k { "k" } else { "" };
+                format!("SetList {} {} {}{}", a, b, c, k_str)
+            }
             OpCode::ExtraArg => format!("EXTRAARG {}", bx),
             OpCode::Tbc => format!("TBC {}", a),
             OpCode::Close => format!("CLOSE {}", a),

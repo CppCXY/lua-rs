@@ -2320,8 +2320,8 @@ fn compile_table_expr_to(
                     // key is a numeric literal - try SETI optimization
                     if !number_token.is_float() {
                         let int_value = number_token.get_int_value();
-                        // SETI can handle integer keys directly (8-bit unsigned index)
-                        if int_value >= 0 && int_value <= 255 {
+                        // SETI: B field is sB (signed byte), range -128 to 127
+                        if int_value >= -128 && int_value <= 127 {
                             // Try to compile value as constant first (for RK optimization)
                             let (value_operand, use_constant) =
                                 if let Some(value_expr) = field.get_value_expr() {
@@ -2336,13 +2336,15 @@ fn compile_table_expr_to(
                                     (r, false)
                                 };
 
-                            // Use SETI: R(A)[B] := RK(C) where B is integer index (0-255)
+                            // Use SETI: R(A)[sB] := RK(C) where sB is signed byte
+                            // Encode sB: add OFFSET_SB (128)
+                            let encoded_b = (int_value + 128) as u32;
                             emit(
                                 c,
                                 Instruction::create_abck(
                                     OpCode::SetI,
                                     reg,
-                                    int_value as u32,
+                                    encoded_b,
                                     value_operand,
                                     use_constant,
                                 ),
@@ -2369,7 +2371,8 @@ fn compile_table_expr_to(
                 LuaIndexKey::Expr(key_expr) => {
                     // key is an expression - try to evaluate as constant integer for SETI
                     if let Some(int_val) = try_eval_const_int(&key_expr) {
-                        if int_val >= 0 && int_val <= 255 {
+                        // SETI: B field is sB (signed byte), range -128 to 127
+                        if int_val >= -128 && int_val <= 127 {
                             // Use SETI for small integer keys
                             let (value_operand, use_constant) =
                                 if let Some(value_expr) = field.get_value_expr() {
@@ -2384,12 +2387,14 @@ fn compile_table_expr_to(
                                     (r, false)
                                 };
 
+                            // Encode sB: add OFFSET_SB (128)
+                            let encoded_b = (int_val + 128) as u32;
                             emit(
                                 c,
                                 Instruction::create_abck(
                                     OpCode::SetI,
                                     reg,
-                                    int_val as u32,
+                                    encoded_b,
                                     value_operand,
                                     use_constant,
                                 ),
@@ -2530,17 +2535,19 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
 
             match index_key {
                 LuaIndexKey::Integer(number_token) => {
-                    // Optimized: table[integer] = value -> SetTableI
-                    // B field is 9 bits, so max value is 511
+                    // Optimized: table[integer] = value -> SETI A sB C k
+                    // B field is sB (signed byte), range -128 to 127
                     let int_value = number_token.get_int_value();
-                    if int_value >= 0 && int_value <= 511 {
-                        // Use SetTableI: R(A)[B] := R(C)
+                    if int_value >= -128 && int_value <= 127 {
+                        // Use SETI: R(A)[sB] := RK(C)
+                        // Encode sB: add OFFSET_SB (128) to get 0-255 range
+                        let encoded_b = (int_value + 128) as u32;
                         emit(
                             c,
                             Instruction::encode_abc(
                                 OpCode::SetI,
                                 table_reg,
-                                int_value as u32,
+                                encoded_b,
                                 value_reg,
                             ),
                         );
@@ -2587,7 +2594,10 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                     Ok(())
                 }
                 LuaIndexKey::String(string_token) => {
-                    // Optimized: table["string"] = value -> SetTableK
+                    // Optimized: table["string"] = value -> SETFIELD A B C k
+                    // A: table register
+                    // B: key (constant index)
+                    // C: value (register or constant, determined by k)
                     let string_value = string_token.get_value();
                     let lua_str = create_string_value(c, &string_value);
                     let const_idx = add_constant_dedup(c, lua_str);
@@ -2599,7 +2609,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                                 table_reg,
                                 const_idx,
                                 value_reg,
-                                true,
+                                false, // k=0: C is register (value_reg is a register!)
                             ),
                         );
                         return Ok(());
