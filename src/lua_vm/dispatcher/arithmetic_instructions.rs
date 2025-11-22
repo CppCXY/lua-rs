@@ -316,6 +316,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 // ============ Arithmetic Immediate Instructions ============
 
 /// ADDI: R[A] = R[B] + sC
+#[inline(always)]
 pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;

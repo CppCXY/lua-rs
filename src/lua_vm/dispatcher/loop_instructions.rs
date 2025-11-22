@@ -10,6 +10,7 @@ use crate::{
 
 /// FORPREP A Bx
 /// Prepare numeric for loop: R[A]-=R[A+2]; R[A+3]=R[A]; if (skip) pc+=Bx+1
+#[inline(always)]
 pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
@@ -101,6 +102,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// FORLOOP A Bx
 /// R[A]+=R[A+2];
 /// if R[A] <?= R[A+1] then { pc-=Bx; R[A+3]=R[A] }
+#[inline(always)]
 pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;

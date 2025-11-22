@@ -116,6 +116,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// JMP sJ
 /// pc += sJ
+#[inline(always)]
 pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let sj = Instruction::get_sj(instr);
     
