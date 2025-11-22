@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// FORPREP A Bx
-/// R[A]-=R[A+2]; pc+=Bx
+/// Prepare numeric for loop: R[A]-=R[A+2]; R[A+3]=R[A]; if (skip) pc+=Bx+1
 pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
@@ -18,29 +18,82 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let base_ptr = frame.base_ptr;
 
     let init = vm.register_stack[base_ptr + a];
+    let limit = vm.register_stack[base_ptr + a + 1];
     let step = vm.register_stack[base_ptr + a + 2];
 
-    // Subtract step from init (preparation for first iteration)
-    let result = if let (Some(i), Some(s)) = (init.as_integer(), step.as_integer()) {
-        if let Some(diff) = i.checked_sub(s) {
-            LuaValue::integer(diff)
+    // Check for integer loop
+    if let (Some(init_i), Some(limit_i), Some(step_i)) = 
+        (init.as_integer(), limit.as_integer(), step.as_integer())
+    {
+        if step_i == 0 {
+            return Err(LuaError::RuntimeError("'for' step is zero".to_string()));
+        }
+
+        // Set control variable (R[A+3] = init)
+        vm.register_stack[base_ptr + a + 3] = LuaValue::integer(init_i);
+
+        // Calculate loop count (Lua 5.4 uses counter for integer loops)
+        let count = if step_i > 0 {
+            // Ascending: count = (limit - init) / step
+            if limit_i < init_i {
+                0 // skip loop
+            } else {
+                let diff = (limit_i as i128) - (init_i as i128);
+                (diff / (step_i as i128)) as u64
+            }
         } else {
-            LuaValue::number(i as f64 - s as f64)
+            // Descending: count = (init - limit) / (-(step+1)+1)
+            if init_i < limit_i {
+                0 // skip loop
+            } else {
+                let diff = (init_i as i128) - (limit_i as i128);
+                let divisor = -((step_i + 1) as i128) + 1;
+                (diff / divisor) as u64
+            }
+        };
+
+        if count == 0 {
+            // Skip the entire loop body and FORLOOP
+            vm.current_frame_mut().pc = vm.current_frame().pc + bx;
+        } else {
+            // Store count in R[A+1] (replacing limit)
+            vm.register_stack[base_ptr + a + 1] = LuaValue::integer(count as i64);
+            // R[A] keeps init value (will be updated by FORLOOP)
+            // Don't modify R[A] here!
         }
     } else {
+        // Float loop
         let init_f = init.as_number().ok_or_else(|| {
             LuaError::RuntimeError("'for' initial value must be a number".to_string())
         })?;
-        let step_f = step
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' step must be a number".to_string()))?;
-        LuaValue::number(init_f - step_f)
-    };
+        let limit_f = limit.as_number().ok_or_else(|| {
+            LuaError::RuntimeError("'for' limit must be a number".to_string())
+        })?;
+        let step_f = step.as_number().ok_or_else(|| {
+            LuaError::RuntimeError("'for' step must be a number".to_string())
+        })?;
 
-    vm.register_stack[base_ptr + a] = result;
+        if step_f == 0.0 {
+            return Err(LuaError::RuntimeError("'for' step is zero".to_string()));
+        }
 
-    // Jump to loop start
-    vm.current_frame_mut().pc += bx;
+        // Set control variable
+        vm.register_stack[base_ptr + a + 3] = LuaValue::number(init_f);
+
+        // Check if we should skip
+        let should_skip = if step_f > 0.0 {
+            init_f > limit_f
+        } else {
+            init_f < limit_f
+        };
+
+        if should_skip {
+            vm.current_frame_mut().pc = vm.current_frame().pc + bx;
+        } else {
+            // Prepare internal index
+            vm.register_stack[base_ptr + a] = LuaValue::number(init_f - step_f);
+        }
+    }
 
     Ok(DispatchAction::Continue)
 }
@@ -56,55 +109,63 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let base_ptr = frame.base_ptr;
 
     let idx = vm.register_stack[base_ptr + a];
-    let limit = vm.register_stack[base_ptr + a + 1];
+    let counter_or_limit = vm.register_stack[base_ptr + a + 1];
     let step = vm.register_stack[base_ptr + a + 2];
 
-    // Add step to index
-    let new_idx = if let (Some(i), Some(s)) = (idx.as_integer(), step.as_integer()) {
-        if let Some(sum) = i.checked_add(s) {
-            LuaValue::integer(sum)
-        } else {
-            LuaValue::number(i as f64 + s as f64)
+    // Check if this is an integer loop (step is integer)
+    if let Some(step_i) = step.as_integer() {
+        // Integer loop: R[A+1] is a counter
+        let count = counter_or_limit.as_integer().ok_or_else(|| {
+            LuaError::RuntimeError("'for' counter must be a number".to_string())
+        })?;
+
+        if count > 0 {
+            // Update counter
+            vm.register_stack[base_ptr + a + 1] = LuaValue::integer(count - 1);
+
+            // Update internal index
+            let idx_i = idx.as_integer().ok_or_else(|| {
+                LuaError::RuntimeError("'for' index must be a number".to_string())
+            })?;
+            let new_idx = idx_i.wrapping_add(step_i);
+            vm.register_stack[base_ptr + a] = LuaValue::integer(new_idx);
+
+            // Update control variable
+            vm.register_stack[base_ptr + a + 3] = LuaValue::integer(new_idx);
+
+            // Jump back
+            vm.current_frame_mut().pc = vm.current_frame().pc - bx;
         }
+        // If count <= 0, exit loop (don't jump)
     } else {
-        let idx_f = idx
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' index must be a number".to_string()))?;
-        let step_f = step
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' step must be a number".to_string()))?;
-        LuaValue::number(idx_f + step_f)
-    };
+        // Float loop: R[A+1] is limit, use traditional comparison
+        let limit_f = counter_or_limit.as_number().ok_or_else(|| {
+            LuaError::RuntimeError("'for' limit must be a number".to_string())
+        })?;
+        let idx_f = idx.as_number().ok_or_else(|| {
+            LuaError::RuntimeError("'for' index must be a number".to_string())
+        })?;
+        let step_f = step.as_number().ok_or_else(|| {
+            LuaError::RuntimeError("'for' step must be a number".to_string())
+        })?;
 
-    vm.register_stack[base_ptr + a] = new_idx;
+        // Add step to index
+        let new_idx_f = idx_f + step_f;
+        vm.register_stack[base_ptr + a] = LuaValue::number(new_idx_f);
 
-    // Check loop condition
-    let should_continue = if let (Some(i), Some(l), Some(s)) =
-        (new_idx.as_integer(), limit.as_integer(), step.as_integer())
-    {
-        if s > 0 { i <= l } else { i >= l }
-    } else {
-        let idx_f = new_idx
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' index must be a number".to_string()))?;
-        let limit_f = limit
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' limit must be a number".to_string()))?;
-        let step_f = step
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' step must be a number".to_string()))?;
-
-        if step_f > 0.0 {
-            idx_f <= limit_f
+        // Check condition
+        let should_continue = if step_f > 0.0 {
+            new_idx_f <= limit_f
         } else {
-            idx_f >= limit_f
-        }
-    };
+            new_idx_f >= limit_f
+        };
 
-    if should_continue {
-        // Continue loop: set loop variable and jump back
-        vm.register_stack[base_ptr + a + 3] = new_idx;
-        vm.current_frame_mut().pc -= bx;
+        if should_continue {
+            // Update control variable
+            vm.register_stack[base_ptr + a + 3] = LuaValue::number(new_idx_f);
+            // Jump back
+            vm.current_frame_mut().pc = vm.current_frame().pc - bx;
+        }
     }
 
     Ok(DispatchAction::Continue)

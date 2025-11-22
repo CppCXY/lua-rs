@@ -225,14 +225,11 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
         false
     };
 
-    // Discharge right to register only if not using constant optimization
-    let right_reg = if use_immediate || can_use_rk {
-        // Will use immediate or RK instruction - discharge might not be needed
-        // But still discharge for safety, will be optimized by instruction selection
-        exp_to_any_reg(c, &mut right_desc)
-    } else {
-        exp_to_any_reg(c, &mut right_desc)
-    };
+    // Save constant info before discharging
+    let saved_right_desc = right_desc.clone();
+    
+    // Discharge right to register (needed for non-RK path)
+    let right_reg = exp_to_any_reg(c, &mut right_desc);
 
     // Handle immediate instructions for ADD/SUB
     if use_immediate && matches!(op_kind, BinaryOperator::OpAdd | BinaryOperator::OpSub) {
@@ -327,7 +324,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             };
             if can_use_rk {
                 // Right is constant, use MULK
-                let const_idx = ensure_constant(c, &right_desc)?;
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::MulK, result_reg, left_reg, const_idx),
@@ -356,7 +353,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 alloc_register(c)
             };
             if can_use_rk {
-                let const_idx = ensure_constant(c, &right_desc)?;
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::DivK, result_reg, left_reg, const_idx),
@@ -385,7 +382,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 alloc_register(c)
             };
             if can_use_rk {
-                let const_idx = ensure_constant(c, &right_desc)?;
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::IDivK, result_reg, left_reg, const_idx),
@@ -408,7 +405,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 alloc_register(c)
             };
             if can_use_rk {
-                let const_idx = ensure_constant(c, &right_desc)?;
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::ModK, result_reg, left_reg, const_idx),
@@ -437,7 +434,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 alloc_register(c)
             };
             if can_use_rk {
-                let const_idx = ensure_constant(c, &right_desc)?;
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::PowK, result_reg, left_reg, const_idx),

@@ -142,11 +142,13 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 format!("GEI {} {} {}", a, imm, k as u32)
             }
             OpCode::ForLoop => {
-                // FORLOOP stores negative jump offset, but display as positive distance
-                let jump_dist = if sbx < 0 { -sbx } else { sbx };
-                format!("FORLOOP {} {}", a, jump_dist)
+                // FORLOOP uses unsigned Bx (backward jump distance)
+                format!("FORLOOP {} {}", a, bx)
             }
-            OpCode::ForPrep => format!("FORPREP {} {}", a, sbx),
+            OpCode::ForPrep => {
+                // FORPREP uses unsigned Bx (forward jump distance to skip loop)
+                format!("FORPREP {} {}", a, bx)
+            }
             OpCode::TForPrep => format!("TFORPREP {} {}", a, sbx),
             OpCode::TForLoop => format!("TFORLOOP {} {}", a, c),
             OpCode::MmBin => {

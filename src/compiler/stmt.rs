@@ -310,13 +310,7 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                     return Err(format!("attempt to assign to const variable '{}'", name));
                 }
                 // Local variable - compile expression directly to its register
-                // NEW: Use ExpDesc system!
-                let mut e = compile_expr_desc(c, &exprs[0])?;
-                exp_to_next_reg(c, &mut e);
-                // If result is not in target register, emit move
-                if e.get_register() != Some(local.register) {
-                    emit_move(c, local.register, e.get_register().unwrap());
-                }
+                let _result_reg = compile_expr_to(c, &exprs[0], Some(local.register))?;
                 return Ok(());
             }
             
@@ -983,6 +977,12 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
         emit(c, Instruction::encode_asbx(OpCode::LoadI, step_reg, 1));
     }
 
+    // Create hidden local variables for the internal control state
+    // These prevent the registers from being reused by function calls
+    add_local(c, "(for state)".to_string(), base_reg);
+    add_local(c, "(for state)".to_string(), limit_reg);
+    add_local(c, "(for state)".to_string(), step_reg);
+
     // Emit FORPREP: R(base) -= R(step); jump to FORLOOP (not loop body)
     let forprep_pc = c.chunk.code.len();
     emit(c, Instruction::encode_asbx(OpCode::ForPrep, base_reg, 0)); // Will patch later
@@ -1005,15 +1005,19 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     // FORLOOP comes AFTER the body
     let forloop_pc = c.chunk.code.len();
     // Emit FORLOOP: increments index, checks condition, copies to var, jumps back to body
-    let forloop_offset = (loop_body_start as i32) - (forloop_pc as i32) - 1;
+    // Bx is the backward jump distance. Since PC is incremented before dispatch,
+    // when FORLOOP executes, PC is already forloop_pc+1. To jump back to loop_body_start:
+    // (forloop_pc + 1) - Bx = loop_body_start => Bx = forloop_pc + 1 - loop_body_start
+    let forloop_offset = forloop_pc + 1 - loop_body_start;
     emit(
         c,
-        Instruction::encode_asbx(OpCode::ForLoop, base_reg, forloop_offset),
+        Instruction::encode_abx(OpCode::ForLoop, base_reg, forloop_offset as u32),
     );
 
     // Patch FORPREP to jump to FORLOOP (not body)
+    // Use unsigned Bx for forward jump distance
     let prep_jump = (forloop_pc as i32) - (forprep_pc as i32) - 1;
-    c.chunk.code[forprep_pc] = Instruction::encode_asbx(OpCode::ForPrep, base_reg, prep_jump);
+    c.chunk.code[forprep_pc] = Instruction::encode_abx(OpCode::ForPrep, base_reg, prep_jump as u32);
 
     end_loop(c);
     end_scope(c);

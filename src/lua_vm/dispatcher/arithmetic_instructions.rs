@@ -43,7 +43,8 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// SUB: R[A] = R[B] - R[C]
@@ -79,7 +80,8 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// MUL: R[A] = R[B] * R[C]
@@ -115,7 +117,8 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// DIV: R[A] = R[B] / R[C]
@@ -148,7 +151,8 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::number(l_float / r_float);
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
@@ -191,7 +195,8 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// MOD: R[A] = R[B] % R[C]
@@ -234,7 +239,8 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// POW: R[A] = R[B] ^ R[C]
@@ -267,7 +273,8 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::number(l_float.powf(r_float));
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
@@ -650,7 +657,8 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::integer(l_int & r_int);
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// BOR: R[A] = R[B] | R[C]
@@ -680,7 +688,8 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::integer(l_int | r_int);
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// BXOR: R[A] = R[B] ~ R[C]
@@ -710,7 +719,8 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::integer(l_int ^ r_int);
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// SHL: R[A] = R[B] << R[C]
@@ -745,7 +755,8 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// SHR: R[A] = R[B] >> R[C]
@@ -780,7 +791,8 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip the following MMBIN instruction since the operation succeeded
+    Ok(DispatchAction::Skip(1))
 }
 
 /// BANDK: R[A] = R[B] & K[C]
@@ -1104,20 +1116,22 @@ fn get_binop_metamethod(tm: u8) -> &'static str {
 pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let c = Instruction::get_c(instr) as usize; // C is the TagMethod index, NOT a register
+    // k bit is unused for MMBIN
     
     let base_ptr = vm.current_frame().base_ptr;
+    // A and B are the operand registers from the failed arithmetic operation
+    let ra = vm.register_stack[base_ptr + a];
     let rb = vm.register_stack[base_ptr + b];
-    let rc = vm.register_stack[base_ptr + c];
     
-    let metamethod_name = get_binop_metamethod(k as u8);
+    // C is the metamethod index (TagMethod enum value)
+    let metamethod_name = get_binop_metamethod(c as u8);
     let mm_key = vm.create_string(metamethod_name);
     
     // Try to get metamethod from first operand's metatable
-    let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
+    let metamethod = if let Some(mt) = vm.table_get_metatable(&ra) {
         vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
-    } else if let Some(mt) = vm.table_get_metatable(&rc) {
+    } else if let Some(mt) = vm.table_get_metatable(&rb) {
         vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
     } else {
         LuaValue::nil()
@@ -1126,13 +1140,13 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError
     if metamethod.is_nil() {
         return Err(LuaError::RuntimeError(format!(
             "attempt to perform arithmetic on {} and {}",
-            rb.type_name(),
-            rc.type_name()
+            ra.type_name(),
+            rb.type_name()
         )));
     }
     
     // Call metamethod
-    let args = vec![rb, rc];
+    let args = vec![ra, rb];
     let result = vm.call_metamethod(&metamethod, &args)?
         .unwrap_or(LuaValue::nil());
     vm.register_stack[base_ptr + a] = result;
