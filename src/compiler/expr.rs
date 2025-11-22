@@ -1308,6 +1308,14 @@ fn compile_binary_expr_to(
     // Fall back to normal two-operand instruction
     // Compile left and right first to get their registers
     let left_reg = compile_expr(c, &left)?;
+    
+    // CRITICAL: Ensure freereg is at least left_reg+1 to prevent right expression
+    // from overwriting left's register during nested compilation
+    // This is essential for expressions like: fib(n-1) + fib(n-2)
+    if c.freereg <= left_reg {
+        c.freereg = left_reg + 1;
+    }
+    
     let right_reg = compile_expr(c, &right)?;
     // Then allocate result register
     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
