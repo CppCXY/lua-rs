@@ -538,10 +538,13 @@ impl LuaVM {
             self.run().map(|v| vec![v])
         };
 
-        // Check if thread yielded by examining thread's yield_values
-        let did_yield = {
-            let thread = thread_rc.borrow();
-            !thread.yield_values.is_empty()
+        // Check if thread yielded by examining the result
+        let did_yield = match &result {
+            Ok(_) if !self.frames.is_empty() => {
+                // If frames are not empty after execution, it means we yielded
+                true
+            }
+            _ => false,
         };
 
         // Save thread state back

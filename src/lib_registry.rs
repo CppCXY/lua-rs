@@ -143,6 +143,39 @@ impl LibraryRegistry {
                 vm.set_string_metatable(lib_table.clone());
             }
 
+            // Special handling for coroutine library: override wrap with Lua implementation
+            if module.name == "coroutine" {
+                // Save current VM state
+                let old_stack_len = vm.register_stack.len();
+                let old_frames_len = vm.frames.len();
+                
+                let wrap_code = r#"
+                    local create = coroutine.create
+                    local resume = coroutine.resume
+                    return function(f)
+                        local co = create(f)
+                        return function(...)
+                            local ok, a, b, c, d, e = resume(co, ...)
+                            if not ok then error(a, 2) end
+                            return a, b, c, d, e
+                        end
+                    end
+                "#;
+                
+                if let Ok(wrap_func) = vm.execute_string(wrap_code) {
+                    // Restore VM state (execute_string clears it)
+                    vm.register_stack.truncate(old_stack_len);
+                    vm.frames.truncate(old_frames_len);
+                    
+                    // Set the wrap function in the coroutine table
+                    let wrap_key = vm.create_string("wrap");
+                    let _ = vm.table_set_with_meta(lib_table.clone(), wrap_key, wrap_func);
+                    
+                    // Also update the global coroutine table
+                    vm.set_global(module.name, lib_table.clone());
+                }
+            }
+
             // Also register in package.loaded (if package exists)
             // This allows require() to find standard libraries
             if let Some(package_table) = vm.get_global("package") {

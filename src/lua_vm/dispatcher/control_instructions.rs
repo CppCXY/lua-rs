@@ -497,8 +497,20 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             );
             
             vm.frames.push(temp_frame);
-            let result = cfunc(vm)?;
+            let result = match cfunc(vm) {
+                Ok(r) => Ok(r),
+                Err(LuaError::Yield(values)) => {
+                    // CFunction yielded - pop the temporary frame before yielding
+                    vm.frames.pop();
+                    return Err(LuaError::Yield(values));
+                }
+                Err(e) => {
+                    vm.frames.pop();
+                    return Err(e);
+                }
+            };
             vm.frames.pop();
+            let result = result?;
             
             // Store return values
             let values = result.all_values();

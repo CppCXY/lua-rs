@@ -143,11 +143,10 @@ fn coroutine_running(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// coroutine.wrap(f) - Create a wrapped coroutine
-/// This is a placeholder - the actual implementation is done in Lua
-/// and registered in LuaVM::open_libs()
+/// This is placeholder - the actual implementation is injected as Lua code in lib_registry
 fn coroutine_wrap(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
     Err(LuaError::RuntimeError(
-        "coroutine.wrap should have been overridden in open_libs".to_string(),
+        "coroutine.wrap should be overridden by Lua implementation in lib_registry".to_string(),
     ))
 }
 
