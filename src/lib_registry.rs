@@ -225,6 +225,7 @@ pub fn create_standard_registry() -> LibraryRegistry {
     registry.register(stdlib::coroutine::create_coroutine_lib());
     registry.register(stdlib::debug::create_debug_lib());
     registry.register(stdlib::ffi::create_ffi_lib());
+    registry.register(stdlib::async_lib::create_async_lib());
 
     registry
 }

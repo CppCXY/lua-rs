@@ -6,6 +6,7 @@ mod opcode;
 mod dispatcher;
 
 use crate::gc::GC;
+use crate::lua_async::AsyncExecutor;
 use dispatcher::{dispatch_instruction, DispatchAction};
 use crate::lua_value::{
     Chunk, CoroutineStatus, LuaFunction, LuaString, LuaTable, LuaThread, LuaUpvalue, LuaValue,
@@ -62,6 +63,9 @@ pub struct LuaVM {
 
     // Object pool for unified object management (new architecture)
     pub(crate) object_pool: crate::object_pool::ObjectPool,
+
+    // Async executor for Lua-Rust async bridge
+    pub(crate) async_executor: AsyncExecutor,
 }
 
 impl LuaVM {
@@ -81,6 +85,7 @@ impl LuaVM {
             main_thread_value: None, // Will be initialized lazily
             string_metatable: None,
             object_pool: ObjectPool::new(),
+            async_executor: AsyncExecutor::new(),
         };
 
         // Set _G to point to the global table itself
@@ -114,6 +119,9 @@ impl LuaVM {
 
     pub fn open_libs(&mut self) {
         let _ = lib_registry::create_standard_registry().load_all(self);
+        
+        // Register async functions
+        crate::stdlib::async_lib::register_async_functions(self);
     }
 
     /// Execute a chunk directly (convenience method)
@@ -2016,5 +2024,38 @@ impl LuaVM {
                 "attempt to call a non-function value".to_string(),
             )),
         }
+    }
+
+    // Async bridge API: Call a registered async function (internal use)
+    pub fn async_call(&mut self, func_name: &str, args: Vec<LuaValue>, coroutine: LuaValue) -> LuaResult<u64> {
+        let task_id = self.async_executor.spawn_task(func_name, args, coroutine)?;
+        Ok(task_id)
+    }
+
+    // Poll all async tasks and resume completed coroutines
+    pub fn poll_async(&mut self) -> LuaResult<()> {
+        let completed_tasks = self.async_executor.collect_completed_tasks();
+        
+        for (_task_id, coroutine, result) in completed_tasks {
+            // Resume the coroutine with the result values
+            let values = result?;
+            let (_success, _resume_result) = self.resume_thread(coroutine, values)?;
+        }
+        
+        Ok(())
+    }
+
+    // Register an async function callable from Lua
+    pub fn register_async_function<F, Fut>(&mut self, name: &str, func: F)
+    where
+        F: Fn(Vec<LuaValue>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = LuaResult<Vec<LuaValue>>> + Send + 'static,
+    {
+        self.async_executor.register_async_function(name.to_string(), func);
+    }
+
+    // Get the number of active async tasks
+    pub fn active_async_tasks(&self) -> usize {
+        self.async_executor.active_task_count()
     }
 }

@@ -1,6 +1,6 @@
 use crate::LuaValue;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LuaError {
     RuntimeError(String),
     CompileError(String),

@@ -8,6 +8,7 @@ pub mod compiler;
 pub mod ffi;
 pub mod gc;
 pub mod lib_registry;
+pub mod lua_async;
 pub mod lua_pattern;
 pub mod lua_value;
 pub mod lua_vm;
