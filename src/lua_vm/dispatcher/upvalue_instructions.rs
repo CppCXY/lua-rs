@@ -3,6 +3,7 @@
 /// These instructions handle upvalues, closures, and variable captures.
 
 use crate::lua_vm::{LuaVM, LuaResult, LuaError, Instruction};
+use crate::lua_value::LuaValue;
 use super::DispatchAction;
 
 /// GETUPVAL A B
@@ -134,7 +135,15 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     vm.open_upvalues.extend(new_open_upvalues);
 
     let closure = vm.create_function(proto, upvalues);
-    vm.register_stack[base_ptr + a] = closure;
+    
+    // Ensure we have enough stack space before writing
+    // (workaround for compiler occasionally under-estimating max_stack_size)
+    let target_pos = base_ptr + a;
+    if target_pos >= vm.register_stack.len() {
+        vm.register_stack.resize(target_pos + 1, LuaValue::nil());
+    }
+    
+    vm.register_stack[target_pos] = closure;
 
     Ok(DispatchAction::Continue)
 }

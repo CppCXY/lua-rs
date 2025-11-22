@@ -562,7 +562,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         }
                     }
                 }
-                return Err(LuaError::RuntimeError("module not found".to_string()));
+                // Module not in loaded table - continue to searchers
             }
         }
     }

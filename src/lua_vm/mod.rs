@@ -612,6 +612,21 @@ impl LuaVM {
     /// Use this for GETTABLE, GETFIELD, GETI instructions
     /// For raw access without metamethods, use table_get_raw() instead
     pub fn table_get_with_meta(&mut self, lua_table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        // Handle strings with metatable support
+        if lua_table_value.is_string() {
+            // Strings use a shared metatable
+            if let Some(string_mt) = self.get_string_metatable() {
+                let index_key = self.create_string("__index");
+                
+                // Get the __index field from string metatable
+                if let Some(index_table) = self.table_get_with_meta(&string_mt, &index_key) {
+                    // Look up the key in the __index table (the string library)
+                    return self.table_get_with_meta(&index_table, key);
+                }
+            }
+            return None;
+        }
+
         // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
         if let Some(ptr) = lua_table_value.as_table_ptr() {
             // SAFETY: Pointer is valid as long as table exists in ObjectPool
@@ -1894,6 +1909,12 @@ impl LuaVM {
                 let new_base = self.register_stack.len();
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
+                // Initialize all registers with nil
+                for i in new_base..(new_base + max_stack_size) {
+                    self.register_stack[i] = LuaValue::nil();
+                }
+
+                // Copy arguments to registers
                 for (i, arg) in args.iter().enumerate() {
                     if i < max_stack_size {
                         self.register_stack[new_base + i] = arg.clone();
