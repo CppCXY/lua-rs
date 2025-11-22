@@ -1380,8 +1380,28 @@ fn compile_binary_expr_to(
             return compile_comparison_to_bool(c, op_kind, left_reg, right_reg, result_reg);
         }
         
-        BinaryOperator::OpAnd => (OpCode::TestSet, None), // Lua 5.4: Use TestSet for short-circuit
-        BinaryOperator::OpOr => (OpCode::TestSet, None), // Lua 5.4: Use TestSet for short-circuit
+        BinaryOperator::OpAnd | BinaryOperator::OpOr => {
+            // Boolean operators with proper short-circuit evaluation
+            // Pattern: TESTSET + JMP + MOVE
+            // and: if left is false, return left; else return right  
+            // or: if left is true, return left; else return right
+            let k_flag = matches!(op_kind, BinaryOperator::OpOr);
+            
+            // TestSet: if (is_truthy == k) then R[A] := R[B] else pc++
+            emit(
+                c,
+                Instruction::create_abck(OpCode::TestSet, result_reg, left_reg, 0, k_flag),
+            );
+            // JMP: skip the MOVE if TestSet assigned the value
+            let jump_pos = emit_jump(c, OpCode::Jmp);
+            // MOVE: use right operand if TestSet didn't assign
+            emit(c, Instruction::create_abc(OpCode::Move, result_reg, right_reg, 0));
+            // Patch the jump to point after MOVE
+            patch_jump(c, jump_pos);
+            
+            return Ok(result_reg);
+        }
+        
         _ => return Err(format!("Unsupported binary operator: {:?}", op_kind)),
     };
 

@@ -133,12 +133,12 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let value = vm.register_stack[base_ptr + b];
     
-    // Lua truthiness
+    // Lua truthiness: not l_isfalse(v) means v is truthy
     let is_truthy = !value.is_nil() && value.as_bool().unwrap_or(true);
     
-    // If (not value) == k, assign R[A] = R[B]
-    // Otherwise skip next instruction
-    if !is_truthy == k {
+    // TESTSET: if ((not l_isfalse(R[B])) == k) then R[A] := R[B] else pc++
+    // If (is_truthy == k), assign R[A] = R[B], otherwise skip next instruction
+    if is_truthy == k {
         vm.register_stack[base_ptr + a] = value;
     } else {
         vm.current_frame_mut().pc += 1;
