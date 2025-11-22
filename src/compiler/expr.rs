@@ -1683,8 +1683,8 @@ fn compile_call_expr_to(
     expr: &LuaCallExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    // If dest is specified and this is a simple call (not "all out" mode),
-    // we can use dest as the function register to avoid extra Move instructions
+    // Compile call with specified destination
+    // The call handler will decide whether to use dest as func_reg or allocate fresh registers
     compile_call_expr_with_returns_and_dest(c, expr, 1, dest)
 }
 
@@ -1856,12 +1856,22 @@ pub fn compile_call_expr_with_returns_and_dest(
     let mut arg_regs = Vec::new();
     let mut last_arg_is_call_all_out = false;
 
+    // Save freereg before compiling arguments
+    // We'll reset it before each argument so they compile into consecutive registers
+    let saved_freereg = c.freereg;
+
     // CRITICAL: Compile arguments directly to their target positions
     // This is how standard Lua ensures arguments are in consecutive registers
     // Each argument should be compiled to args_start + i
     for (i, arg_expr) in arg_exprs.iter().enumerate() {
         let is_last = i == arg_exprs.len() - 1;
         let arg_dest = args_start + i as u32;
+
+        // Reset freereg to arg_dest for non-call expressions
+        // This ensures constants and variables compile directly to their target positions
+        if !matches!(arg_expr, LuaExpr::CallExpr(_)) {
+            c.freereg = arg_dest;
+        }
 
         // Ensure max_stack_size can accommodate this register
         if arg_dest as usize >= c.chunk.max_stack_size {
@@ -1924,7 +1934,16 @@ pub fn compile_call_expr_with_returns_and_dest(
                         unreachable!("inner_is_method but not IndexExpr")
                     }
                 } else {
-                    compile_expr(c, &inner_prefix)?
+                    // For regular call, we need to place it at arg_dest (outer call's argument position)
+                    // to avoid register conflicts
+                    let temp_func_reg = compile_expr(c, &inner_prefix)?;
+                    if temp_func_reg != arg_dest {
+                        ensure_register(c, arg_dest);
+                        emit_move(c, arg_dest, temp_func_reg);
+                        arg_dest
+                    } else {
+                        temp_func_reg
+                    }
                 };
 
                 // Compile call arguments
@@ -1938,6 +1957,9 @@ pub fn compile_call_expr_with_returns_and_dest(
                     .ok_or("missing args list")?
                     .get_args()
                     .collect::<Vec<_>>();
+
+                // CRITICAL: Reset freereg so inner call's arguments compile into correct positions
+                c.freereg = call_args_start;
 
                 let mut call_arg_regs = Vec::new();
                 for call_arg in call_arg_exprs.iter() {
@@ -1980,9 +2002,28 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
 
         // Compile argument directly to its target position
-        let arg_reg = compile_expr_to(c, arg_expr, Some(arg_dest))?;
+        // SPECIAL CASE: If argument is a function call, don't pass dest
+        // because function calls need their own register space
+        let arg_reg = if matches!(arg_expr, LuaExpr::CallExpr(_)) {
+            let call_reg = compile_expr_to(c, arg_expr, None)?;
+            // Move result to target position if needed
+            if call_reg != arg_dest {
+                ensure_register(c, arg_dest);
+                emit_move(c, arg_dest, call_reg);
+                arg_dest
+            } else {
+                call_reg
+            }
+        } else {
+            compile_expr_to(c, arg_expr, Some(arg_dest))?
+        };
         arg_regs.push(arg_reg);
     }
+
+    // Restore freereg to saved value or update to after last argument
+    // whichever is higher (to account for any temporary registers used)
+    let after_args = args_start + arg_regs.len() as u32;
+    c.freereg = std::cmp::max(saved_freereg, after_args);
 
     // Check if arguments are already in the correct positions
     let mut need_move = false;
