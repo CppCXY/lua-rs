@@ -576,7 +576,7 @@ pub fn emit_goto(c: &mut Compiler, label_name: String) -> Result<(), String> {
             // Label found - emit direct jump
             let current_pos = c.chunk.code.len();
             let offset = label.position as i32 - current_pos as i32 - 1;
-            emit(c, Instruction::encode_asbx(OpCode::Jmp, 0, offset));
+            emit(c, Instruction::create_sj(OpCode::Jmp, offset));
             return Ok(());
         }
     }
@@ -607,7 +607,7 @@ fn resolve_pending_gotos(c: &mut Compiler, label_name: &str) {
         if c.gotos[i].name == label_name {
             let goto = c.gotos.remove(i);
             let offset = label_pos as i32 - goto.jump_position as i32 - 1;
-            c.chunk.code[goto.jump_position] = Instruction::encode_asbx(OpCode::Jmp, 0, offset);
+            c.chunk.code[goto.jump_position] = Instruction::create_sj(OpCode::Jmp, offset);
         } else {
             i += 1;
         }

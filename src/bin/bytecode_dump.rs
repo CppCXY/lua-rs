@@ -88,10 +88,9 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             }
             OpCode::Add => format!("ADD {} {} {}", a, b, c),
             OpCode::AddI => {
-                // ADDI uses signed 8-bit immediate in C field
-                // Values 0-127 are positive, 128-255 are negative (128=-128, 255=-1)
-                let imm = if c > 127 { (c as i32) - 256 } else { c as i32 };
-                format!("ADDI {} {} {}", a, b, imm)
+                // ADDI uses signed 8-bit immediate in sC field
+                let sc = Instruction::get_sc(instr);
+                format!("ADDI {} {} {}", a, b, sc)
             }
             OpCode::AddK => format!("ADDK {} {} {}", a, b, c),
             OpCode::Sub => format!("SUB {} {} {}", a, b, c),
@@ -121,25 +120,25 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Lt => format!("LT {} {} {}", a, b, k as u32),
             OpCode::Le => format!("LE {} {} {}", a, b, k as u32),
             OpCode::EqI => {
-                // B field is signed 8-bit integer
-                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
-                format!("EQI {} {} {}", a, imm, k as u32)
+                // sB field is signed 8-bit integer
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("EQI {} {} {}", a, sb, k as u32)
             }
             OpCode::LtI => {
-                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
-                format!("LTI {} {} {}", a, imm, k as u32)
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("LTI {} {} {}", a, sb, k as u32)
             }
             OpCode::LeI => {
-                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
-                format!("LEI {} {} {}", a, imm, k as u32)
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("LEI {} {} {}", a, sb, k as u32)
             }
             OpCode::GtI => {
-                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
-                format!("GTI {} {} {}", a, imm, k as u32)
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("GTI {} {} {}", a, sb, k as u32)
             }
             OpCode::GeI => {
-                let imm = if b > 127 { (b as i32) - 256 } else { b as i32 };
-                format!("GEI {} {} {}", a, imm, k as u32)
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("GEI {} {} {}", a, sb, k as u32)
             }
             OpCode::ForLoop => {
                 // FORLOOP uses unsigned Bx (backward jump distance)
@@ -156,8 +155,9 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 format!("MMBIN {} {} {}", a, b, c)
             }
             OpCode::MmBinI => {
-                // MMBINI shows 4 parameters including k flag
-                format!("MMBINI {} {} {} {}", a, b, c, k as u32)
+                // MMBINI shows 4 parameters, B is signed
+                let sb = b as i32 - Instruction::OFFSET_SB;
+                format!("MMBINI {} {} {} {}", a, sb, c, k as u32)
             }
             OpCode::MmBinK => {
                 // MMBINK shows k flag as 4th parameter
