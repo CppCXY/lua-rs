@@ -40,8 +40,8 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
 
     println!("{}=== {} ===", indent, name);
     println!(
-        "{}params: {}, vararg: {}",
-        indent, chunk.param_count, chunk.is_vararg
+        "{}params: {}, vararg: {}, max_stack: {}",
+        indent, chunk.param_count, chunk.is_vararg, chunk.max_stack_size
     );
     println!();
 

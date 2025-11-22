@@ -2788,6 +2788,12 @@ pub fn compile_closure_expr_to(
         r
     });
 
+    // Update peak_freereg to account for this register
+    // This is crucial when dest is provided (e.g., in assignments)
+    if dest_reg + 1 > c.peak_freereg {
+        c.peak_freereg = dest_reg + 1;
+    }
+
     // Ensure max_stack_size accounts for this register
     if (dest_reg + 1) as usize > c.chunk.max_stack_size {
         c.chunk.max_stack_size = (dest_reg + 1) as usize;
