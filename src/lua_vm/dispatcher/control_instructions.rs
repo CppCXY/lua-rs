@@ -438,7 +438,38 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let base = frame.base_ptr;
 
     // Get function from R[A]
-    let func = vm.register_stack[base + a];
+    let mut func = vm.register_stack[base + a].clone();
+    let mut use_call_metamethod = false;
+    let mut call_metamethod_self = LuaValue::nil();
+
+    // Check for __call metamethod if func is not callable
+    if !func.is_callable() {
+        // Try to get __call metamethod for tables
+        if func.kind() == LuaValueKind::Table {
+            // First, get the metatable (need to release table_ref before creating string)
+            let metatable_opt = vm.get_table(&func)
+                .and_then(|table_ref| table_ref.borrow().get_metatable());
+            
+            if let Some(metatable) = metatable_opt {
+                let call_key = vm.create_string("__call");
+                if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
+                    if call_func.is_callable() {
+                        // Use metamethod instead
+                        call_metamethod_self = func;
+                        func = call_func;
+                        use_call_metamethod = true;
+                    }
+                }
+            }
+        }
+        
+        // If still not callable, error
+        if !func.is_callable() {
+            return Err(LuaError::RuntimeError(
+                format!("attempt to call a {} value", func.type_name())
+            ));
+        }
+    }
 
     // Determine argument count
     // CRITICAL: In Lua, when B != 0, CALL sets its own top (doesn't use frame.top)
@@ -480,12 +511,27 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             
             // Set up call arguments in a new stack segment
             let call_base = vm.register_stack.len();
-            vm.ensure_stack_capacity(call_base + arg_count + 1);
+            let actual_arg_count = if use_call_metamethod {
+                arg_count + 1 // Add 1 for self argument
+            } else {
+                arg_count
+            };
+            vm.ensure_stack_capacity(call_base + actual_arg_count + 1);
             
             // Copy function and arguments
             vm.register_stack[call_base] = func;
-            for i in 0..arg_count {
-                vm.register_stack[call_base + i + 1] = vm.register_stack[base + a + 1 + i];
+            if use_call_metamethod {
+                // First argument is the original table (self)
+                vm.register_stack[call_base + 1] = call_metamethod_self;
+                // Then copy the original arguments
+                for i in 0..arg_count {
+                    vm.register_stack[call_base + i + 2] = vm.register_stack[base + a + 1 + i];
+                }
+            } else {
+                // Normal call: copy arguments directly
+                for i in 0..arg_count {
+                    vm.register_stack[call_base + i + 1] = vm.register_stack[base + a + 1 + i];
+                }
             }
             
             let temp_frame = LuaCallFrame::new_c_function(
@@ -493,7 +539,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 vm.current_frame().function_value,
                 vm.current_frame().pc,
                 call_base,
-                arg_count + 1,
+                actual_arg_count + 1,
             );
             
             vm.frames.push(temp_frame);
@@ -557,8 +603,16 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             }
 
             let new_base = vm.register_stack.len();
+            
+            // Calculate actual argument count for __call metamethod
+            let actual_arg_count = if use_call_metamethod {
+                arg_count + 1
+            } else {
+                arg_count
+            };
+            
             // Ensure new frame can hold at least the arguments
-            let actual_stack_size = max_stack_size.max(arg_count);
+            let actual_stack_size = max_stack_size.max(actual_arg_count);
             
             // For vararg functions, we need extra space to store varargs beyond max_stack_size
             // Check if this is a vararg function by looking at the chunk
@@ -567,9 +621,9 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 None => false,
             };
             
-            let total_stack_size = if is_vararg && arg_count > 0 {
+            let total_stack_size = if is_vararg && actual_arg_count > 0 {
                 // Allocate space for: max_stack_size + varargs
-                actual_stack_size + arg_count
+                actual_stack_size + actual_arg_count
             } else {
                 actual_stack_size
             };
@@ -581,17 +635,35 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 vm.register_stack[new_base + i] = crate::LuaValue::nil();
             }
 
-            if is_vararg && arg_count > 0 {
+            if is_vararg && actual_arg_count > 0 {
                 // For vararg functions, copy arguments BEYOND max_stack_size
                 // so they won't be overwritten by local variables
                 let vararg_base = new_base + actual_stack_size;
-                for i in 0..arg_count {
-                    vm.register_stack[vararg_base + i] = vm.register_stack[base + a + 1 + i];
+                if use_call_metamethod {
+                    // First argument is self
+                    vm.register_stack[vararg_base] = call_metamethod_self;
+                    // Then copy original arguments
+                    for i in 0..arg_count {
+                        vm.register_stack[vararg_base + i + 1] = vm.register_stack[base + a + 1 + i];
+                    }
+                } else {
+                    for i in 0..actual_arg_count {
+                        vm.register_stack[vararg_base + i] = vm.register_stack[base + a + 1 + i];
+                    }
                 }
             } else {
                 // Regular function: copy arguments to R[0], R[1], ...
-                for i in 0..arg_count {
-                    vm.register_stack[new_base + i] = vm.register_stack[base + a + 1 + i];
+                if use_call_metamethod {
+                    // First argument is self
+                    vm.register_stack[new_base] = call_metamethod_self;
+                    // Then copy original arguments
+                    for i in 0..arg_count {
+                        vm.register_stack[new_base + i + 1] = vm.register_stack[base + a + 1 + i];
+                    }
+                } else {
+                    for i in 0..actual_arg_count {
+                        vm.register_stack[new_base + i] = vm.register_stack[base + a + 1 + i];
+                    }
                 }
             }
 
@@ -602,7 +674,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 frame_id,
                 func,
                 new_base,
-                arg_count, // top = number of arguments passed
+                actual_arg_count, // top = number of arguments passed
                 a, // result_reg: where to store return values
                 return_count,
             );
