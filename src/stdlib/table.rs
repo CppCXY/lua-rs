@@ -286,31 +286,35 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     let comp_func = comp.unwrap();
 
-    // Custom comparison using Lua function - insertion sort
-    for i in 1..values.len() {
-        let mut j = i;
-        while j > 0 {
-            // Call comparison function: comp(a, b) should return true if a < b
-            let args = vec![values[j].clone(), values[j - 1].clone()];
-            let result = match vm.call_metamethod(&comp_func, &args) {
-                Ok(Some(val)) => val.is_truthy(),
-                Ok(None) => false,
-                Err(e) => {
-                    return Err(LuaError::RuntimeError(format!(
-                        "error in sort comparison function: {}",
-                        e
-                    )));
+    // Custom comparison using Lua function - use sort_by with comparator
+    // We need to use sort_by_cached_key or manual sort_by to handle comparison errors
+    values.sort_by(|a, b| {
+        // Call comparison function: comp(a, b) should return true if a < b
+        let args = vec![a.clone(), b.clone()];
+        match vm.call_function_internal(comp_func.clone(), args) {
+            Ok(results) => {
+                let result = results.get(0).map(|v| v.is_truthy()).unwrap_or(false);
+                if result {
+                    std::cmp::Ordering::Less
+                } else {
+                    // Need to check comp(b, a) to distinguish Equal from Greater
+                    let args_rev = vec![b.clone(), a.clone()];
+                    match vm.call_function_internal(comp_func.clone(), args_rev) {
+                        Ok(results_rev) => {
+                            let result_rev = results_rev.get(0).map(|v| v.is_truthy()).unwrap_or(false);
+                            if result_rev {
+                                std::cmp::Ordering::Greater
+                            } else {
+                                std::cmp::Ordering::Equal
+                            }
+                        }
+                        Err(_) => std::cmp::Ordering::Equal, // On error, treat as equal
+                    }
                 }
-            };
-
-            if result {
-                values.swap(j, j - 1);
-                j -= 1;
-            } else {
-                break;
             }
+            Err(_) => std::cmp::Ordering::Equal, // On error, treat as equal
         }
-    }
+    });
 
     // Write back the sorted values
     let table_ref_cell = vm
