@@ -20,26 +20,18 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        // Integer addition with wraparound semantics
-        LuaValue::integer(l.wrapping_add(r))
+    // Fast path: both are integers (no float conversion check)
+    let result = if left.is_integer() && right.is_integer() {
+        LuaValue::integer((left.secondary as i64).wrapping_add(right.secondary as i64))
+    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+        // Float path (handles integer->float conversion)
+        LuaValue::number(l + r)
     } else {
-        // Float addition
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to add {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        let r_float = right.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to add {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        LuaValue::number(l_float + r_float)
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to add {} with {}",
+            left.type_name(),
+            right.type_name()
+        )));
     };
 
     vm.register_stack[base_ptr + a] = result;
@@ -59,24 +51,17 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        LuaValue::integer(l.wrapping_sub(r))
+    // Fast path: both are integers
+    let result = if left.is_integer() && right.is_integer() {
+        LuaValue::integer((left.secondary as i64).wrapping_sub(right.secondary as i64))
+    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+        LuaValue::number(l - r)
     } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to subtract {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        let r_float = right.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to subtract {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        LuaValue::number(l_float - r_float)
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to subtract {} with {}",
+            left.type_name(),
+            right.type_name()
+        )));
     };
 
     vm.register_stack[base_ptr + a] = result;
@@ -96,24 +81,17 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        LuaValue::integer(l.wrapping_mul(r))
+    // Fast path: both are integers
+    let result = if left.is_integer() && right.is_integer() {
+        LuaValue::integer((left.secondary as i64).wrapping_mul(right.secondary as i64))
+    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+        LuaValue::number(l * r)
     } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to multiply {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        let r_float = right.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to multiply {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        LuaValue::number(l_float * r_float)
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to multiply {} with {}",
+            left.type_name(),
+            right.type_name()
+        )));
     };
 
     vm.register_stack[base_ptr + a] = result;
