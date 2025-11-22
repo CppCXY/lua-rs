@@ -20,6 +20,10 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     })?;
 
     let base_ptr = frame.base_ptr;
+    // CRITICAL: result_reg and num_results are stored in the CALLED frame, not the caller!
+    // They tell us where to place return values in the CALLER's register space.
+    let result_reg = frame.get_result_reg();
+    let num_results = frame.get_num_results();
 
     // Collect return values
     vm.return_values.clear();
@@ -47,8 +51,6 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // If there are more frames, place return values in the caller's registers
     if !vm.frames.is_empty() {
         let caller_frame = vm.current_frame();
-        let result_reg = caller_frame.get_result_reg();
-        let num_results = caller_frame.get_num_results();
         let caller_base = caller_frame.base_ptr;
         
         // Copy return values to result registers

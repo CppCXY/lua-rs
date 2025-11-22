@@ -657,6 +657,28 @@ impl PartialEq for LuaValue {
             return true;
         }
 
+        // Lua 5.4 semantics: integer and float with same numeric value are equal
+        // Check if one is integer and the other is float
+        if self.is_integer() && other.is_float() {
+            let int_val = self.as_integer().unwrap();
+            let float_val = other.as_float().unwrap();
+            // Check if float is an exact integer and values match
+            if float_val.fract() == 0.0 && float_val >= i64::MIN as f64 && float_val <= i64::MAX as f64 {
+                return int_val == float_val as i64;
+            }
+            return false;
+        }
+        
+        if self.is_float() && other.is_integer() {
+            let float_val = self.as_float().unwrap();
+            let int_val = other.as_integer().unwrap();
+            // Check if float is an exact integer and values match
+            if float_val.fract() == 0.0 && float_val >= i64::MIN as f64 && float_val <= i64::MAX as f64 {
+                return float_val as i64 == int_val;
+            }
+            return false;
+        }
+
         // For ID-based architecture, same ID means same object
         // No need for deep comparison
         false

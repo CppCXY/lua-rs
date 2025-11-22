@@ -243,13 +243,9 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
     // Fill missing values with nil (batch optimization)
     if regs.len() < names.len() {
-        let first_nil_reg = alloc_register(c);
+        // Use pre-allocated registers instead of allocating new ones
+        let first_nil_reg = base_reg + regs.len() as u32;
         let nil_count = names.len() - regs.len();
-
-        // Allocate remaining registers
-        for _ in 1..nil_count {
-            alloc_register(c);
-        }
 
         // Emit single LOADNIL instruction for all nil values
         // Format: LOADNIL A B - loads nil into R(A)..R(A+B)
