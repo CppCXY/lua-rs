@@ -268,7 +268,8 @@ impl LuaVM {
             // Drop borrows before executing instruction
             drop(func_ref);
 
-            // Increment PC (some instructions will modify it)
+            // Increment PC before dispatching (standard for most instructions)
+            // Some instructions (JMP, FORLOOP, etc.) will override this
             self.current_frame_mut().pc += 1;
 
             // Dispatch instruction using the dispatcher module
@@ -300,6 +301,8 @@ impl LuaVM {
                             .copied()
                             .unwrap_or(LuaValue::nil()));
                     }
+                    // NOTE: Caller's PC should remain unchanged - it was already incremented
+                    // before the CALL instruction was executed, and points to the next instruction.
                 }
                 DispatchAction::Yield => {
                     // Coroutine yielded - return control to resume_thread

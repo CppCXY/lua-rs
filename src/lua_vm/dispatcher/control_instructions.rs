@@ -24,6 +24,9 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // They tell us where to place return values in the CALLER's register space.
     let result_reg = frame.get_result_reg();
     let num_results = frame.get_num_results();
+    
+    // DEBUG: Print return info
+
 
     // Collect return values
     vm.return_values.clear();
@@ -57,6 +60,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         let actual_returns = if num_results == usize::MAX {
             // Multiple return values expected - copy all
             for (i, value) in vm.return_values.iter().enumerate() {
+                println!("  DEBUG: Writing return[{}] = {:?} to register[{}]", i, value, caller_base + result_reg + i);
                 vm.register_stack[caller_base + result_reg + i] = *value;
             }
             vm.return_values.len()
@@ -64,6 +68,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // Fixed number of return values
             for i in 0..num_results {
                 let value = vm.return_values.get(i).copied().unwrap_or(LuaValue::nil());
+                println!("  DEBUG: Writing return[{}] = {:?} to register[{}]", i, value, caller_base + result_reg + i);
                 vm.register_stack[caller_base + result_reg + i] = value;
             }
             num_results
@@ -73,6 +78,28 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         // This is how Lua communicates variable return counts to the next instruction
         // (e.g., CALL with B=0 will use this top to determine argument count)
         vm.current_frame_mut().top = result_reg + actual_returns;
+        
+        // CRITICAL FIX: Truncate register stack back to caller's frame
+        // When we created the called function's frame, we extended register_stack.
+        // Now that we're returning, we must truncate it back so the next call
+        // doesn't create its frame at the wrong position.
+        // The caller needs its FULL max_stack_size space, not just up to the return values!
+        let caller_frame = vm.current_frame();
+        let func_id = caller_frame.get_function_id();
+        if let Some(func_id) = func_id {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                let caller_max_stack = func_ref.borrow().chunk.max_stack_size;
+                // Truncate to the end of caller's allocated stack space
+                let caller_stack_end = caller_base + caller_max_stack;
+                
+                // But we need to ensure the caller's stack is at least long enough
+                // In case it was never fully allocated
+                if vm.register_stack.len() < caller_stack_end {
+                    vm.ensure_stack_capacity(caller_stack_end);
+                }
+                vm.register_stack.truncate(caller_stack_end);
+            }
+        }
     }
 
     // Handle upvalue closing (k bit)
@@ -434,8 +461,10 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.frames.last().unwrap();
-    let base = frame.base_ptr;
+    let base = {
+        let frame = vm.frames.last().unwrap();
+        frame.base_ptr
+    };
 
     // Get function from R[A]
     let mut func = vm.register_stack[base + a].clone();
@@ -602,7 +631,33 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 vm.ensure_stack_capacity(max_src_reg);
             }
 
-            let new_base = vm.register_stack.len();
+            // CRITICAL FIX: new_base should be at the end of caller's stack frame,
+            // NOT at the end of register_stack! The caller may not have allocated
+            // its full max_stack_size yet, so register_stack.len() could be less.
+            // We need to ensure the caller's full stack is allocated first.
+            let frame = vm.current_frame();
+            let caller_base = frame.base_ptr;
+            let caller_func_id = frame.get_function_id();
+            let caller_max_stack = if let Some(caller_func_id) = caller_func_id {
+                if let Some(func_ref) = vm.object_pool.get_function(caller_func_id) {
+                    func_ref.borrow().chunk.max_stack_size
+                } else {
+                    // Fallback: use current stack length
+                    vm.register_stack.len().saturating_sub(caller_base)
+                }
+            } else {
+                // Not a Lua function (e.g., C function or main), use current length
+                vm.register_stack.len().saturating_sub(caller_base)
+            };
+            
+            // Ensure caller's full stack is allocated
+            let caller_stack_end = caller_base + caller_max_stack;
+            if vm.register_stack.len() < caller_stack_end {
+                vm.ensure_stack_capacity(caller_stack_end);
+            }
+            
+            // Now new_base is at the end of caller's frame
+            let new_base = caller_stack_end;
             
             // Calculate actual argument count for __call metamethod
             let actual_arg_count = if use_call_metamethod {
@@ -616,6 +671,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             
             // For vararg functions, we need extra space to store varargs beyond max_stack_size
             // Check if this is a vararg function by looking at the chunk
+            // Use the CALLED function's func_id (not caller's)
             let is_vararg = match vm.object_pool.get_function(func_id) {
                 Some(func_ref) => func_ref.borrow().chunk.is_vararg,
                 None => false,
@@ -678,6 +734,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 a, // result_reg: where to store return values
                 return_count,
             );
+            
             vm.frames.push(new_frame);
 
             Ok(DispatchAction::Call)
@@ -799,12 +856,14 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let base_ptr = frame.base_ptr;
     let result_reg = frame.get_result_reg();
+    
+
 
     vm.return_values.clear();
     if base_ptr + a < vm.register_stack.len() {
-        vm.return_values.push(vm.register_stack[base_ptr + a]);
+        let return_value = vm.register_stack[base_ptr + a];
+        vm.return_values.push(return_value);
     }
-    
     // Copy return value to caller's registers if needed
     if !vm.frames.is_empty() {
         let caller_base = vm.current_frame().base_ptr;

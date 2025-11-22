@@ -17,6 +17,7 @@ use emmylua_parser::{
 
 /// Check if a block contains only a single unconditional jump statement (break/return only)
 /// Note: goto is NOT optimized by luac, so we don't include it here
+#[allow(dead_code)]
 fn is_single_jump_block(block: &LuaBlock) -> bool {
     let stats: Vec<_> = block.get_stats().collect();
     if stats.len() != 1 {
@@ -711,51 +712,44 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
         // BUT: Only if there are no else/elseif clauses (otherwise we need to compile them)
         // NOTE: For break statements, we DON'T invert because the JMP IS the break itself
         let then_body = stat.get_block();
+        #[allow(unused_variables)]
         let is_single_break = then_body.as_ref().map_or(false, |b| {
             let stats: Vec<_> = b.get_stats().collect();
             stats.len() == 1 && matches!(stats[0], LuaStat::BreakStat(_))
         });
         
         // Only invert for return statements, not for break
+        // DISABLED: This optimization assumes the if statement is at the end of the block
+        // But in cases like "if cond then return end; <more code>", we need normal mode
+        // TODO: Re-enable this optimization only when if statement is the last statement in the block
+        let invert = false;
+        /*
         let invert = !has_branches
             && !is_single_break
             && then_body
                 .as_ref()
                 .map_or(false, |b| is_single_jump_block(b));
+        */
 
         // Try immediate comparison optimization (like GTI, LEI, etc.)
         let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, invert)? {
             // Immediate comparison emitted
             if invert {
-                // Inverted mode: comparison skips jump if TRUE, executes jump if FALSE
-                // The jump directly replaces the single jump statement (break/goto/return)
-                // So we emit the jump and compile the single statement manually
-                let jump_pos = emit_jump(c, OpCode::Jmp);
-
-                // Extract and handle the single jump statement
+                // Inverted mode: comparison skips then-block if condition is TRUE
+                // When condition is FALSE, execute then-block directly (no JMP needed)
+                // This optimization is only used when then-block is a single jump (return/break)
+                // and there are no elseif/else branches
+                
+                // Compile then block directly
                 if let Some(body) = then_body {
-                    let stats: Vec<_> = body.get_stats().collect();
-                    if stats.len() == 1 {
-                        match &stats[0] {
-                            LuaStat::BreakStat(_) => {
-                                // Register this as a break jump
-                                c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
-                            }
-                            LuaStat::ReturnStat(ret_stat) => {
-                                // Compile return normally
-                                compile_return_stat(c, ret_stat)?;
-                            }
-                            _ => unreachable!(
-                                "is_single_jump_block should only return true for break/return"
-                            ),
-                        }
-                    }
+                    compile_block(c, &body)?;
                 }
 
                 // No elseif/else for inverted single-jump blocks
                 return Ok(());
             } else {
-                // Normal mode: skip next instruction if FALSE
+                // Normal mode: comparison skips next instruction if FALSE
+                // So we emit a JMP to skip the then-block when condition is false
                 emit_jump(c, OpCode::Jmp)
             }
         } else {

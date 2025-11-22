@@ -330,6 +330,7 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     if let Some(l) = left.as_integer() {
         // Integer operation with wraparound, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(sc as i64));
+        // Skip the following MMBINI instruction (PC already incremented by main loop)
         vm.current_frame_mut().pc += 1;
         return Ok(DispatchAction::Continue);
     }
@@ -338,12 +339,13 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     if let Some(l) = left.as_number() {
         // Float operation succeeded, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::number(l + sc as f64);
+        // Skip the following MMBINI instruction (PC already incremented by main loop)
         vm.current_frame_mut().pc += 1;
         return Ok(DispatchAction::Continue);
     }
     
     // Not a number, fallthrough to MMBINI without setting result
-    
+    // MMBINI will be next instruction and handle metamethod
     Ok(DispatchAction::Continue)
 }
 
