@@ -1,7 +1,7 @@
 // Coroutine library - Full implementation
 // Implements: create, resume, yield, status, running, wrap, isyieldable
 
-use crate::lib_registry::{LibraryModule, get_args, require_arg};
+use crate::lib_registry::{LibraryModule, get_args, get_arg, arg_count, require_arg};
 use crate::lua_value::{CoroutineStatus, LuaValue, MultiValue};
 use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 use std::rc::Rc;
@@ -183,19 +183,7 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// Helper function for coroutine.wrap - called when the wrapper is invoked
 fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // First argument is the wrapper table itself (self)
-    let frame = vm.frames.last().ok_or_else(|| {
-        LuaError::RuntimeError("no active frame".to_string())
-    })?;
-    let base = frame.base_ptr;
-    let top = frame.top;
-    
-    if top < 1 {
-        return Err(LuaError::RuntimeError(
-            "coroutine.wrap call requires self argument".to_string(),
-        ));
-    }
-    
-    let wrapper_table = vm.register_stack[base];
+    let wrapper_table = require_arg(vm, 0, "coroutine.wrap_call")?;
     
     // Get the stored coroutine
     let thread_key = vm.create_string("__thread");
@@ -204,8 +192,11 @@ fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     
     // Collect arguments (skip self at index 0)
     let mut args = Vec::new();
-    for i in 1..top {
-        args.push(vm.register_stack[base + i]);
+    let arg_cnt = arg_count(vm);
+    for i in 1..arg_cnt {
+        if let Some(arg) = get_arg(vm, i) {
+            args.push(arg);
+        }
     }
     
     // Resume the coroutine
