@@ -243,27 +243,20 @@ impl LuaVM {
 
             // Get current frame and chunk
             let frame = self.current_frame();
-            let func_ptr = frame
-                .get_function_ptr()
-                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+            let func_ptr = match frame.get_function_ptr() {
+                Some(ptr) => ptr,
+                None => return Err(LuaError::RuntimeError("Not a Lua function".to_string())),
+            };
 
             // Safety: func_ptr is valid as long as the function exists in object_pool
             let func = unsafe { &*func_ptr };
             let func_ref = func.borrow();
             let chunk = &func_ref.chunk;
 
-            // Check PC bounds
+            // OPTIMIZATION: Use unsafe for unchecked instruction fetch (hot path)
+            // Safety: PC bounds are checked by bytecode compiler and instruction execution
             let pc = frame.pc;
-            if pc >= chunk.code.len() {
-                return Err(LuaError::RuntimeError(format!(
-                    "PC out of bounds: {} >= {}",
-                    pc,
-                    chunk.code.len()
-                )));
-            }
-
-            // Fetch instruction
-            let instr = chunk.code[pc];
+            let instr = unsafe { *chunk.code.get_unchecked(pc) };
 
             // Drop borrows before executing instruction
             drop(func_ref);

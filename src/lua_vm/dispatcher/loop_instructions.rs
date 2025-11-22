@@ -105,53 +105,63 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let idx = vm.register_stack[base_ptr + a];
-    let counter_or_limit = vm.register_stack[base_ptr + a + 1];
-    let step = vm.register_stack[base_ptr + a + 2];
+    // OPTIMIZATION: Use unsafe for unchecked register access (hot path)
+    // Safety: FORPREP guarantees these registers exist and are initialized
+    let (idx, counter_or_limit, step) = unsafe {
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr + a);
+        (*reg_base, *reg_base.add(1), *reg_base.add(2))
+    };
 
     // Check if this is an integer loop (step is integer)
     if let Some(step_i) = step.as_integer() {
         // Integer loop: R[A+1] is a counter
-        let count = counter_or_limit.as_integer().ok_or_else(|| {
-            LuaError::RuntimeError("'for' counter must be a number".to_string())
-        })?;
+        // OPTIMIZATION: Use match instead of ok_or_else to avoid closure
+        let count = match counter_or_limit.as_integer() {
+            Some(c) => c,
+            None => return Err(LuaError::RuntimeError("'for' counter must be a number".to_string())),
+        };
 
         if count > 0 {
-            // Update counter
-            vm.register_stack[base_ptr + a + 1] = LuaValue::integer(count - 1);
-
             // Update internal index
-            let idx_i = idx.as_integer().ok_or_else(|| {
-                LuaError::RuntimeError("'for' index must be a number".to_string())
-            })?;
+            let idx_i = match idx.as_integer() {
+                Some(i) => i,
+                None => return Err(LuaError::RuntimeError("'for' index must be a number".to_string())),
+            };
             let new_idx = idx_i.wrapping_add(step_i);
-            vm.register_stack[base_ptr + a] = LuaValue::integer(new_idx);
+            
+            // OPTIMIZATION: Use unsafe for unchecked writes (hot path)
+            // Safety: Same registers we just read from, still valid
+            unsafe {
+                let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                *reg_base = LuaValue::integer(new_idx);
+                *reg_base.add(1) = LuaValue::integer(count - 1);
+                *reg_base.add(3) = LuaValue::integer(new_idx);
+            }
 
-            // Update control variable
-            vm.register_stack[base_ptr + a + 3] = LuaValue::integer(new_idx);
-
-            // Jump back
-            vm.current_frame_mut().pc = vm.current_frame().pc - bx;
+            // OPTIMIZATION: Direct PC manipulation
+            let pc = vm.current_frame().pc;
+            vm.current_frame_mut().pc = pc - bx;
         }
         // If count <= 0, exit loop (don't jump)
     } else {
         // Float loop: R[A+1] is limit, use traditional comparison
-        let limit_f = counter_or_limit.as_number().ok_or_else(|| {
-            LuaError::RuntimeError("'for' limit must be a number".to_string())
-        })?;
-        let idx_f = idx.as_number().ok_or_else(|| {
-            LuaError::RuntimeError("'for' index must be a number".to_string())
-        })?;
-        let step_f = step.as_number().ok_or_else(|| {
-            LuaError::RuntimeError("'for' step must be a number".to_string())
-        })?;
+        let limit_f = match counter_or_limit.as_number() {
+            Some(l) => l,
+            None => return Err(LuaError::RuntimeError("'for' limit must be a number".to_string())),
+        };
+        let idx_f = match idx.as_number() {
+            Some(i) => i,
+            None => return Err(LuaError::RuntimeError("'for' index must be a number".to_string())),
+        };
+        let step_f = match step.as_number() {
+            Some(s) => s,
+            None => return Err(LuaError::RuntimeError("'for' step must be a number".to_string())),
+        };
 
         // Add step to index
         let new_idx_f = idx_f + step_f;
-        vm.register_stack[base_ptr + a] = LuaValue::number(new_idx_f);
 
         // Check condition
         let should_continue = if step_f > 0.0 {
@@ -161,10 +171,15 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         };
 
         if should_continue {
-            // Update control variable
-            vm.register_stack[base_ptr + a + 3] = LuaValue::number(new_idx_f);
-            // Jump back
-            vm.current_frame_mut().pc = vm.current_frame().pc - bx;
+            // OPTIMIZATION: Unsafe writes for float path too
+            unsafe {
+                let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                *reg_base = LuaValue::number(new_idx_f);
+                *reg_base.add(3) = LuaValue::number(new_idx_f);
+            }
+            
+            let pc = vm.current_frame().pc;
+            vm.current_frame_mut().pc = pc - bx;
         }
     }
 
