@@ -3,6 +3,7 @@
 /// These instructions handle table creation, access, and manipulation.
 
 use crate::lua_vm::{LuaVM, LuaResult, LuaError, Instruction};
+use crate::lua_value::LuaValue;
 use super::DispatchAction;
 
 /// NEWTABLE A B C k
@@ -61,8 +62,8 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let table = vm.register_stack[base_ptr + b];
     let key = vm.register_stack[base_ptr + c];
 
-    // CRITICAL: Use fast path without metatable check
-    let value = vm.table_get(&table, &key);
+    // Use table_get_with_meta to support __index metamethod
+    let value = vm.table_get_with_meta(&table, &key).unwrap_or(LuaValue::nil());
     vm.register_stack[base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)
@@ -101,7 +102,7 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 }
 
 /// GETI A B C
-/// R[A] := R[B][C]
+/// R[A] := R[B][C:integer]
 #[inline(always)]
 pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
@@ -112,10 +113,10 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let base_ptr = frame.base_ptr;
 
     let table = vm.register_stack[base_ptr + b];
-    let key = crate::LuaValue::integer(c as i64);
+    let key = LuaValue::integer(c as i64);
 
-    // CRITICAL: Use fast path without metatable check
-    let value = vm.table_get(&table, &key);
+    // Use table_get_with_meta to support __index metamethod
+    let value = vm.table_get_with_meta(&table, &key).unwrap_or(LuaValue::nil());
     vm.register_stack[base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)
@@ -172,8 +173,8 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let table = vm.register_stack[base_ptr + b];
 
-    // CRITICAL: Use fast path without metatable check (correct Lua behavior!)
-    let value = vm.table_get(&table, &key);
+    // Use table_get_with_meta to support __index metamethod
+    let value = vm.table_get_with_meta(&table, &key).unwrap_or(LuaValue::nil());
     vm.register_stack[base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)

@@ -382,7 +382,15 @@ fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 Ok(MultiValue::single(LuaValue::nil()))
             }
         }
-        // TODO: Support metatables for other types (userdata, strings, etc.)
+        LuaValueKind::String => {
+            // Return the shared string metatable
+            if let Some(mt) = vm.get_string_metatable() {
+                Ok(MultiValue::single(mt))
+            } else {
+                Ok(MultiValue::single(LuaValue::nil()))
+            }
+        }
+        // TODO: Support metatables for other types (userdata, numbers, etc.)
         _ => Ok(MultiValue::single(LuaValue::nil())),
     }
 }
