@@ -55,12 +55,9 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 #[cold]
 #[inline(never)]
-fn add_error(left: LuaValue, right: LuaValue) -> LuaResult<DispatchAction> {
-    Err(LuaError::RuntimeError(format!(
-        "attempt to add {} with {}",
-        left.type_name(),
-        right.type_name()
-    )))
+fn add_error(_left: LuaValue, _right: LuaValue) -> LuaResult<DispatchAction> {
+    // Don't throw error - let MMBIN handle metamethod
+    Ok(DispatchAction::Continue)
 }
 
 /// SUB: R[A] = R[B] - R[C]
@@ -107,12 +104,9 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 #[cold]
 #[inline(never)]
-fn sub_error(left: LuaValue, right: LuaValue) -> LuaResult<DispatchAction> {
-    Err(LuaError::RuntimeError(format!(
-        "attempt to subtract {} with {}",
-        left.type_name(),
-        right.type_name()
-    )))
+fn sub_error(_left: LuaValue, _right: LuaValue) -> LuaResult<DispatchAction> {
+    // Don't throw error - let MMBIN handle metamethod
+    Ok(DispatchAction::Continue)
 }
 
 /// MUL: R[A] = R[B] * R[C]
@@ -157,12 +151,9 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 #[cold]
 #[inline(never)]
-fn mul_error(left: LuaValue, right: LuaValue) -> LuaResult<DispatchAction> {
-    Err(LuaError::RuntimeError(format!(
-        "attempt to multiply {} with {}",
-        left.type_name(),
-        right.type_name()
-    )))
+fn mul_error(_left: LuaValue, _right: LuaValue) -> LuaResult<DispatchAction> {
+    // Don't throw error - let MMBIN handle metamethod
+    Ok(DispatchAction::Continue)
 }
 
 /// DIV: R[A] = R[B] / R[C]
@@ -178,20 +169,14 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let right = vm.register_stack[base_ptr + c];
 
     // Division always returns float in Lua
-    let l_float = left.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to divide {} with {}",
-            left.type_name(),
-            right.type_name()
-        ))
-    })?;
-    let r_float = right.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to divide {} with {}",
-            left.type_name(),
-            right.type_name()
-        ))
-    })?;
+    let l_float = match left.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
+    let r_float = match right.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
 
     let result = LuaValue::number(l_float / r_float);
     vm.register_stack[base_ptr + a] = result;
@@ -221,20 +206,14 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         let quot = l.div_euclid(r);
         LuaValue::integer(quot)
     } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to divide {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        let r_float = right.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to divide {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
+        let l_float = match left.as_number() {
+            Some(n) => n,
+            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+        };
+        let r_float = match right.as_number() {
+            Some(n) => n,
+            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+        };
         LuaValue::number((l_float / r_float).floor())
     };
 
@@ -263,20 +242,14 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         }
         LuaValue::integer(l.rem_euclid(r))
     } else {
-        let l_float = left.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to perform modulo on {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
-        let r_float = right.as_number().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
-                "attempt to perform modulo on {} with {}",
-                left.type_name(),
-                right.type_name()
-            ))
-        })?;
+        let l_float = match left.as_number() {
+            Some(n) => n,
+            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+        };
+        let r_float = match right.as_number() {
+            Some(n) => n,
+            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+        };
         // Lua uses floored division modulo: a % b = a - floor(a/b) * b
         let result = l_float - (l_float / r_float).floor() * r_float;
         LuaValue::number(result)
@@ -300,20 +273,14 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let right = vm.register_stack[base_ptr + c];
 
     // Power always uses float
-    let l_float = left.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to exponentiate {} with {}",
-            left.type_name(),
-            right.type_name()
-        ))
-    })?;
-    let r_float = right.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to exponentiate {} with {}",
-            left.type_name(),
-            right.type_name()
-        ))
-    })?;
+    let l_float = match left.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
+    let r_float = match right.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
 
     let result = LuaValue::number(l_float.powf(r_float));
     vm.register_stack[base_ptr + a] = result;
@@ -340,14 +307,13 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     } else if let Some(f) = value.as_number() {
         LuaValue::number(-f)
     } else {
-        return Err(LuaError::RuntimeError(format!(
-            "attempt to negate {}",
-            value.type_name()
-        )));
+        // Let MMBIN handle metamethod
+        return Ok(DispatchAction::Continue);
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Continue)
+    // Skip MMBIN if successful
+    Ok(DispatchAction::Skip(1))
 }
 
 // ============ Arithmetic Immediate Instructions ============
@@ -712,18 +678,14 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
-    let r_int = right.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            right.type_name()
-        ))
-    })?;
+    let l_int = match left.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
+    let r_int = match right.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
 
     let result = LuaValue::integer(l_int & r_int);
     vm.register_stack[base_ptr + a] = result;
@@ -743,18 +705,14 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
-    let r_int = right.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            right.type_name()
-        ))
-    })?;
+    let l_int = match left.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
+    let r_int = match right.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
 
     let result = LuaValue::integer(l_int | r_int);
     vm.register_stack[base_ptr + a] = result;
@@ -774,18 +732,14 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
-    let r_int = right.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            right.type_name()
-        ))
-    })?;
+    let l_int = match left.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
+    let r_int = match right.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
 
     let result = LuaValue::integer(l_int ^ r_int);
     vm.register_stack[base_ptr + a] = result;
@@ -841,18 +795,14 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
-    let r_int = right.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            right.type_name()
-        ))
-    })?;
+    let l_int = match left.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
+    let r_int = match right.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+    };
 
     let result = if r_int >= 0 {
         LuaValue::integer(l_int >> (r_int & 63))
@@ -1182,13 +1132,29 @@ fn get_binop_metamethod(tm: u8) -> &'static str {
 
 /// MmBin: Metamethod binary operation (register, register)
 pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize; // C is the TagMethod index, NOT a register
+    let a = Instruction::get_a(instr) as usize;  // operand 1
+    let b = Instruction::get_b(instr) as usize;  // operand 2
+    let c = Instruction::get_c(instr) as usize;  // C is the TagMethod index
     // k bit is unused for MMBIN
     
-    let base_ptr = vm.current_frame().base_ptr;
-    // A and B are the operand registers from the failed arithmetic operation
+    // Get the previous instruction to find the destination register
+    let frame = vm.current_frame();
+    let func_ptr = frame.get_function_ptr()
+        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+    let func = unsafe { &*func_ptr };
+    let func_ref = func.borrow();
+    let chunk = &func_ref.chunk;
+    let prev_pc = frame.pc - 1;  // Previous instruction was the failed arithmetic op
+    
+    if prev_pc == 0 {
+        return Err(LuaError::RuntimeError("MMBIN: no previous instruction".to_string()));
+    }
+    
+    let prev_instr = chunk.code[prev_pc - 1];
+    let dest_reg = Instruction::get_a(prev_instr) as usize;  // Destination register from ADD/SUB/etc
+    
+    let base_ptr = frame.base_ptr;
+    // A and B are the operand registers
     let ra = vm.register_stack[base_ptr + a];
     let rb = vm.register_stack[base_ptr + b];
     
@@ -1217,7 +1183,8 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaError
     let args = vec![ra, rb];
     let result = vm.call_metamethod(&metamethod, &args)?
         .unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + a] = result;
+    // Store result in the destination register from the previous instruction
+    vm.register_stack[base_ptr + dest_reg] = result;
     
     Ok(DispatchAction::Continue)
 }

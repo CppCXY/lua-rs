@@ -1194,12 +1194,31 @@ impl LuaVM {
         }
     }
 
-    /// Helper: Get table metatable
-    pub fn table_get_metatable(&self, table: &LuaValue) -> Option<LuaValue> {
-        if let Some(table_ref) = self.get_table(table) {
-            table_ref.borrow().get_metatable()
-        } else {
-            None
+    /// Helper: Get table metatable (also supports userdata and strings)
+    pub fn table_get_metatable(&self, value: &LuaValue) -> Option<LuaValue> {
+        match value.kind() {
+            LuaValueKind::Table => {
+                if let Some(table_ref) = self.get_table(value) {
+                    table_ref.borrow().get_metatable()
+                } else {
+                    None
+                }
+            }
+            LuaValueKind::Userdata => {
+                if let Some(id) = value.as_userdata_id() {
+                    self.object_pool.get_userdata(id)
+                        .and_then(|ud| {
+                            let mt = ud.borrow().get_metatable();
+                            if mt.is_nil() { None } else { Some(mt) }
+                        })
+                } else {
+                    None
+                }
+            }
+            LuaValueKind::String => {
+                self.get_string_metatable()
+            }
+            _ => None,
         }
     }
 
