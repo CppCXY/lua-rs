@@ -1094,11 +1094,20 @@ impl LuaVM {
             .iter()
             .filter(|uv| {
                 // Check if this upvalue points to stack_pos or higher
+                // We need to find the frame that owns this upvalue
                 for frame in self.frames.iter() {
-                    for reg_idx in 0..frame.top {
-                        let absolute_pos = frame.base_ptr + reg_idx;
-                        if absolute_pos >= stack_pos && uv.points_to(frame.frame_id, reg_idx) {
-                            return true;
+                    // Check all possible registers in this frame
+                    // Use max_stack_size instead of top, because top might be 0 for functions
+                    // called with no arguments (but they can still have local variables)
+                    if let Some(func_ptr) = frame.function_value.as_function_ptr() {
+                        let max_regs = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
+                        for reg_idx in 0..max_regs {
+                            if uv.points_to(frame.frame_id, reg_idx) {
+                                let absolute_pos = frame.base_ptr + reg_idx;
+                                if absolute_pos >= stack_pos {
+                                    return true;
+                                }
+                            }
                         }
                     }
                 }

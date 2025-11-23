@@ -166,11 +166,11 @@ impl LuaUpvalue {
                 drop(state);
                 // Find the frame and read the register from global stack
                 if let Some(frame) = frames.iter().find(|f| f.frame_id == frame_id) {
-                    if register < frame.top {
-                        let index = frame.base_ptr + register;
-                        if index < register_stack.len() {
-                            return register_stack[index];
-                        }
+                    // Don't check against frame.top, as it might be 0 for functions called with no args
+                    // Instead, just validate the absolute index is within the stack
+                    let index = frame.base_ptr + register;
+                    if index < register_stack.len() {
+                        return register_stack[index];
                     }
                 }
                 LuaValue::nil()
@@ -193,11 +193,11 @@ impl LuaUpvalue {
                 drop(state);
                 // Find the frame and write the register to global stack
                 if let Some(frame) = frames.iter_mut().find(|f| f.frame_id == frame_id) {
-                    if register < frame.top {
-                        let index = frame.base_ptr + register;
-                        if index < register_stack.len() {
-                            register_stack[index] = value;
-                        }
+                    // Don't check against frame.top, as it might be 0 for functions called with no args
+                    // Instead, just validate the absolute index is within the stack
+                    let index = frame.base_ptr + register;
+                    if index < register_stack.len() {
+                        register_stack[index] = value;
                     }
                 }
             }

@@ -963,6 +963,11 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
             let max_stack_size = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
 
+            // CRITICAL: Before popping the frame, close all upvalues that point to it
+            // This ensures that any closures created in this frame can still access
+            // the captured values after the frame is destroyed
+            vm.close_upvalues_from(base);
+
             // Pop current frame (tail call optimization)
             let old_base = base; // Already extracted
             // return_count already extracted
