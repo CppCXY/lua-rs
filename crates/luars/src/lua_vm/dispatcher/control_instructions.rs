@@ -864,41 +864,23 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 }
                 
                 // OPTIMIZATION: Use ptr::copy for argument copying (faster than loop)
-                if is_vararg && actual_arg_count > 0 {
-                    let vararg_base = new_base + actual_stack_size;
-                    if use_call_metamethod {
-                        *reg_ptr.add(vararg_base) = call_metamethod_self;
-                        if arg_count > 0 {
-                            std::ptr::copy_nonoverlapping(
-                                reg_ptr.add(base + a + 1),
-                                reg_ptr.add(vararg_base + 1),
-                                arg_count
-                            );
-                        }
-                    } else if actual_arg_count > 0 {
+                // For all functions (including vararg), arguments are placed starting at new_base
+                // VARARGPREP will later move the varargs to their proper location
+                if use_call_metamethod {
+                    *reg_ptr.add(new_base) = call_metamethod_self;
+                    if arg_count > 0 {
                         std::ptr::copy_nonoverlapping(
                             reg_ptr.add(base + a + 1),
-                            reg_ptr.add(vararg_base),
-                            actual_arg_count
+                            reg_ptr.add(new_base + 1),
+                            arg_count
                         );
                     }
-                } else {
-                    if use_call_metamethod {
-                        *reg_ptr.add(new_base) = call_metamethod_self;
-                        if arg_count > 0 {
-                            std::ptr::copy_nonoverlapping(
-                                reg_ptr.add(base + a + 1),
-                                reg_ptr.add(new_base + 1),
-                                arg_count
-                            );
-                        }
-                    } else if actual_arg_count > 0 {
-                        std::ptr::copy_nonoverlapping(
-                            reg_ptr.add(base + a + 1),
-                            reg_ptr.add(new_base),
-                            actual_arg_count
-                        );
-                    }
+                } else if actual_arg_count > 0 {
+                    std::ptr::copy_nonoverlapping(
+                        reg_ptr.add(base + a + 1),
+                        reg_ptr.add(new_base),
+                        actual_arg_count
+                    );
                 }
             }
 
@@ -1001,8 +983,8 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 frame_id,
                 func,
                 old_base,
-                max_stack_size,
-                0,
+                arg_count, // top = number of arguments passed
+                result_reg, // result_reg from the CALLER (not 0!)
                 return_count,
             );
             vm.frames.push(new_frame);

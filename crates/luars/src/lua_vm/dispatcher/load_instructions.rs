@@ -17,10 +17,6 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> 
     let base_ptr = frame.base_ptr;
     let top = frame.top;
     
-    // For vararg functions, arguments are stored BEYOND the normal register space
-    // The CALL instruction places them at base_ptr + max_stack_size
-    // We need to calculate where they are based on the actual stack layout
-    
     // Get max_stack_size from the function
     let max_stack_size = if let Some(func_ref) = frame.function_value.as_lua_function() {
         func_ref.borrow().chunk.max_stack_size
@@ -28,12 +24,24 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> 
         return Err(LuaError::RuntimeError("Invalid function in VARARGPREP".to_string()));
     };
     
-    // Varargs were placed at base_ptr + max_stack_size by CALL
-    // The number of varargs is determined by 'top' which was set to arg_count
+    // Arguments were placed starting at base_ptr by CALL instruction
+    // Fixed parameters are at base_ptr + 0 to base_ptr + a - 1
+    // Extra arguments (varargs) are at base_ptr + a to base_ptr + top - 1
+    // We need to move the varargs to base_ptr + max_stack_size
+    
     if top > a {
         let vararg_count = top - a;
-        let vararg_start = base_ptr + max_stack_size;
-        vm.frames[frame_idx].set_vararg(vararg_start, vararg_count);
+        let vararg_dest = base_ptr + max_stack_size;
+        
+        // Ensure we have enough space for the varargs
+        vm.ensure_stack_capacity(vararg_dest + vararg_count);
+        
+        // Move varargs from base_ptr + a to base_ptr + max_stack_size
+        for i in 0..vararg_count {
+            vm.register_stack[vararg_dest + i] = vm.register_stack[base_ptr + a + i].clone();
+        }
+        
+        vm.frames[frame_idx].set_vararg(vararg_dest, vararg_count);
     } else {
         vm.frames[frame_idx].set_vararg(base_ptr + max_stack_size, 0);
     }
