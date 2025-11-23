@@ -500,7 +500,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         // Try to get __call metamethod for tables
         if func.kind() == LuaValueKind::Table {
             // First, get the metatable (need to release table_ref before creating string)
-            let metatable_opt = vm.get_table(&func)
+            let metatable_opt = func.as_lua_table()
                 .and_then(|table_ref| table_ref.borrow().get_metatable());
             
             if let Some(metatable) = metatable_opt {

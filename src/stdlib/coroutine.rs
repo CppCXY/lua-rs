@@ -173,7 +173,7 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     vm.table_set_with_meta(metatable, call_key, call_func)?;
     
     // Set metatable on wrapper table
-    let table_ref = vm.get_table(&wrapper_table)
+    let table_ref = wrapper_table.as_lua_table()
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     table_ref.borrow_mut().set_metatable(Some(metatable));
     

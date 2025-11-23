@@ -22,7 +22,7 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> 
     // We need to calculate where they are based on the actual stack layout
     
     // Get max_stack_size from the function
-    let max_stack_size = if let Some(func_ref) = vm.get_function(&frame.function_value) {
+    let max_stack_size = if let Some(func_ref) = frame.function_value.as_lua_function() {
         func_ref.borrow().chunk.max_stack_size
     } else {
         return Err(LuaError::RuntimeError("Invalid function in VARARGPREP".to_string()));

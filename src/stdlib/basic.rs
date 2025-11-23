@@ -471,7 +471,7 @@ fn lua_rawlen(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     let len = unsafe {
         match value.kind() {
-            LuaValueKind::Table => vm.get_table(&value).unwrap().borrow().len() as i64,
+            LuaValueKind::Table => value.as_lua_table().unwrap().borrow().len() as i64,
             LuaValueKind::String => {
                 if let Some(s) = value.as_string() {
                     s.as_str().len() as i64

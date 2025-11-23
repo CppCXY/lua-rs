@@ -58,7 +58,7 @@ fn create_config_string(vm: &mut LuaVM) -> LuaValue {
 // Create package.searchers table with 4 standard searchers
 fn create_searchers_table(vm: &mut LuaVM) -> LuaValue {
     let searchers = vm.create_table();
-    let searchers_ref = vm.get_table(&searchers).unwrap();
+    let searchers_ref = searchers.as_lua_table().unwrap();
 
     searchers_ref
         .borrow_mut()

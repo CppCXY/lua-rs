@@ -498,6 +498,32 @@ impl LuaValue {
         }
     }
 
+    /// Get table as RefCell<LuaTable> reference (ZERO lookups if pointer cached!)
+    #[inline]
+    pub fn as_lua_table(&self) -> Option<&std::cell::RefCell<crate::lua_value::LuaTable>> {
+        if self.is_table() && self.secondary != 0 {
+            unsafe {
+                let ptr = self.secondary as *const std::cell::RefCell<crate::lua_value::LuaTable>;
+                Some(&*ptr)
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get function as RefCell<LuaFunction> reference (ZERO lookups if pointer cached!)
+    #[inline]
+    pub fn as_lua_function(&self) -> Option<&std::cell::RefCell<crate::lua_value::LuaFunction>> {
+        if self.is_function() && self.secondary != 0 {
+            unsafe {
+                let ptr = self.secondary as *const std::cell::RefCell<crate::lua_value::LuaFunction>;
+                Some(&*ptr)
+            }
+        } else {
+            None
+        }
+    }
+
     #[inline]
     pub fn as_cfunction(&self) -> Option<CFunction> {
         if self.primary == TAG_CFUNCTION {
