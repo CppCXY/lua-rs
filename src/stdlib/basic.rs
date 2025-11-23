@@ -240,14 +240,14 @@ fn ipairs_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         ));
     };
 
-    // Fast type check using bit patterns
-    if let Some(table_id) = table_val.as_table_id() {
+    // Fast type check using direct pointer (ZERO ObjectPool lookup!)
+    if let Some(table_ptr) = table_val.as_table_ptr() {
         if let Some(index) = index_val.as_integer() {
             let next_index = index + 1;
 
-            // Direct table access
-            if let Some(table_ref) = vm.object_pool.get_table(table_id) {
-                let table = table_ref.borrow();
+            // Direct table access via pointer
+            unsafe {
+                let table = (*table_ptr).borrow();
                 if let Some(value) = table.get_int(next_index) {
                     drop(table);
                     return Ok(MultiValue::multiple(vec![

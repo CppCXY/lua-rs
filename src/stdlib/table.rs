@@ -35,10 +35,9 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         None => "".to_string(),
     };
 
-    let table_ref = vm
-        .get_table(&table_val)
+    let table_ptr = table_val.as_table_ptr()
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-    let len = table_ref.borrow().len();
+    let len = unsafe { (*table_ptr).borrow().len() };
 
     let i = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
 
@@ -49,7 +48,7 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let mut parts = Vec::new();
     for idx in i..=j {
         let key = LuaValue::integer(idx);
-        let value = table_ref.borrow().raw_get(&key).unwrap_or(LuaValue::nil());
+        let value = unsafe { (*table_ptr).borrow().raw_get(&key).unwrap_or(LuaValue::nil()) };
 
         unsafe {
             if let Some(s) = value.as_string() {
@@ -164,10 +163,9 @@ fn table_move(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Copy elements
     let mut values = Vec::new();
     {
-        let src_ref_cell = vm
-            .get_table(&src_val)
+        let src_ptr = src_val.as_table_ptr()
             .ok_or(LuaError::RuntimeError("Invalid source table".to_string()))?;
-        let src_ref = src_ref_cell.borrow();
+        let src_ref = unsafe { (*src_ptr).borrow() };
         for i in f..=e {
             let val = src_ref
                 .raw_get(&LuaValue::integer(i))
@@ -177,10 +175,9 @@ fn table_move(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     {
-        let dst_ref_cell = vm.get_table(&dst_value).ok_or(LuaError::RuntimeError(
-            "Invalid destination table".to_string(),
-        ))?;
-        let mut dst_ref = dst_ref_cell.borrow_mut();
+        let dst_ptr = dst_value.as_table_ptr()
+            .ok_or(LuaError::RuntimeError("Invalid destination table".to_string()))?;
+        let mut dst_ref = unsafe { (*dst_ptr).borrow_mut() };
         for (offset, val) in values.into_iter().enumerate() {
             dst_ref.raw_set(LuaValue::integer(t + offset as i64), val);
         }
@@ -195,10 +192,9 @@ fn table_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table = vm.create_table();
     // Set 'n' field
     let n_key = vm.create_string("n");
-    let table_ref_cell = vm
-        .get_table(&table)
+    let table_ptr = table.as_table_ptr()
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-    let mut table_ref = table_ref_cell.borrow_mut();
+    let mut table_ref = unsafe { (*table_ptr).borrow_mut() };
 
     for (i, arg) in args.iter().enumerate() {
         table_ref.raw_set(LuaValue::integer(i as i64 + 1), arg.clone());
@@ -213,10 +209,9 @@ fn table_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// table.unpack(list [, i [, j]]) - Unpack table into values
 fn table_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.unpack")?;
-    let table_ref_cell = vm
-        .get_table(&table_val)
+    let table_ptr = table_val.as_table_ptr()
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-    let table_ref = table_ref_cell.borrow();
+    let table_ref = unsafe { (*table_ptr).borrow() };
     let len = table_ref.len();
 
     let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1);
@@ -243,10 +238,9 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     // Get array length and extract values
     let len = {
-        let table_ref_cell = vm
-            .get_table(&table_val)
+        let table_ptr = table_val.as_table_ptr()
             .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-        let table_ref = table_ref_cell.borrow();
+        let table_ref = unsafe { (*table_ptr).borrow() };
         table_ref.len()
     };
 
@@ -257,10 +251,9 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Extract values from array part [1..len]
     let mut values = Vec::with_capacity(len);
     {
-        let table_ref_cell = vm
-            .get_table(&table_val)
+        let table_ptr = table_val.as_table_ptr()
             .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-        let table_ref = table_ref_cell.borrow();
+        let table_ref = unsafe { (*table_ptr).borrow() };
         for i in 1..=len {
             if let Some(val) = table_ref.get_int(i as i64) {
                 values.push(val);
@@ -274,10 +267,9 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     if comp.is_none() || comp.as_ref().map(|v| v.is_nil()).unwrap_or(true) {
         values.sort();
         // Write back sorted values
-        let table_ref_cell = vm
-            .get_table(&table_val)
+        let table_ptr = table_val.as_table_ptr()
             .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-        let mut table_ref = table_ref_cell.borrow_mut();
+        let mut table_ref = unsafe { (*table_ptr).borrow_mut() };
         for (i, val) in values.into_iter().enumerate() {
             table_ref.set_int((i + 1) as i64, val);
         }

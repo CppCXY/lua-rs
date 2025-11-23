@@ -863,3 +863,174 @@ Lua-RS has achieved **100% correctness (133/133 tests)** with **30-80% of native
 *Status: Production-Ready with Near-Native Performance*
 *Test Coverage: 133/133 (100%)*
 *Performance: 50-95% of native for most operations, with areas exceeding native (180-320%)*
+
+---
+
+## Phase 17: Table and String Operation Optimization (November 24, 2025)
+
+### Motivation
+
+After achieving **82% of native function call performance** in Phase 16 by eliminating HashMap lookups, user feedback identified that **table and string operations in instructions and stdlib are still slow**.
+
+**Analysis showed**:
+- Table instructions (GETTABLE, SETTABLE, GETI, SETI, GETFIELD, SETFIELD) lacked `#[inline(always)]`
+- stdlib functions (table.rs, string.rs, utf8.rs, package.rs) used `vm.get_table()` → object_pool HashMap lookup
+- Same pattern as Phase 16: Unnecessary 25ns HashMap lookups in hot paths
+- `ipairs_next` iterator doing HashMap lookup on every iteration
+
+### Optimizations Applied
+
+#### 1. Table Instructions Inlining
+Added `#[inline(always)]` to all table operation instructions:
+- exec_gettable, exec_settable
+- exec_geti, exec_seti  
+- exec_getfield, exec_setfield
+
+Improved constant access pattern:
+```rust
+// BEFORE (SETFIELD):
+let func = unsafe { &*func_ptr };
+func.borrow().chunk.constants.get(c).copied()
+
+// AFTER:
+unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied() }
+```
+
+#### 2. stdlib table.rs Optimizations
+Converted 8 functions to use direct pointer access:
+
+**table.concat**: Loop iteration uses `table_ptr`
+```rust
+// BEFORE: HashMap lookup
+let table_ref = vm.get_table(&table_val)?;
+
+// AFTER: Direct pointer
+let table_ptr = table_val.as_table_ptr()?;
+unsafe { (*table_ptr).borrow().raw_get(&key) }
+```
+
+**table.move**: Both source and destination table access
+```rust
+let src_ptr = src_val.as_table_ptr()?;
+let dst_ptr = dst_value.as_table_ptr()?;
+// Zero HashMap lookups!
+```
+
+**table.pack / table.unpack / table.sort**: All converted to pointer access
+
+#### 3. ipairs Iterator Critical Path
+Most impactful optimization - `ipairs_next` called on every iteration:
+
+```rust
+// BEFORE: HashMap lookup per iteration
+if let Some(table_id) = table_val.as_table_id() {
+    if let Some(table_ref) = vm.object_pool.get_table(table_id) {
+        // ...
+    }
+}
+
+// AFTER: Direct pointer per iteration
+if let Some(table_ptr) = table_val.as_table_ptr() {
+    unsafe {
+        let table = (*table_ptr).borrow();
+        table.get_int(next_index)
+    }
+}
+```
+
+For a 10k×1k ipairs loop: **10 million HashMap lookups eliminated** → 10M × 25ns = **250ms saved!**
+
+### Performance Results
+
+#### Detailed Table Operations
+| Operation | Before | After | Native | % Native | Improvement |
+|-----------|--------|-------|--------|----------|-------------|
+| **GETI read** | - | **49.30 M/s** | 66.76 M/s | **73.8%** | ✓ Inline |
+| **SETI write** | - | **35.86 M/s** | 63.98 M/s | **56.0%** | ✓ Inline |
+| **GETFIELD** | - | **29.03 M/s** | 75.47 M/s | **38.5%** | ⚠️ Low |
+| **SETFIELD** | - | **17.83 M/s** | 102.04 M/s | **17.5%** | ⚠️ Low |
+
+#### stdlib Function Performance
+| Function | Time | Native | % Native | Status |
+|----------|------|--------|----------|--------|
+| table.insert (100k) | 1.11s | 0.011s | **~1%** | ⚠️ Very slow |
+| table.remove (50k) | 2.51s | 0.008s | **~0.3%** | ⚠️ Very slow |
+| ipairs (10k×1k) | 1.10s | 0.70s | **64%** | ⚠️ Improvement needed |
+| table.concat (10k×1k) | 0.40s | 0.46s | **115%** | ✅ Faster! |
+
+**Note on Field Access**: GETFIELD/SETFIELD slower than expected due to:
+- Metatable checking overhead (strings have metatables)
+- String key hashing cost
+- table_get_with_meta/table_set_with_meta metamethod lookup
+
+**Note on table.insert/remove**: Extreme slowness (1-0.3% of native!) indicates **algorithmic issue**, not just instruction overhead. Requires profiling to identify bottleneck (likely array shifting implementation).
+
+### Architectural Consistency
+
+Phase 17 applies the **same principle as Phase 16**:
+
+```rust
+// Design Principle:
+// - GC/Allocator → use object_pool (lifetime management)
+// - VM Hot Path → use direct pointers (performance)
+
+// Object types with pointer accessors:
+✅ Functions - as_function_ptr() (Phase 16)
+✅ Tables - as_table_ptr() (Phase 17)
+✅ Strings - as_string_ptr() (Phase 17, partially used)
+```
+
+All hot paths now bypass HashMap lookups:
+- Function calls: 3+ lookups eliminated → **+50.7%**
+- Table operations: 1-2 lookups per instruction → **Inlined + fast path**
+- ipairs iterations: 1 lookup per iteration → **Direct pointer**
+
+### Known Issues & Future Work
+
+#### Critical Issues
+1. **table.insert/remove performance disaster** (~1% of native)
+   - Root cause: Array element shifting implementation
+   - Next step: Profile and optimize LuaTable::insert_array_at/remove_array_at
+   - Expected gain: **10-50x improvement**
+
+2. **GETFIELD/SETFIELD slower than expected** (17-38% of native)
+   - Metatable checking overhead
+   - String hashing cost
+   - Possible optimization: Fast path for tables without metatables
+
+#### Completed
+- ✅ All table instructions inlined
+- ✅ table.concat, table.move, table.pack, table.unpack, table.sort optimized
+- ✅ ipairs iterator direct pointer access
+- ✅ Architectural consistency: Pointers in hot paths
+
+#### Next Priorities
+1. **Emergency**: Fix table.insert/remove algorithmic issue
+2. Optimize GETFIELD/SETFIELD fast path
+3. Apply same pattern to string operations
+4. Profile stdlib functions for remaining bottlenecks
+
+### Lessons Learned
+
+**Direct pointer optimization is powerful but not a silver bullet**:
+- ✅ Eliminates 25ns HashMap lookup overhead
+- ✅ Critical for functions called millions of times (ipairs_next)
+- ❌ Doesn't fix algorithmic problems (table.insert/remove)
+- ❌ Doesn't eliminate legitimate overhead (metatable checks)
+
+**Optimization checklist**:
+1. Profile first - identify actual bottleneck
+2. Check algorithm efficiency (not just micro-optimizations)
+3. Add inline attributes to hot instructions
+4. Use direct pointers in tight loops
+5. Measure impact - some optimizations don't help
+
+**Result**: Table operations **partially improved**, but uncovered **critical algorithmic issue** requiring immediate attention. Function calls remain at excellent **82% of native** performance from Phase 16.
+
+---
+
+*Updated: November 24, 2025*
+*Phase 17: Table/String Operations - Partial Success*
+*Critical Issue Discovered: table.insert/remove algorithmic bottleneck*
+*Next Phase: Profile and fix array manipulation algorithms*
+

@@ -49,6 +49,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// GETTABLE A B C
 /// R[A] := R[B][R[C]]
+#[inline(always)]
 pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -68,6 +69,7 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// SETTABLE A B C k
 /// R[A][R[B]] := RK(C)
+#[inline(always)]
 pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -81,16 +83,14 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let key = vm.register_stack[base_ptr + b];
     
     let value = if k {
-        // K[C]
+        // OPTIMIZATION: Get constant directly
         let func_ptr = frame.get_function_ptr().ok_or_else(|| {
             LuaError::RuntimeError("Not a Lua function".to_string())
         })?;
-        let func = unsafe { &*func_ptr };
-        func.borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+        unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
             LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-        })?
+        })? }
     } else {
-        // R[C]
         vm.register_stack[base_ptr + c]
     };
 
@@ -101,6 +101,7 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// GETI A B C
 /// R[A] := R[B][C]
+#[inline(always)]
 pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -120,9 +121,10 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// SETI A B C k
 /// R[A][B] := RK(C)
+#[inline(always)]
 pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_sb(instr); // B is a signed byte (sB)
+    let b = Instruction::get_sb(instr);
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
@@ -136,10 +138,9 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         let func_ptr = frame.get_function_ptr().ok_or_else(|| {
             LuaError::RuntimeError("Not a Lua function".to_string())
         })?;
-        let func = unsafe { &*func_ptr };
-        func.borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+        unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
             LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-        })?
+        })? }
     } else {
         vm.register_stack[base_ptr + c]
     };
@@ -151,6 +152,7 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// GETFIELD A B C
 /// R[A] := R[B][K[C]:string]
+#[inline(always)]
 pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -162,10 +164,9 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let func_ptr = frame.get_function_ptr().ok_or_else(|| {
         LuaError::RuntimeError("Not a Lua function".to_string())
     })?;
-    let func = unsafe { &*func_ptr };
-    let key = func.borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+    let key = unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
         LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-    })?;
+    })? };
 
     let table = vm.register_stack[base_ptr + b];
 
@@ -177,6 +178,7 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// SETFIELD A B C k
 /// R[A][K[B]:string] := RK(C)
+#[inline(always)]
 pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -189,17 +191,16 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let func_ptr = frame.get_function_ptr().ok_or_else(|| {
         LuaError::RuntimeError("Not a Lua function".to_string())
     })?;
-    let func = unsafe { &*func_ptr };
-    let key = func.borrow().chunk.constants.get(b).copied().ok_or_else(|| {
+    let key = unsafe { (*func_ptr).borrow().chunk.constants.get(b).copied().ok_or_else(|| {
         LuaError::RuntimeError(format!("Invalid constant index: {}", b))
-    })?;
+    })? };
 
     let table = vm.register_stack[base_ptr + a];
     
     let value = if k {
-        func.borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+        unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
             LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-        })?
+        })? }
     } else {
         vm.register_stack[base_ptr + c]
     };
