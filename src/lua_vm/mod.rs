@@ -1756,10 +1756,16 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                // CRITICAL: Use current frame's actual boundary, not register_stack.len()
-                // to prevent overwriting active registers
+                // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
+                // to prevent overwriting ANY caller registers (including those beyond top)
                 let new_base = if let Some(current_frame) = self.frames.last() {
-                    current_frame.base_ptr + current_frame.top
+                    let caller_base = current_frame.base_ptr;
+                    let caller_max_stack = if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
+                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                    } else {
+                        256
+                    };
+                    caller_base + caller_max_stack
                 } else {
                     0
                 };
@@ -1793,18 +1799,8 @@ impl LuaVM {
                 let dummy_func_id = self.object_pool.create_function(dummy_func);
                 let dummy_func_value = LuaValue::function_id(dummy_func_id);
 
-                // Use caller's max_stack as safe position
-                let (caller_base, caller_max_stack) = if let Some(caller_frame) = self.frames.last() {
-                    let max_stack = if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
-                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
-                    } else {
-                        256
-                    };
-                    (caller_frame.base_ptr, max_stack)
-                } else {
-                    (0, 256)
-                };
-                let safe_result_reg = caller_max_stack;
+                // Use new_base as result_reg (same as caller_base + caller_max_stack)
+                let safe_result_reg = new_base;
                 
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
@@ -1852,9 +1848,15 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                // CRITICAL: Use current frame's actual boundary
+                // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
                 let new_base = if let Some(current_frame) = self.frames.last() {
-                    current_frame.base_ptr + current_frame.top
+                    let caller_base = current_frame.base_ptr;
+                    let caller_max_stack = if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
+                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                    } else {
+                        256
+                    };
+                    caller_base + caller_max_stack
                 } else {
                     0
                 };
@@ -1872,19 +1874,8 @@ impl LuaVM {
                     }
                 }
 
-                // CRITICAL FIX: Write return values beyond caller's max_stack
-                // to avoid overwriting any caller registers (including temporaries)
-                let (caller_base, caller_max_stack) = if let Some(caller_frame) = self.frames.last() {
-                    let max_stack = if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
-                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
-                    } else {
-                        256 // Fallback for non-Lua frames
-                    };
-                    (caller_frame.base_ptr, max_stack)
-                } else {
-                    (0, 256)
-                };
-                let safe_result_reg = caller_max_stack; // Beyond caller's register range
+                // Use caller's max_stack as result_reg (safe write position)
+                let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
 
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
