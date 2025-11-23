@@ -16,6 +16,10 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let _c = Instruction::get_c(instr) as usize;
     let _k = Instruction::get_k(instr);
 
+    // Close upvalues before popping the frame
+    let base_ptr = vm.current_frame().base_ptr;
+    vm.close_upvalues_from(base_ptr);
+
     let frame = vm.frames.pop().ok_or_else(|| {
         LuaError::RuntimeError("RETURN with no frame on stack".to_string())
     })?;
@@ -1083,6 +1087,10 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// RETURN0
 /// return (no values)
 pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
+    // Close upvalues before popping the frame
+    let base_ptr = vm.current_frame().base_ptr;
+    vm.close_upvalues_from(base_ptr);
+
     let frame = vm.frames.pop().ok_or_else(|| {
         LuaError::RuntimeError("RETURN0 with no frame on stack".to_string())
     })?;
@@ -1114,6 +1122,10 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
 /// return R[A]
 pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
+
+    // Close upvalues before popping the frame
+    let base_ptr = vm.current_frame().base_ptr;
+    vm.close_upvalues_from(base_ptr);
 
     let frame = vm.frames.pop().ok_or_else(|| {
         LuaError::RuntimeError("RETURN1 with no frame on stack".to_string())
