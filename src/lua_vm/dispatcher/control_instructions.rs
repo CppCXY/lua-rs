@@ -67,17 +67,16 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         
         // Truncate register stack back to caller's frame
         let caller_frame = vm.current_frame();
-        if let Some(func_id) = caller_frame.get_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                let caller_max_stack = func_ref.borrow().chunk.max_stack_size;
-                let caller_base = caller_frame.base_ptr;
-                let caller_stack_end = caller_base + caller_max_stack;
-                
-                if vm.register_stack.len() < caller_stack_end {
-                    vm.ensure_stack_capacity(caller_stack_end);
-                }
-                vm.register_stack.truncate(caller_stack_end);
+        // OPTIMIZATION: Use direct pointer access instead of hash lookup
+        if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
+            let caller_max_stack = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
+            let caller_base = caller_frame.base_ptr;
+            let caller_stack_end = caller_base + caller_max_stack;
+            
+            if vm.register_stack.len() < caller_stack_end {
+                vm.ensure_stack_capacity(caller_stack_end);
             }
+            vm.register_stack.truncate(caller_stack_end);
         }
     }
 
@@ -633,14 +632,15 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             Ok(DispatchAction::Continue)
         },
         LuaValueKind::Function => {
-            // OPTIMIZATION: Get function reference once and cache all needed values
-            let func_id = func.as_function_id().unwrap();
-            let func_ref = vm.object_pool.get_function(func_id)
-                .ok_or_else(|| LuaError::RuntimeError("Invalid function reference".to_string()))?;
-            let func_borrow = func_ref.borrow();
-            let max_stack_size = if func_borrow.chunk.max_stack_size == 0 { 1 } else { func_borrow.chunk.max_stack_size };
-            let is_vararg = func_borrow.chunk.is_vararg;
-            drop(func_borrow); // Release borrow early
+            // OPTIMIZATION: Direct pointer access - NO hash lookup!
+            let func_ptr = func.as_function_ptr()
+                .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
+            let (max_stack_size, is_vararg) = unsafe {
+                let func_borrow = (*func_ptr).borrow();
+                let size = if func_borrow.chunk.max_stack_size == 0 { 1 } else { func_borrow.chunk.max_stack_size };
+                let vararg = func_borrow.chunk.is_vararg;
+                (size, vararg)
+            }; // Borrow released immediately
 
             // Create new frame
             let frame_id = vm.next_frame_id;
@@ -649,13 +649,9 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // OPTIMIZATION: Calculate all sizes upfront and do ONE capacity check
             let frame = vm.current_frame();
             let caller_base = frame.base_ptr;
-            let caller_func_id = frame.get_function_id();
-            let caller_max_stack = if let Some(caller_func_id) = caller_func_id {
-                if let Some(func_ref) = vm.object_pool.get_function(caller_func_id) {
-                    func_ref.borrow().chunk.max_stack_size
-                } else {
-                    vm.register_stack.len().saturating_sub(caller_base)
-                }
+            // OPTIMIZATION: Direct pointer access for caller function
+            let caller_max_stack = if let Some(func_ptr) = frame.function_value.as_function_ptr() {
+                unsafe { (*func_ptr).borrow().chunk.max_stack_size }
             } else {
                 vm.register_stack.len().saturating_sub(caller_base)
             };
@@ -788,13 +784,10 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // Get max_stack_size from function
     let max_stack_size = match func.kind() {
         LuaValueKind::Function => {
-            let func_id = func.as_function_id().unwrap();
-            match vm.object_pool.get_function(func_id) {
-                Some(func_ref) => func_ref.borrow().chunk.max_stack_size,
-                None => {
-                    return Err(LuaError::RuntimeError("Invalid function reference".to_string()));
-                }
-            }
+            // OPTIMIZATION: Direct pointer access
+            let func_ptr = func.as_function_ptr()
+                .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
+            unsafe { (*func_ptr).borrow().chunk.max_stack_size }
         }
         LuaValueKind::CFunction => 256,
         _ => {

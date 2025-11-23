@@ -270,15 +270,12 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             vm.register_stack[base_ptr + a + 4] = state;
             vm.register_stack[base_ptr + a + 5] = control;
             
-            // Create the call frame
-            let func_id = func.as_function_id().ok_or_else(|| {
-                LuaError::RuntimeError("Invalid function".to_string())
-            })?;
+            // OPTIMIZATION: Use direct pointer access instead of hash lookup
+            let func_ptr = func.as_function_ptr()
+                .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
             
-            let max_stack_size = {
-                let func_ref = vm.object_pool.get_function(func_id)
-                    .ok_or_else(|| LuaError::RuntimeError("Invalid function".to_string()))?;
-                func_ref.borrow().chunk.max_stack_size
+            let max_stack_size = unsafe {
+                (*func_ptr).borrow().chunk.max_stack_size
             };
             
             let frame_id = vm.next_frame_id;
