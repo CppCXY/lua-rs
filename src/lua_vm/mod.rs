@@ -1757,8 +1757,13 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                // Allocate registers in global stack
-                let new_base = self.register_stack.len();
+                // CRITICAL: Use current frame's actual boundary, not register_stack.len()
+                // to prevent overwriting active registers
+                let new_base = if let Some(current_frame) = self.frames.last() {
+                    current_frame.base_ptr + current_frame.top
+                } else {
+                    0
+                };
                 let stack_size = 16; // enough for most cfunc calls
                 self.ensure_stack_capacity(new_base + stack_size);
 
@@ -1835,7 +1840,12 @@ impl LuaVM {
                 let frame_id = self.next_frame_id;
                 self.next_frame_id += 1;
 
-                let new_base = self.register_stack.len();
+                // CRITICAL: Use current frame's actual boundary
+                let new_base = if let Some(current_frame) = self.frames.last() {
+                    current_frame.base_ptr + current_frame.top
+                } else {
+                    0
+                };
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
                 // Initialize all registers with nil
@@ -1850,12 +1860,18 @@ impl LuaVM {
                     }
                 }
 
+                // CRITICAL FIX: Use NO_WRITEBACK flag for internal metamethod calls
+                // This prevents return values from overwriting caller's registers
+                // The return values will only be available in self.return_values
+                const RESULT_REG_NO_WRITEBACK: usize = 0xFFFE;
+                let safe_result_reg = RESULT_REG_NO_WRITEBACK;
+
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     func,
                     new_base,
                     max_stack_size,
-                    0,
+                    safe_result_reg,
                     usize::MAX, // Want all return values
                 );
 

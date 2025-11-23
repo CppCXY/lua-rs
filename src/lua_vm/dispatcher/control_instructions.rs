@@ -36,6 +36,27 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         let caller_frame = vm.current_frame();
         let caller_base = caller_frame.base_ptr;
         
+        const RESULT_REG_NO_WRITEBACK: u16 = 0xFFFE;
+        if result_reg as u16 == RESULT_REG_NO_WRITEBACK {
+            // Only populate return_values, don't write to registers
+            vm.return_values.clear();
+            for i in 0..return_count {
+                vm.return_values.push(vm.register_stack[base_ptr + a + i]);
+            }
+            // Note: DON'T update caller's top in NO_WRITEBACK mode
+            // Truncate register stack
+            let caller_frame = vm.current_frame();
+            if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
+                let caller_max_stack = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
+                let caller_base = caller_frame.base_ptr;
+                let caller_stack_end = caller_base + caller_max_stack;
+                if vm.register_stack.len() < caller_stack_end {
+                    vm.ensure_stack_capacity(caller_stack_end);
+                }
+                vm.register_stack.truncate(caller_stack_end);
+            }
+            // Skip the register writeback below
+        } else {
         unsafe {
             let reg_ptr = vm.register_stack.as_mut_ptr();
             
@@ -78,6 +99,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             }
             vm.register_stack.truncate(caller_stack_end);
         }
+        } // End of else block for normal writeback mode
     }
 
     // Handle upvalue closing (k bit)
@@ -988,7 +1010,11 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
     // Update caller's top to indicate 0 return values
     if !vm.frames.is_empty() {
         let result_reg = frame.get_result_reg();
-        vm.current_frame_mut().top = result_reg; // No return values, so top = result_reg + 0
+        const RESULT_REG_NO_WRITEBACK: usize = 0xFFFE;
+        if result_reg != RESULT_REG_NO_WRITEBACK {
+            vm.current_frame_mut().top = result_reg; // No return values, so top = result_reg + 0
+        }
+        // For NO_WRITEBACK, don't modify caller's top
     }
     
     Ok(DispatchAction::Return)
@@ -1015,6 +1041,21 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     }
     // Copy return value to caller's registers if needed
     if !vm.frames.is_empty() {
+        const RESULT_REG_NO_WRITEBACK: usize = 0xFFFE;
+        if result_reg == RESULT_REG_NO_WRITEBACK {
+            // NO_WRITEBACK mode: only return_values, no register write
+            // Just truncate stack if needed
+            let caller_frame = vm.current_frame();
+            if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
+                let caller_max_stack = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
+                let caller_base = caller_frame.base_ptr;
+                let caller_stack_end = caller_base + caller_max_stack;
+                if vm.register_stack.len() < caller_stack_end {
+                    vm.ensure_stack_capacity(caller_stack_end);
+                }
+                vm.register_stack.truncate(caller_stack_end);
+            }
+        } else {
         let caller_base = vm.current_frame().base_ptr;
 
         if !vm.return_values.is_empty() {
@@ -1023,6 +1064,7 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         
         // Update caller's top to indicate 1 return value
         vm.current_frame_mut().top = result_reg + 1;
+        } // End of else block for normal mode
     }
 
     Ok(DispatchAction::Return)

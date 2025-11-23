@@ -56,15 +56,21 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-
-    let table = vm.register_stack[base_ptr + b];
-    let key = vm.register_stack[base_ptr + c];
+    // CRITICAL: Read values BEFORE metamethod calls
+    let (table_value, key_value) = {
+        let frame = vm.current_frame();
+        let base_ptr = frame.base_ptr;
+        let table = vm.register_stack[base_ptr + b];
+        let key = vm.register_stack[base_ptr + c];
+        (table, key)
+    };
 
     // Use table_get_with_meta to support __index metamethod
-    let value = vm.table_get_with_meta(&table, &key).unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + a] = value;
+    let value = vm.table_get_with_meta(&table_value, &key_value).unwrap_or(LuaValue::nil());
+    
+    // Re-read base_ptr after metamethod call  
+    let new_base_ptr = vm.current_frame().base_ptr;
+    vm.register_stack[new_base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)
 }
@@ -161,23 +167,29 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    
-    let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-        LuaError::RuntimeError("Not a Lua function".to_string())
-    })?;
-    let key = unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
-        LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-    })? };
-
-    // IMPORTANT: Clone the table value before calling table_get_with_meta
-    // because metamethod calls can modify the register stack
-    let table = vm.register_stack[base_ptr + b].clone();
+    // CRITICAL: Read frame info and values BEFORE any metamethod calls
+    // because metamethods can modify the register stack
+    let (table_value, key_value) = {
+        let frame = vm.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        let func_ptr = frame.get_function_ptr().ok_or_else(|| {
+            LuaError::RuntimeError("Not a Lua function".to_string())
+        })?;
+        let key = unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+            LuaError::RuntimeError(format!("Invalid constant index: {}", c))
+        })? };
+        
+        let table = vm.register_stack[base_ptr + b];
+        (table, key)
+    };
 
     // Use table_get_with_meta to support __index metamethod
-    let value = vm.table_get_with_meta(&table, &key).unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + a] = value;
+    let value = vm.table_get_with_meta(&table_value, &key_value).unwrap_or(LuaValue::nil());
+    
+    // IMPORTANT: Re-read base_ptr after metamethod call in case frames changed
+    let new_base_ptr = vm.current_frame().base_ptr;
+    vm.register_stack[new_base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)
 }
