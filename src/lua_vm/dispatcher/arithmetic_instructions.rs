@@ -558,20 +558,15 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let l_float = left.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to exponentiate {} with {}",
-            left.type_name(),
-            constant.type_name()
-        ))
-    })?;
-    let r_float = constant.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to exponentiate {} with {}",
-            left.type_name(),
-            constant.type_name()
-        ))
-    })?;
+    // Try float operation
+    let l_float = match left.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBINK handle
+    };
+    let r_float = match constant.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBINK handle
+    };
 
     let result = LuaValue::number(l_float.powf(r_float));
     vm.register_stack[base_ptr + a] = result;
@@ -601,20 +596,15 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let l_float = left.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to divide {} with {}",
-            left.type_name(),
-            constant.type_name()
-        ))
-    })?;
-    let r_float = constant.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to divide {} with {}",
-            left.type_name(),
-            constant.type_name()
-        ))
-    })?;
+    // Try to perform the operation; if not possible, let MMBINK handle it
+    let l_float = match left.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBINK handle
+    };
+    let r_float = match constant.as_number() {
+        Some(n) => n,
+        None => return Ok(DispatchAction::Continue), // Let MMBINK handle
+    };
 
     let result = LuaValue::number(l_float / r_float);
     vm.register_stack[base_ptr + a] = result;
@@ -1196,7 +1186,24 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     let c = Instruction::get_c(instr);
     let k = Instruction::get_k(instr);
     
-    let base_ptr = vm.current_frame().base_ptr;
+    // Get the previous instruction to find the destination register
+    let frame = vm.current_frame();
+    let func_ptr = frame
+        .get_function_ptr()
+        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+    let func = unsafe { &*func_ptr };
+    let func_ref = func.borrow();
+    let chunk = &func_ref.chunk;
+    let prev_pc = frame.pc - 1;  // Previous instruction was the failed arithmetic op
+    
+    if prev_pc == 0 {
+        return Err(LuaError::RuntimeError("MMBINI: no previous instruction".to_string()));
+    }
+    
+    let prev_instr = chunk.code[prev_pc - 1];
+    let dest_reg = Instruction::get_a(prev_instr) as usize;  // Destination register from ADDI
+    
+    let base_ptr = frame.base_ptr;
     
     // From compiler: create_abck(OpCode::MmBinI, left_reg, imm, TagMethod, false)
     // So: A = left_reg (operand), B = imm (immediate value encoded), C = tagmethod
@@ -1226,7 +1233,7 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     let args = if k { vec![rc, rb] } else { vec![rb, rc] };
     let result = vm.call_metamethod(&metamethod, &args)?
         .unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + a] = result;
+    vm.register_stack[base_ptr + dest_reg] = result;
     
     Ok(DispatchAction::Continue)
 }
@@ -1238,6 +1245,7 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     let c = Instruction::get_c(instr) as usize;  // C is the TagMethod
     let k = Instruction::get_k(instr);            // k is the flip flag
     
+    // Get the previous instruction to find the destination register
     let frame = vm.current_frame();
     let func_ptr = frame
         .get_function_ptr()
@@ -1245,6 +1253,15 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     let func = unsafe { &*func_ptr };
     let func_ref = func.borrow();
     let chunk = &func_ref.chunk;
+    let prev_pc = frame.pc - 1;  // Previous instruction was the failed arithmetic op
+    
+    if prev_pc == 0 {
+        return Err(LuaError::RuntimeError("MMBINK: no previous instruction".to_string()));
+    }
+    
+    let prev_instr = chunk.code[prev_pc - 1];
+    let dest_reg = Instruction::get_a(prev_instr) as usize;  // Destination register from ADDK/SUBK/etc
+    
     let base_ptr = frame.base_ptr;
     
     let ra = vm.register_stack[base_ptr + a];
@@ -1284,7 +1301,7 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> Result<DispatchAction, LuaErro
     let args = vec![left, right];
     let result = vm.call_metamethod(&metamethod, &args)?
         .unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + a] = result;
+    vm.register_stack[base_ptr + dest_reg] = result;
     
     Ok(DispatchAction::Continue)
 }

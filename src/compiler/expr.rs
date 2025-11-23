@@ -241,6 +241,8 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
         let int_val = right_desc.ival;
         // Use immediate instruction with sC field encoding (add OFFSET_SC = 127)
         let imm = ((int_val + 127) & 0xff) as u32;
+        // For MMBINI, we need the signed B field encoding (add OFFSET_SB = 128)
+        let imm_mmbini = ((int_val + 128) & 0xff) as u32;
 
         // Allocate result register (can't reuse left if it's a local variable)
         let result_reg = if can_reuse_left {
@@ -260,7 +262,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                     Instruction::create_abck(
                         OpCode::MmBinI,
                         left_reg,
-                        imm,
+                        imm_mmbini,
                         TagMethod::Add.as_u32(),
                         false,
                     ),
@@ -270,6 +272,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             BinaryOperator::OpSub => {
                 // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
                 let neg_imm = ((-int_val + 127) & 0xff) as u32;
+                let neg_imm_mmbini = ((-int_val + 128) & 0xff) as u32;
                 emit(
                     c,
                     Instruction::encode_abc(
@@ -284,7 +287,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                     Instruction::create_abck(
                         OpCode::MmBinI,
                         left_reg,
-                        imm,
+                        neg_imm_mmbini,
                         TagMethod::Sub.as_u32(),
                         false,
                     ),
@@ -1054,6 +1057,8 @@ fn compile_binary_expr_to(
                 if int_val >= -256 && int_val <= 255 {
                     // Encode immediate value for sC field (8-bit signed with OFFSET_SC)
                     let imm = ((int_val + 127) & 0xff) as u32;
+                    // For MMBINI, encode with OFFSET_SB (128) instead of OFFSET_SC (127)
+                    let imm_mmbini = ((int_val + 128) & 0xff) as u32;
 
                     // Try immediate arithmetic instructions
                     // Only compile left operand if we actually use immediate instruction
@@ -1076,7 +1081,7 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call (TM_ADD = 6)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 6, false),
+                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 6, false),
                             );
                             return Ok(result_reg);
                         }
@@ -1103,7 +1108,7 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call - use ORIGINAL immediate value from source (TM_SUB = 7)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 7, false),
+                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 7, false),
                             );
                             return Ok(result_reg);
                         }

@@ -1918,7 +1918,6 @@ impl LuaVM {
                         },
                         Err(e) => {
                             // Real error occurred
-                            eprintln!("[call_function_internal] Error during execution: {:?}", e);
                             break Err(e);
                         }
                     }
@@ -1929,13 +1928,9 @@ impl LuaVM {
                         // Get return values
                         let result = self.return_values.clone();
                         self.return_values.clear();
-                        eprintln!("[call_function_internal] Lua function returned {} values", result.len());
                         Ok(result)
                     }
-                    Err(e) => {
-                        eprintln!("[call_function_internal] Returning error: {:?}", e);
-                        Err(e)
-                    },
+                    Err(e) => Err(e),
                 }
             }
             _ => Err(LuaError::RuntimeError(

@@ -739,9 +739,14 @@ impl PartialOrd for LuaValue {
                 LuaValueKind::Integer => self.as_integer().partial_cmp(&other.as_integer()),
                 LuaValueKind::Float => self.as_float().partial_cmp(&other.as_float()),
                 LuaValueKind::String => {
-                    // In ID architecture, compare IDs directly
-                    // Same ID = same string content (guaranteed by ObjectPool interning)
-                    self.secondary().partial_cmp(&other.secondary())
+                    // Compare string contents lexicographically, not IDs
+                    unsafe {
+                        if let (Some(s1), Some(s2)) = (self.as_string(), other.as_string()) {
+                            s1.as_str().partial_cmp(s2.as_str())
+                        } else {
+                            None
+                        }
+                    }
                 }
                 LuaValueKind::Table
                 | LuaValueKind::Function
