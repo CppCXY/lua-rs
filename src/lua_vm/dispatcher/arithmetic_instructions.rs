@@ -6,6 +6,7 @@ use super::DispatchAction;
 use crate::{
     LuaValue,
     lua_vm::{Instruction, LuaError, LuaResult, LuaVM},
+    lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK},
 };
 
 /// ADD: R[A] = R[B] + R[C]
@@ -21,28 +22,23 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    // Optimized: inline constants
-    const TYPE_MASK: u64 = 0xFFFF_0000_0000_0000;
-    const TAG_INT: u64 = 0x7FF8_0000_0000_0000;
-    const TAG_FLT: u64 = 0x7FF7_0000_0000_0000;
-    
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
     
     // Fast path 1: both integers
-    let result = if left_tag == TAG_INT && right_tag == TAG_INT {
+    let result = if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
         LuaValue::integer((left.secondary as i64).wrapping_add(right.secondary as i64))
     }
     // Fast path 2: both floats
-    else if left_tag == TAG_FLT && right_tag == TAG_FLT {
+    else if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
         LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
     }
     // Mixed: integer + float
-    else if left_tag == TAG_INT && right_tag == TAG_FLT {
+    else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
         LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
     }
     // Mixed: float + integer
-    else if left_tag == TAG_FLT && right_tag == TAG_INT {
+    else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
         LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
     }
     else {
@@ -76,28 +72,23 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    // Optimized: inline constants
-    const TYPE_MASK: u64 = 0xFFFF_0000_0000_0000;
-    const TAG_INT: u64 = 0x7FF8_0000_0000_0000;
-    const TAG_FLT: u64 = 0x7FF7_0000_0000_0000;
-    
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
     
     // Fast path 1: both integers
-    let result = if left_tag == TAG_INT && right_tag == TAG_INT {
+    let result = if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
         LuaValue::integer((left.secondary as i64).wrapping_sub(right.secondary as i64))
     }
     // Fast path 2: both floats
-    else if left_tag == TAG_FLT && right_tag == TAG_FLT {
+    else if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
         LuaValue::number(f64::from_bits(left.secondary) - f64::from_bits(right.secondary))
     }
     // Mixed: integer - float
-    else if left_tag == TAG_INT && right_tag == TAG_FLT {
+    else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
         LuaValue::number((left.secondary as i64) as f64 - f64::from_bits(right.secondary))
     }
     // Mixed: float - integer
-    else if left_tag == TAG_FLT && right_tag == TAG_INT {
+    else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
         LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
     }
     else {
@@ -131,28 +122,23 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let left = vm.register_stack[base_ptr + b];
     let right = vm.register_stack[base_ptr + c];
 
-    // Optimized: Extract tags once with inline constants
-    const TYPE_MASK: u64 = 0xFFFF_0000_0000_0000;
-    const TAG_INT: u64 = 0x7FF8_0000_0000_0000;
-    const TAG_FLT: u64 = 0x7FF7_0000_0000_0000;
-    
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
     
     // Fast path 1: both are integers (most common, predict taken)
-    let result = if left_tag == TAG_INT && right_tag == TAG_INT {
+    let result = if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
         LuaValue::integer((left.secondary as i64).wrapping_mul(right.secondary as i64))
     }
     // Fast path 2: both are floats
-    else if left_tag == TAG_FLT && right_tag == TAG_FLT {
+    else if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
         LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
     }
     // Mixed: integer * float
-    else if left_tag == TAG_INT && right_tag == TAG_FLT {
+    else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
         LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
     }
     // Mixed: float * integer
-    else if left_tag == TAG_FLT && right_tag == TAG_INT {
+    else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
         LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
     }
     else {
@@ -372,19 +358,19 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    // Try integer operation first
-    if let Some(l) = left.as_integer() {
-        // Integer operation with wraparound, skip fallback
+    if left.primary == TAG_INTEGER {
+        // Integer operation with wraparound
+        let l = left.secondary as i64;
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(sc as i64));
         // Skip the following MMBINI instruction (PC already incremented by main loop)
         vm.current_frame_mut().pc += 1;
         return Ok(DispatchAction::Continue);
     }
     
-    // Try float operation
-    if let Some(l) = left.as_number() {
-        // Float operation succeeded, skip fallback
-        vm.register_stack[base_ptr + a] = LuaValue::number(l + sc as f64);
+    if left.primary == TAG_FLOAT {
+        // Float operation
+        let l = f64::from_bits(left.secondary);
+        vm.register_stack[base_ptr + a] = LuaValue::float(l + sc as f64);
         // Skip the following MMBINI instruction (PC already incremented by main loop)
         vm.current_frame_mut().pc += 1;
         return Ok(DispatchAction::Continue);
@@ -498,15 +484,36 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    // Try integer operation
-    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
+    // Fast path: Direct type tag check (avoid method call overhead)
+    
+    // Check if both are integers
+    if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+        let l = left.secondary as i64;
+        let r = constant.secondary as i64;
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_mul(r));
         return Ok(DispatchAction::Skip(1));
     }
     
-    // Try float operation
-    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-        vm.register_stack[base_ptr + a] = LuaValue::number(l * r);
+    // Check if at least one is float (covers float*float, float*int, int*float)
+    if left.primary == TAG_FLOAT || constant.primary == TAG_FLOAT {
+        // Convert to float
+        let l = if left.primary == TAG_FLOAT {
+            f64::from_bits(left.secondary)
+        } else if left.primary == TAG_INTEGER {
+            left.secondary as i64 as f64
+        } else {
+            return Ok(DispatchAction::Continue); // Not a number
+        };
+        
+        let r = if constant.primary == TAG_FLOAT {
+            f64::from_bits(constant.secondary)
+        } else if constant.primary == TAG_INTEGER {
+            constant.secondary as i64 as f64
+        } else {
+            return Ok(DispatchAction::Continue); // Not a number
+        };
+        
+        vm.register_stack[base_ptr + a] = LuaValue::float(l * r);
         return Ok(DispatchAction::Skip(1));
     }
 
