@@ -471,7 +471,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         if let Some(dot_pos) = flags.find('.') {
                             let precision_str = &flags[dot_pos + 1..];
                             if let Ok(precision) = precision_str.parse::<usize>() {
-                                result.push_str(&format!("{:.prec$}", num, prec = precision));
+                                result.push_str(&format!("{:.precision$}", num, precision = precision));
                             } else {
                                 result.push_str(&format!("{}", num));
                             }

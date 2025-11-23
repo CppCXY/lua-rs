@@ -475,6 +475,7 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 }
 
 /// MULK: R[A] = R[B] * K[C]
+#[inline(always)]
 pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -483,31 +484,32 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+    // Get constant once
+    let func_ptr = match frame.get_function_ptr() {
+        Some(ptr) => ptr,
+        None => return Err(LuaError::RuntimeError("Not a Lua function".to_string())),
+    };
     let func = unsafe { &*func_ptr };
-    let constant = func
-        .borrow()
-        .chunk
-        .constants
-        .get(c)
-        .copied()
-        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid constant index: {}", c)))?;
+    let constants = &func.borrow().chunk.constants;
+    let constant = match constants.get(c) {
+        Some(val) => *val,
+        None => return Err(LuaError::RuntimeError(format!("Invalid constant index: {}", c))),
+    };
 
     let left = vm.register_stack[base_ptr + b];
 
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_mul(r));
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip(1));
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number(l * r);
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip(1));
     }
+
     Ok(DispatchAction::Continue)
 }
 

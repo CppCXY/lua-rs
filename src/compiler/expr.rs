@@ -228,8 +228,13 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
     // Save constant info before discharging
     let saved_right_desc = right_desc.clone();
     
-    // Discharge right to register (needed for non-RK path)
-    let right_reg = exp_to_any_reg(c, &mut right_desc);
+    // Discharge right to register ONLY if not using RK or immediate
+    // This prevents unnecessary LOADK instructions before *K opcodes
+    let right_reg = if !can_use_rk && !use_immediate {
+        exp_to_any_reg(c, &mut right_desc)
+    } else {
+        0 // Dummy value, won't be used in RK/immediate paths
+    };
 
     // Handle immediate instructions for ADD/SUB
     if use_immediate && matches!(op_kind, BinaryOperator::OpAdd | BinaryOperator::OpSub) {
@@ -1305,6 +1310,142 @@ fn compile_binary_expr_to(
         }
     }
 
+    // FLOAT CONSTANT OPTIMIZATION: Check if right operand is a float literal
+    // Generate *K instructions for MUL/DIV/MOD/POW with constant operands
+    if let LuaExpr::LiteralExpr(lit) = &right {
+        if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
+            // Handle both float and integer literals
+            let is_float_lit = num.is_float();
+            let const_val = if is_float_lit {
+                LuaValue::float(num.get_float_value())
+            } else {
+                // Integer literal - still use *K instruction instead of immediate
+                let int_val = num.get_int_value();
+                // Skip small integers that were already handled by immediate optimization
+                if int_val >= -256 && int_val <= 255 {
+                    match op_kind {
+                        BinaryOperator::OpAdd | BinaryOperator::OpSub => {
+                            // Already handled by ADDI above
+                            // Fall through to normal code path
+                            LuaValue::integer(int_val) // dummy, won't be used
+                        }
+                        _ => LuaValue::integer(int_val)
+                    }
+                } else {
+                    LuaValue::integer(int_val)
+                }
+            };
+
+            // Generate *K instruction for supported operations
+            match op_kind {
+                BinaryOperator::OpMul => {
+                    let const_idx = add_constant_dedup(c, const_val);
+                    let left_reg = compile_expr(c, &left)?;
+                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::MulK, result_reg, left_reg, const_idx),
+                    );
+                    emit(
+                        c,
+                        Instruction::create_abck(
+                            OpCode::MmBinK,
+                            left_reg,
+                            const_idx,
+                            TagMethod::Mul.as_u32(),
+                            false,
+                        ),
+                    );
+                    return Ok(result_reg);
+                }
+                BinaryOperator::OpDiv => {
+                    let const_idx = add_constant_dedup(c, const_val);
+                    let left_reg = compile_expr(c, &left)?;
+                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::DivK, result_reg, left_reg, const_idx),
+                    );
+                    emit(
+                        c,
+                        Instruction::create_abck(
+                            OpCode::MmBinK,
+                            left_reg,
+                            const_idx,
+                            TagMethod::Div.as_u32(),
+                            false,
+                        ),
+                    );
+                    return Ok(result_reg);
+                }
+                BinaryOperator::OpMod => {
+                    let const_idx = add_constant_dedup(c, const_val);
+                    let left_reg = compile_expr(c, &left)?;
+                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::ModK, result_reg, left_reg, const_idx),
+                    );
+                    emit(
+                        c,
+                        Instruction::create_abck(
+                            OpCode::MmBinK,
+                            left_reg,
+                            const_idx,
+                            TagMethod::Mod.as_u32(),
+                            false,
+                        ),
+                    );
+                    return Ok(result_reg);
+                }
+                BinaryOperator::OpPow => {
+                    let const_idx = add_constant_dedup(c, const_val);
+                    let left_reg = compile_expr(c, &left)?;
+                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::PowK, result_reg, left_reg, const_idx),
+                    );
+                    emit(
+                        c,
+                        Instruction::create_abck(
+                            OpCode::MmBinK,
+                            left_reg,
+                            const_idx,
+                            TagMethod::Pow.as_u32(),
+                            false,
+                        ),
+                    );
+                    return Ok(result_reg);
+                }
+                BinaryOperator::OpIDiv if !is_float_lit => {
+                    // IDiv only for integer constants
+                    let const_idx = add_constant_dedup(c, const_val);
+                    let left_reg = compile_expr(c, &left)?;
+                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::IDivK, result_reg, left_reg, const_idx),
+                    );
+                    emit(
+                        c,
+                        Instruction::create_abck(
+                            OpCode::MmBinK,
+                            left_reg,
+                            const_idx,
+                            TagMethod::IDiv.as_u32(),
+                            false,
+                        ),
+                    );
+                    return Ok(result_reg);
+                }
+                _ => {
+                    // Not a *K-supported operation, fall through
+                }
+            }
+        }
+    }
+
     // Fall back to normal two-operand instruction
     // Compile left and right first to get their registers
     let left_reg = compile_expr(c, &left)?;
@@ -1868,18 +2009,20 @@ pub fn compile_call_expr_with_returns_and_dest(
     // We'll reset it before each argument so they compile into consecutive registers
     let saved_freereg = c.freereg;
 
+    // CRITICAL: Pre-reserve all argument registers before compiling any arguments
+    // This prevents nested call expressions from overwriting earlier argument registers
+    let num_fixed_args = arg_exprs.len();
+    let args_end = args_start + num_fixed_args as u32;
+    if c.freereg < args_end {
+        c.freereg = args_end;
+    }
+
     // CRITICAL: Compile arguments directly to their target positions
     // This is how standard Lua ensures arguments are in consecutive registers
     // Each argument should be compiled to args_start + i
     for (i, arg_expr) in arg_exprs.iter().enumerate() {
         let is_last = i == arg_exprs.len() - 1;
         let arg_dest = args_start + i as u32;
-
-        // Reset freereg to arg_dest for non-call expressions
-        // This ensures constants and variables compile directly to their target positions
-        if !matches!(arg_expr, LuaExpr::CallExpr(_)) {
-            c.freereg = arg_dest;
-        }
 
         // Ensure max_stack_size can accommodate this register
         if arg_dest as usize >= c.chunk.max_stack_size {
