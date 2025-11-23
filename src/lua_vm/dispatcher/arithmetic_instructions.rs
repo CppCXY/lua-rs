@@ -11,16 +11,19 @@ use crate::{
 
 /// ADD: R[A] = R[B] + R[C]
 #[inline(always)]
+#[inline(always)]
 pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
+    // OPTIMIZATION: Use unsafe for unchecked register access
+    let (left, right) = unsafe {
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        (*reg_base.add(b), *reg_base.add(c))
+    };
 
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
@@ -45,7 +48,9 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         return add_error(left, right);
     };
 
-    vm.register_stack[base_ptr + a] = result;
+    unsafe {
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+    }
     Ok(DispatchAction::Skip(1))
 }
 
@@ -95,7 +100,9 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         return sub_error(left, right);
     };
 
-    vm.register_stack[base_ptr + a] = result;
+    unsafe {
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+    }
     Ok(DispatchAction::Skip(1))
 }
 

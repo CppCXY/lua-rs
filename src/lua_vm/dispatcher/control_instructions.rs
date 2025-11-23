@@ -131,14 +131,17 @@ pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// TEST A k
 /// if (not R[A] == k) then pc++
+#[inline(always)]
 pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let value = vm.register_stack[base_ptr + a];
+    // OPTIMIZATION: Use unsafe for unchecked register access (hot path)
+    let value = unsafe {
+        *vm.register_stack.as_ptr().add(base_ptr + a)
+    };
     
     // Lua truthiness: nil and false are falsy, everything else is truthy
     let is_truthy = !value.is_nil() && value.as_bool().unwrap_or(true);
@@ -153,15 +156,18 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// TESTSET A B k
 /// if (not R[B] == k) then R[A] := R[B] else pc++
+#[inline(always)]
 pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let value = vm.register_stack[base_ptr + b];
+    // OPTIMIZATION: Use unsafe for unchecked register access
+    let value = unsafe {
+        *vm.register_stack.as_ptr().add(base_ptr + b)
+    };
     
     // Lua truthiness: not l_isfalse(v) means v is truthy
     let is_truthy = !value.is_nil() && value.as_bool().unwrap_or(true);
@@ -169,7 +175,9 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // TESTSET: if ((not l_isfalse(R[B])) == k) then R[A] := R[B] else pc++
     // If (is_truthy == k), assign R[A] = R[B], otherwise skip next instruction
     if is_truthy == k {
-        vm.register_stack[base_ptr + a] = value;
+        unsafe {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
+        }
     } else {
         vm.current_frame_mut().pc += 1;
     }
@@ -181,16 +189,19 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// EQ A B k
 /// if ((R[A] == R[B]) ~= k) then pc++
+#[inline(always)]
 pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
-    let right = vm.register_stack[base_ptr + b];
+    // OPTIMIZATION: Use unsafe for unchecked register access
+    let (left, right) = unsafe {
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        (*reg_base.add(a), *reg_base.add(b))
+    };
 
     let is_equal = left == right;
     
@@ -204,31 +215,41 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// LT A B k
 /// if ((R[A] < R[B]) ~= k) then pc++
+#[inline(always)]
 pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
-    let right = vm.register_stack[base_ptr + b];
+    // OPTIMIZATION: Use unsafe for unchecked register access (hot path)
+    let (left, right) = unsafe {
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        (*reg_base.add(a), *reg_base.add(b))
+    };
 
-    let is_less = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        l < r
-    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-        l < r
-    } else if left.is_string() && right.is_string() {
-        // String comparison - would need VM to get strings
-        // For now, just use default comparison
-        left < right
+    // OPTIMIZATION: Direct type tag comparison (avoid method calls)
+    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+    let left_tag = left.primary;
+    let right_tag = right.primary;
+    
+    let is_less = if (left_tag & TYPE_MASK) == TAG_INTEGER && (right_tag & TYPE_MASK) == TAG_INTEGER {
+        // Fast integer path - compare secondary values directly
+        (left.secondary as i64) < (right.secondary as i64)
     } else {
-        return Err(LuaError::RuntimeError(format!(
-            "attempt to compare {} with {}",
-            left.type_name(),
-            right.type_name()
-        )));
+        // Fallback to method calls for float/string
+        if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+            l < r
+        } else if left.is_string() && right.is_string() {
+            left < right
+        } else {
+            return Err(LuaError::RuntimeError(format!(
+                "attempt to compare {} with {}",
+                left.type_name(),
+                right.type_name()
+            )));
+        }
     };
     
     if is_less != k {
@@ -240,19 +261,24 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// LE A B k
 /// if ((R[A] <= R[B]) ~= k) then pc++
+#[inline(always)]
 pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
-    let right = vm.register_stack[base_ptr + b];
+    // OPTIMIZATION: Use unsafe for unchecked register access
+    let (left, right) = unsafe {
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        (*reg_base.add(a), *reg_base.add(b))
+    };
 
-    let is_less_equal = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        l <= r
+    // OPTIMIZATION: Direct type tag comparison
+    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+    let is_less_or_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER && (right.primary & TYPE_MASK) == TAG_INTEGER {
+        (left.secondary as i64) <= (right.secondary as i64)
     } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
         l <= r
     } else if left.is_string() && right.is_string() {
@@ -265,7 +291,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         )));
     };
     
-    if is_less_equal != k {
+    if is_less_or_equal != k {
         vm.current_frame_mut().pc += 1;
     }
     
