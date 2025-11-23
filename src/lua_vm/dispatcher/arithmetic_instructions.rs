@@ -11,7 +11,6 @@ use crate::{
 
 /// ADD: R[A] = R[B] + R[C]
 #[inline(always)]
-#[inline(always)]
 pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;

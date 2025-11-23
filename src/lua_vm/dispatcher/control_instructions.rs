@@ -329,18 +329,21 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// EQI A sB k
 /// if ((R[A] == sB) ~= k) then pc++
+#[inline(always)]
 pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
+    let left = unsafe {
+        *vm.register_stack.as_ptr().add(base_ptr + a)
+    };
 
-    let is_equal = if let Some(l) = left.as_integer() {
-        l == sb as i64
+    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+    let is_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        (left.secondary as i64) == (sb as i64)
     } else if let Some(l) = left.as_number() {
         l == sb as f64
     } else {
@@ -356,18 +359,24 @@ pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// LTI A sB k
 /// if ((R[A] < sB) ~= k) then pc++
+#[inline(always)]
 pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
+    // OPTIMIZATION: Use unsafe for unchecked register access
+    let left = unsafe {
+        *vm.register_stack.as_ptr().add(base_ptr + a)
+    };
 
-    let is_less = if let Some(l) = left.as_integer() {
-        l < sb as i64
+    // OPTIMIZATION: Direct type tag comparison
+    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+    let is_less = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        // Fast integer path
+        (left.secondary as i64) < (sb as i64)
     } else if let Some(l) = left.as_number() {
         l < sb as f64
     } else {
@@ -386,18 +395,21 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// LEI A sB k
 /// if ((R[A] <= sB) ~= k) then pc++
+#[inline(always)]
 pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
+    let left = unsafe {
+        *vm.register_stack.as_ptr().add(base_ptr + a)
+    };
 
-    let is_less_equal = if let Some(l) = left.as_integer() {
-        l <= sb as i64
+    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+    let is_less_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        (left.secondary as i64) <= (sb as i64)
     } else if let Some(l) = left.as_number() {
         l <= sb as f64
     } else {
@@ -416,18 +428,21 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// GTI A sB k
 /// if ((R[A] > sB) ~= k) then pc++
+#[inline(always)]
 pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
+    let left = unsafe {
+        *vm.register_stack.as_ptr().add(base_ptr + a)
+    };
 
-    let is_greater = if let Some(l) = left.as_integer() {
-        l > sb as i64
+    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+    let is_greater = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        (left.secondary as i64) > (sb as i64)
     } else if let Some(l) = left.as_number() {
         l > sb as f64
     } else {
@@ -446,18 +461,21 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// GEI A sB k
 /// if ((R[A] >= sB) ~= k) then pc++
+#[inline(always)]
 pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let left = vm.register_stack[base_ptr + a];
+    let left = unsafe {
+        *vm.register_stack.as_ptr().add(base_ptr + a)
+    };
 
-    let is_greater_equal = if let Some(l) = left.as_integer() {
-        l >= sb as i64
+    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+    let is_greater_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        (left.secondary as i64) >= (sb as i64)
     } else if let Some(l) = left.as_number() {
         l >= sb as f64
     } else {
