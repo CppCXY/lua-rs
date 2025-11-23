@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Example 2: Interactive Calculator</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .calculator {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .input-group {
+            margin: 15px 0;
+        }
+        label {
+            display: block;
+            color: #666;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        button {
+            width: 100%;
+            background: #667eea;
+            color: white;
+            padding: 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #764ba2;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f0f7ff;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .error {
+            background: #ffe0e0;
+            color: #d32f2f;
+        }
+    </style>
+</head>
+<body>
+    <div class="calculator">
+        <h1>🧮 Lua WASM Calculator</h1>
+        
+        <div class="input-group">
+            <label for="num1">First Number:</label>
+            <input type="number" id="num1" value="10" step="any">
+        </div>
+
+        <div class="input-group">
+            <label for="operation">Operation:</label>
+            <select id="operation">
+                <option value="+">Addition (+)</option>
+                <option value="-">Subtraction (-)</option>
+                <option value="*">Multiplication (×)</option>
+                <option value="/">Division (÷)</option>
+                <option value="%">Modulo (%)</option>
+                <option value="^">Power (^)</option>
+            </select>
+        </div>
+
+        <div class="input-group">
+            <label for="num2">Second Number:</label>
+            <input type="number" id="num2" value="5" step="any">
+        </div>
+
+        <button onclick="calculate()">Calculate</button>
+
+        <div id="result" class="result">
+            Ready to calculate...
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { LuaWasm } from './pkg/luars_wasm.js';
+
+        let lua = null;
+
+        async function initLua() {
+            await init();
+            lua = new LuaWasm();
+            console.log('✓ Calculator ready');
+        }
+
+        window.calculate = function() {
+            const num1 = parseFloat(document.getElementById('num1').value);
+            const num2 = parseFloat(document.getElementById('num2').value);
+            const op = document.getElementById('operation').value;
+            const resultDiv = document.getElementById('result');
+
+            if (isNaN(num1) || isNaN(num2)) {
+                resultDiv.textContent = 'Please enter valid numbers';
+                resultDiv.className = 'result error';
+                return;
+            }
+
+            try {
+                // Build Lua expression
+                let expression = `${num1} ${op} ${num2}`;
+                
+                // Execute in Lua
+                const result = lua.eval(expression);
+                
+                // Display result
+                resultDiv.textContent = `${num1} ${op} ${num2} = ${result}`;
+                resultDiv.className = 'result';
+            } catch (e) {
+                resultDiv.textContent = 'Error: ' + e;
+                resultDiv.className = 'result error';
+            }
+        };
+
+        // Initialize
+        initLua().catch(e => {
+            document.getElementById('result').textContent = 'Failed to initialize: ' + e;
+            document.getElementById('result').className = 'result error';
+        });
+    </script>
+</body>
+</html>

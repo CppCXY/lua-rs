@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Lua WASM Examples</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: white;
+            font-size: 48px;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .subtitle {
+            text-align: center;
+            color: rgba(255,255,255,0.9);
+            font-size: 20px;
+            margin-bottom: 50px;
+        }
+        .examples-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+        .example-card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            transition: transform 0.3s, box-shadow 0.3s;
+            cursor: pointer;
+            text-decoration: none;
+            color: inherit;
+            display: block;
+        }
+        .example-card:hover {
+            transform: translateY(-10px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.4);
+        }
+        .example-icon {
+            font-size: 48px;
+            margin-bottom: 15px;
+        }
+        .example-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+        .example-desc {
+            color: #7f8c8d;
+            line-height: 1.6;
+        }
+        .info-box {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        .info-box h2 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+        }
+        .info-box p {
+            color: #7f8c8d;
+            line-height: 1.8;
+            margin-bottom: 10px;
+        }
+        .info-box ul {
+            color: #7f8c8d;
+            margin-left: 20px;
+            line-height: 1.8;
+        }
+        code {
+            background: #ecf0f1;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            color: #e74c3c;
+        }
+        .footer {
+            text-align: center;
+            color: rgba(255,255,255,0.8);
+            margin-top: 40px;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌙 Lua WASM Examples</h1>
+        <p class="subtitle">Interactive examples showing how to use Lua in the browser</p>
+
+        <div class="examples-grid">
+            <a href="example1_basic.html" class="example-card">
+                <div class="example-icon">📚</div>
+                <div class="example-title">Basic Operations</div>
+                <div class="example-desc">
+                    Learn the fundamentals: math operations, string manipulation, 
+                    tables, loops, and functions.
+                </div>
+            </a>
+
+            <a href="example2_calculator.html" class="example-card">
+                <div class="example-icon">🧮</div>
+                <div class="example-title">Interactive Calculator</div>
+                <div class="example-desc">
+                    A beautiful calculator app demonstrating how to use Lua for 
+                    real-time calculations with a modern UI.
+                </div>
+            </a>
+
+            <a href="example3_playground.html" class="example-card">
+                <div class="example-icon">🎮</div>
+                <div class="example-title">Code Playground</div>
+                <div class="example-desc">
+                    Full-featured editor with syntax highlighting theme. Write and 
+                    execute Lua code with Ctrl+Enter.
+                </div>
+            </a>
+
+            <a href="example4_data.html" class="example-card">
+                <div class="example-icon">📊</div>
+                <div class="example-title">Data Processing</div>
+                <div class="example-desc">
+                    Advanced examples: array statistics, text analysis, and data 
+                    filtering using Lua algorithms.
+                </div>
+            </a>
+
+            <a href="index.html" class="example-card">
+                <div class="example-icon">🎨</div>
+                <div class="example-title">Full Demo</div>
+                <div class="example-desc">
+                    The complete interactive demo with all features and multiple 
+                    code examples to explore.
+                </div>
+            </a>
+        </div>
+
+        <div class="info-box">
+            <h2>🚀 Getting Started</h2>
+            <p>These examples demonstrate how to use <code>luars_wasm</code> as a library in your web applications.</p>
+            
+            <h2 style="margin-top: 25px;">📦 Basic Usage</h2>
+            <p>1. Import the WASM module:</p>
+            <pre style="background: #ecf0f1; padding: 15px; border-radius: 8px; overflow-x: auto;"><code>import init, { LuaWasm } from './pkg/luars_wasm.js';</code></pre>
+            
+            <p style="margin-top: 15px;">2. Initialize and use:</p>
+            <pre style="background: #ecf0f1; padding: 15px; border-radius: 8px; overflow-x: auto;"><code>await init();
+const lua = new LuaWasm();
+
+// Execute Lua code
+const result = lua.execute('return 2 + 2');
+console.log(result); // "4"
+
+// Evaluate expressions
+const sum = lua.eval('10 * 20');
+console.log(sum); // "200"
+
+// Set global variables
+lua.setGlobal('myVar', 42);
+
+// Get global variables
+const value = lua.getGlobal('myVar');</code></pre>
+
+            <h2 style="margin-top: 25px;">✨ Features</h2>
+            <ul>
+                <li>Full Lua 5.4 interpreter running in WebAssembly</li>
+                <li>Complete standard library (math, string, table, etc.)</li>
+                <li>Execute arbitrary Lua code from JavaScript</li>
+                <li>Bidirectional data exchange</li>
+                <li>Zero dependencies - pure WebAssembly</li>
+            </ul>
+
+            <h2 style="margin-top: 25px;">⚡ Performance</h2>
+            <p>
+                Lua WASM runs at near-native speed thanks to WebAssembly. 
+                It's perfect for:
+            </p>
+            <ul>
+                <li>Scripting engines for web games</li>
+                <li>Configuration and data processing</li>
+                <li>Teaching programming interactively</li>
+                <li>Rapid prototyping and testing</li>
+            </ul>
+        </div>
+
+        <div class="footer">
+            <p>Built with ❤️ using Rust + WebAssembly</p>
+            <p style="margin-top: 10px; font-size: 14px;">
+                Lua WASM Project | 2025
+            </p>
+        </div>
+    </div>
+</body>
+</html>

@@ -528,7 +528,15 @@ impl LuaValue {
     pub fn as_cfunction(&self) -> Option<CFunction> {
         if self.primary == TAG_CFUNCTION {
             let addr = self.secondary & POINTER_MASK;
-            Some(unsafe { std::mem::transmute::<u64, CFunction>(addr) })
+            // WASM has 32-bit pointers, handle both 32-bit and 64-bit targets
+            #[cfg(target_pointer_width = "32")]
+            {
+                Some(unsafe { std::mem::transmute::<u32, CFunction>(addr as u32) })
+            }
+            #[cfg(target_pointer_width = "64")]
+            {
+                Some(unsafe { std::mem::transmute::<u64, CFunction>(addr) })
+            }
         } else {
             None
         }

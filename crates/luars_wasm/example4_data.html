@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Example 4: Data Processing</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1000px;
+            margin: 30px auto;
+            padding: 20px;
+            background: #f5f7fa;
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+        }
+        .card {
+            background: white;
+            padding: 25px;
+            margin: 20px 0;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 0;
+        }
+        button {
+            background: #3498db;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #2980b9;
+        }
+        .output {
+            background: #ecf0f1;
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background: #3498db;
+            color: white;
+        }
+        tr:hover {
+            background: #f5f5f5;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .stat-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+    <h1>📊 Lua WASM Data Processing</h1>
+
+    <div class="card">
+        <h2>Array Statistics</h2>
+        <p>Generate random numbers and calculate statistics using Lua</p>
+        <button onclick="calculateStats()">Calculate Statistics</button>
+        <div id="stats-container"></div>
+        <div id="stats-output" class="output"></div>
+    </div>
+
+    <div class="card">
+        <h2>Text Analysis</h2>
+        <p>Analyze text and count word frequencies</p>
+        <button onclick="analyzeText()">Analyze Sample Text</button>
+        <div id="text-output" class="output"></div>
+        <div id="word-table"></div>
+    </div>
+
+    <div class="card">
+        <h2>Data Filtering</h2>
+        <p>Filter and transform data arrays</p>
+        <button onclick="filterData()">Filter Numbers</button>
+        <div id="filter-output" class="output"></div>
+    </div>
+
+    <script type="module">
+        import init, { LuaWasm } from './pkg/luars_wasm.js';
+
+        let lua = null;
+
+        async function initLua() {
+            await init();
+            lua = new LuaWasm();
+            console.log('✓ Lua initialized');
+        }
+
+        // Example 1: Array Statistics
+        window.calculateStats = function() {
+            const container = document.getElementById('stats-container');
+            const output = document.getElementById('stats-output');
+            
+            try {
+                lua.execute(`
+                    math.randomseed(os.time())
+                    _data = {}
+                    for i = 1, 100 do
+                        _data[i] = math.random(1, 100)
+                    end
+                    
+                    function _calculate_stats()
+                        local sum = 0
+                        local min = _data[1]
+                        local max = _data[1]
+                        
+                        for _, v in ipairs(_data) do
+                            sum = sum + v
+                            if v < min then min = v end
+                            if v > max then max = v end
+                        end
+                        
+                        local mean = sum / #_data
+                        
+                        -- Calculate median
+                        local sorted = {}
+                        for _, v in ipairs(_data) do
+                            table.insert(sorted, v)
+                        end
+                        table.sort(sorted)
+                        local median = sorted[math.floor(#sorted / 2)]
+                        
+                        return {
+                            count = #_data,
+                            sum = sum,
+                            mean = mean,
+                            median = median,
+                            min = min,
+                            max = max
+                        }
+                    end
+                `);
+                
+                const count = lua.eval('#_data');
+                const sum = lua.eval('_calculate_stats().sum');
+                const mean = lua.eval('_calculate_stats().mean');
+                const median = lua.eval('_calculate_stats().median');
+                const min = lua.eval('_calculate_stats().min');
+                const max = lua.eval('_calculate_stats().max');
+                
+                // Display stats boxes
+                container.innerHTML = `
+                    <div class="stats">
+                        <div class="stat-box">
+                            <div class="stat-label">Count</div>
+                            <div class="stat-value">${count}</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Sum</div>
+                            <div class="stat-value">${parseFloat(sum).toFixed(0)}</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Mean</div>
+                            <div class="stat-value">${parseFloat(mean).toFixed(2)}</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Median</div>
+                            <div class="stat-value">${median}</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Min</div>
+                            <div class="stat-value">${min}</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Max</div>
+                            <div class="stat-value">${max}</div>
+                        </div>
+                    </div>
+                `;
+                
+                // Show first 20 numbers
+                const sample = lua.execute(`
+                    local result = "First 20 numbers:\\n"
+                    for i = 1, math.min(20, #_data) do
+                        result = result .. _data[i]
+                        if i < 20 and i < #_data then
+                            result = result .. ", "
+                        end
+                    end
+                    return result
+                `);
+                output.textContent = sample;
+                
+            } catch (e) {
+                output.textContent = 'Error: ' + e;
+            }
+        };
+
+        // Example 2: Text Analysis
+        window.analyzeText = function() {
+            const output = document.getElementById('text-output');
+            const tableDiv = document.getElementById('word-table');
+            
+            const sampleText = `
+                The quick brown fox jumps over the lazy dog.
+                The dog was very lazy and the fox was very quick.
+                This is a sample text for analysis.
+            `;
+            
+            try {
+                lua.execute(`
+                    _text = [[${sampleText}]]
+                    
+                    function _analyze_text()
+                        local words = {}
+                        for word in _text:lower():gmatch("%w+") do
+                            words[word] = (words[word] or 0) + 1
+                        end
+                        return words
+                    end
+                `);
+                
+                const wordCount = lua.eval('select("#", _text:gmatch("%w+"))');
+                
+                output.textContent = `Total words: ${wordCount}\\n\\nWord frequency analysis:`;
+                
+                // Get word frequencies and create table
+                lua.execute(`
+                    _word_list = {}
+                    local words = _analyze_text()
+                    for word, count in pairs(words) do
+                        table.insert(_word_list, {word = word, count = count})
+                    end
+                    table.sort(_word_list, function(a, b) return a.count > b.count end)
+                `);
+                
+                const listSize = lua.eval('#_word_list');
+                let tableHTML = '<table><tr><th>Word</th><th>Count</th></tr>';
+                
+                for (let i = 1; i <= Math.min(listSize, 10); i++) {
+                    const word = lua.eval(`_word_list[${i}].word`);
+                    const count = lua.eval(`_word_list[${i}].count`);
+                    tableHTML += `<tr><td>${word}</td><td>${count}</td></tr>`;
+                }
+                
+                tableHTML += '</table>';
+                tableDiv.innerHTML = tableHTML;
+                
+            } catch (e) {
+                output.textContent = 'Error: ' + e;
+            }
+        };
+
+        // Example 3: Data Filtering
+        window.filterData = function() {
+            const output = document.getElementById('filter-output');
+            
+            try {
+                lua.execute(`
+                    _numbers = {5, 12, 8, 130, 44, 25, 7, 90, 33, 61}
+                    
+                    function _filter_even()
+                        local result = {}
+                        for _, n in ipairs(_numbers) do
+                            if n % 2 == 0 then
+                                table.insert(result, n)
+                            end
+                        end
+                        return result
+                    end
+                    
+                    function _filter_greater_than(threshold)
+                        local result = {}
+                        for _, n in ipairs(_numbers) do
+                            if n > threshold then
+                                table.insert(result, n)
+                            end
+                        end
+                        return result
+                    end
+                    
+                    function _map_square()
+                        local result = {}
+                        for _, n in ipairs(_numbers) do
+                            table.insert(result, n * n)
+                        end
+                        return result
+                    end
+                `);
+                
+                const original = lua.execute(`return table.concat(_numbers, ", ")`);
+                const even = lua.execute(`
+                    local evens = _filter_even()
+                    return table.concat(evens, ", ")
+                `);
+                const greater = lua.execute(`
+                    local filtered = _filter_greater_than(30)
+                    return table.concat(filtered, ", ")
+                `);
+                const squared = lua.execute(`
+                    local squares = _map_square()
+                    return table.concat(squares, ", ")
+                `);
+                
+                output.textContent = `Original: [${original}]
+
+Even numbers: [${even}]
+
+Greater than 30: [${greater}]
+
+Squared: [${squared}]`;
+                
+            } catch (e) {
+                output.textContent = 'Error: ' + e;
+            }
+        };
+
+        // Initialize
+        initLua().catch(e => {
+            console.error('Failed to initialize:', e);
+            document.querySelectorAll('.output').forEach(el => {
+                el.textContent = 'Failed to initialize Lua WASM: ' + e;
+            });
+        });
+    </script>
+</body>
+</html>

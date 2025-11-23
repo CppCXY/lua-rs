@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Example 3: Script Playground</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            display: flex;
+            height: 100vh;
+        }
+        .container {
+            display: flex;
+            width: 100%;
+            height: 100%;
+        }
+        .editor-panel, .output-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .editor-panel {
+            border-right: 2px solid #333;
+        }
+        .panel-header {
+            background: #2d2d30;
+            padding: 15px 20px;
+            border-bottom: 1px solid #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .panel-header h2 {
+            margin: 0;
+            font-size: 16px;
+            color: #cccccc;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            background: #0e639c;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #1177bb;
+        }
+        button.clear {
+            background: #d32f2f;
+        }
+        button.clear:hover {
+            background: #e53935;
+        }
+        #editor {
+            flex: 1;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 14px;
+            border: none;
+            resize: none;
+            outline: none;
+            line-height: 1.5;
+        }
+        #output {
+            flex: 1;
+            background: #1e1e1e;
+            padding: 20px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 14px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .output-line {
+            margin: 2px 0;
+            padding: 2px 0;
+        }
+        .output-line.error {
+            color: #f48771;
+        }
+        .output-line.success {
+            color: #4ec9b0;
+        }
+        .output-line.info {
+            color: #9cdcfe;
+        }
+        .status {
+            background: #007acc;
+            color: white;
+            padding: 8px 20px;
+            font-size: 12px;
+            border-top: 1px solid #333;
+        }
+        .examples {
+            display: flex;
+            gap: 5px;
+        }
+        .examples button {
+            background: #3c3c3c;
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+        .examples button:hover {
+            background: #505050;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Editor Panel -->
+        <div class="editor-panel">
+            <div class="panel-header">
+                <h2>📝 Lua Editor</h2>
+                <div class="controls">
+                    <div class="examples">
+                        <button onclick="loadExample(1)">Ex1</button>
+                        <button onclick="loadExample(2)">Ex2</button>
+                        <button onclick="loadExample(3)">Ex3</button>
+                    </div>
+                    <button onclick="runCode()">▶ Run (Ctrl+Enter)</button>
+                    <button class="clear" onclick="clearEditor()">Clear</button>
+                </div>
+            </div>
+            <textarea id="editor" spellcheck="false">-- Welcome to Lua WASM Playground!
+-- Press Ctrl+Enter or click Run to execute
+
+print("Hello, World!")
+
+-- Try some math
+local function sum(a, b)
+    return a + b
+end
+
+print("5 + 3 =", sum(5, 3))
+
+-- Try a loop
+for i = 1, 5 do
+    print("Count:", i)
+end</textarea>
+            <div class="status">Ready | Press Ctrl+Enter to run</div>
+        </div>
+
+        <!-- Output Panel -->
+        <div class="output-panel">
+            <div class="panel-header">
+                <h2>📊 Output</h2>
+                <button class="clear" onclick="clearOutput()">Clear Output</button>
+            </div>
+            <div id="output">Initializing Lua WASM...</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { LuaWasm } from './pkg/luars_wasm.js';
+
+        let lua = null;
+        const outputDiv = document.getElementById('output');
+        const editor = document.getElementById('editor');
+
+        function addOutput(text, className = '') {
+            const line = document.createElement('div');
+            line.className = 'output-line ' + className;
+            line.textContent = text;
+            outputDiv.appendChild(line);
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        }
+
+        window.clearOutput = function() {
+            outputDiv.innerHTML = '';
+        };
+
+        window.clearEditor = function() {
+            editor.value = '';
+            editor.focus();
+        };
+
+        async function initLua() {
+            await init();
+            lua = new LuaWasm();
+            
+            // Setup print capture
+            lua.execute(`
+                _outputs = {}
+                _original_print = print
+                function print(...)
+                    local args = {...}
+                    local msg = ""
+                    for i, v in ipairs(args) do
+                        if i > 1 then msg = msg .. "\\t" end
+                        msg = msg .. tostring(v)
+                    end
+                    table.insert(_outputs, msg)
+                end
+                
+                function _get_outputs()
+                    local result = _outputs
+                    _outputs = {}
+                    return result
+                end
+            `);
+            
+            clearOutput();
+            addOutput('✓ Lua WASM initialized successfully!', 'success');
+            addOutput('Ready to execute Lua code.', 'info');
+            addOutput('');
+        }
+
+        window.runCode = function() {
+            if (!lua) {
+                addOutput('✗ Lua not initialized', 'error');
+                return;
+            }
+
+            const code = editor.value;
+            if (!code.trim()) {
+                addOutput('⚠ No code to execute', 'error');
+                return;
+            }
+
+            addOutput('─'.repeat(50), 'info');
+            addOutput('▶ Executing...', 'info');
+            
+            try {
+                const result = lua.execute(code);
+                
+                // Get print outputs
+                const outputs = lua.execute(`
+                    local result = _get_outputs()
+                    return table.concat(result, "\\n")
+                `);
+                
+                if (outputs && outputs !== 'nil' && outputs.length > 0) {
+                    outputs.split('\\n').forEach(line => {
+                        if (line) addOutput(line);
+                    });
+                }
+                
+                if (result !== 'nil') {
+                    addOutput('');
+                    addOutput('Return: ' + result, 'success');
+                }
+                
+                addOutput('✓ Execution completed', 'success');
+            } catch (e) {
+                addOutput('');
+                addOutput('✗ Error: ' + e, 'error');
+            }
+            
+            addOutput('');
+        };
+
+        window.loadExample = function(num) {
+            const examples = [
+                `-- Example 1: Basic operations
+local name = "Lua WASM"
+print("Running in:", name)
+
+local nums = {1, 2, 3, 4, 5}
+local sum = 0
+for _, n in ipairs(nums) do
+    sum = sum + n
+end
+print("Sum of numbers:", sum)
+
+return "Example 1 done"`,
+
+                `-- Example 2: String manipulation
+local text = "Hello, World!"
+print("Original:", text)
+print("Length:", #text)
+print("Upper:", string.upper(text))
+print("Lower:", string.lower(text))
+
+local words = {}
+for word in text:gmatch("%w+") do
+    table.insert(words, word)
+end
+print("Words:", table.concat(words, ", "))
+
+return #words .. " words found"`,
+
+                `-- Example 3: Algorithm
+local function isPrime(n)
+    if n < 2 then return false end
+    for i = 2, math.sqrt(n) do
+        if n % i == 0 then return false end
+    end
+    return true
+end
+
+print("Prime numbers under 50:")
+local primes = {}
+for i = 2, 50 do
+    if isPrime(i) then
+        table.insert(primes, i)
+    end
+end
+print(table.concat(primes, ", "))
+
+return #primes .. " primes found"`
+            ];
+
+            if (num >= 1 && num <= examples.length) {
+                editor.value = examples[num - 1];
+                editor.focus();
+            }
+        };
+
+        // Keyboard shortcut: Ctrl+Enter to run
+        editor.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                e.preventDefault();
+                runCode();
+            }
+        });
+
+        // Initialize
+        initLua().catch(e => {
+            clearOutput();
+            addOutput('✗ Failed to initialize Lua WASM', 'error');
+            addOutput('Error: ' + e, 'error');
+        });
+    </script>
+</body>
+</html>

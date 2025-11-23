@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Example 1: Basic Lua Execution</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f0f0f0;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 { color: #333; }
+        h2 { color: #666; }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background: #45a049; }
+        pre {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .output {
+            background: #263238;
+            color: #aed581;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            min-height: 100px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>📚 Example 1: Basic Lua Execution</h1>
+    
+    <div class="card">
+        <h2>Simple Math</h2>
+        <button onclick="runExample1()">Run</button>
+        <div id="output1" class="output">Click "Run" to execute...</div>
+    </div>
+
+    <div class="card">
+        <h2>String Operations</h2>
+        <button onclick="runExample2()">Run</button>
+        <div id="output2" class="output">Click "Run" to execute...</div>
+    </div>
+
+    <div class="card">
+        <h2>Tables and Loops</h2>
+        <button onclick="runExample3()">Run</button>
+        <div id="output3" class="output">Click "Run" to execute...</div>
+    </div>
+
+    <div class="card">
+        <h2>Functions</h2>
+        <button onclick="runExample4()">Run</button>
+        <div id="output4" class="output">Click "Run" to execute...</div>
+    </div>
+
+    <script type="module">
+        // Import the WASM module
+        import init, { LuaWasm } from './pkg/luars_wasm.js';
+
+        let lua = null;
+
+        // Initialize Lua
+        async function initLua() {
+            await init();
+            lua = new LuaWasm();
+            console.log('✓ Lua WASM initialized');
+            
+            // Setup print capture
+            lua.execute(`
+                _outputs = {}
+                function print(...)
+                    local args = {...}
+                    local msg = ""
+                    for i, v in ipairs(args) do
+                        if i > 1 then msg = msg .. "\\t" end
+                        msg = msg .. tostring(v)
+                    end
+                    table.insert(_outputs, msg)
+                end
+                
+                function _get_output()
+                    local result = table.concat(_outputs, "\\n")
+                    _outputs = {}
+                    return result
+                end
+            `);
+        }
+
+        function getOutput() {
+            try {
+                return lua.execute('return _get_output()');
+            } catch (e) {
+                return '';
+            }
+        }
+
+        // Example 1: Simple Math
+        window.runExample1 = function() {
+            const output = document.getElementById('output1');
+            try {
+                lua.execute(`
+                    local a = 10
+                    local b = 20
+                    print("a =", a)
+                    print("b =", b)
+                    print("a + b =", a + b)
+                    print("a * b =", a * b)
+                    print("b / a =", b / a)
+                    print("b % a =", b % a)
+                `);
+                output.textContent = getOutput();
+            } catch (e) {
+                output.textContent = 'Error: ' + e;
+            }
+        };
+
+        // Example 2: String Operations
+        window.runExample2 = function() {
+            const output = document.getElementById('output2');
+            try {
+                lua.execute(`
+                    local str = "Hello, Lua WASM!"
+                    print("Original:", str)
+                    print("Length:", #str)
+                    print("Upper:", string.upper(str))
+                    print("Lower:", string.lower(str))
+                    print("Substring:", string.sub(str, 1, 5))
+                    print("Replace:", string.gsub(str, "Lua", "World"))
+                `);
+                output.textContent = getOutput();
+            } catch (e) {
+                output.textContent = 'Error: ' + e;
+            }
+        };
+
+        // Example 3: Tables and Loops
+        window.runExample3 = function() {
+            const output = document.getElementById('output3');
+            try {
+                lua.execute(`
+                    local fruits = {"apple", "banana", "orange"}
+                    
+                    print("Using ipairs:")
+                    for i, fruit in ipairs(fruits) do
+                        print(i .. ":", fruit)
+                    end
+                    
+                    print("\\nTable as dictionary:")
+                    local person = {
+                        name = "Alice",
+                        age = 30,
+                        city = "Tokyo"
+                    }
+                    
+                    for k, v in pairs(person) do
+                        print(k .. " = " .. tostring(v))
+                    end
+                `);
+                output.textContent = getOutput();
+            } catch (e) {
+                output.textContent = 'Error: ' + e;
+            }
+        };
+
+        // Example 4: Functions
+        window.runExample4 = function() {
+            const output = document.getElementById('output4');
+            try {
+                lua.execute(`
+                    local function factorial(n)
+                        if n <= 1 then return 1 end
+                        return n * factorial(n - 1)
+                    end
+                    
+                    local function fibonacci(n)
+                        if n <= 1 then return n end
+                        return fibonacci(n - 1) + fibonacci(n - 2)
+                    end
+                    
+                    print("Factorials:")
+                    for i = 1, 6 do
+                        print("  " .. i .. "! =", factorial(i))
+                    end
+                    
+                    print("\\nFibonacci:")
+                    for i = 0, 10 do
+                        print("  fib(" .. i .. ") =", fibonacci(i))
+                    end
+                `);
+                output.textContent = getOutput();
+            } catch (e) {
+                output.textContent = 'Error: ' + e;
+            }
+        };
+
+        // Initialize when page loads
+        initLua().catch(e => {
+            console.error('Failed to initialize Lua:', e);
+            document.querySelectorAll('.output').forEach(el => {
+                el.textContent = 'Failed to initialize Lua WASM: ' + e;
+            });
+        });
+    </script>
+</body>
+</html>
