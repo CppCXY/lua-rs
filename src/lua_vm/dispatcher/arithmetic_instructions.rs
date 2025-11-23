@@ -1118,6 +1118,7 @@ pub fn exec_not(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 }
 
 /// LEN: R[A] = #R[B]
+#[inline(always)]
 pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -1127,12 +1128,9 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let value = vm.register_stack[base_ptr + b];
 
-    let len = if let Some(table_id) = value.as_table_id() {
-        let table = vm
-            .object_pool
-            .get_table(table_id)
-            .ok_or_else(|| LuaError::RuntimeError("invalid table".to_string()))?;
-        table.borrow().len() as i64
+    // CRITICAL OPTIMIZATION: Use direct pointer instead of HashMap lookup!
+    let len = if let Some(table_ptr) = value.as_table_ptr() {
+        unsafe { (*table_ptr).borrow().len() as i64 }
     } else if value.is_string() {
         if let Some(s) = vm.get_string(&value) {
             s.as_str().len() as i64

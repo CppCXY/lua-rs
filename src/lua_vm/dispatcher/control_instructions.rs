@@ -571,19 +571,27 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             };
             vm.ensure_stack_capacity(call_base + actual_arg_count + 1);
             
-            // Copy function and arguments
+            // OPTIMIZATION: Bulk copy function and arguments (critical for table.insert perf!)
             vm.register_stack[call_base] = func;
             if use_call_metamethod {
                 // First argument is the original table (self)
                 vm.register_stack[call_base + 1] = call_metamethod_self;
-                // Then copy the original arguments
-                for i in 0..arg_count {
-                    vm.register_stack[call_base + i + 2] = vm.register_stack[base + a + 1 + i];
+                // Then bulk copy the original arguments
+                if arg_count > 0 {
+                    unsafe {
+                        let src_ptr = vm.register_stack.as_ptr().add(base + a + 1);
+                        let dst_ptr = vm.register_stack.as_mut_ptr().add(call_base + 2);
+                        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, arg_count);
+                    }
                 }
             } else {
-                // Normal call: copy arguments directly
-                for i in 0..arg_count {
-                    vm.register_stack[call_base + i + 1] = vm.register_stack[base + a + 1 + i];
+                // Normal call: bulk copy arguments directly
+                if arg_count > 0 {
+                    unsafe {
+                        let src_ptr = vm.register_stack.as_ptr().add(base + a + 1);
+                        let dst_ptr = vm.register_stack.as_mut_ptr().add(call_base + 1);
+                        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, arg_count);
+                    }
                 }
             }
             
@@ -611,17 +619,26 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             vm.frames.pop();
             let result = result?;
             
-            // Store return values
+            // OPTIMIZATION: Bulk copy return values
             let values = result.all_values();
             let num_returns = if return_count == usize::MAX {
                 values.len()
             } else {
-                return_count
+                return_count.min(values.len())
             };
             
-            for i in 0..num_returns {
-                let value = values.get(i).copied().unwrap_or(crate::LuaValue::nil());
-                vm.register_stack[base + a + i] = value;
+            if num_returns > 0 {
+                unsafe {
+                    let src_ptr = values.as_ptr();
+                    let dst_ptr = vm.register_stack.as_mut_ptr().add(base + a);
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, num_returns);
+                }
+            }
+            // Fill remaining with nil if needed (only when return_count is fixed)
+            if return_count != usize::MAX {
+                for i in num_returns..return_count {
+                    vm.register_stack[base + a + i] = crate::LuaValue::nil();
+                }
             }
             
             // CRITICAL: Update caller's top to indicate how many values were returned

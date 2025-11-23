@@ -71,16 +71,16 @@ fn table_insert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.insert")?;
     let argc = crate::lib_registry::arg_count(vm);
 
-    let table_ref_cell = vm
-        .get_table(&table_val)
+    // CRITICAL: Use direct pointer to avoid HashMap lookup per insert!
+    let table_ptr = table_val.as_table_ptr()
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-    let mut table_ref = table_ref_cell.borrow_mut();
-    let len = table_ref.len();
+    
+    let len = unsafe { (*table_ptr).borrow().len() };
 
     if argc == 2 {
-        // table.insert(list, value)
+        // table.insert(list, value) - append at end
         let value = require_arg(vm, 1, "table.insert")?;
-        table_ref.raw_set(LuaValue::integer(len as i64 + 1), value);
+        unsafe { (*table_ptr).borrow_mut().raw_set(LuaValue::integer(len as i64 + 1), value) };
     } else if argc == 3 {
         // table.insert(list, pos, value)
         let pos = require_arg(vm, 1, "table.insert")?
@@ -99,7 +99,7 @@ fn table_insert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             )));
         }
 
-        table_ref.insert_array_at(pos as usize - 1, value)?;
+        unsafe { (*table_ptr).borrow_mut().insert_array_at(pos as usize - 1, value)? };
     } else {
         return Err(LuaError::RuntimeError(
             "wrong number of arguments to 'table.insert'".to_string(),
@@ -113,11 +113,11 @@ fn table_insert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn table_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "table.remove")?;
 
-    let table_ref_cell = vm
-        .get_table(&table_val)
+    // CRITICAL: Use direct pointer to avoid HashMap lookup
+    let table_ptr = table_val.as_table_ptr()
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-    let mut table_ref = table_ref_cell.borrow_mut();
-    let len = table_ref.len();
+    
+    let len = unsafe { (*table_ptr).borrow().len() };
 
     if len == 0 {
         return Ok(MultiValue::single(LuaValue::nil()));
@@ -133,7 +133,7 @@ fn table_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         )));
     }
 
-    let removed = table_ref.remove_array_at(pos as usize - 1)?;
+    let removed = unsafe { (*table_ptr).borrow_mut().remove_array_at(pos as usize - 1)? };
     Ok(MultiValue::single(removed))
 }
 

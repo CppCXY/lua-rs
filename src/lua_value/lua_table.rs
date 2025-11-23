@@ -382,16 +382,10 @@ impl LuaTable {
         hasher.finish() as usize
     }
 
-    /// Get array length (number of consecutive non-nil elements from index 1)
+    /// Get array length
+    #[inline]
     pub fn len(&self) -> usize {
-        let mut len = 0;
-        for val in &self.array {
-            if val.is_nil() {
-                break;
-            }
-            len += 1;
-        }
-        len
+        self.array.len()
     }
 
     /// Iterator for next() function - follows Lua's iteration order

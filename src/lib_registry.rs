@@ -211,6 +211,7 @@ pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
 }
 
 /// Helper to get a specific argument
+#[inline(always)]
 pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
     let frame = vm.frames.last().unwrap();
     let base_ptr = frame.base_ptr;
@@ -234,6 +235,7 @@ pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
 }
 
 /// Helper to require an argument
+#[inline]
 pub fn require_arg(vm: &LuaVM, index: usize, func_name: &str) -> LuaResult<LuaValue> {
     get_arg(vm, index).ok_or_else(|| {
         LuaError::RuntimeError(format!("{}() requires argument {}", func_name, index + 1))
@@ -241,6 +243,7 @@ pub fn require_arg(vm: &LuaVM, index: usize, func_name: &str) -> LuaResult<LuaVa
 }
 
 /// Helper to get argument count
+#[inline(always)]
 pub fn arg_count(vm: &LuaVM) -> usize {
     let frame = vm.frames.last().unwrap();
     // Subtract 1 for the function itself
