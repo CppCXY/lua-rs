@@ -1,7 +1,7 @@
-use wasm_bindgen::prelude::*;
 use luars::{LuaVM, LuaValue};
-use std::rc::Rc;
 use std::cell::RefCell;
+use std::rc::Rc;
+use wasm_bindgen::prelude::*;
 
 // Set panic hook for better error messages in WASM
 #[wasm_bindgen(start)]
@@ -22,7 +22,7 @@ impl LuaWasm {
     pub fn new() -> Result<LuaWasm, JsValue> {
         let mut vm = LuaVM::new();
         vm.open_libs();
-        
+
         Ok(LuaWasm {
             vm: Rc::new(RefCell::new(vm)),
         })
@@ -32,14 +32,9 @@ impl LuaWasm {
     #[wasm_bindgen]
     pub fn execute(&self, code: &str) -> Result<String, JsValue> {
         let mut vm = self.vm.borrow_mut();
-        
-        match vm.compile(code) {
-            Ok(chunk) => {
-                match vm.execute(Rc::new(chunk)) {
-                    Ok(value) => Ok(lua_value_to_string(&value)),
-                    Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
-                }
-            }
+
+        match vm.execute_string(code) {
+            Ok(result) => Ok(lua_value_to_string(&result)),
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
         }
     }
@@ -48,8 +43,8 @@ impl LuaWasm {
     #[wasm_bindgen(js_name = setGlobal)]
     pub fn set_global(&self, name: &str, value: JsValue) -> Result<(), JsValue> {
         let mut vm = self.vm.borrow_mut();
-        let lua_value = js_value_to_lua(&value)
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        let lua_value =
+            js_value_to_lua(&value).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         vm.set_global(name, lua_value);
         Ok(())
     }
@@ -70,39 +65,43 @@ impl LuaWasm {
     pub fn eval(&self, expr: &str) -> Result<JsValue, JsValue> {
         let code = format!("return {}", expr);
         let mut vm = self.vm.borrow_mut();
-        
+
         match vm.compile(&code) {
-            Ok(chunk) => {
-                match vm.execute(Rc::new(chunk)) {
-                    Ok(value) => lua_value_to_js(&value),
-                    Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
-                }
-            }
+            Ok(chunk) => match vm.execute(Rc::new(chunk)) {
+                Ok(value) => lua_value_to_js(&value),
+                Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
+            },
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
         }
     }
-    
+
     /// Register a simple JavaScript callback that can be called from Lua
     /// Note: This is a simplified version - full JS callback support requires additional work
     #[wasm_bindgen(js_name = registerFunction)]
-    pub fn register_function(&self, name: String, _callback: js_sys::Function) -> Result<(), JsValue> {
+    pub fn register_function(
+        &self,
+        name: String,
+        _callback: js_sys::Function,
+    ) -> Result<(), JsValue> {
         // For now, we'll create a placeholder function
         // Full JS callback support would require using thread_local storage
-        let code = format!(r#"
+        let code = format!(
+            r#"
             function {}(...)
                 error("JS callbacks not yet fully implemented - use setGlobal for values")
             end
-        "#, name);
-        
+        "#,
+            name
+        );
+
         let mut vm = self.vm.borrow_mut();
-        let chunk = vm.compile(&code).map_err(|e| {
-            JsValue::from_str(&format!("Failed to register function: {:?}", e))
-        })?;
-        
-        vm.execute(Rc::new(chunk)).map_err(|e| {
-            JsValue::from_str(&format!("Failed to execute registration: {:?}", e))
-        })?;
-        
+        let chunk = vm
+            .compile(&code)
+            .map_err(|e| JsValue::from_str(&format!("Failed to register function: {:?}", e)))?;
+
+        vm.execute(Rc::new(chunk))
+            .map_err(|e| JsValue::from_str(&format!("Failed to execute registration: {:?}", e)))?;
+
         Ok(())
     }
 }
