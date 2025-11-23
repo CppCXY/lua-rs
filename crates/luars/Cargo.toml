@@ -1,0 +1,10 @@
+[package]
+name = "luars"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+emmylua_parser.workspace = true
+libloading.workspace = true
+tokio.workspace = true
+hashbrown.workspace = true

@@ -1,18 +1,16 @@
-[package]
-name = "lua_rs"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+    "tools/*",
+]
 
-[dependencies]
+[workspace.dependencies]
+# local
+luars = { path = "crates/luars", version = "0.1.0" }
+
+# external
 emmylua_parser = "0.19.0"
 libloading = "0.9"
 tokio = { version = "1.42", features = ["rt-multi-thread", "time", "sync", "macros"] }
 hashbrown = "0.16"
-
-[[bin]]
-name = "lua"
-path = "src/bin/main.rs"
-
-[[bin]]
-name = "bytecode_dump"
-path = "src/bin/bytecode_dump.rs"
