@@ -469,18 +469,15 @@ impl LuaTable {
             ));
         }
 
-        // Ensure array is large enough
-        if self.array.len() <= len {
-            self.array.resize(len + 1, LuaValue::nil());
+        // CRITICAL OPTIMIZATION: Fast path for appending at end (no shift needed!)
+        if pos == len {
+            self.array.push(value);
+            return Ok(());
         }
 
-        // Shift elements to the right
-        for i in (pos..len).rev() {
-            self.array[i + 1] = self.array[i].clone();
-        }
-
-        // Insert new value
-        self.array[pos] = value;
+        // OPTIMIZATION: Use Vec::insert which uses memmove internally
+        // Much faster than manual clone loop
+        self.array.insert(pos, value);
         Ok(())
     }
 
@@ -496,15 +493,19 @@ impl LuaTable {
 
         let removed = self.array[pos].clone();
 
-        // Shift elements to the left
-        for i in pos..len - 1 {
-            self.array[i] = self.array[i + 1].clone();
+        // CRITICAL OPTIMIZATION: Fast path for removing from end (no shift needed!)
+        if pos == len - 1 {
+            // Just pop the last element
+            self.array.pop();
+            return Ok(removed);
         }
 
-        // Clear the last element
-        if len > 0 {
-            self.array[len - 1] = LuaValue::nil();
-        }
+        // OPTIMIZATION: Use copy_within for bulk memory move instead of clone loop
+        // This is much faster as it's a single memmove operation
+        self.array.copy_within(pos + 1..len, pos);
+        
+        // Remove the last element (now duplicated)
+        self.array.pop();
 
         Ok(removed)
     }
