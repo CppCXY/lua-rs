@@ -97,13 +97,15 @@ pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// LOADI A sBx
 /// R[A] := sBx (signed integer)
+#[inline(always)]
 pub fn exec_loadi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    vm.register_stack[base_ptr + a] = LuaValue::integer(sbx as i64);
+    unsafe {
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
+    }
 
     Ok(DispatchAction::Continue)
 }
@@ -123,6 +125,7 @@ pub fn exec_loadf(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// LOADK A Bx
 /// R[A] := K[Bx]
+#[inline(always)]
 pub fn exec_loadk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
@@ -208,11 +211,13 @@ pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> Result<DispatchAction, Lua
 pub fn exec_move(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = vm.current_frame().base_ptr;
 
-    let value = vm.register_stack[base_ptr + b];
-    vm.register_stack[base_ptr + a] = value;
+    // OPTIMIZATION: Use unsafe for direct register access
+    unsafe {
+        let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
+        *reg_ptr.add(a) = *reg_ptr.add(b);
+    }
 
     Ok(DispatchAction::Continue)
 }

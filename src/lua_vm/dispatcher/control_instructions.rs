@@ -9,6 +9,7 @@ use super::DispatchAction;
 
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
+#[inline(always)]
 pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -20,80 +21,58 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     })?;
 
     let base_ptr = frame.base_ptr;
-    // CRITICAL: result_reg and num_results are stored in the CALLED frame, not the caller!
-    // They tell us where to place return values in the CALLER's register space.
     let result_reg = frame.get_result_reg();
     let num_results = frame.get_num_results();
     
-    // DEBUG: Print return info
-
-
-    // Collect return values
-    vm.return_values.clear();
-
-    if b == 0 {
-        // Return all values from R[A] to top of stack
-        let top = frame.top;
-        for i in a..top {
-            if base_ptr + i < vm.register_stack.len() {
-                vm.return_values
-                    .push(vm.register_stack[base_ptr + i]);
-            }
-        }
+    // OPTIMIZATION: Calculate return count once
+    let return_count = if b == 0 {
+        frame.top.saturating_sub(a)
     } else {
-        // Return b-1 values
-        let count = b - 1;
-        for i in 0..count {
-            if base_ptr + a + i < vm.register_stack.len() {
-                vm.return_values
-                    .push(vm.register_stack[base_ptr + a + i]);
-            }
-        }
-    }
+        b - 1
+    };
 
-    // If there are more frames, place return values in the caller's registers
+    // OPTIMIZATION: Direct copy to caller's registers using unsafe (skip intermediate vec)
     if !vm.frames.is_empty() {
         let caller_frame = vm.current_frame();
         let caller_base = caller_frame.base_ptr;
         
-        // Copy return values to result registers
-        let actual_returns = if num_results == usize::MAX {
-            // Multiple return values expected - copy all
-            for (i, value) in vm.return_values.iter().enumerate() {
-                println!("  DEBUG: Writing return[{}] = {:?} to register[{}]", i, value, caller_base + result_reg + i);
-                vm.register_stack[caller_base + result_reg + i] = *value;
+        unsafe {
+            let reg_ptr = vm.register_stack.as_mut_ptr();
+            
+            if num_results == usize::MAX {
+                // Copy all return values
+                let count = return_count.min(vm.register_stack.len().saturating_sub(base_ptr + a));
+                if count > 0 {
+                    std::ptr::copy_nonoverlapping(
+                        reg_ptr.add(base_ptr + a),
+                        reg_ptr.add(caller_base + result_reg),
+                        count
+                    );
+                }
+                vm.current_frame_mut().top = result_reg + count;
+            } else {
+                // Fixed number of return values
+                let nil_val = LuaValue::nil();
+                for i in 0..num_results {
+                    let val = if i < return_count {
+                        *reg_ptr.add(base_ptr + a + i)
+                    } else {
+                        nil_val
+                    };
+                    *reg_ptr.add(caller_base + result_reg + i) = val;
+                }
+                vm.current_frame_mut().top = result_reg + num_results;
             }
-            vm.return_values.len()
-        } else {
-            // Fixed number of return values
-            for i in 0..num_results {
-                let value = vm.return_values.get(i).copied().unwrap_or(LuaValue::nil());
-                println!("  DEBUG: Writing return[{}] = {:?} to register[{}]", i, value, caller_base + result_reg + i);
-                vm.register_stack[caller_base + result_reg + i] = value;
-            }
-            num_results
-        };
+        }
         
-        // CRITICAL: Update caller's top to point after the return values
-        // This is how Lua communicates variable return counts to the next instruction
-        // (e.g., CALL with B=0 will use this top to determine argument count)
-        vm.current_frame_mut().top = result_reg + actual_returns;
-        
-        // CRITICAL FIX: Truncate register stack back to caller's frame
-        // When we created the called function's frame, we extended register_stack.
-        // Now that we're returning, we must truncate it back so the next call
-        // doesn't create its frame at the wrong position.
-        // The caller needs its FULL max_stack_size space, not just up to the return values!
+        // Truncate register stack back to caller's frame
         let caller_frame = vm.current_frame();
-        let func_id = caller_frame.get_function_id();
-        if let Some(func_id) = func_id {
+        if let Some(func_id) = caller_frame.get_function_id() {
             if let Some(func_ref) = vm.object_pool.get_function(func_id) {
                 let caller_max_stack = func_ref.borrow().chunk.max_stack_size;
-                // Truncate to the end of caller's allocated stack space
+                let caller_base = caller_frame.base_ptr;
                 let caller_stack_end = caller_base + caller_max_stack;
                 
-                // But we need to ensure the caller's stack is at least long enough
-                // In case it was never fully allocated
                 if vm.register_stack.len() < caller_stack_end {
                     vm.ensure_stack_capacity(caller_stack_end);
                 }
@@ -496,6 +475,7 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// CALL A B C
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
+#[inline(always)]
 pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     use crate::lua_value::LuaValueKind;
     use crate::lua_vm::LuaCallFrame;
@@ -653,33 +633,20 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             Ok(DispatchAction::Continue)
         },
         LuaValueKind::Function => {
-            // Get max_stack_size from function before creating frame
+            // OPTIMIZATION: Get function reference once and cache all needed values
             let func_id = func.as_function_id().unwrap();
-            let max_stack_size = match vm.object_pool.get_function(func_id) {
-                Some(func_ref) => {
-                    let size = func_ref.borrow().chunk.max_stack_size;
-                    // Ensure at least 1 register for function body
-                    if size == 0 { 1 } else { size }
-                },
-                None => {
-                    return Err(LuaError::RuntimeError("Invalid function reference".to_string()));
-                }
-            };
+            let func_ref = vm.object_pool.get_function(func_id)
+                .ok_or_else(|| LuaError::RuntimeError("Invalid function reference".to_string()))?;
+            let func_borrow = func_ref.borrow();
+            let max_stack_size = if func_borrow.chunk.max_stack_size == 0 { 1 } else { func_borrow.chunk.max_stack_size };
+            let is_vararg = func_borrow.chunk.is_vararg;
+            drop(func_borrow); // Release borrow early
 
             // Create new frame
             let frame_id = vm.next_frame_id;
             vm.next_frame_id += 1;
 
-            // Ensure source argument registers are accessible
-            let max_src_reg = base + a + 1 + arg_count;
-            if max_src_reg > vm.register_stack.len() {
-                vm.ensure_stack_capacity(max_src_reg);
-            }
-
-            // CRITICAL FIX: new_base should be at the end of caller's stack frame,
-            // NOT at the end of register_stack! The caller may not have allocated
-            // its full max_stack_size yet, so register_stack.len() could be less.
-            // We need to ensure the caller's full stack is allocated first.
+            // OPTIMIZATION: Calculate all sizes upfront and do ONE capacity check
             let frame = vm.current_frame();
             let caller_base = frame.base_ptr;
             let caller_func_id = frame.get_function_id();
@@ -687,83 +654,73 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 if let Some(func_ref) = vm.object_pool.get_function(caller_func_id) {
                     func_ref.borrow().chunk.max_stack_size
                 } else {
-                    // Fallback: use current stack length
                     vm.register_stack.len().saturating_sub(caller_base)
                 }
             } else {
-                // Not a Lua function (e.g., C function or main), use current length
                 vm.register_stack.len().saturating_sub(caller_base)
             };
             
-            // Ensure caller's full stack is allocated
             let caller_stack_end = caller_base + caller_max_stack;
-            if vm.register_stack.len() < caller_stack_end {
-                vm.ensure_stack_capacity(caller_stack_end);
-            }
-            
-            // Now new_base is at the end of caller's frame
             let new_base = caller_stack_end;
             
-            // Calculate actual argument count for __call metamethod
-            let actual_arg_count = if use_call_metamethod {
-                arg_count + 1
-            } else {
-                arg_count
-            };
-            
-            // Ensure new frame can hold at least the arguments
+            let actual_arg_count = if use_call_metamethod { arg_count + 1 } else { arg_count };
             let actual_stack_size = max_stack_size.max(actual_arg_count);
-            
-            // For vararg functions, we need extra space to store varargs beyond max_stack_size
-            // Check if this is a vararg function by looking at the chunk
-            // Use the CALLED function's func_id (not caller's)
-            let is_vararg = match vm.object_pool.get_function(func_id) {
-                Some(func_ref) => func_ref.borrow().chunk.is_vararg,
-                None => false,
-            };
-            
             let total_stack_size = if is_vararg && actual_arg_count > 0 {
-                // Allocate space for: max_stack_size + varargs
                 actual_stack_size + actual_arg_count
             } else {
                 actual_stack_size
             };
             
-            vm.ensure_stack_capacity(new_base + total_stack_size);
+            // OPTIMIZATION: Single capacity check for everything
+            let required_capacity = (base + a + 1 + arg_count).max(caller_stack_end).max(new_base + total_stack_size);
+            vm.ensure_stack_capacity(required_capacity);
 
-            // Initialize registers with nil
-            for i in 0..total_stack_size {
-                vm.register_stack[new_base + i] = crate::LuaValue::nil();
-            }
-
-            if is_vararg && actual_arg_count > 0 {
-                // For vararg functions, copy arguments BEYOND max_stack_size
-                // so they won't be overwritten by local variables
-                let vararg_base = new_base + actual_stack_size;
-                if use_call_metamethod {
-                    // First argument is self
-                    vm.register_stack[vararg_base] = call_metamethod_self;
-                    // Then copy original arguments
-                    for i in 0..arg_count {
-                        vm.register_stack[vararg_base + i + 1] = vm.register_stack[base + a + 1 + i];
-                    }
-                } else {
-                    for i in 0..actual_arg_count {
-                        vm.register_stack[vararg_base + i] = vm.register_stack[base + a + 1 + i];
-                    }
+            // OPTIMIZATION: Initialize with nil only once, then overwrite with arguments
+            // Use unsafe for faster bulk operations
+            unsafe {
+                let reg_ptr = vm.register_stack.as_mut_ptr();
+                let nil_val = crate::LuaValue::nil();
+                
+                // Initialize entire frame with nil
+                for i in 0..total_stack_size {
+                    *reg_ptr.add(new_base + i) = nil_val;
                 }
-            } else {
-                // Regular function: copy arguments to R[0], R[1], ...
-                if use_call_metamethod {
-                    // First argument is self
-                    vm.register_stack[new_base] = call_metamethod_self;
-                    // Then copy original arguments
-                    for i in 0..arg_count {
-                        vm.register_stack[new_base + i + 1] = vm.register_stack[base + a + 1 + i];
+                
+                // OPTIMIZATION: Use ptr::copy for argument copying (faster than loop)
+                if is_vararg && actual_arg_count > 0 {
+                    let vararg_base = new_base + actual_stack_size;
+                    if use_call_metamethod {
+                        *reg_ptr.add(vararg_base) = call_metamethod_self;
+                        if arg_count > 0 {
+                            std::ptr::copy_nonoverlapping(
+                                reg_ptr.add(base + a + 1),
+                                reg_ptr.add(vararg_base + 1),
+                                arg_count
+                            );
+                        }
+                    } else if actual_arg_count > 0 {
+                        std::ptr::copy_nonoverlapping(
+                            reg_ptr.add(base + a + 1),
+                            reg_ptr.add(vararg_base),
+                            actual_arg_count
+                        );
                     }
                 } else {
-                    for i in 0..actual_arg_count {
-                        vm.register_stack[new_base + i] = vm.register_stack[base + a + 1 + i];
+                    if use_call_metamethod {
+                        *reg_ptr.add(new_base) = call_metamethod_self;
+                        if arg_count > 0 {
+                            std::ptr::copy_nonoverlapping(
+                                reg_ptr.add(base + a + 1),
+                                reg_ptr.add(new_base + 1),
+                                arg_count
+                            );
+                        }
+                    } else if actual_arg_count > 0 {
+                        std::ptr::copy_nonoverlapping(
+                            reg_ptr.add(base + a + 1),
+                            reg_ptr.add(new_base),
+                            actual_arg_count
+                        );
                     }
                 }
             }
