@@ -114,9 +114,6 @@ fn test_function_vararg_count() {
         assert(count_args() == 0)
         assert(count_args(nil, nil, 1) == 3)
     "#);
-    if let Err(e) = &result {
-        eprintln!("Error: {:?}", e);
-    }
     assert!(result.is_ok());
 }
 

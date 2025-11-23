@@ -936,8 +936,17 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.frames.last().unwrap();
-    let base = frame.base_ptr;
+    // Extract all frame information we'll need BEFORE taking mutable references
+    let (base, return_count, result_reg, function_value, pc) = {
+        let frame = vm.frames.last().unwrap();
+        (
+            frame.base_ptr,
+            frame.get_num_results(),
+            frame.get_result_reg(),
+            frame.function_value,
+            frame.pc,
+        )
+    };
 
     // Get function from R[A]
     let func = vm.register_stack[base + a];
@@ -973,8 +982,8 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             let max_stack_size = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
 
             // Pop current frame (tail call optimization)
-            let old_base = frame.base_ptr;
-            let return_count = frame.get_num_results();
+            let old_base = base; // Already extracted
+            // return_count already extracted
             vm.frames.pop();
 
             // Create new frame at same location
@@ -1004,31 +1013,51 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // C function: cannot use tail call optimization
             // Convert to regular call
             
-            // Get return information before function call
-            let return_count = frame.get_num_results();
-            let result_reg = frame.get_result_reg();
-            let caller_base = frame.base_ptr;
+            // CRITICAL: return_count, result_reg, caller_base already extracted
+            // These tell us where to write results in the CALLER's frame
+            let args_len = args.len();
+            
+            // IMPORTANT: For TAILCALL, we need the PARENT frame's base
+            // The current frame IS the tail-calling function
+            // When we pop it, we return to the parent
+            // result_reg is relative to parent's base
             
             let c_func = func.as_cfunction()
                 .ok_or_else(|| LuaError::RuntimeError("Invalid C function".to_string()))?;
 
-            // Store function and arguments in registers for C function call
-            vm.register_stack[base + a] = func;
+            // Create temporary C function frame
+            let frame_id = vm.next_frame_id;
+            vm.next_frame_id += 1;
+            
+            // Set up arguments in a temporary stack space
+            let call_base = vm.register_stack.len();
+            vm.ensure_stack_capacity(call_base + args_len + 1);
+            
+            vm.register_stack[call_base] = func;
             for (i, arg) in args.iter().enumerate() {
-                vm.register_stack[base + a + 1 + i] = *arg;
+                vm.register_stack[call_base + 1 + i] = *arg;
             }
-
-            // Update frame top to include all arguments
-            vm.current_frame_mut().top = a + 1 + args.len();
-
-            // Call C function
+            
+            let temp_frame = LuaCallFrame::new_c_function(
+                frame_id,
+                function_value,
+                pc,
+                call_base,
+                args_len + 1,
+            );
+            
+            // Push temp frame and call C function
+            vm.frames.push(temp_frame);
             let result = c_func(vm)?;
-
-            // Pop current frame
+            vm.frames.pop(); // Pop temp frame
+            
+            // NOW pop the tail-calling function's frame
             vm.frames.pop();
 
-            // Write return values if there's a caller frame
+            // Write return values to PARENT frame
+            // CRITICAL: result_reg is relative to PARENT's base_ptr!
             if !vm.frames.is_empty() {
+                let parent_base = vm.current_frame().base_ptr;
                 let vals = result.all_values();
                 let count = if return_count == usize::MAX {
                     vals.len()
@@ -1038,17 +1067,19 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 
                 // Write return values
                 for i in 0..count {
-                    vm.register_stack[caller_base + result_reg + i] = vals[i];
+                    vm.register_stack[parent_base + result_reg + i] = vals[i];
                 }
                 
                 // Fill remaining expected values with nil
                 if return_count != usize::MAX {
                     for i in count..return_count {
-                        vm.register_stack[caller_base + result_reg + i] = LuaValue::nil();
+                        vm.register_stack[parent_base + result_reg + i] = LuaValue::nil();
                     }
                 }
-
-                // No need to restore top, it will be handled by the next instruction
+                
+                // CRITICAL: Update parent frame's top to reflect the number of return values
+                // This is essential for variable returns (return_count == usize::MAX)
+                vm.current_frame_mut().top = result_reg + count;
             }
 
             Ok(DispatchAction::Continue)
