@@ -23,19 +23,28 @@ pub fn match_pattern(text: &str, pattern: &Pattern) -> Option<(usize, Vec<String
     try_match(pattern, &text_chars, 0)
 }
 
-/// Global substitution
+/// Global substitution with capture support
+/// Supports:
+/// - %0: entire match
+/// - %1-%9: capture groups
+/// - %%: literal %
 pub fn gsub(
     text: &str,
     pattern: &Pattern,
     replacement: &str,
     max: Option<usize>,
-) -> (String, usize) {
+) -> Result<(String, usize), String> {
     let mut result = String::new();
     let mut count = 0;
     let mut pos = 0;
     let text_chars: Vec<char> = text.chars().collect();
+    let mut last_was_nonempty = false; // Track if last match was non-empty
+    
+    // Fast path: if replacement doesn't contain %, no substitution needed
+    let needs_substitution = replacement.contains('%');
 
-    while pos < text_chars.len() {
+    // We need to try matching one position past the end to handle empty matches at the end
+    while pos <= text_chars.len() {
         if let Some(max_count) = max {
             if count >= max_count {
                 // Reached max replacements, copy rest
@@ -44,26 +53,110 @@ pub fn gsub(
             }
         }
 
-        if let Some((end_pos, _)) = try_match(pattern, &text_chars, pos) {
-            // Found match
+        if let Some((end_pos, captures)) = try_match(pattern, &text_chars, pos) {
+            // Skip empty match right after non-empty match
+            if end_pos == pos && last_was_nonempty {
+                // Copy character and continue
+                if pos < text_chars.len() {
+                    result.push(text_chars[pos]);
+                }
+                pos += 1;
+                last_was_nonempty = false;
+                continue;
+            }
+            
+            // Found match (either non-empty, or empty not after non-empty)
             count += 1;
 
-            // Do replacement (simplified - doesn't handle %1, %2 yet)
-            result.push_str(replacement);
+            if needs_substitution {
+                // Build replacement with capture substitution
+                let matched_text: String = text_chars[pos..end_pos].iter().collect();
+                let replaced = substitute_captures(replacement, &matched_text, &captures)?;
+                result.push_str(&replaced);
+            } else {
+                // Fast path: no % in replacement, just copy it
+                result.push_str(replacement);
+            }
 
-            pos = end_pos.max(pos + 1); // Move past match
+            // Handle empty vs non-empty match
+            if end_pos == pos {
+                // Empty match: copy character and advance
+                if pos < text_chars.len() {
+                    result.push(text_chars[pos]);
+                }
+                pos += 1;
+                last_was_nonempty = false;
+            } else {
+                // Non-empty match: just advance position
+                pos = end_pos;
+                last_was_nonempty = true;
+            }
         } else {
-            // No match, copy character
-            result.push(text_chars[pos]);
+            // No match, copy character if within bounds
+            if pos < text_chars.len() {
+                result.push(text_chars[pos]);
+            }
             pos += 1;
+            last_was_nonempty = false;
         }
     }
 
-    (result, count)
+    Ok((result, count))
+}
+
+/// Substitute %0-%9 and %% in replacement string
+fn substitute_captures(
+    replacement: &str,
+    full_match: &str,
+    captures: &[String],
+) -> Result<String, String> {
+    let mut result = String::new();
+    let chars: Vec<char> = replacement.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '%' {
+            if i + 1 < chars.len() {
+                let next = chars[i + 1];
+                if next == '%' {
+                    // %% -> literal %
+                    result.push('%');
+                    i += 2;
+                } else if next >= '0' && next <= '9' {
+                    // %0-%9 -> capture
+                    let capture_idx = (next as u8 - b'0') as usize;
+                    if capture_idx == 0 {
+                        // %0 is full match
+                        result.push_str(full_match);
+                    } else if capture_idx <= captures.len() {
+                        // %1-%9 are captures
+                        result.push_str(&captures[capture_idx - 1]);
+                    } else {
+                        // Invalid capture index
+                        return Err(format!("invalid capture index %{}", capture_idx));
+                    }
+                    i += 2;
+                } else {
+                    // Invalid escape sequence, just copy
+                    result.push('%');
+                    i += 1;
+                }
+            } else {
+                // Trailing %, just copy
+                result.push('%');
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    Ok(result)
 }
 
 /// Try to match pattern at specific position
-fn try_match(pattern: &Pattern, text: &[char], pos: usize) -> Option<(usize, Vec<String>)> {
+pub fn try_match(pattern: &Pattern, text: &[char], pos: usize) -> Option<(usize, Vec<String>)> {
     let mut captures = Vec::new();
     match match_impl(pattern, text, pos, &mut captures) {
         Some(end_pos) => Some((end_pos, captures)),

@@ -766,28 +766,185 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     let arg2 = require_arg(vm, 2, "string.gsub")?;
-    let repl = unsafe {
-        arg2.as_string().ok_or_else(|| {
-            LuaError::RuntimeError("bad argument #3 to 'string.gsub' (string expected)".to_string())
-        })?
-    };
-
+    
     let max = get_arg(vm, 3)
         .and_then(|v| v.as_integer())
         .map(|n| n as usize);
 
-    match lua_pattern::parse_pattern(pattern_str.as_str()) {
-        Ok(pattern) => {
-            let (result_str, count) = lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max);
+    let pattern = match lua_pattern::parse_pattern(pattern_str.as_str()) {
+        Ok(p) => p,
+        Err(e) => return Err(LuaError::RuntimeError(format!("invalid pattern: {}", e))),
+    };
 
-            let result = vm.create_string(&result_str);
-            Ok(MultiValue::multiple(vec![
-                result,
-                LuaValue::integer(count as i64),
-            ]))
+    // Check replacement type: string, function, or table
+    if arg2.is_string() {
+        // String replacement with capture substitution
+        let repl = unsafe { arg2.as_string().unwrap() };
+        match lua_pattern::gsub(s.as_str(), &pattern, repl.as_str(), max) {
+            Ok((result_str, count)) => {
+                let result = vm.create_string(&result_str);
+                Ok(MultiValue::multiple(vec![
+                    result,
+                    LuaValue::integer(count as i64),
+                ]))
+            }
+            Err(e) => Err(LuaError::RuntimeError(e)),
         }
-        Err(e) => Err(LuaError::RuntimeError(format!("invalid pattern: {}", e))),
+    } else if arg2.is_function() || arg2.is_cfunction() {
+        // Function replacement
+        gsub_with_function(vm, s.as_str(), &pattern, arg2, max)
+    } else if arg2.is_table() {
+        // Table replacement (lookup)
+        gsub_with_table(vm, s.as_str(), &pattern, arg2, max)
+    } else {
+        Err(LuaError::RuntimeError(
+            "bad argument #3 to 'string.gsub' (string/function/table expected)".to_string()
+        ))
     }
+}
+
+/// Helper for gsub with function replacement
+fn gsub_with_function(
+    vm: &mut LuaVM,
+    text: &str,
+    pattern: &crate::lua_pattern::Pattern,
+    func: LuaValue,
+    max: Option<usize>,
+) -> LuaResult<MultiValue> {
+    let mut result = String::new();
+    let mut count = 0;
+    let mut pos = 0;
+    let text_chars: Vec<char> = text.chars().collect();
+
+    while pos < text_chars.len() {
+        if let Some(max_count) = max {
+            if count >= max_count {
+                result.extend(&text_chars[pos..]);
+                break;
+            }
+        }
+
+        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos) {
+            count += 1;
+            
+            // Prepare arguments for function call
+            let args = if captures.is_empty() {
+                // No captures, pass the whole match
+                let matched: String = text_chars[pos..end_pos].iter().collect();
+                vec![vm.create_string(&matched)]
+            } else {
+                // Pass captures as arguments
+                captures.iter().map(|cap| vm.create_string(cap)).collect()
+            };
+
+            // Call the function
+            match vm.protected_call(func, args) {
+                Ok((success, mut results)) => {
+                    if !success {
+                        let error_msg = results.first()
+                            .and_then(|v| v.as_lua_string())
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_else(|| "unknown error".to_string());
+                        return Err(LuaError::RuntimeError(error_msg));
+                    }
+                    
+                    // Get the replacement from function result
+                    let replacement = results.pop().unwrap_or(LuaValue::nil());
+                    
+                    if replacement.is_string() {
+                        // Use the returned string
+                        if let Some(repl_str) = replacement.as_lua_string() {
+                            result.push_str(repl_str.as_str());
+                        }
+                    } else if !replacement.is_nil() && !replacement.is_boolean() {
+                        // Convert to string (numbers, etc)
+                        let repl_str = vm.value_to_string(&replacement)?;
+                        result.push_str(&repl_str);
+                    } else {
+                        // nil or false: keep original
+                        result.extend(&text_chars[pos..end_pos]);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+
+            pos = end_pos.max(pos + 1);
+        } else {
+            result.push(text_chars[pos]);
+            pos += 1;
+        }
+    }
+
+    let result_value = vm.create_string(&result);
+    Ok(MultiValue::multiple(vec![
+        result_value,
+        LuaValue::integer(count as i64),
+    ]))
+}
+
+/// Helper for gsub with table replacement
+fn gsub_with_table(
+    vm: &mut LuaVM,
+    text: &str,
+    pattern: &crate::lua_pattern::Pattern,
+    table: LuaValue,
+    max: Option<usize>,
+) -> LuaResult<MultiValue> {
+    let mut result = String::new();
+    let mut count = 0;
+    let mut pos = 0;
+    let text_chars: Vec<char> = text.chars().collect();
+
+    while pos < text_chars.len() {
+        if let Some(max_count) = max {
+            if count >= max_count {
+                result.extend(&text_chars[pos..]);
+                break;
+            }
+        }
+
+        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos) {
+            count += 1;
+            
+            // Get the key for table lookup
+            let key = if captures.is_empty() {
+                // No captures, use whole match
+                let matched: String = text_chars[pos..end_pos].iter().collect();
+                vm.create_string(&matched)
+            } else {
+                // Use first capture as key
+                vm.create_string(&captures[0])
+            };
+
+            // Lookup in table
+            let replacement = vm.table_get(&table, &key);
+            
+            if replacement.is_string() {
+                // Use the value from table
+                if let Some(repl_str) = replacement.as_lua_string() {
+                    result.push_str(repl_str.as_str());
+                }
+            } else if !replacement.is_nil() && !replacement.is_boolean() {
+                // Convert to string
+                let repl_str = vm.value_to_string(&replacement)?;
+                result.push_str(&repl_str);
+            } else {
+                // nil or false: keep original
+                result.extend(&text_chars[pos..end_pos]);
+            }
+
+            pos = end_pos.max(pos + 1);
+        } else {
+            result.push(text_chars[pos]);
+            pos += 1;
+        }
+    }
+
+    let result_value = vm.create_string(&result);
+    Ok(MultiValue::multiple(vec![
+        result_value,
+        LuaValue::integer(count as i64),
+    ]))
 }
 
 /// string.gmatch(s, pattern) - Returns an iterator function
