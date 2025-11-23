@@ -61,7 +61,8 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let table = vm.register_stack[base_ptr + b];
     let key = vm.register_stack[base_ptr + c];
 
-    let value = vm.table_get_with_meta(&table, &key).unwrap_or(crate::LuaValue::nil());
+    // CRITICAL: Use fast path without metatable check
+    let value = vm.table_get(&table, &key);
     vm.register_stack[base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)
@@ -113,7 +114,8 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let table = vm.register_stack[base_ptr + b];
     let key = crate::LuaValue::integer(c as i64);
 
-    let value = vm.table_get_with_meta(&table, &key).unwrap_or(crate::LuaValue::nil());
+    // CRITICAL: Use fast path without metatable check
+    let value = vm.table_get(&table, &key);
     vm.register_stack[base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)
@@ -170,7 +172,8 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let table = vm.register_stack[base_ptr + b];
 
-    let value = vm.table_get_with_meta(&table, &key).unwrap_or(crate::LuaValue::nil());
+    // CRITICAL: Use fast path without metatable check (correct Lua behavior!)
+    let value = vm.table_get(&table, &key);
     vm.register_stack[base_ptr + a] = value;
 
     Ok(DispatchAction::Continue)

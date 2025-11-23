@@ -13,16 +13,16 @@ use std::hash::{Hash, Hasher};
 /// Hash node for the hash part of the table
 /// Uses open addressing with chaining via next pointer
 #[derive(Clone)]
-struct Node {
-    key: LuaValue,
-    value: LuaValue,
+pub(crate) struct Node {
+    pub(crate) key: LuaValue,
+    pub(crate) value: LuaValue,
     /// Index of next node in chain, or -1 if end of chain
-    next: i32,
+    pub(crate) next: i32,
 }
 
 impl Node {
     #[inline]
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.key.is_nil()
     }
 }
@@ -34,12 +34,12 @@ impl Node {
 pub struct LuaTable {
     /// Array part: stores values for integer keys [1..array.len()]
     /// Only allocated when first integer key is set
-    array: Vec<LuaValue>,
+    pub(crate) array: Vec<LuaValue>,
 
     /// Hash part: open-addressed hash table with chaining
     /// Size is always a power of 2 (or 0)
     /// Only allocated when first non-array key is set
-    node: Vec<Node>,
+    pub(crate) node: Vec<Node>,
 
     /// Last free position in hash table (used for allocation)
     last_free: i32,
@@ -131,7 +131,8 @@ impl LuaTable {
                 return None;
             }
             if node.key == *key {
-                return Some(node.value.clone());
+                // LuaValue is Copy, no need to clone!
+                return Some(node.value);
             }
             if node.next < 0 {
                 return None;
@@ -376,7 +377,7 @@ impl LuaTable {
 
     /// Hash a key
     #[inline]
-    fn hash_key(&self, key: &LuaValue) -> usize {
+    pub(crate) fn hash_key(&self, key: &LuaValue) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         hasher.finish() as usize

@@ -615,6 +615,76 @@ impl LuaVM {
         }
     }
 
+    /// Fast table get - NO metatable support!
+    /// Use this for normal field access (GETFIELD, GETTABLE, GETI)
+    /// This is the correct behavior for Lua bytecode instructions
+    /// Only use table_get_with_meta when you explicitly need __index metamethod
+    #[inline(always)]
+    pub fn table_get(&self, lua_table_value: &LuaValue, key: &LuaValue) -> LuaValue {
+        // CRITICAL FAST PATH: Direct pointer access, no metatable check!
+        if let Some(ptr) = lua_table_value.as_table_ptr() {
+            let lua_table = unsafe { &*ptr };
+            
+            // OPTIMIZATION: Inline the borrow and raw_get to reduce overhead
+            unsafe {
+                let table = &*lua_table.as_ptr();
+                
+                // Fast path for integer keys
+                if let Some(i) = key.as_integer() {
+                    if i > 0 {
+                        let idx = (i - 1) as usize;
+                        if idx < table.array.len() {
+                            let val = table.array.get_unchecked(idx);
+                            if !val.is_nil() {
+                                return *val;
+                            }
+                        }
+                    }
+                }
+                
+                // Hash part lookup for string/other keys
+                if !table.node.is_empty() {
+                    // Use simplified inline hash to avoid Hasher allocation
+                    use std::hash::{Hash, Hasher};
+                    use std::collections::hash_map::DefaultHasher;
+                    
+                    let mut hasher = DefaultHasher::new();
+                    key.hash(&mut hasher);
+                    let hash = hasher.finish() as usize;
+                    
+                    let mask = table.node.len() - 1;
+                    let mut idx = (hash & mask) as usize;
+                    
+                    loop {
+                        let node = table.node.get_unchecked(idx);
+                        if node.is_empty() {
+                            break;
+                        }
+                        if node.key == *key {
+                            return node.value;
+                        }
+                        if node.next < 0 {
+                            break;
+                        }
+                        idx = node.next as usize;
+                    }
+                }
+            }
+            
+            return LuaValue::nil();
+        }
+        
+        // Fallback: ObjectPool lookup (rare case)
+        if let Some(table_id) = lua_table_value.as_table_id() {
+            if let Some(lua_table) = self.object_pool.get_table(table_id) {
+                let table = lua_table.borrow();
+                return table.raw_get(key).unwrap_or(LuaValue::nil());
+            }
+        }
+        
+        LuaValue::nil()
+    }
+
     /// Get value from table with metatable support (__index metamethod)
     /// Use this for GETTABLE, GETFIELD, GETI instructions
     /// For raw access without metamethods, use table_get_raw() instead
