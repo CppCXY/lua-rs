@@ -642,32 +642,10 @@ impl LuaVM {
                     }
                 }
                 
-                // Hash part lookup for string/other keys
-                if !table.node.is_empty() {
-                    // Use simplified inline hash to avoid Hasher allocation
-                    use std::hash::{Hash, Hasher};
-                    use std::collections::hash_map::DefaultHasher;
-                    
-                    let mut hasher = DefaultHasher::new();
-                    key.hash(&mut hasher);
-                    let hash = hasher.finish() as usize;
-                    
-                    let mask = table.node.len() - 1;
-                    let mut idx = (hash & mask) as usize;
-                    
-                    loop {
-                        let node = table.node.get_unchecked(idx);
-                        if node.is_empty() {
-                            break;
-                        }
-                        if node.key == *key {
-                            return node.value;
-                        }
-                        if node.next < 0 {
-                            break;
-                        }
-                        idx = node.next as usize;
-                    }
+                // Hash part lookup using HashMap's get()
+                // This is MUCH faster than HashTable with closure overhead!
+                if let Some(val) = table.hash.get(key) {
+                    return *val;
                 }
             }
             
