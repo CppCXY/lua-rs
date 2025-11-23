@@ -16,24 +16,7 @@ Current test status: **133 out of 133 tests passing (100%)** ✅
 
 ### Performance
 
-**Overall**: 30-80% of native Lua 5.4.6 performance
-
-**Highlights**:
-- 🏆 Hash tables: **198%** (2x faster than native!)
-- 🏆 string.gsub: **324%** (3.2x faster than native!)
-- ✅ String concatenation: **70%**
-- ✅ Table operations: **68%**
-- ✅ Array creation: **68%**
-- ✅ If-else control: **64%**
-- ✅ Vararg functions: **61%**
-- ✅ ipairs iteration: **57%**
-
-**Recent Fixes** (November 23, 2025):
-- ✅ Fixed critical function call register allocation bug
-- ✅ For loops with function calls now work correctly (no infinite loops)
-- ✅ Recursion fully functional (factorial, fibonacci)
-- ✅ Nested function calls work perfectly
-- ✅ All 133 tests passing (100% correctness)
+**Overall**:50-100% of native Lua 5.4.6 performance
 
 See detailed analysis: [Performance Report](PERFORMANCE_REPORT.md)
 

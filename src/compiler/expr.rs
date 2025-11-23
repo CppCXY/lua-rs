@@ -1059,6 +1059,12 @@ fn compile_binary_expr_to(
                     // Only compile left operand if we actually use immediate instruction
                     match op_kind {
                         BinaryOperator::OpAdd => {
+                            // CRITICAL: Protect freereg if dest specified
+                            if let Some(d) = dest {
+                                if c.freereg < d + 1 {
+                                    c.freereg = d + 1;
+                                }
+                            }
                             // Compile left operand first to get its register
                             let left_reg = compile_expr(c, &left)?;
                             // Use dest if provided, otherwise reuse left_reg
@@ -1075,6 +1081,11 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpSub => {
+                            if let Some(d) = dest {
+                                if c.freereg < d + 1 {
+                                    c.freereg = d + 1;
+                                }
+                            }
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
@@ -1238,6 +1249,11 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpShr => {
+                            if let Some(d) = dest {
+                                if c.freereg < d + 1 {
+                                    c.freereg = d + 1;
+                                }
+                            }
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use ShrI for immediate right shift
@@ -1253,6 +1269,11 @@ fn compile_binary_expr_to(
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpShl => {
+                            if let Some(d) = dest {
+                                if c.freereg < d + 1 {
+                                    c.freereg = d + 1;
+                                }
+                            }
                             let left_reg = compile_expr(c, &left)?;
                             let result_reg = dest.unwrap_or(left_reg);
                             // Lua 5.4: Use ShlI for immediate left shift
@@ -1331,6 +1352,12 @@ fn compile_binary_expr_to(
             match op_kind {
                 BinaryOperator::OpMul => {
                     let const_idx = add_constant_dedup(c, const_val);
+                    // CRITICAL: Protect freereg if dest specified
+                    if let Some(d) = dest {
+                        if c.freereg < d + 1 {
+                            c.freereg = d + 1;
+                        }
+                    }
                     let left_reg = compile_expr(c, &left)?;
                     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                     emit(
@@ -1351,6 +1378,12 @@ fn compile_binary_expr_to(
                 }
                 BinaryOperator::OpDiv => {
                     let const_idx = add_constant_dedup(c, const_val);
+                    // CRITICAL: Protect freereg if dest specified
+                    if let Some(d) = dest {
+                        if c.freereg < d + 1 {
+                            c.freereg = d + 1;
+                        }
+                    }
                     let left_reg = compile_expr(c, &left)?;
                     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                     emit(
@@ -1371,6 +1404,12 @@ fn compile_binary_expr_to(
                 }
                 BinaryOperator::OpMod => {
                     let const_idx = add_constant_dedup(c, const_val);
+                    // CRITICAL: Protect freereg if dest specified
+                    if let Some(d) = dest {
+                        if c.freereg < d + 1 {
+                            c.freereg = d + 1;
+                        }
+                    }
                     let left_reg = compile_expr(c, &left)?;
                     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                     emit(
@@ -1391,6 +1430,12 @@ fn compile_binary_expr_to(
                 }
                 BinaryOperator::OpPow => {
                     let const_idx = add_constant_dedup(c, const_val);
+                    // CRITICAL: Protect freereg if dest specified
+                    if let Some(d) = dest {
+                        if c.freereg < d + 1 {
+                            c.freereg = d + 1;
+                        }
+                    }
                     let left_reg = compile_expr(c, &left)?;
                     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                     emit(
@@ -1412,6 +1457,12 @@ fn compile_binary_expr_to(
                 BinaryOperator::OpIDiv if !is_float_lit => {
                     // IDiv only for integer constants
                     let const_idx = add_constant_dedup(c, const_val);
+                    // CRITICAL: Protect freereg if dest specified
+                    if let Some(d) = dest {
+                        if c.freereg < d + 1 {
+                            c.freereg = d + 1;
+                        }
+                    }
                     let left_reg = compile_expr(c, &left)?;
                     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
                     emit(
@@ -1438,12 +1489,18 @@ fn compile_binary_expr_to(
     }
 
     // Fall back to normal two-operand instruction
+    // CRITICAL: If dest is specified, protect freereg BEFORE compiling operands
+    // This prevents nested expressions from allocating temps that conflict with dest
+    if let Some(d) = dest {
+        if c.freereg < d + 1 {
+            c.freereg = d + 1;
+        }
+    }
+    
     // Compile left and right first to get their registers
     let left_reg = compile_expr(c, &left)?;
     
-    // CRITICAL: Ensure freereg is at least left_reg+1 to prevent right expression
-    // from overwriting left's register during nested compilation
-    // This is essential for expressions like: fib(n-1) + fib(n-2)
+    // Ensure right doesn't overwrite left
     if c.freereg <= left_reg {
         c.freereg = left_reg + 1;
     }
@@ -2004,8 +2061,10 @@ pub fn compile_call_expr_with_returns_and_dest(
     // This prevents nested call expressions from overwriting earlier argument registers
     let num_fixed_args = arg_exprs.len();
     let args_end = args_start + num_fixed_args as u32;
-    if c.freereg < args_end {
-        c.freereg = args_end;
+    
+    // Allocate all argument registers upfront
+    while c.freereg < args_end {
+        alloc_register(c);
     }
 
     // CRITICAL: Compile arguments directly to their target positions
@@ -2014,6 +2073,12 @@ pub fn compile_call_expr_with_returns_and_dest(
     for (i, arg_expr) in arg_exprs.iter().enumerate() {
         let is_last = i == arg_exprs.len() - 1;
         let arg_dest = args_start + i as u32;
+
+        // CRITICAL: Before compiling each argument, ensure freereg is beyond ALL argument slots
+        // This prevents expressions from allocating temps that conflict with argument positions
+        if c.freereg < args_end {
+            c.freereg = args_end;
+        }
 
         // Ensure max_stack_size can accommodate this register
         if arg_dest as usize >= c.chunk.max_stack_size {
@@ -2104,8 +2169,20 @@ pub fn compile_call_expr_with_returns_and_dest(
                 c.freereg = call_args_start;
 
                 let mut call_arg_regs = Vec::new();
-                for call_arg in call_arg_exprs.iter() {
-                    let arg_reg = compile_expr(c, call_arg)?;
+                // CRITICAL: Allocate all argument registers upfront to prevent conflicts
+                let num_call_args = call_arg_exprs.len();
+                let call_args_end = call_args_start + num_call_args as u32;
+                while c.freereg < call_args_end {
+                    alloc_register(c);
+                }
+                
+                for (j, call_arg) in call_arg_exprs.iter().enumerate() {
+                    let call_arg_dest = call_args_start + j as u32;
+                    // Reset freereg before each argument to protect argument slots
+                    if c.freereg < call_args_end {
+                        c.freereg = call_args_end;
+                    }
+                    let arg_reg = compile_expr_to(c, call_arg, Some(call_arg_dest))?;
                     call_arg_regs.push(arg_reg);
                 }
 
@@ -2144,10 +2221,9 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
 
         // Compile argument directly to its target position
-        // SPECIAL CASE: If argument is a function call, don't pass dest
-        // because function calls need their own register space
         let arg_reg = if matches!(arg_expr, LuaExpr::CallExpr(_)) {
-            let call_reg = compile_expr_to(c, arg_expr, None)?;
+            // Pass dest to allow nested expressions to use correct registers
+            let call_reg = compile_expr_to(c, arg_expr, Some(arg_dest))?;
             // Move result to target position if needed
             if call_reg != arg_dest {
                 ensure_register(c, arg_dest);

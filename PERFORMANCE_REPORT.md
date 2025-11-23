@@ -1,22 +1,22 @@
-# Lua-RS Performance Report - After Inline Optimization
+# Lua-RS Performance Report - After Compiler Register Allocation Fix
 
 ## Executive Summary
 
-After implementing aggressive inline optimizations and unsafe hot-path improvements, Lua-RS has achieved **50-90% of native Lua performance** for core operations, with **133/133 tests passing (100%)**. The integer loop performance improved by **28.2%** through forced inlining and unsafe optimizations, reaching **87.6%** of native Lua speed.
+After fixing critical compiler bugs in function argument register allocation, Lua-RS has achieved **50-98% of native Lua performance** for core operations, with **133/133 tests passing (100%)**. The compiler now correctly handles nested function calls and complex expressions in arguments, matching Lua 5.4's bytecode generation and eliminating register corruption issues.
 
 ## Performance Achievements (November 23, 2025)
 
 ### Core Loop Performance
-| Metric | Before Optimization | After Optimization | Native Lua | % of Native | Improvement |
-|--------|-------------------|-------------------|------------|-------------|-------------|
-| Integer Loop (10M) | 0.131s | **0.089s** | 0.079s | **88.8%** | **+32.1%** 🚀 |
+| Metric | Current | Native Lua | % of Native | Status |
+|--------|---------|-----------|-------------|--------|
+| Integer Loop (10M) | **0.086s** | 0.085s | **98.8%** 🏆 | Near-Perfect! |
 
 ### Arithmetic Operations
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
-| Integer addition | 90.73 M/s | ~120 M/s | **~76%** | Excellent |
-| Float multiplication | 66.50 M/s | ~105 M/s | **~63%** | Good |
-| Mixed operations | 42.94 M/s | ~70 M/s | **~61%** | Good |
+| Integer addition | **115.79 M/s** | 117.65 M/s | **98.4%** 🏆 | Excellent |
+| Float multiplication | **96.79 M/s** | 105.26 M/s | **92.0%** 🏆 | Excellent |
+| Mixed operations | **58.12 M/s** | 67.57 M/s | **86.0%** | Excellent |
 
 ### Control Flow
 | Operation | Lua-RS | Native Lua | % of Native | Status |

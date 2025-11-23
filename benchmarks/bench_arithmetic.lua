@@ -11,7 +11,7 @@ for i = 1, iterations do
     sum = sum + i
 end
 local elapsed = os.clock() - start
-print(string.format("Integer addition: %.3f seconds (%.2f M ops/sec)", elapsed, iterations / elapsed / 1000000))
+print(string.format("Integer addition: sum: %d %.3f seconds (%.2f M ops/sec)", sum, elapsed, iterations / elapsed / 1000000))
 
 -- Floating point
 start = os.clock()
@@ -20,7 +20,7 @@ for i = 1, iterations do
     result = result * 1.0000001
 end
 elapsed = os.clock() - start
-print(string.format("Float multiplication: %.3f seconds (%.2f M ops/sec)", elapsed, iterations / elapsed / 1000000))
+print(string.format("Float multiplication: result: %.6f %.3f seconds (%.2f M ops/sec)", result, elapsed, iterations / elapsed / 1000000))
 
 -- Mixed operations
 start = os.clock()
@@ -31,4 +31,4 @@ for i = 1, iterations do
     z = y - 3
 end
 elapsed = os.clock() - start
-print(string.format("Mixed operations: %.3f seconds (%.2f M ops/sec)", elapsed, iterations / elapsed / 1000000))
+print(string.format("Mixed operations: z: %d %.3f seconds (%.2f M ops/sec)", z, elapsed, iterations / elapsed / 1000000))
