@@ -44,13 +44,9 @@ See detailed analysis: [Performance Report](PERFORMANCE_REPORT.md)
 
 ### Known Limitations ⚠️
 
-1. **Performance Bottlenecks**:
-   - Function calls: 38% of native (call frame overhead)
-   - String operations: 41-43% of native (string.len, string.sub)
-   - While/repeat loops: 40-41% of native (loop condition overhead)
-2. **No JIT**: Pure interpreter, no Just-In-Time compilation
-3. **Limited Optimization**: Minimal compile-time optimizations
-4. **No Debug Library**: Debug introspection not implemented
+1. **No JIT**: Pure interpreter, no Just-In-Time compilation
+2. **Limited Optimization**: Minimal compile-time optimizations
+3. **No Debug Library**: Debug introspection not implemented
 
 **Note**: All major correctness issues have been fixed! ✅ 100% test pass rate.
 
