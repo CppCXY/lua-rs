@@ -586,8 +586,23 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
 
             // Compile arguments to consecutive registers after function
+            let mut last_is_vararg_all_out = false;
             for (i, arg) in args.iter().enumerate() {
                 let target_reg = reserved_regs[i + 1];
+                let is_last_arg = i == args.len() - 1;
+
+                // Check if last argument is ... (vararg)
+                if is_last_arg {
+                    if let LuaExpr::LiteralExpr(lit) = arg {
+                        if matches!(lit.get_literal(), Some(emmylua_parser::LuaLiteralToken::Dots(_))) {
+                            // Vararg as last argument: use "all out" mode
+                            emit(c, Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0));
+                            last_is_vararg_all_out = true;
+                            continue;
+                        }
+                    }
+                }
+
                 let arg_reg = compile_expr(c, &arg)?;
                 if arg_reg != target_reg {
                     emit_move(c, target_reg, arg_reg);
@@ -595,11 +610,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
 
             // Emit TailCall instruction
-            // A = function register, B = num_args + 1
+            // A = function register, B = num_args + 1 (or 0 if last arg is vararg "all out")
             let num_args = args.len();
+            let b_param = if last_is_vararg_all_out {
+                0 // B=0: all in (variable number of args from vararg)
+            } else {
+                (num_args + 1) as u32
+            };
             emit(
                 c,
-                Instruction::encode_abc(OpCode::TailCall, base_reg, (num_args + 1) as u32, 0),
+                Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
             );
 
             return Ok(());

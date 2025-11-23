@@ -12,3 +12,6 @@ pub mod test_utf8;
 pub mod test_xpcall_debug;
 pub mod test_metamethods;
 pub mod test_syntax;
+// pub mod test_closures;  // Disabled - upvalue handling needs work
+pub mod test_functions;
+pub mod test_advanced_calls;

@@ -941,12 +941,18 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     // Get function from R[A]
     let func = vm.register_stack[base + a];
-
+    
     // Determine argument count
     let arg_count = if b == 0 {
         // Use all values from R[A+1] to top
+        // IMPORTANT: frame.top is RELATIVE to frame.base_ptr
         let frame = vm.current_frame();
-        frame.top - (base + a + 1)
+        let args_start_rel = a + 1; // Relative to base
+        if frame.top > args_start_rel {
+            frame.top - args_start_rel
+        } else {
+            0 // No arguments
+        }
     } else {
         b - 1
     };
@@ -957,50 +963,103 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         args.push(vm.register_stack[base + a + 1 + i]);
     }
 
-    // Pop current frame (tail call optimization)
-    let old_base = frame.base_ptr;
-    let return_count = frame.get_num_results();
-    vm.frames.pop();
-
-    // Get max_stack_size from function
-    let max_stack_size = match func.kind() {
+    // Check if function is Lua or C function
+    match func.kind() {
         LuaValueKind::Function => {
-            // OPTIMIZATION: Direct pointer access
+            // Lua function: tail call optimization
+            
             let func_ptr = func.as_function_ptr()
                 .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
-            unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+            let max_stack_size = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
+
+            // Pop current frame (tail call optimization)
+            let old_base = frame.base_ptr;
+            let return_count = frame.get_num_results();
+            vm.frames.pop();
+
+            // Create new frame at same location
+            let frame_id = vm.next_frame_id;
+            vm.next_frame_id += 1;
+
+            vm.ensure_stack_capacity(old_base + max_stack_size);
+
+            // Copy arguments to frame base
+            for (i, arg) in args.iter().enumerate() {
+                vm.register_stack[old_base + i] = *arg;
+            }
+
+            let new_frame = LuaCallFrame::new_lua_function(
+                frame_id,
+                func,
+                old_base,
+                max_stack_size,
+                0,
+                return_count,
+            );
+            vm.frames.push(new_frame);
+
+            Ok(DispatchAction::Call)
         }
-        LuaValueKind::CFunction => 256,
+        LuaValueKind::CFunction => {
+            // C function: cannot use tail call optimization
+            // Convert to regular call
+            
+            // Get return information before function call
+            let return_count = frame.get_num_results();
+            let result_reg = frame.get_result_reg();
+            let caller_base = frame.base_ptr;
+            
+            let c_func = func.as_cfunction()
+                .ok_or_else(|| LuaError::RuntimeError("Invalid C function".to_string()))?;
+
+            // Store function and arguments in registers for C function call
+            vm.register_stack[base + a] = func;
+            for (i, arg) in args.iter().enumerate() {
+                vm.register_stack[base + a + 1 + i] = *arg;
+            }
+
+            // Update frame top to include all arguments
+            vm.current_frame_mut().top = a + 1 + args.len();
+
+            // Call C function
+            let result = c_func(vm)?;
+
+            // Pop current frame
+            vm.frames.pop();
+
+            // Write return values if there's a caller frame
+            if !vm.frames.is_empty() {
+                let vals = result.all_values();
+                let count = if return_count == usize::MAX {
+                    vals.len()
+                } else {
+                    vals.len().min(return_count)
+                };
+                
+                // Write return values
+                for i in 0..count {
+                    vm.register_stack[caller_base + result_reg + i] = vals[i];
+                }
+                
+                // Fill remaining expected values with nil
+                if return_count != usize::MAX {
+                    for i in count..return_count {
+                        vm.register_stack[caller_base + result_reg + i] = LuaValue::nil();
+                    }
+                }
+
+                // No need to restore top, it will be handled by the next instruction
+            }
+
+            Ok(DispatchAction::Continue)
+        }
         _ => {
-            return Err(LuaError::RuntimeError(format!(
+            Err(LuaError::RuntimeError(format!(
                 "attempt to call a {} value",
                 func.type_name()
-            )));
+            )))
         }
-    };
-
-    // Create new frame at same location
-    let frame_id = vm.next_frame_id;
-    vm.next_frame_id += 1;
-
-    vm.ensure_stack_capacity(old_base + max_stack_size);
-
-    // Copy arguments to frame base
-    for (i, arg) in args.iter().enumerate() {
-        vm.register_stack[old_base + i] = *arg;
     }
-
-    let new_frame = LuaCallFrame::new_lua_function(
-        frame_id,
-        func,
-        old_base,
-        max_stack_size,
-        0,
-        return_count,
-    );
-    vm.frames.push(new_frame);
-
-    Ok(DispatchAction::Call)
 }
 
 /// RETURN0
@@ -1012,9 +1071,21 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
 
     vm.return_values.clear();
     
-    // Update caller's top to indicate 0 return values
+    // IMPORTANT: For RETURN0, we need to fill the result register(s) with nil
+    // if the caller expects return values (num_results > 0)
     if !vm.frames.is_empty() {
         let result_reg = frame.get_result_reg();
+        let num_results = frame.get_num_results();
+        let caller_base = vm.current_frame().base_ptr;
+        
+        // Fill expected return values with nil
+        if num_results != usize::MAX && num_results > 0 {
+            for i in 0..num_results {
+                vm.register_stack[caller_base + result_reg + i] = LuaValue::nil();
+            }
+        }
+        
+        // Update caller's top to indicate 0 return values (for variable returns)
         vm.current_frame_mut().top = result_reg; // No return values, so top = result_reg + 0
     }
     

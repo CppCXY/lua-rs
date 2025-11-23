@@ -2140,6 +2140,19 @@ pub fn compile_call_expr_with_returns_and_dest(
             c.chunk.max_stack_size = (arg_dest + 1) as usize;
         }
 
+        // OPTIMIZATION: If last argument is ... (vararg), use "all out" mode
+        if is_last {
+            if let LuaExpr::LiteralExpr(lit_expr) = arg_expr {
+                if matches!(lit_expr.get_literal(), Some(LuaLiteralToken::Dots(_))) {
+                    // Vararg as last argument: VARARG with C=0 (all out)
+                    emit(c, Instruction::encode_abc(OpCode::Vararg, arg_dest, 0, 0));
+                    arg_regs.push(arg_dest);
+                    last_arg_is_call_all_out = true;
+                    break;
+                }
+            }
+        }
+
         // OPTIMIZATION: If last argument is a call, use "all out" mode
         // Use recursive compile_call_expr_with_returns to support method calls (SELF instruction)
         if is_last && matches!(arg_expr, LuaExpr::CallExpr(_)) {
