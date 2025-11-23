@@ -312,6 +312,16 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 c,
                 Instruction::encode_abc(OpCode::Add, result_reg, left_reg, right_reg),
             );
+            emit(
+                c,
+                Instruction::create_abck(
+                    OpCode::MmBin,
+                    left_reg,
+                    right_reg,
+                    TagMethod::Add.as_u32(),
+                    false,
+                ),
+            );
         }
         BinaryOperator::OpSub => {
             result_reg = if can_reuse_left {
@@ -322,6 +332,16 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             emit(
                 c,
                 Instruction::encode_abc(OpCode::Sub, result_reg, left_reg, right_reg),
+            );
+            emit(
+                c,
+                Instruction::create_abck(
+                    OpCode::MmBin,
+                    left_reg,
+                    right_reg,
+                    TagMethod::Sub.as_u32(),
+                    false,
+                ),
             );
         }
         BinaryOperator::OpMul => {
@@ -352,6 +372,16 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                     c,
                     Instruction::encode_abc(OpCode::Mul, result_reg, left_reg, right_reg),
                 );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBin,
+                        left_reg,
+                        right_reg,
+                        TagMethod::Mul.as_u32(),
+                        false,
+                    ),
+                );
             }
         }
         BinaryOperator::OpDiv => {
@@ -381,6 +411,16 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                     c,
                     Instruction::encode_abc(OpCode::Div, result_reg, left_reg, right_reg),
                 );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBin,
+                        left_reg,
+                        right_reg,
+                        TagMethod::Div.as_u32(),
+                        false,
+                    ),
+                );
             }
         }
         BinaryOperator::OpIDiv => {
@@ -403,6 +443,16 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::IDiv, result_reg, left_reg, right_reg),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBin,
+                        left_reg,
+                        right_reg,
+                        TagMethod::IDiv.as_u32(),
+                        false,
+                    ),
                 );
             }
         }

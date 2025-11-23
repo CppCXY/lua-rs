@@ -84,25 +84,31 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    // CRITICAL: Read all values BEFORE any metamethod calls
+    // because metamethods can modify the register stack
+    let (table_value, key_value, set_value) = {
+        let frame = vm.current_frame();
+        let base_ptr = frame.base_ptr;
 
-    let table = vm.register_stack[base_ptr + a];
-    let key = vm.register_stack[base_ptr + b];
-    
-    let value = if k {
-        // OPTIMIZATION: Get constant directly
-        let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-            LuaError::RuntimeError("Not a Lua function".to_string())
-        })?;
-        unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
-            LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-        })? }
-    } else {
-        vm.register_stack[base_ptr + c]
+        let table = vm.register_stack[base_ptr + a];
+        let key = vm.register_stack[base_ptr + b];
+        
+        let value = if k {
+            // OPTIMIZATION: Get constant directly
+            let func_ptr = frame.get_function_ptr().ok_or_else(|| {
+                LuaError::RuntimeError("Not a Lua function".to_string())
+            })?;
+            unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+                LuaError::RuntimeError(format!("Invalid constant index: {}", c))
+            })? }
+        } else {
+            vm.register_stack[base_ptr + c]
+        };
+        
+        (table, key, value)
     };
 
-    vm.table_set_with_meta(table, key, value)?;
+    vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(DispatchAction::Continue)
 }
@@ -137,24 +143,30 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    // CRITICAL: Read all values BEFORE any metamethod calls
+    // because metamethods can modify the register stack
+    let (table_value, key_value, set_value) = {
+        let frame = vm.current_frame();
+        let base_ptr = frame.base_ptr;
 
-    let table = vm.register_stack[base_ptr + a];
-    let key = crate::LuaValue::integer(b as i64);
-    
-    let value = if k {
-        let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-            LuaError::RuntimeError("Not a Lua function".to_string())
-        })?;
-        unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
-            LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-        })? }
-    } else {
-        vm.register_stack[base_ptr + c]
+        let table = vm.register_stack[base_ptr + a];
+        let key = crate::LuaValue::integer(b as i64);
+        
+        let value = if k {
+            let func_ptr = frame.get_function_ptr().ok_or_else(|| {
+                LuaError::RuntimeError("Not a Lua function".to_string())
+            })?;
+            unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+                LuaError::RuntimeError(format!("Invalid constant index: {}", c))
+            })? }
+        } else {
+            vm.register_stack[base_ptr + c]
+        };
+        
+        (table, key, value)
     };
 
-    vm.table_set_with_meta(table, key, value)?;
+    vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(DispatchAction::Continue)
 }
@@ -203,27 +215,33 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    
-    let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-        LuaError::RuntimeError("Not a Lua function".to_string())
-    })?;
-    let key = unsafe { (*func_ptr).borrow().chunk.constants.get(b).copied().ok_or_else(|| {
-        LuaError::RuntimeError(format!("Invalid constant index: {}", b))
-    })? };
+    // CRITICAL: Read all values BEFORE any metamethod calls
+    // because metamethods can modify the register stack
+    let (table_value, key_value, set_value) = {
+        let frame = vm.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        let func_ptr = frame.get_function_ptr().ok_or_else(|| {
+            LuaError::RuntimeError("Not a Lua function".to_string())
+        })?;
+        let key = unsafe { (*func_ptr).borrow().chunk.constants.get(b).copied().ok_or_else(|| {
+            LuaError::RuntimeError(format!("Invalid constant index: {}", b))
+        })? };
 
-    let table = vm.register_stack[base_ptr + a];
-    
-    let value = if k {
-        unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
-            LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-        })? }
-    } else {
-        vm.register_stack[base_ptr + c]
+        let table = vm.register_stack[base_ptr + a];
+        
+        let value = if k {
+            unsafe { (*func_ptr).borrow().chunk.constants.get(c).copied().ok_or_else(|| {
+                LuaError::RuntimeError(format!("Invalid constant index: {}", c))
+            })? }
+        } else {
+            vm.register_stack[base_ptr + c]
+        };
+        
+        (table, key, value)
     };
 
-    vm.table_set_with_meta(table, key, value)?;
+    vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(DispatchAction::Continue)
 }
@@ -269,34 +287,40 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    
-    let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-        LuaError::RuntimeError("Not a Lua function".to_string())
-    })?;
-    let func = unsafe { &*func_ptr };
-    let func_ref = func.borrow();
-    
-    let key = func_ref.chunk.constants.get(b).copied().ok_or_else(|| {
-        LuaError::RuntimeError(format!("Invalid constant index: {}", b))
-    })?;
+    // CRITICAL: Read all values BEFORE any metamethod calls
+    // because metamethods can modify the register stack
+    let (table_value, key_value, set_value) = {
+        let frame = vm.current_frame();
+        let base_ptr = frame.base_ptr;
+        
+        let func_ptr = frame.get_function_ptr().ok_or_else(|| {
+            LuaError::RuntimeError("Not a Lua function".to_string())
+        })?;
+        let func = unsafe { &*func_ptr };
+        let func_ref = func.borrow();
+        
+        let key = func_ref.chunk.constants.get(b).copied().ok_or_else(|| {
+            LuaError::RuntimeError(format!("Invalid constant index: {}", b))
+        })?;
 
-    let upvalue = func_ref.upvalues.get(a).ok_or_else(|| {
-        LuaError::RuntimeError(format!("Invalid upvalue index: {}", a))
-    })?;
+        let upvalue = func_ref.upvalues.get(a).ok_or_else(|| {
+            LuaError::RuntimeError(format!("Invalid upvalue index: {}", a))
+        })?;
 
-    let table = upvalue.get_value(&vm.frames, &vm.register_stack);
-    
-    let value = if k {
-        func_ref.chunk.constants.get(c).copied().ok_or_else(|| {
-            LuaError::RuntimeError(format!("Invalid constant index: {}", c))
-        })?
-    } else {
-        vm.register_stack[base_ptr + c]
+        let table = upvalue.get_value(&vm.frames, &vm.register_stack);
+        
+        let value = if k {
+            func_ref.chunk.constants.get(c).copied().ok_or_else(|| {
+                LuaError::RuntimeError(format!("Invalid constant index: {}", c))
+            })?
+        } else {
+            vm.register_stack[base_ptr + c]
+        };
+        
+        (table, key, value)
     };
 
-    vm.table_set_with_meta(table, key, value)?;
+    vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(DispatchAction::Continue)
 }
