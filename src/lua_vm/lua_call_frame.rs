@@ -38,9 +38,6 @@ const FLAG_IS_PROTECTED: u8 = 1 << 1;
 // 特殊值：num_results = 0xFFFF 表示接受多个返回值
 const NUM_RESULTS_MULTIPLE: u16 = 0xFFFF;
 
-// 特殊值：result_reg = 0xFFFE 表示不写回register (只用return_values)
-const RESULT_REG_NO_WRITEBACK: u16 = 0xFFFE;
-
 impl LuaCallFrame {
     #[inline]
     pub fn new_lua_function(

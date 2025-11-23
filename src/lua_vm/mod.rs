@@ -1690,7 +1690,6 @@ impl LuaVM {
         eprintln!("[xpcall] initial_frame_count: {}", initial_frame_count);
 
         let result = self.call_function_internal(func, args);
-        eprintln!("[xpcall] call_function_internal result: {:?}", result.is_ok());
 
         self.error_handler = old_handler;
 
@@ -1794,13 +1793,26 @@ impl LuaVM {
                 let dummy_func_id = self.object_pool.create_function(dummy_func);
                 let dummy_func_value = LuaValue::function_id(dummy_func_id);
 
+                // Use caller's max_stack as safe position
+                let (caller_base, caller_max_stack) = if let Some(caller_frame) = self.frames.last() {
+                    let max_stack = if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
+                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                    } else {
+                        256
+                    };
+                    (caller_frame.base_ptr, max_stack)
+                } else {
+                    (0, 256)
+                };
+                let safe_result_reg = caller_max_stack;
+                
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     dummy_func_value,
                     new_base,
                     stack_size,
-                    0,
-                    0,
+                    safe_result_reg,
+                    usize::MAX,
                 );
 
                 self.frames.push(temp_frame);
@@ -1860,11 +1872,19 @@ impl LuaVM {
                     }
                 }
 
-                // CRITICAL FIX: Use NO_WRITEBACK flag for internal metamethod calls
-                // This prevents return values from overwriting caller's registers
-                // The return values will only be available in self.return_values
-                const RESULT_REG_NO_WRITEBACK: usize = 0xFFFE;
-                let safe_result_reg = RESULT_REG_NO_WRITEBACK;
+                // CRITICAL FIX: Write return values beyond caller's max_stack
+                // to avoid overwriting any caller registers (including temporaries)
+                let (caller_base, caller_max_stack) = if let Some(caller_frame) = self.frames.last() {
+                    let max_stack = if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
+                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                    } else {
+                        256 // Fallback for non-Lua frames
+                    };
+                    (caller_frame.base_ptr, max_stack)
+                } else {
+                    (0, 256)
+                };
+                let safe_result_reg = caller_max_stack; // Beyond caller's register range
 
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
