@@ -1061,9 +1061,8 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpAdd => {
                             // Compile left operand first to get its register
                             let left_reg = compile_expr(c, &left)?;
-                            // If dest is specified and different from left_reg, emit MOVE after operation
-                            // Otherwise, reuse left_reg as result
-                            let result_reg = left_reg;
+                            // Use dest if provided, otherwise reuse left_reg
+                            let result_reg = dest.unwrap_or(left_reg);
                             emit(
                                 c,
                                 Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm),
@@ -1073,14 +1072,6 @@ fn compile_binary_expr_to(
                                 c,
                                 Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 6, false),
                             );
-
-                            // If caller wants result in a different register, emit MOVE
-                            if let Some(dest_reg) = dest {
-                                if dest_reg != result_reg {
-                                    emit_move(c, dest_reg, result_reg);
-                                    return Ok(dest_reg);
-                                }
-                            }
                             return Ok(result_reg);
                         }
                         BinaryOperator::OpSub => {

@@ -204,6 +204,7 @@ pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> Result<DispatchAction, Lua
 
 /// MOVE A B
 /// R[A] := R[B]
+#[inline(always)]
 pub fn exec_move(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
