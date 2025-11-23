@@ -181,7 +181,30 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         (*reg_base.add(a), *reg_base.add(b))
     };
 
-    let is_equal = left == right;
+    let mut is_equal = left == right;
+    
+    // If not equal by value, try __eq metamethod
+    // IMPORTANT: Both operands must have the SAME __eq metamethod (Lua 5.4 spec)
+    if !is_equal && (left.is_table() || right.is_table()) {
+        let mm_key = vm.create_string("__eq");
+        
+        let left_mt = vm.table_get_metatable(&left);
+        let right_mt = vm.table_get_metatable(&right);
+        
+        if let (Some(lmt), Some(rmt)) = (left_mt, right_mt) {
+            let left_mm = vm.table_get_with_meta(&lmt, &mm_key);
+            let right_mm = vm.table_get_with_meta(&rmt, &mm_key);
+            
+            // Both must have __eq and they must be the same function
+            if let (Some(lmm), Some(rmm)) = (left_mm, right_mm) {
+                if !lmm.is_nil() && lmm == rmm {
+                    if let Some(result) = vm.call_metamethod(&lmm, &[left, right])? {
+                        is_equal = !result.is_nil() && result.as_bool().unwrap_or(true);
+                    }
+                }
+            }
+        }
+    }
     
     // If (left == right) != k, skip next instruction
     if is_equal != k {
@@ -215,19 +238,55 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let is_less = if (left_tag & TYPE_MASK) == TAG_INTEGER && (right_tag & TYPE_MASK) == TAG_INTEGER {
         // Fast integer path - compare secondary values directly
         (left.secondary as i64) < (right.secondary as i64)
+    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
+        l < r
+    } else if left.is_string() && right.is_string() {
+        left < right
     } else {
-        // Fallback to method calls for float/string
-        if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-            l < r
-        } else if left.is_string() && right.is_string() {
-            left < right
-        } else {
+        // Try __lt metamethod
+        let mm_key = vm.create_string("__lt");
+        let mut found_metamethod = false;
+        
+        if let Some(mt) = vm.table_get_metatable(&left) {
+            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+                if !metamethod.is_nil() {
+                    if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
+                        let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
+                        if is_less_result != k {
+                            vm.current_frame_mut().pc += 1;
+                        }
+                        return Ok(DispatchAction::Continue);
+                    }
+                    found_metamethod = true;
+                }
+            }
+        }
+        
+        if !found_metamethod {
+            if let Some(mt) = vm.table_get_metatable(&right) {
+                if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+                    if !metamethod.is_nil() {
+                        if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
+                            let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
+                            if is_less_result != k {
+                                vm.current_frame_mut().pc += 1;
+                            }
+                            return Ok(DispatchAction::Continue);
+                        }
+                        found_metamethod = true;
+                    }
+                }
+            }
+        }
+        
+        if !found_metamethod {
             return Err(LuaError::RuntimeError(format!(
                 "attempt to compare {} with {}",
                 left.type_name(),
                 right.type_name()
             )));
         }
+        return Ok(DispatchAction::Continue);
     };
     
     if is_less != k {
@@ -262,11 +321,89 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     } else if left.is_string() && right.is_string() {
         left <= right
     } else {
-        return Err(LuaError::RuntimeError(format!(
-            "attempt to compare {} with {}",
-            left.type_name(),
-            right.type_name()
-        )));
+        // Try __le metamethod first
+        let mm_key_le = vm.create_string("__le");
+        let mut found_metamethod = false;
+        
+        if let Some(mt) = vm.table_get_metatable(&left) {
+            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key_le) {
+                if !metamethod.is_nil() {
+                    if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
+                        let is_le_result = !result.is_nil() && result.as_bool().unwrap_or(true);
+                        if is_le_result != k {
+                            vm.current_frame_mut().pc += 1;
+                        }
+                        return Ok(DispatchAction::Continue);
+                    }
+                    found_metamethod = true;
+                }
+            }
+        }
+        
+        if !found_metamethod {
+            if let Some(mt) = vm.table_get_metatable(&right) {
+                if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key_le) {
+                    if !metamethod.is_nil() {
+                        if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
+                            let is_le_result = !result.is_nil() && result.as_bool().unwrap_or(true);
+                            if is_le_result != k {
+                                vm.current_frame_mut().pc += 1;
+                            }
+                            return Ok(DispatchAction::Continue);
+                        }
+                        found_metamethod = true;
+                    }
+                }
+            }
+        }
+        
+        // If __le not found, try __lt and compute !(b < a)
+        if !found_metamethod {
+            let mm_key_lt = vm.create_string("__lt");
+            
+            if let Some(mt) = vm.table_get_metatable(&right) {
+                if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key_lt) {
+                    if !metamethod.is_nil() {
+                        if let Some(result) = vm.call_metamethod(&metamethod, &[right, left])? {
+                            let is_gt_result = !result.is_nil() && result.as_bool().unwrap_or(true);
+                            let is_le_result = !is_gt_result; // a <= b is !(b < a)
+                            if is_le_result != k {
+                                vm.current_frame_mut().pc += 1;
+                            }
+                            return Ok(DispatchAction::Continue);
+                        }
+                        found_metamethod = true;
+                    }
+                }
+            }
+            
+            if !found_metamethod {
+                if let Some(mt) = vm.table_get_metatable(&left) {
+                    if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key_lt) {
+                        if !metamethod.is_nil() {
+                            if let Some(result) = vm.call_metamethod(&metamethod, &[right, left])? {
+                                let is_gt_result = !result.is_nil() && result.as_bool().unwrap_or(true);
+                                let is_le_result = !is_gt_result;
+                                if is_le_result != k {
+                                    vm.current_frame_mut().pc += 1;
+                                }
+                                return Ok(DispatchAction::Continue);
+                            }
+                            found_metamethod = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if !found_metamethod {
+            return Err(LuaError::RuntimeError(format!(
+                "attempt to compare {} with {}",
+                left.type_name(),
+                right.type_name()
+            )));
+        }
+        return Ok(DispatchAction::Continue);
     };
     
     if is_less_or_equal != k {

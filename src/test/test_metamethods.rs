@@ -337,8 +337,9 @@ fn test_eq_metamethod() {
     let result = vm.execute_string(r#"
         local a = {val = 5}
         local b = {val = 5}
-        setmetatable(a, {__eq = function(x, y) return x.val == y.val end})
-        setmetatable(b, {__eq = function(x, y) return x.val == y.val end})
+        local mt = {__eq = function(x, y) return x.val == y.val end}
+        setmetatable(a, mt)
+        setmetatable(b, mt)
         assert(a == b)
     "#);
     assert!(result.is_ok());
