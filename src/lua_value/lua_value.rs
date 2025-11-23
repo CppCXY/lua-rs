@@ -51,8 +51,6 @@ pub const VALUE_NIL: u64 = TAG_NIL;
 
 // NaN detection and float range
 pub const NAN_BASE: u64 = 0x7FF8_0000_0000_0000; // Start of NaN space where we put tags
-pub const NEGATIVE_ZERO: u64 = 0x8000_0000_0000_0000; // Start of negative numbers
-
 // Masks for ID extraction (low 32 bits)
 pub const ID_MASK: u64 = 0x0000_0000_FFFF_FFFF;
 pub const TYPE_MASK: u64 = 0xFFFF_0000_0000_0000; // High 16 bits for type

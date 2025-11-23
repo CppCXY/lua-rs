@@ -4,6 +4,7 @@
 
 /// Expression kind - determines how the expression value is represented
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(unused)]
 pub enum ExpKind {
     /// No value (void expression)
     VVoid,
@@ -56,6 +57,7 @@ pub struct IndexInfo {
 #[derive(Debug, Clone, Copy)]
 pub struct VarInfo {
     pub ridx: u32,   // Register index
+    #[allow(unused)]
     pub vidx: usize, // Variable index in locals array
 }
 
