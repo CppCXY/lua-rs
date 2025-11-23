@@ -307,13 +307,26 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     } else if let Some(f) = value.as_number() {
         LuaValue::number(-f)
     } else {
-        // Let MMBIN handle metamethod
-        return Ok(DispatchAction::Continue);
+        // Try metamethod
+        let mm_key = vm.create_string("__unm");
+        if let Some(mt) = vm.table_get_metatable(&value) {
+            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+                if !metamethod.is_nil() {
+                    let result = vm.call_metamethod(&metamethod, &[value])?
+                        .unwrap_or(LuaValue::nil());
+                    vm.register_stack[base_ptr + a] = result;
+                    return Ok(DispatchAction::Continue);
+                }
+            }
+        }
+        return Err(LuaError::RuntimeError(format!(
+            "attempt to perform arithmetic on {}",
+            value.type_name()
+        )));
     };
 
     vm.register_stack[base_ptr + a] = result;
-    // Skip MMBIN if successful
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Continue)
 }
 
 // ============ Arithmetic Immediate Instructions ============
@@ -975,12 +988,10 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let left = vm.register_stack[base_ptr + b];
 
-    let l_int = left.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            left.type_name()
-        ))
-    })?;
+    let l_int = match left.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBINI handle metamethod
+    };
 
     let result = if sc >= 0 {
         LuaValue::integer(l_int >> (sc & 63))
@@ -1003,12 +1014,10 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let right = vm.register_stack[base_ptr + b];
 
-    let r_int = right.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
-            "attempt to perform bitwise operation on {}",
-            right.type_name()
-        ))
-    })?;
+    let r_int = match right.as_integer() {
+        Some(i) => i,
+        None => return Ok(DispatchAction::Continue), // Let MMBINI handle metamethod
+    };
 
     let result = if r_int >= 0 {
         LuaValue::integer((sc as i64) << (r_int & 63))
@@ -1030,14 +1039,27 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let value = vm.register_stack[base_ptr + b];
 
-    let int_val = value.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
+    let result = if let Some(int_val) = value.as_integer() {
+        LuaValue::integer(!int_val)
+    } else {
+        // Try metamethod
+        let mm_key = vm.create_string("__bnot");
+        if let Some(mt) = vm.table_get_metatable(&value) {
+            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+                if !metamethod.is_nil() {
+                    let result = vm.call_metamethod(&metamethod, &[value])?
+                        .unwrap_or(LuaValue::nil());
+                    vm.register_stack[base_ptr + a] = result;
+                    return Ok(DispatchAction::Continue);
+                }
+            }
+        }
+        return Err(LuaError::RuntimeError(format!(
             "attempt to perform bitwise operation on {}",
             value.type_name()
-        ))
-    })?;
+        )));
+    };
 
-    let result = LuaValue::integer(!int_val);
     vm.register_stack[base_ptr + a] = result;
     Ok(DispatchAction::Continue)
 }
@@ -1067,6 +1089,21 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let base_ptr = frame.base_ptr;
 
     let value = vm.register_stack[base_ptr + b];
+
+    // Check for __len metamethod first (for tables)
+    if value.is_table() {
+        let mm_key = vm.create_string("__len");
+        if let Some(mt) = vm.table_get_metatable(&value) {
+            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+                if !metamethod.is_nil() {
+                    let result = vm.call_metamethod(&metamethod, &[value])?
+                        .unwrap_or(LuaValue::nil());
+                    vm.register_stack[base_ptr + a] = result;
+                    return Ok(DispatchAction::Continue);
+                }
+            }
+        }
+    }
 
     // CRITICAL OPTIMIZATION: Use direct pointer instead of HashMap lookup!
     let len = if let Some(table_ptr) = value.as_table_ptr() {

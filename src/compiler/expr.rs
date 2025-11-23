@@ -1269,7 +1269,7 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call (TM_SHR = 17)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 17, false),
+                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 17, false),
                             );
                             return Ok(result_reg);
                         }
@@ -1301,7 +1301,7 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call (TM_SHL = 16)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm, 16, false),
+                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 16, false),
                             );
                             return Ok(result_reg);
                         }
