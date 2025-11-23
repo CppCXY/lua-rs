@@ -408,12 +408,21 @@ fn test_multiple_metamethods_same_object() {
     let mut vm = LuaVM::new();
     vm.open_libs();
     let result = vm.execute_string(r#"
-        local obj = {x = 10}
-        setmetatable(obj, {
-            __add = function(a, b) return {x = a.x + 5} end,
-            __sub = function(a, b) return {x = a.x - 3} end,
+        local mt = {
+            __add = function(a, b) 
+                local result = {x = a.x + 5}
+                setmetatable(result, mt)
+                return result
+            end,
+            __sub = function(a, b) 
+                local result = {x = a.x - 3}
+                setmetatable(result, mt)
+                return result
+            end,
             __tostring = function(o) return "Obj(" .. o.x .. ")" end
-        })
+        }
+        local obj = {x = 10}
+        setmetatable(obj, mt)
         local r1 = obj + obj
         local r2 = obj - obj
         local s = tostring(obj)
@@ -498,11 +507,20 @@ fn test_arithmetic_metamethod_chain() {
     let mut vm = LuaVM::new();
     vm.open_libs();
     let result = vm.execute_string(r#"
+        local mt = {
+            __add = function(a, b) 
+                local result = {n = a.n + b.n}
+                setmetatable(result, getmetatable(a))
+                return result
+            end,
+            __mul = function(a, b) 
+                local result = {n = a.n * b.n}
+                setmetatable(result, getmetatable(a))
+                return result
+            end
+        }
         local t = {n = 2}
-        setmetatable(t, {
-            __add = function(a, b) return {n = a.n + b.n} end,
-            __mul = function(a, b) return {n = a.n * b.n} end
-        })
+        setmetatable(t, mt)
         local r = (t + t) * t
         assert(r.n == 8)  -- (2 + 2) * 2
     "#);
@@ -525,6 +543,9 @@ fn test_index_with_rawget() {
         assert(rawget(t, "real") == 1)
         assert(rawget(t, "fake") == nil)
     "#);
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

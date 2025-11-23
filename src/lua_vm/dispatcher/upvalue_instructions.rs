@@ -183,32 +183,81 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// CONCAT A B
 /// R[A] := R[A].. ... ..R[A+B]
 pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+    use crate::lua_value::LuaValue;
+    
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let mut result = String::new();
-    
-    for i in 0..=b {
-        let value = vm.register_stack[base_ptr + a + i];
-        
+    // Helper function to convert value to string
+    fn to_concat_string(value: LuaValue) -> Option<String> {
         if let Some(s) = value.as_lua_string() {
-            result.push_str(s.as_str());
+            return Some(s.as_str().to_string());
         } else if let Some(i) = value.as_integer() {
-            result.push_str(&i.to_string());
+            return Some(i.to_string());
         } else if let Some(f) = value.as_number() {
-            result.push_str(&f.to_string());
+            return Some(f.to_string());
+        }
+        None
+    }
+
+    // Concatenate values from R[A] to R[A+B]
+    let mut result_value = vm.register_stack[base_ptr + a];
+    
+    for i in 1..=b {
+        let next_value = vm.register_stack[base_ptr + a + i];
+        
+        // Try direct concatenation first
+        let left_str = to_concat_string(result_value);
+        let right_str = to_concat_string(next_value);
+        
+        if let (Some(l), Some(r)) = (left_str, right_str) {
+            let concat_result = l + &r;
+            result_value = vm.create_string(&concat_result);
         } else {
-            return Err(LuaError::RuntimeError(format!(
-                "attempt to concatenate a {} value",
-                value.type_name()
-            )));
+            // Try __concat metamethod
+            let mm_key = vm.create_string("__concat");
+            let mut found_metamethod = false;
+            
+            if let Some(mt) = vm.table_get_metatable(&result_value) {
+                if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+                    if !metamethod.is_nil() {
+                        if let Some(mm_result) = vm.call_metamethod(&metamethod, &[result_value, next_value])? {
+                            result_value = mm_result;
+                            found_metamethod = true;
+                        }
+                    }
+                }
+            }
+            
+            if !found_metamethod {
+                if let Some(mt) = vm.table_get_metatable(&next_value) {
+                    if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+                        if !metamethod.is_nil() {
+                            if let Some(mm_result) = vm.call_metamethod(&metamethod, &[result_value, next_value])? {
+                                result_value = mm_result;
+                                found_metamethod = true;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if !found_metamethod {
+                return Err(LuaError::RuntimeError(format!(
+                    "attempt to concatenate a {} value",
+                    if result_value.is_string() || result_value.is_number() {
+                        next_value.type_name()
+                    } else {
+                        result_value.type_name()
+                    }
+                )));
+            }
         }
     }
 
-    let result_value = vm.create_string(&result);
     vm.register_stack[base_ptr + a] = result_value;
 
     Ok(DispatchAction::Continue)

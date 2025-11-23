@@ -152,6 +152,9 @@ fn test_function_as_table_method() {
         obj:add(5)
         assert(obj.value == 15)
     "#);
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

@@ -376,7 +376,21 @@ fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let table_ref = vm
                 .get_table(&value)
                 .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-            if let Some(mt) = table_ref.borrow().get_metatable() {
+            
+            // Get metatable, releasing the borrow immediately
+            let mt = table_ref.borrow().get_metatable();
+            
+            if let Some(mt) = mt {
+                // Check for __metatable field
+                let metatable_key = vm.create_string("__metatable");
+                if let Some(mt_table) = vm.get_table(&mt) {
+                    if let Some(protected) = mt_table.borrow().raw_get(&metatable_key) {
+                        if !protected.is_nil() {
+                            // Return the __metatable field value instead of the actual metatable
+                            return Ok(MultiValue::single(protected));
+                        }
+                    }
+                }
                 Ok(MultiValue::single(mt))
             } else {
                 Ok(MultiValue::single(LuaValue::nil()))
@@ -401,35 +415,58 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let metatable = require_arg(vm, 1, "setmetatable")?;
 
     // First argument must be a table
-    if table.is_table() {
+    if !table.is_table() {
+        return Err(LuaError::RuntimeError(
+            "setmetatable() first argument must be a table".to_string(),
+        ));
+    }
+    
+    // Check if the current metatable has __metatable protection
+    let has_protection = {
         let table_ref = vm
             .get_table(&table)
             .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-        // Set the new metatable
-        match metatable.kind() {
-            LuaValueKind::Nil => {
-                table_ref.borrow_mut().set_metatable(None);
-            }
-            LuaValueKind::Table => {
-                // Just pass the metatable TableId as LuaValue
-                table_ref
-                    .borrow_mut()
-                    .set_metatable(Some(metatable.clone()));
-            }
-            _ => {
-                return Err(LuaError::RuntimeError(
-                    "setmetatable() second argument must be a table or nil".to_string(),
-                ));
+        table_ref.borrow().get_metatable()
+    }; // table_ref borrow ends here
+    
+    if let Some(current_mt) = has_protection {
+        let metatable_key = vm.create_string("__metatable");
+        if let Some(mt_table) = vm.get_table(&current_mt) {
+            if let Some(protected) = mt_table.borrow().raw_get(&metatable_key) {
+                if !protected.is_nil() {
+                    // Metatable is protected, cannot change it
+                    return Err(LuaError::RuntimeError(
+                        "cannot change a protected metatable".to_string(),
+                    ));
+                }
             }
         }
-
-        // Return the original table
-        Ok(MultiValue::single(table.clone()))
-    } else {
-        Err(LuaError::RuntimeError(
-            "setmetatable() first argument must be a table".to_string(),
-        ))
     }
+    
+    // Set the new metatable
+    let table_ref = vm
+        .get_table(&table)
+        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
+    
+    match metatable.kind() {
+        LuaValueKind::Nil => {
+            table_ref.borrow_mut().set_metatable(None);
+        }
+        LuaValueKind::Table => {
+            // Just pass the metatable TableId as LuaValue
+            table_ref
+                .borrow_mut()
+                .set_metatable(Some(metatable.clone()));
+        }
+        _ => {
+            return Err(LuaError::RuntimeError(
+                "setmetatable() second argument must be a table or nil".to_string(),
+            ));
+        }
+    }
+
+    // Return the original table
+    Ok(MultiValue::single(table.clone()))
 }
 
 /// rawget(table, index) - Get without metamethods

@@ -171,7 +171,9 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         LuaError::RuntimeError(format!("Invalid constant index: {}", c))
     })? };
 
-    let table = vm.register_stack[base_ptr + b];
+    // IMPORTANT: Clone the table value before calling table_get_with_meta
+    // because metamethod calls can modify the register stack
+    let table = vm.register_stack[base_ptr + b].clone();
 
     // Use table_get_with_meta to support __index metamethod
     let value = vm.table_get_with_meta(&table, &key).unwrap_or(LuaValue::nil());
