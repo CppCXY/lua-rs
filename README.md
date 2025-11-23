@@ -76,6 +76,37 @@ Uses hybrid NaN-boxing with dual-field design (16 bytes total):
 
 ## Building
 
+### Cargo Features
+
+The project supports optional features that can be enabled at compile time:
+
+- **`async`**: Enables async/await support with Tokio runtime (adds `tokio` dependency)
+- **`loadlib`**: Enables dynamic library loading via FFI (adds `libloading` dependency)  
+- **`wasm`**: Marker feature for WASM target compatibility
+
+By default, **all features are disabled** to minimize dependencies.
+
+#### Build Examples
+
+```bash
+# Default build (no optional features)
+cargo build --release
+
+# Enable async support
+cargo build --release --features async
+
+# Enable FFI/dynamic library loading
+cargo build --release --features loadlib
+
+# Enable both features
+cargo build --release --features "async,loadlib"
+
+# Enable all features
+cargo build --release --all-features
+```
+
+### Running
+
 ```bash
 # Build the project
 cargo build --release

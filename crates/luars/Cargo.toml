@@ -3,8 +3,14 @@ name = "luars"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+async = ["dep:tokio"]
+wasm = []
+loadlib = ["dep:libloading"]
+
 [dependencies]
 emmylua_parser.workspace = true
-libloading.workspace = true
-tokio.workspace = true
 hashbrown.workspace = true
+libloading = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }

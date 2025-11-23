@@ -6,6 +6,7 @@ mod opcode;
 mod dispatcher;
 
 use crate::gc::GC;
+#[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use dispatcher::{dispatch_instruction, DispatchAction};
 use crate::lua_value::{
@@ -47,6 +48,7 @@ pub struct LuaVM {
     pub error_handler: Option<LuaValue>, // Current error handler for xpcall
 
     // FFI state
+    #[cfg(feature = "loadlib")]
     pub(crate) ffi_state: crate::ffi::FFIState,
 
     // Current running thread (for coroutine.running())
@@ -65,6 +67,7 @@ pub struct LuaVM {
     pub(crate) object_pool: crate::object_pool::ObjectPool,
 
     // Async executor for Lua-Rust async bridge
+    #[cfg(feature = "async")]
     pub(crate) async_executor: AsyncExecutor,
 }
 
@@ -79,12 +82,14 @@ impl LuaVM {
             open_upvalues: Vec::new(),
             next_frame_id: 0,
             error_handler: None,
+            #[cfg(feature = "loadlib")]
             ffi_state: crate::ffi::FFIState::new(),
             current_thread: None,
             current_thread_value: None,
             main_thread_value: None, // Will be initialized lazily
             string_metatable: None,
             object_pool: ObjectPool::new(),
+            #[cfg(feature = "async")]
             async_executor: AsyncExecutor::new(),
         };
 
@@ -121,6 +126,7 @@ impl LuaVM {
         let _ = lib_registry::create_standard_registry().load_all(self);
         
         // Register async functions
+        #[cfg(feature = "async")]
         crate::stdlib::async_lib::register_async_functions(self);
     }
 
@@ -381,11 +387,13 @@ impl LuaVM {
     }
 
     /// Get FFI state (immutable)
+    #[cfg(feature = "loadlib")]
     pub fn get_ffi_state(&self) -> &crate::ffi::FFIState {
         &self.ffi_state
     }
 
     /// Get FFI state (mutable)
+    #[cfg(feature = "loadlib")]
     pub fn get_ffi_state_mut(&mut self) -> &mut crate::ffi::FFIState {
         &mut self.ffi_state
     }
@@ -1967,12 +1975,14 @@ impl LuaVM {
     }
 
     // Async bridge API: Call a registered async function (internal use)
+    #[cfg(feature = "async")]
     pub fn async_call(&mut self, func_name: &str, args: Vec<LuaValue>, coroutine: LuaValue) -> LuaResult<u64> {
         let task_id = self.async_executor.spawn_task(func_name, args, coroutine)?;
         Ok(task_id)
     }
 
     // Poll all async tasks and resume completed coroutines
+    #[cfg(feature = "async")]
     pub fn poll_async(&mut self) -> LuaResult<()> {
         let completed_tasks = self.async_executor.collect_completed_tasks();
         
@@ -1986,6 +1996,7 @@ impl LuaVM {
     }
 
     // Register an async function callable from Lua
+    #[cfg(feature = "async")]
     pub fn register_async_function<F, Fut>(&mut self, name: &str, func: F)
     where
         F: Fn(Vec<LuaValue>) -> Fut + Send + Sync + 'static,
@@ -1995,6 +2006,7 @@ impl LuaVM {
     }
 
     // Get the number of active async tasks
+    #[cfg(feature = "async")]
     pub fn active_async_tasks(&self) -> usize {
         self.async_executor.active_task_count()
     }

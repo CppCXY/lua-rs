@@ -7,6 +7,7 @@ use crate::{LuaValue, LuaVM};
 use crate::lua_vm::{LuaError, LuaResult};
 use crate::lua_value::MultiValue;
 use std::time::Duration;
+use tokio::time::sleep;
 
 /// Create the async library module with async functions
 pub fn create_async_lib() -> LibraryModule {
@@ -39,7 +40,7 @@ async fn async_sleep_impl(args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         )),
     };
 
-    tokio::time::sleep(Duration::from_millis(ms)).await;
+    sleep(Duration::from_millis(ms)).await;
     
     Ok(vec![])
 }

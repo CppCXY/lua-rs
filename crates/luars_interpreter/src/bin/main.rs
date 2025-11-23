@@ -1,4 +1,4 @@
-use lua_rs::LuaVM;
+use luars::LuaVM;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};

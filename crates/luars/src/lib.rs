@@ -5,9 +5,11 @@
 mod test;
 
 pub mod compiler;
+#[cfg(feature = "loadlib")]
 pub mod ffi;
 pub mod gc;
 pub mod lib_registry;
+#[cfg(feature = "async")]
 pub mod lua_async;
 pub mod lua_pattern;
 pub mod lua_value;
@@ -16,6 +18,7 @@ pub mod object_pool;
 pub mod stdlib;
 
 pub use compiler::Compiler;
+#[cfg(feature = "loadlib")]
 pub use ffi::FFIState;
 pub use gc::GC;
 pub use lib_registry::LibraryRegistry;

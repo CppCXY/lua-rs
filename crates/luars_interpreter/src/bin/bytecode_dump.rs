@@ -1,5 +1,5 @@
-use lua_rs::lua_vm::{Instruction, OpCode};
-use lua_rs::{Chunk, LuaVM};
+use luars::lua_vm::{Instruction, OpCode};
+use luars::{Chunk, LuaVM};
 use std::env;
 use std::fs;
 

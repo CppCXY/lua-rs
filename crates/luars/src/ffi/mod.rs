@@ -4,6 +4,7 @@
 use crate::lib_registry;
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use libloading;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
