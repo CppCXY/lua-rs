@@ -31,7 +31,7 @@ pub fn create_string_lib() -> LibraryModule {
 /// string.byte(s [, i [, j]]) - Return byte values
 fn string_byte(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.byte")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.byte' (string expected)".to_string())
     })?;
 
@@ -94,7 +94,7 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn string_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.len")?;
 
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.len' (string expected)".to_string())
     })?;
 
@@ -105,7 +105,7 @@ fn string_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.lower(s) - Convert to lowercase
 fn string_lower(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.lower")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.lower' (string expected)".to_string())
     })?;
 
@@ -116,7 +116,7 @@ fn string_lower(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.upper(s) - Convert to uppercase
 fn string_upper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.upper")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.upper' (string expected)".to_string())
     })?;
 
@@ -127,7 +127,7 @@ fn string_upper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.rep(s, n [, sep]) - Repeat string
 fn string_rep(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.rep")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.rep' (string expected)".to_string())
     })?;
 
@@ -170,7 +170,7 @@ fn string_rep(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.reverse(s) - Reverse string
 fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.reverse")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.reverse' (string expected)".to_string())
     })?;
 
@@ -182,7 +182,7 @@ fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.sub(s, i [, j]) - Extract substring
 fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.sub")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.sub' (string expected)".to_string())
     })?;
 
@@ -238,7 +238,7 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.format(formatstring, ...) - Format string (simplified)
 fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let format_str_value = require_arg(vm, 0, "string.format")?;
-    let format_str = vm.get_string(&format_str_value).ok_or_else(|| {
+    let format_str = format_str_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.format' (string expected)".to_string())
     })?;
 
@@ -546,7 +546,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
                         // Check if string first
                         let maybe_string = if val.is_string() {
-                            vm.get_string(&val).map(|s| s.as_str().to_string())
+                            val.as_lua_string().map(|s| s.as_str().to_string())
                         } else {
                             None
                         };
@@ -580,7 +580,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                                 arg_index + 1
                             ))
                         })?;
-                        let s = vm.get_string(&val).ok_or_else(|| {
+                        let s = val.as_lua_string().ok_or_else(|| {
                             LuaError::RuntimeError(format!(
                                 "bad argument #{} to 'format' (string expected)",
                                 arg_index + 1
@@ -626,11 +626,11 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
 fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.find")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.find' (string expected)".to_string())
     })?;
     let pattern_str_value = require_arg(vm, 1, "string.find")?;
-    let pattern_str = vm.get_string(&pattern_str_value).ok_or_else(|| {
+    let pattern_str = pattern_str_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #2 to 'string.find' (string expected)".to_string())
     })?;
 
@@ -714,12 +714,12 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.match(s, pattern [, init]) - Match pattern
 fn string_match(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.match")?;
-    let s = vm.get_string(&s_value).ok_or_else(|| {
+    let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.match' (string expected)".to_string())
     })?;
 
     let pattern_str_value = require_arg(vm, 1, "string.match")?;
-    let pattern_str = vm.get_string(&pattern_str_value).ok_or_else(|| {
+    let pattern_str = pattern_str_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #2 to 'string.match' (string expected)".to_string())
     })?;
 

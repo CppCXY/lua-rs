@@ -51,7 +51,7 @@ fn io_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     // Default to "*l" (read line)
     let format_str = format
-        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
+        .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "*l".to_string());
 
     match format_str.as_str() {
@@ -134,12 +134,12 @@ fn io_open(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use crate::lib_registry::{get_arg, require_arg};
 
     let filename_val = require_arg(vm, 0, "io.open")?;
-    let filename = vm.get_string(&filename_val).ok_or_else(|| {
+    let filename = filename_val.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'io.open' (string expected)".to_string())
     })?;
 
     let mode_str = get_arg(vm, 1)
-        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
+        .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "r".to_string());
     let mode = mode_str.as_str();
 

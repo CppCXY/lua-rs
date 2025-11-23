@@ -194,7 +194,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     for i in 0..=b {
         let value = vm.register_stack[base_ptr + a + i];
         
-        if let Some(s) = vm.get_string(&value) {
+        if let Some(s) = value.as_lua_string() {
             result.push_str(s.as_str());
         } else if let Some(i) = value.as_integer() {
             result.push_str(&i.to_string());

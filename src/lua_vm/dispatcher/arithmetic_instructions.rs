@@ -1132,7 +1132,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let len = if let Some(table_ptr) = value.as_table_ptr() {
         unsafe { (*table_ptr).borrow().len() as i64 }
     } else if value.is_string() {
-        if let Some(s) = vm.get_string(&value) {
+        if let Some(s) = value.as_lua_string() {
             s.as_str().len() as i64
         } else {
             0

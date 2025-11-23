@@ -80,7 +80,7 @@ fn lua_assert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     if !condition.is_truthy() {
         let message = get_arg(vm, 1)
-            .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
+            .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
             .unwrap_or_else(|| "assertion failed!".to_string());
         return Err(LuaError::RuntimeError(message));
     }
@@ -504,7 +504,7 @@ fn lua_rawequal(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// collectgarbage([opt [, arg]]) - Garbage collector control
 fn lua_collectgarbage(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let opt = get_arg(vm, 0)
-        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
+        .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "=(load)".to_string());
 
     match opt.as_str() {
@@ -612,7 +612,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         if !success {
             let error_msg = results
                 .first()
-                .and_then(|v| vm.get_string(v))
+                .and_then(|v| v.as_lua_string())
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_else(|| "unknown error in searcher".to_string());
             return Err(LuaError::RuntimeError(format!(
@@ -640,7 +640,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 if !load_success {
                     let error_msg = load_results
                         .first()
-                        .and_then(|v| vm.get_string(v))
+                        .and_then(|v| v.as_lua_string())
                         .map(|s| s.as_str().to_string())
                         .unwrap_or_else(|| "unknown error".to_string());
                     return Err(LuaError::RuntimeError(format!(
@@ -673,7 +673,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 }
 
                 return Ok(MultiValue::single(module_value));
-            } else if let Some(err_str) = vm.get_string(first_result) {
+            } else if let Some(err_str) = first_result.as_lua_string() {
                 // It's an error message
                 error_messages.push(err_str.as_str().to_string());
             }
