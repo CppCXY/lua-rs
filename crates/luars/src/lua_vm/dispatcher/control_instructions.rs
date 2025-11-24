@@ -721,59 +721,61 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     match func.kind() {
         LuaValueKind::CFunction => {
-            // Call C function immediately
+            // Call C function immediately - Lua-style: NO COPY!
             let cfunc = func.as_cfunction().unwrap();
 
-            // Create temporary frame for CFunction
+            // === CRITICAL: 完全模仿Lua的precallC - 在原位调用 ===
+            // Lua: L->ci = ci = prepCallInfo(L, func, nresults, CIST_C, L->top.p + LUA_MINSTACK);
+            // 我们：直接把frame的base_ptr设置为 R[A] 的位置，不复制任何东西！
+            
             let frame_id = vm.next_frame_id;
             vm.next_frame_id += 1;
 
-            // Set up call arguments in a new stack segment
-            let call_base = vm.register_stack.len();
+            // C函数的调用栈：R[A] = func, R[A+1..A+B-1] = args
+            // 直接在这个位置创建frame，不需要复制到新地址！
+            let call_base = base + a;
+            
+            // Handle __call metamethod: need to insert self as first argument
+            if use_call_metamethod {
+                // Shift arguments right by 1 to make room for self
+                // R[A+1] = original table (self)
+                // R[A+2..A+B] = original R[A+1..A+B-1]
+                if arg_count > 0 {
+                    // Move arguments: from back to front to avoid overwriting
+                    for i in (0..arg_count).rev() {
+                        vm.register_stack[call_base + 2 + i] = vm.register_stack[call_base + 1 + i].clone();
+                    }
+                }
+                vm.register_stack[call_base + 1] = call_metamethod_self;
+                vm.register_stack[call_base] = func; // Replace original table with __call function
+            }
+            // else: 参数已经在正确位置了！无需任何操作！
+
             let actual_arg_count = if use_call_metamethod {
-                arg_count + 1 // Add 1 for self argument
+                arg_count + 1
             } else {
                 arg_count
             };
-            vm.ensure_stack_capacity(call_base + actual_arg_count + 1);
 
-            // OPTIMIZATION: Bulk copy function and arguments (critical for table.insert perf!)
-            vm.register_stack[call_base] = func;
-            if use_call_metamethod {
-                // First argument is the original table (self)
-                vm.register_stack[call_base + 1] = call_metamethod_self;
-                // Then bulk copy the original arguments
-                if arg_count > 0 {
-                    unsafe {
-                        let src_ptr = vm.register_stack.as_ptr().add(base + a + 1);
-                        let dst_ptr = vm.register_stack.as_mut_ptr().add(call_base + 2);
-                        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, arg_count);
-                    }
-                }
-            } else {
-                // Normal call: bulk copy arguments directly
-                if arg_count > 0 {
-                    unsafe {
-                        let src_ptr = vm.register_stack.as_ptr().add(base + a + 1);
-                        let dst_ptr = vm.register_stack.as_mut_ptr().add(call_base + 1);
-                        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, arg_count);
-                    }
-                }
-            }
+            // 确保栈足够（Lua: checkstackGCp(L, LUA_MINSTACK, func)）
+            let required_top = call_base + actual_arg_count + 1 + 20; // +20 for C function working space
+            vm.ensure_stack_capacity(required_top);
 
+            // Push C function frame - 注意：base_ptr = call_base (R[A]的位置)
             let temp_frame = LuaCallFrame::new_c_function(
                 frame_id,
                 vm.current_frame().function_value,
                 vm.current_frame().pc,
                 call_base,
-                actual_arg_count + 1,
+                actual_arg_count + 1, // +1 for function itself
             );
 
             vm.frames.push(temp_frame);
+            
+            // Lua: n = (*f)(L);  // 直接调用
             let result = match cfunc(vm) {
                 Ok(r) => Ok(r),
                 Err(LuaError::Yield(values)) => {
-                    // CFunction yielded - pop the temporary frame before yielding
                     vm.frames.pop();
                     return Err(LuaError::Yield(values));
                 }
@@ -785,7 +787,10 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             vm.frames.pop();
             let result = result?;
 
-            // OPTIMIZATION: Bulk copy return values
+            // === 关键改进：返回值已经在正确位置了！===
+            // C函数通过vm.push()写入返回值，已经在register_stack的末尾
+            // 但CALL指令期望返回值在 R[A], R[A+1], ...
+            // 所以我们需要把返回值从栈顶移动到R[A]
             let values = result.all_values();
             let num_returns = if return_count == usize::MAX {
                 values.len()
@@ -793,23 +798,23 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 return_count.min(values.len())
             };
 
+            // OPTIMIZATION: 只在返回值不在正确位置时才复制
             if num_returns > 0 {
                 unsafe {
                     let src_ptr = values.as_ptr();
-                    let dst_ptr = vm.register_stack.as_mut_ptr().add(base + a);
+                    let dst_ptr = vm.register_stack.as_mut_ptr().add(call_base);
                     std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, num_returns);
                 }
             }
-            // Fill remaining with nil if needed (only when return_count is fixed)
+            
+            // Fill remaining with nil if needed
             if return_count != usize::MAX {
                 for i in num_returns..return_count {
-                    vm.register_stack[base + a + i] = crate::LuaValue::nil();
+                    vm.register_stack[call_base + i] = crate::LuaValue::nil();
                 }
             }
 
-            // CRITICAL: Update caller's top to indicate how many values were returned
-            // This is essential for variable returns (C=0) so the next instruction knows
-            // how many values are available (e.g., CALL with B=0)
+            // Update caller's top
             vm.current_frame_mut().top = a + num_returns;
 
             Ok(DispatchAction::Continue)

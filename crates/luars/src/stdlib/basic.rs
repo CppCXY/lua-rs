@@ -204,7 +204,7 @@ fn lua_ipairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "ipairs")?;
 
     // Validate that it's a table
-    if table_val.as_table_id().is_none() {
+    if !table_val.is_table() {
         return Err(LuaError::RuntimeError(
             "bad argument #1 to 'ipairs' (table expected)".to_string(),
         ));
