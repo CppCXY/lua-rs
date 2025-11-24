@@ -11,6 +11,5 @@ loadlib = ["dep:libloading"]
 
 [dependencies]
 emmylua_parser.workspace = true
-hashbrown.workspace = true
 libloading = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

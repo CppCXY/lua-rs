@@ -292,16 +292,18 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 0, "next")?;
     let index_val = get_arg(vm, 1).unwrap_or(LuaValue::nil());
 
-    // Use the table's built-in next() method which maintains proper iteration order
-    let result = vm
-        .get_table(&table_val)
-        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?
-        .borrow()
-        .next(&index_val);
-
-    match result {
-        Some((key, value)) => Ok(MultiValue::multiple(vec![key, value])),
-        None => Ok(MultiValue::single(LuaValue::nil())),
+    // CRITICAL OPTIMIZATION: Use direct pointer access instead of ObjectPool lookup!
+    // This eliminates HashMap lookup on every iteration
+    if let Some(table_ptr) = table_val.as_table_ptr() {
+        // Direct pointer dereference - ZERO ObjectPool overhead!
+        let result = unsafe { (*table_ptr).borrow().next(&index_val) };
+        
+        match result {
+            Some((key, value)) => Ok(MultiValue::multiple(vec![key, value])),
+            None => Ok(MultiValue::single(LuaValue::nil())),
+        }
+    } else {
+        Err(LuaError::RuntimeError("Invalid table".to_string()))
     }
 }
 

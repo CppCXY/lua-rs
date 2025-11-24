@@ -1,22 +1,51 @@
 // High-performance Lua table implementation following Lua 5.4 design
 // - Array part for integer keys [1..n]
-// - Hash part using hashbrown (faster than std HashMap)
+// - Hash part using open addressing (same as Lua 5.4)
 use crate::LuaVM;
 use crate::lua_vm::{LuaError, LuaResult};
 
 use super::LuaValue;
 
+/// Hash node - mimics Lua 5.4's Node structure
+/// Contains key+value pair and next index for collision chaining
+#[derive(Clone, Copy)]
+struct Node {
+    key: LuaValue,
+    value: LuaValue,
+}
+
+impl Node {
+    #[inline(always)]
+    fn empty() -> Self {
+        Node {
+            key: LuaValue::nil(),
+            value: LuaValue::nil(),
+        }
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.key.is_nil() && self.value.is_nil()
+    }
+}
+
 /// Lua table implementation
 /// - Array part for integer keys [1..n]
-/// - Hash part using hashbrown::HashMap (55% faster than std::collections::HashMap)
+/// - Hash part using open addressing with chaining (same as Lua 5.4)
 pub struct LuaTable {
     /// Array part: stores values for integer keys [1..array.len()]
     /// Only allocated when first integer key is set
     pub(crate) array: Vec<LuaValue>,
 
-    /// Hash part: hashbrown's high-performance hash map
-    /// Note: hashbrown crate is significantly faster than std HashMap despite same algorithm
-    pub(crate) hash: hashbrown::HashMap<LuaValue, LuaValue>,
+    /// Hash part: open-addressed hash table with linear probing
+    /// This matches Lua 5.4's design for better iteration performance
+    /// - Faster iteration: linear scan vs HashMap's complex structure
+    /// - Better cache locality: contiguous memory
+    /// - Same lookup performance: O(1) average case
+    nodes: Vec<Node>,
+
+    /// Number of occupied slots in hash part (O(1) load factor tracking)
+    hash_size: usize,
 
     /// Metatable - optional table that defines special behaviors  
     /// Store as LuaValue (table ID) instead of Rc for ID-based architecture
@@ -28,9 +57,129 @@ impl LuaTable {
     pub fn new() -> Self {
         LuaTable {
             array: Vec::new(),
-            hash: hashbrown::HashMap::new(),
+            nodes: Vec::new(),
+            hash_size: 0,
             metatable: None,
         }
+    }
+
+    /// Hash function for LuaValue - matches Lua's hashing strategy
+    #[inline]
+    fn hash_key(key: &LuaValue, size: usize) -> usize {
+        if size == 0 {
+            return 0;
+        }
+
+        // Use Lua's approach: extract a numeric hash from the value
+        let hash = if let Some(i) = key.as_integer() {
+            i as u64
+        } else if let Some(f) = key.as_float() {
+            f.to_bits()
+        } else {
+            // For other types, use the primary value as hash
+            key.primary
+        };
+
+        // Simple modulo - Lua uses power-of-2 sizes for fast masking
+        (hash as usize) & (size - 1)
+    }
+
+    /// Find a node with the given key, returns Some(index) if found
+    #[inline]
+    fn find_node(&self, key: &LuaValue) -> Option<usize> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+
+        let size = self.nodes.len();
+        let mut idx = Self::hash_key(key, size);
+
+        // Linear probe with wraparound
+        let start_idx = idx;
+        loop {
+            let node = &self.nodes[idx];
+
+            if node.is_empty() {
+                return None;
+            }
+
+            if node.key == *key {
+                return Some(idx);
+            }
+
+            // Linear probing
+            idx = (idx + 1) & (size - 1);
+
+            // Avoid infinite loop
+            if idx == start_idx {
+                return None;
+            }
+        }
+    }
+
+    /// Resize hash part to new size (power of 2)
+    fn resize_hash(&mut self, new_size: usize) {
+        if new_size == 0 {
+            self.nodes.clear();
+            self.hash_size = 0;
+            return;
+        }
+
+        // Must be power of 2 for fast modulo
+        debug_assert!(new_size.is_power_of_two());
+
+        let old_nodes = std::mem::replace(&mut self.nodes, vec![Node::empty(); new_size]);
+        self.hash_size = 0; // Reset counter, will be rebuilt during rehash
+
+        // Rehash all existing nodes
+        for old_node in old_nodes {
+            if !old_node.is_empty() {
+                self.insert_node_simple(old_node.key, old_node.value);
+            }
+        }
+    }
+
+    /// Simple insert using linear probing (no complex chaining)
+    fn insert_node_simple(&mut self, key: LuaValue, value: LuaValue) {
+        let size = self.nodes.len();
+        let mut idx = Self::hash_key(&key, size);
+        let start_idx = idx;
+
+        loop {
+            if self.nodes[idx].is_empty() {
+                // New insertion
+                self.nodes[idx] = Node { key, value };
+                self.hash_size += 1;
+                return;
+            } else if self.nodes[idx].key == key {
+                // Update existing
+                self.nodes[idx].value = value;
+                return;
+            }
+
+            idx = (idx + 1) & (size - 1);
+
+            if idx == start_idx {
+                // Table is full - should not happen if resize is correct
+                panic!("Hash table is full during insert");
+            }
+        }
+    }
+
+    /// Insert a key-value pair into hash part
+    fn insert_node(&mut self, key: LuaValue, value: LuaValue) {
+        if self.nodes.is_empty() {
+            // Initialize hash table with small size
+            self.resize_hash(8);
+        }
+
+        // Check load factor using O(1) counter - resize if > 75%
+        // CRITICAL: Check BEFORE insert to avoid counting the new element
+        if self.hash_size * 4 >= self.nodes.len() * 3 {
+            self.resize_hash(self.nodes.len() * 2);
+        }
+
+        self.insert_node_simple(key, value);
     }
 
     /// Get the metatable of this table
@@ -86,7 +235,7 @@ impl LuaTable {
     /// Get from hash part
     #[inline]
     pub(crate) fn get_from_hash(&self, key: &LuaValue) -> Option<LuaValue> {
-        self.hash.get(key).copied()
+        self.find_node(key).map(|idx| self.nodes[idx].value)
     }
 
     /// Fast integer key write
@@ -130,14 +279,17 @@ impl LuaTable {
         self.set_in_hash(key, value);
     }
 
-    /// Set in hash part - hashbrown handles everything!
+    /// Set in hash part - Lua-style open addressing
     fn set_in_hash(&mut self, key: LuaValue, value: LuaValue) {
         if value.is_nil() {
             // Setting to nil - remove the key
-            self.hash.remove(&key);
+            if let Some(idx) = self.find_node(&key) {
+                self.nodes[idx] = Node::empty();
+                self.hash_size -= 1;
+            }
         } else {
             // Insert or update
-            self.hash.insert(key, value);
+            self.insert_node(key, value);
         }
     }
 
@@ -148,7 +300,7 @@ impl LuaTable {
     }
 
     /// Iterator for next() function - follows Lua's iteration order
-    /// First iterates array part, then hash part
+    /// First iterates array part, then hash part (linear scan for cache efficiency!)
     pub fn next(&self, key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
         if key.is_nil() {
             // Start from beginning - find first non-nil in array
@@ -157,8 +309,13 @@ impl LuaTable {
                     return Some((LuaValue::integer((i + 1) as i64), *val));
                 }
             }
-            // Then first entry in hash
-            return self.hash.iter().next().map(|(k, v)| (*k, *v));
+            // Then first non-empty node in hash
+            for node in &self.nodes {
+                if !node.is_empty() {
+                    return Some((node.key, node.value));
+                }
+            }
+            return None;
         }
 
         // Continue from given key
@@ -171,17 +328,27 @@ impl LuaTable {
                         return Some((LuaValue::integer((j + 1) as i64), self.array[j]));
                     }
                 }
-                // End of array, move to hash
-                return self.hash.iter().next().map(|(k, v)| (*k, *v));
+                // End of array, move to hash - return first non-empty node
+                for node in &self.nodes {
+                    if !node.is_empty() {
+                        return Some((node.key, node.value));
+                    }
+                }
+                return None;
             }
         }
 
-        // Key is in hash part - use skip_while + nth for efficiency
-        self.hash
-            .iter()
-            .skip_while(|(k, _)| *k != key)
-            .nth(1)
-            .map(|(k, v)| (*k, *v))
+        // Key is in hash part - find it quickly and return next non-empty node
+        // OPTIMIZATION: Use find_node to locate current position, then scan forward
+        if let Some(current_idx) = self.find_node(key) {
+            // Found current key - scan forward from next position
+            for idx in (current_idx + 1)..self.nodes.len() {
+                if !self.nodes[idx].is_empty() {
+                    return Some((self.nodes[idx].key, self.nodes[idx].value));
+                }
+            }
+        }
+        None
     }
 
     /// Insert value at position in array part, shifting elements to the right
@@ -246,9 +413,11 @@ impl LuaTable {
             }
         }
 
-        // Iterate hash part
-        for (k, v) in &self.hash {
-            result.push((*k, *v));
+        // Iterate hash part - linear scan!
+        for node in &self.nodes {
+            if !node.is_empty() {
+                result.push((node.key, node.value));
+            }
         }
 
         result

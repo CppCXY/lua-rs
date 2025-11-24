@@ -650,10 +650,9 @@ impl LuaVM {
                     }
                 }
                 
-                // Hash part lookup using HashMap's get()
-                // This is MUCH faster than HashTable with closure overhead!
-                if let Some(val) = table.hash.get(key) {
-                    return *val;
+                // Hash part lookup - use table's get_from_hash method
+                if let Some(val) = table.get_from_hash(key) {
+                    return val;
                 }
             }
             

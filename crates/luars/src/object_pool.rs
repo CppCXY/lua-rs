@@ -5,7 +5,7 @@
 use crate::lua_value::{self, LuaUserdata};
 use crate::{LuaFunction, LuaString, LuaTable};
 use std::cell::RefCell;
-use hashbrown::HashMap;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Object IDs - u32 is enough for most use cases (4 billion objects)
