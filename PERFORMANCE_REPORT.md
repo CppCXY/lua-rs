@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Lua-RS has achieved **production-ready performance** with **252/252 tests passing (100%)**. After systematic optimizations including control flow optimization, function call optimization (eliminating HashMap lookups), and recent C function call + hash table optimizations, the interpreter now delivers **65-120% of native Lua 5.4.6 performance** across most operations, with several areas **exceeding native performance**.
+Lua-RS has achieved **production-ready correctness** with **252/252 tests passing (100%)**. After systematic optimizations including control flow optimization, function call optimization (eliminating HashMap lookups), and recent C function call + hash table optimizations, the interpreter now delivers **22-69% of native Lua 5.4.6 performance** across most operations, with **hash table insertion and string.gsub outperforming native Lua** by 20-50%.
 
 ## Latest Performance Results (November 24, 2025)
 
@@ -10,72 +10,86 @@ Lua-RS has achieved **production-ready performance** with **252/252 tests passin
 ### Arithmetic Operations
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
-| Integer addition | **74.89 M/s** | 62.11 M/s | **120.6%** 🏆 | **Faster!** |
-| Float multiplication | **65.59 M/s** | 60.98 M/s | **107.6%** 🏆 | **Faster!** |
-| Mixed operations | **40.78 M/s** | 37.17 M/s | **109.7%** 🏆 | **Faster!** |
+| Integer addition | **74.45 M/s** | 212.77 M/s | **35.0%** | Good |
+| Float multiplication | **63.42 M/s** | 169.49 M/s | **37.4%** | Good |
+| Mixed operations | **40.50 M/s** | 96.15 M/s | **42.1%** | Good |
 
 ### Function Calls
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
-| Simple function call | **13.39 M/s** | 9.35 M/s | **143.2%** 🏆 | **1.4x Faster!** |
-| Recursive fib(25) | **0.031s** | 0.015s | **48.4%** | Good |
-| Vararg function | **0.59 M/s** | 0.69 M/s | **85.5%** | Excellent |
+| Simple function call | **13.77 M/s** | 33.33 M/s | **41.3%** | Good |
+| Recursive fib(25) | **0.031s** | 0.008s | **25.8%** | Needs optimization |
+| Vararg function | **0.60 M/s** | 2.12 M/s | **28.3%** | Needs optimization |
 
 ### Table Operations
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
-| Array creation & access | **1.48 M/s** | 1.56 M/s | **94.9%** | Excellent |
-| Table insertion | **25.24 M/s** | 24.39 M/s | **103.5%** 🏆 | **Faster!** |
-| Table access | **33.98 M/s** | 37.04 M/s | **91.7%** | Excellent |
-| Hash table insertion (100k) | **0.065s** | 0.168s | **258%** 🏆 | **2.6x Faster!** |
-| ipairs iteration (100×1M) | **11.647s** | 9.851s | **84.6%** | Excellent |
+| Array creation & access | **1.40 M/s** | 5.95 M/s | **23.5%** | Needs optimization |
+| Table insertion | **22.89 M/s** | 33.33 M/s | **68.7%** | Good |
+| Table access | **32.35 M/s** | 125.00 M/s | **25.9%** | Needs optimization |
+| Hash table insertion (100k) | **0.066s** | 0.079s | **119.7%** 🏆 | **1.2x Faster!** |
+| ipairs iteration (100×1M) | **11.316s** | 3.241s | **28.6%** | Needs optimization |
 
 ### String Operations
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
-| String concatenation | **588.72 K/s** | 699.30 K/s | **84.2%** | Excellent |
-| String length | **77.84 M/s** | 50.00 M/s | **155.7%** 🏆 | **1.6x Faster!** |
-| string.sub | **2629.68 K/s** | 5000.00 K/s | **52.6%** | Good |
-| string.find | **5197.07 K/s** | 3333.33 K/s | **155.9%** 🏆 | **1.6x Faster!** |
-| string.gsub (10k) | **0.130s** | 0.456s | **351%** 🏆 | **3.5x Faster!** |
+| String concatenation | **563.78 K/s** | 2564.10 K/s | **22.0%** | Needs optimization |
+| String length | **77.07 M/s** | ∞ M/s | **N/A** | - |
+| string.sub | **2647.65 K/s** | 14285.71 K/s | **18.5%** | Needs optimization |
+| string.find | **5275.90 K/s** | 14285.71 K/s | **36.9%** | Good |
+| string.gsub (10k) | **0.134s** | 0.201s | **150%** 🏆 | **1.5x Faster!** |
 
 ### Control Flow
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
-| If-else | **28.77 M/s** | 25.77 M/s | **111.6%** 🏆 | **Faster!** |
-| While loop | **31.30 M/s** | 45.05 M/s | **69.5%** | Good |
-| Repeat-until | **34.68 M/s** | 51.28 M/s | **67.6%** | Good |
-| Nested loops (1000×1000) | **78.66 M/s** | 62.50 M/s | **125.9%** 🏆 | **1.3x Faster!** |
+| If-else | **28.95 M/s** | 53.48 M/s | **54.1%** | Good |
+| While loop | **30.96 M/s** | 121.95 M/s | **25.4%** | Needs optimization |
+| Repeat-until | **31.40 M/s** | 142.86 M/s | **22.0%** | Needs optimization |
+| Nested loops (1000×1000) | **84.18 M/s** | 200.00 M/s | **42.1%** | Good |
+
+## Important Note on Performance Testing
+
+**Testing Methodology Change (November 24, 2025)**:
+
+Earlier performance reports compared lua-rs against **debug-build native Lua**, which artificially inflated our performance percentages. This led to misleading results showing lua-rs "faster" than native Lua in arithmetic operations (108-120%).
+
+**Current results** now use **release-build native Lua 5.4.6** as the baseline, providing realistic performance comparisons:
+
+- **Arithmetic operations**: ~35-42% of native (was incorrectly shown as 108-120%)
+- **Function calls**: ~41% of native (was incorrectly shown as 143%)
+- **Hash operations**: Still competitive at 120% (0.066s vs 0.079s)
+- **string.gsub**: Still faster at 150% (0.134s vs 0.201s)
+
+This correction provides a more accurate picture of lua-rs performance and identifies genuine optimization opportunities.
 
 ## Performance Highlights
 
-🏆 **8 operations now exceed native Lua performance (100-351%)**:
-- String operations: gsub **3.5x faster**, length & find **1.6x faster**
-- Hash table insertion: **2.6x faster** (0.065s vs 0.168s)
-- Function calls: **1.4x faster** (simple calls)
-- Nested loops: **1.3x faster**
-- Arithmetic: **8-20% faster** (integer, float, mixed)
-- Basic control flow: if-else **12% faster**
+🏆 **2 operations exceed native Lua performance**:
+- Hash table insertion: **1.2x faster** (0.066s vs 0.079s)
+- string.gsub: **1.5x faster** (0.134s vs 0.201s)
 
-🎯 **Most operations at 80-100% of native performance**:
-- Table operations: 85-103% (ipairs, array access, insertions)
-- String operations: 84% (concatenation)
-- Function calls: 86% (varargs)
+🎯 **Good performance (35-70% of native)**:
+- Arithmetic operations: 35-42% (consistent overhead from dispatch)
+- Table insertion: 69% (good)
+- Function calls: 41% (simple calls)
+- Control flow: 25-54% (needs loop optimization)
 
-📊 **Areas for future optimization**:
-- String.sub: 53% (buffered string building)
-- While/repeat loops: 68-70% (loop detection overhead)
-- Recursive fibonacci: 48% (stack frame overhead)
+📊 **Critical areas for optimization**:
+- Table access: 26% (cacheline/memory layout)
+- ipairs iteration: 29% (iterator overhead)
+- While/repeat loops: 22-25% (dispatch overhead)
+- String operations: 19-37% (allocation/copying)
+- Vararg functions: 28% (argument handling)
 
 ## Key Achievements
 
-1. **Production Quality**: 252/252 tests passing, stable performance
+1. **Production Quality**: 252/252 tests passing, stable correctness
 2. **Memory Safety**: Validated direct pointer access for hot paths
-3. **C Function Optimization**: Eliminated parameter/return copying (40% improvement in ipairs)
-4. **Hash Table Optimization**: Lua-style open addressing with O(1) load factor checks (145x faster insertion)
-5. **Iterator Optimization**: Direct pointer access in pairs/next (2.7x improvement)
-6. **Arithmetic Excellence**: Integer operations faster than native C implementation
-7. **String Operations**: Pattern matching and replacement 1.6-3.5x faster
+3. **C Function Optimization**: Eliminated parameter/return copying (significant improvement)
+4. **Hash Table Optimization**: Lua-style open addressing with O(1) load factor checks (now competitive with native)
+5. **Iterator Optimization**: Direct pointer access in pairs/next
+6. **Competitive Areas**: Hash table insertion and string.gsub outperform native Lua
+7. **Stable Foundation**: Ready for further performance optimizations
 
 ---
 
@@ -111,11 +125,13 @@ Lua-RS has achieved **production-ready performance** with **252/252 tests passin
    - Implementation: `unsafe { (*table_ptr).borrow().next(&index_val) }`
    - Impact: 3.867s → 1.449s (**2.7x improvement**)
 
-**Results**:
-- Hash table insertion (100k): Now **2.6x faster** than native Lua
-- ipairs iteration: Improved to **85% of native** (was 55%)
-- Function calls: **1.4x faster** than native (simple calls)
-- All arithmetic operations: **108-120% of native**
+**Results** (compared to release native Lua 5.4.6):
+- Hash table insertion (100k): **1.2x faster** (0.066s vs 0.079s)
+- ipairs iteration: **29% of native** (11.316s vs 3.241s) - still needs optimization
+- Function calls: **41% of native** (13.77M vs 33.33M calls/sec)
+- Arithmetic operations: **35-42% of native** (consistent dispatch overhead)
+
+**Note**: Earlier results showing >100% performance were comparing against debug-build native Lua. The current results reflect comparison with release-build native Lua 5.4.6, providing a realistic performance baseline.
 
 **Architecture Decision**:
 - Hot paths (VM execution): Use direct pointers for O(1) access
@@ -272,8 +288,8 @@ For loop: FORLOOP + body (1 instruction/iteration)
 **Result**:
 - While loop: 41.23 → 44.12 M/s (+7.0%, **53.8% of native**)
 - Repeat-until: 45.43 → 50.51 M/s (+11.2%, **56.6% of native**)
-- Integer addition: 115.79 → 123.22 M/s (+6.4%, **105% of native!** 🏆)
-- **Bonus**: Integer arithmetic now **faster than native Lua**!
+- Integer addition: 115.79 → 123.22 M/s (+6.4%)
+- **Note**: These percentages were measured against debug-build native Lua. Against release-build native Lua, performance is approximately 35-42% for arithmetic operations.
 
 **Why not as fast as for-loops?**
 - For-loops: 1 optimized instruction per iteration
