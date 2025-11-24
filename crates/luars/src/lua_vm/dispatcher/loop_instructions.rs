@@ -4,7 +4,7 @@ use super::DispatchAction;
 /// These instructions handle for loops (numeric and generic iterators).
 use crate::{
     LuaValue,
-    lua_value::LuaValueKind,
+    lua_value::{LuaValueKind, TAG_INTEGER, TAG_FLOAT, TYPE_MASK},
     lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM},
 };
 
@@ -102,86 +102,91 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// FORLOOP A Bx
 /// R[A]+=R[A+2];
 /// if R[A] <?= R[A+1] then { pc-=Bx; R[A+3]=R[A] }
+/// 
+/// ULTRA-OPTIMIZED: Direct bit-mask type checking with combined check
+/// - Single type check for all 3 values (branchless fast path)
+/// - Zero function calls in hot path
 #[inline(always)]
 pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let base_ptr = vm.current_frame().base_ptr;
+    // OPTIMIZATION: Single unsafe block + direct bit-mask type checking
+    unsafe {
+        let frame_ptr = vm.frames.as_mut_ptr().add(vm.frames.len() - 1);
+        let reg_base = vm.register_stack.as_mut_ptr().add((*frame_ptr).base_ptr + a);
+        
+        // Load all 3 values
+        let idx = *reg_base;
+        let counter_or_limit = *reg_base.add(1);
+        let step = *reg_base.add(2);
 
-    // OPTIMIZATION: Use unsafe for unchecked register access (hot path)
-    // Safety: FORPREP guarantees these registers exist and are initialized
-    let (idx, counter_or_limit, step) = unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr + a);
-        (*reg_base, *reg_base.add(1), *reg_base.add(2))
-    };
+        // OPTIMIZATION: Combined type check - single OR operation to detect if all are integers
+        // If all 3 are TAG_INTEGER, then (a|b|c) & TYPE_MASK == TAG_INTEGER
+        let combined_tags = (idx.primary | counter_or_limit.primary | step.primary) & TYPE_MASK;
 
-    // Check if this is an integer loop (step is integer)
-    if let Some(step_i) = step.as_integer() {
-        // Integer loop: R[A+1] is a counter
-        // OPTIMIZATION: Use match instead of ok_or_else to avoid closure
-        let count = match counter_or_limit.as_integer() {
-            Some(c) => c,
-            None => return Err(LuaError::RuntimeError("'for' counter must be a number".to_string())),
-        };
-
-        if count > 0 {
-            // Update internal index
-            let idx_i = match idx.as_integer() {
-                Some(i) => i,
-                None => return Err(LuaError::RuntimeError("'for' index must be a number".to_string())),
-            };
-            let new_idx = idx_i.wrapping_add(step_i);
+        // Fast path: All integers (single branch!)
+        if combined_tags == TAG_INTEGER {
+            let count = counter_or_limit.secondary as i64;
             
-            // OPTIMIZATION: Use unsafe for unchecked writes (hot path)
-            // Safety: Same registers we just read from, still valid
-            unsafe {
-                let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+            if count > 0 {
+                let idx_i = idx.secondary as i64;
+                let step_i = step.secondary as i64;
+                let new_idx = idx_i.wrapping_add(step_i);
+                
+                // Update registers
                 *reg_base = LuaValue::integer(new_idx);
                 *reg_base.add(1) = LuaValue::integer(count - 1);
                 *reg_base.add(3) = LuaValue::integer(new_idx);
-            }
 
-            // OPTIMIZATION: Direct PC manipulation
-            let pc = vm.current_frame().pc;
-            vm.current_frame_mut().pc = pc - bx;
+                (*frame_ptr).pc -= bx;
+            }
         }
-        // If count <= 0, exit loop (don't jump)
-    } else {
-        // Float loop: R[A+1] is limit, use traditional comparison
-        let limit_f = match counter_or_limit.as_number() {
-            Some(l) => l,
-            None => return Err(LuaError::RuntimeError("'for' limit must be a number".to_string())),
-        };
-        let idx_f = match idx.as_number() {
-            Some(i) => i,
-            None => return Err(LuaError::RuntimeError("'for' index must be a number".to_string())),
-        };
-        let step_f = match step.as_number() {
-            Some(s) => s,
-            None => return Err(LuaError::RuntimeError("'for' step must be a number".to_string())),
-        };
-
-        // Add step to index
-        let new_idx_f = idx_f + step_f;
-
-        // Check condition
-        let should_continue = if step_f > 0.0 {
-            new_idx_f <= limit_f
-        } else {
-            new_idx_f >= limit_f
-        };
-
-        if should_continue {
-            // OPTIMIZATION: Unsafe writes for float path too
-            unsafe {
-                let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                *reg_base = LuaValue::number(new_idx_f);
-                *reg_base.add(3) = LuaValue::number(new_idx_f);
-            }
+        // Slow path: at least one non-integer
+        else {
+            let step_tag = step.primary & TYPE_MASK;
+            let counter_tag = counter_or_limit.primary & TYPE_MASK;
+            let idx_tag = idx.primary & TYPE_MASK;
             
-            let pc = vm.current_frame().pc;
-            vm.current_frame_mut().pc = pc - bx;
+            // Check if all are numbers (integer or float)
+            if (step_tag == TAG_FLOAT || step_tag == TAG_INTEGER) &&
+               (counter_tag == TAG_FLOAT || counter_tag == TAG_INTEGER) &&
+               (idx_tag == TAG_FLOAT || idx_tag == TAG_INTEGER) {
+                
+                // Convert to float
+                let idx_f = if idx_tag == TAG_FLOAT {
+                    f64::from_bits(idx.secondary)
+                } else {
+                    idx.secondary as i64 as f64
+                };
+                
+                let limit_f = if counter_tag == TAG_FLOAT {
+                    f64::from_bits(counter_or_limit.secondary)
+                } else {
+                    counter_or_limit.secondary as i64 as f64
+                };
+                
+                let step_f = if step_tag == TAG_FLOAT {
+                    f64::from_bits(step.secondary)
+                } else {
+                    step.secondary as i64 as f64
+                };
+                
+                let new_idx_f = idx_f + step_f;
+                let should_continue = if step_f > 0.0 { 
+                    new_idx_f <= limit_f 
+                } else { 
+                    new_idx_f >= limit_f 
+                };
+
+                if should_continue {
+                    *reg_base = LuaValue::number(new_idx_f);
+                    *reg_base.add(3) = LuaValue::number(new_idx_f);
+                    (*frame_ptr).pc -= bx;
+                }
+            } else {
+                return Err(LuaError::RuntimeError("'for' values must be numbers".to_string()));
+            }
         }
     }
 
