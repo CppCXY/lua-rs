@@ -240,6 +240,11 @@ impl LuaVM {
     /// Main execution loop - interprets bytecode instructions
     /// Returns the final return value from the chunk
     fn run(&mut self) -> LuaResult<LuaValue> {
+        // OPTIMIZATION: Cache chunk pointer across instructions to avoid RefCell::borrow() overhead
+        // This is safe because chunk doesn't change during function execution
+        let mut cached_chunk_ptr: Option<*const Chunk> = None;
+        let mut cached_func_ptr: Option<*const RefCell<LuaFunction>> = None;
+        
         loop {
             // Check if we have any frames to execute
             if self.frames.is_empty() {
@@ -247,25 +252,32 @@ impl LuaVM {
                 return Ok(self.return_values.first().copied().unwrap_or(LuaValue::nil()));
             }
 
-            // Get current frame and chunk
+            // Get current frame
             let frame = self.current_frame();
             let func_ptr = match frame.get_function_ptr() {
                 Some(ptr) => ptr,
                 None => return Err(LuaError::RuntimeError("Not a Lua function".to_string())),
             };
 
-            // Safety: func_ptr is valid as long as the function exists in object_pool
-            let func = unsafe { &*func_ptr };
-            let func_ref = func.borrow();
-            let chunk = &func_ref.chunk;
+            // OPTIMIZATION: Cache chunk pointer to avoid repeated RefCell::borrow()
+            // Only update cache when function changes
+            let chunk_ptr = if Some(func_ptr) == cached_func_ptr {
+                unsafe { cached_chunk_ptr.unwrap_unchecked() }
+            } else {
+                // Function changed (call/return), update cache
+                let func = unsafe { &*func_ptr };
+                let func_ref = func.borrow();
+                let chunk_ptr = Rc::as_ptr(&func_ref.chunk);
+                drop(func_ref);
+                cached_func_ptr = Some(func_ptr);
+                cached_chunk_ptr = Some(chunk_ptr);
+                chunk_ptr
+            };
 
-            // OPTIMIZATION: Use unsafe for unchecked instruction fetch (hot path)
-            // Safety: PC bounds are checked by bytecode compiler and instruction execution
+            // OPTIMIZATION: Use cached chunk pointer directly (zero overhead)
+            let chunk = unsafe { &*chunk_ptr };
             let pc = frame.pc;
             let instr = unsafe { *chunk.code.get_unchecked(pc) };
-
-            // Drop borrows before executing instruction
-            drop(func_ref);
 
             // Increment PC before dispatching (standard for most instructions)
             // Some instructions (JMP, FORLOOP, etc.) will override this

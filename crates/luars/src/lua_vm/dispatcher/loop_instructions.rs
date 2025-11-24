@@ -103,7 +103,8 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// R[A]+=R[A+2];
 /// if R[A] <?= R[A+1] then { pc-=Bx; R[A+3]=R[A] }
 /// 
-/// ULTRA-OPTIMIZED: Direct bit-mask type checking with combined check
+/// ULTRA-OPTIMIZED V2: Cache frame pointer + direct bit-mask type checking
+/// - Eliminate Vec::len() call by using last_mut() directly
 /// - Single type check for all 3 values (branchless fast path)
 /// - Zero function calls in hot path
 #[inline(always)]
@@ -112,9 +113,11 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let bx = Instruction::get_bx(instr) as usize;
 
     // OPTIMIZATION: Single unsafe block + direct bit-mask type checking
+    // Use last_mut() to avoid len() call
     unsafe {
-        let frame_ptr = vm.frames.as_mut_ptr().add(vm.frames.len() - 1);
-        let reg_base = vm.register_stack.as_mut_ptr().add((*frame_ptr).base_ptr + a);
+        let frame_ptr = vm.frames.last_mut().unwrap_unchecked() as *mut LuaCallFrame;
+        let base_ptr = (*frame_ptr).base_ptr;
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
         
         // Load all 3 values
         let idx = *reg_base;
