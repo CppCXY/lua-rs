@@ -30,7 +30,8 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let result =
                 LuaValue::integer((left.secondary as i64).wrapping_add(right.secondary as i64));
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-            vm.current_frame_mut().pc += 1; return Ok(());
+            vm.current_frame_mut().pc += 1;
+            return Ok(());
         }
 
         // Slow path: Check individual types
@@ -52,7 +53,9 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             return add_error(left, right);
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result; vm.current_frame_mut().pc += 1; Ok(())
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        vm.current_frame_mut().pc += 1;
+        Ok(())
     }
 }
 
@@ -85,7 +88,8 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let result =
                 LuaValue::integer((left.secondary as i64).wrapping_sub(right.secondary as i64));
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-            vm.current_frame_mut().pc += 1; return Ok(());
+            vm.current_frame_mut().pc += 1;
+            return Ok(());
         }
 
         // Slow path: Check individual types
@@ -107,7 +111,9 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             return sub_error(left, right);
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result; vm.current_frame_mut().pc += 1; Ok(())
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        vm.current_frame_mut().pc += 1;
+        Ok(())
     }
 }
 
@@ -140,7 +146,8 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let result =
                 LuaValue::integer((left.secondary as i64).wrapping_mul(right.secondary as i64));
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-            vm.current_frame_mut().pc += 1; return Ok(());
+            vm.current_frame_mut().pc += 1;
+            return Ok(());
         }
 
         // Slow path
@@ -157,7 +164,9 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             return mul_error(left, right);
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result; vm.current_frame_mut().pc += 1; Ok(())
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        vm.current_frame_mut().pc += 1;
+        Ok(())
     }
 }
 
@@ -258,7 +267,9 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             LuaValue::number((l_float / r_float).floor())
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result; vm.current_frame_mut().pc += 1; Ok(())
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        vm.current_frame_mut().pc += 1;
+        Ok(())
     }
 }
 
@@ -312,7 +323,9 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             LuaValue::number(result)
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result; vm.current_frame_mut().pc += 1; Ok(())
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        vm.current_frame_mut().pc += 1;
+        Ok(())
     }
 }
 
@@ -339,7 +352,9 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     let result = LuaValue::number(l_float.powf(r_float));
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
@@ -380,7 +395,8 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         )));
     };
 
-    vm.register_stack[base_ptr + a] = result; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    Ok(())
 }
 
 // ============ Arithmetic Immediate Instructions ============
@@ -401,14 +417,16 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let l = left.secondary as i64;
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
                 LuaValue::integer(l.wrapping_add(sc as i64));
-            vm.current_frame_mut().pc += 1; return Ok(());
+            vm.current_frame_mut().pc += 1;
+            return Ok(());
         }
 
         if left.primary == TAG_FLOAT {
             // Float fast path
             let l = f64::from_bits(left.secondary);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(l + sc as f64);
-            vm.current_frame_mut().pc += 1; return Ok(());
+            vm.current_frame_mut().pc += 1;
+            return Ok(());
         }
 
         // Not a number, fallthrough to MMBINI
@@ -444,14 +462,16 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         // Integer operation with wraparound, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(r));
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
 
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         // Float operation succeeded, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::number(l + r);
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
 
     // Not numbers, fallthrough to MMBIN
@@ -484,13 +504,15 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_sub(r));
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
 
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number(l - r);
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
     Ok(())
 }
@@ -531,7 +553,8 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         let l = left.secondary as i64;
         let r = constant.secondary as i64;
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_mul(r));
-        vm.current_frame_mut().pc += 1; return Ok(());
+        vm.current_frame_mut().pc += 1;
+        return Ok(());
     }
 
     // Check if at least one is float (covers float*float, float*int, int*float)
@@ -554,7 +577,8 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         };
 
         vm.register_stack[base_ptr + a] = LuaValue::float(l * r);
-        vm.current_frame_mut().pc += 1; return Ok(());
+        vm.current_frame_mut().pc += 1;
+        return Ok(());
     }
 
     Ok(())
@@ -591,14 +615,16 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             ));
         }
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.rem_euclid(r));
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
 
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         let result = l - (l / r).floor() * r;
         vm.register_stack[base_ptr + a] = LuaValue::number(result);
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
     Ok(())
 }
@@ -637,7 +663,9 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     let result = LuaValue::number(l_float.powf(r_float));
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(()) // Skip MMBIN fallback
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(()) // Skip MMBIN fallback
 }
 
 /// DIVK: R[A] = R[B] / K[C]
@@ -674,7 +702,9 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     let result = LuaValue::number(l_float / r_float);
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// IDIVK: R[A] = R[B] // K[C]
@@ -708,13 +738,15 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             ));
         }
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.div_euclid(r));
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
 
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number((l / r).floor());
-        vm.current_frame_mut().pc += 1; return Ok(()); // Skip MMBIN fallback
+        vm.current_frame_mut().pc += 1;
+        return Ok(()); // Skip MMBIN fallback
     }
     Ok(())
 }
@@ -743,7 +775,9 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     let result = LuaValue::integer(l_int & r_int);
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// BOR: R[A] = R[B] | R[C]
@@ -768,7 +802,9 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     let result = LuaValue::integer(l_int | r_int);
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// BXOR: R[A] = R[B] ~ R[C]
@@ -793,7 +829,9 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     let result = LuaValue::integer(l_int ^ r_int);
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// SHL: R[A] = R[B] << R[C]
@@ -827,7 +865,9 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         LuaValue::integer(l_int >> ((-r_int) & 63))
     };
 
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// SHR: R[A] = R[B] >> R[C]
@@ -857,7 +897,9 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         LuaValue::integer(l_int << ((-r_int) & 63))
     };
 
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// BANDK: R[A] = R[B] & K[C]
@@ -909,7 +951,9 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         return Ok(());
     };
 
-    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int & r_int); vm.current_frame_mut().pc += 1; Ok(()) // Skip MMBIN fallback
+    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int & r_int);
+    vm.current_frame_mut().pc += 1;
+    Ok(()) // Skip MMBIN fallback
 }
 
 /// BORK: R[A] = R[B] | K[C]
@@ -961,7 +1005,9 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         return Ok(());
     };
 
-    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int | r_int); vm.current_frame_mut().pc += 1; Ok(()) // Skip MMBIN fallback
+    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int | r_int);
+    vm.current_frame_mut().pc += 1;
+    Ok(()) // Skip MMBIN fallback
 }
 
 /// BXORK: R[A] = R[B] ~ K[C]
@@ -1013,7 +1059,9 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         return Ok(());
     };
 
-    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int ^ r_int); vm.current_frame_mut().pc += 1; Ok(()) // Skip MMBIN fallback
+    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int ^ r_int);
+    vm.current_frame_mut().pc += 1;
+    Ok(()) // Skip MMBIN fallback
 }
 
 /// SHRI: R[A] = R[B] >> sC
@@ -1038,7 +1086,9 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         LuaValue::integer(l_int << ((-sc) & 63))
     };
 
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// SHLI: R[A] = sC << R[B]
@@ -1063,7 +1113,9 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         LuaValue::integer((sc as i64) >> ((-r_int) & 63))
     };
 
-    vm.register_stack[base_ptr + a] = result; vm.current_frame_mut().pc += 1; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    vm.current_frame_mut().pc += 1;
+    Ok(())
 }
 
 /// BNOT: R[A] = ~R[B]
@@ -1098,7 +1150,8 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         )));
     };
 
-    vm.register_stack[base_ptr + a] = result; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    Ok(())
 }
 
 /// NOT: R[A] = not R[B]
@@ -1115,7 +1168,8 @@ pub fn exec_not(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let is_falsy = value.is_nil() || matches!(value.as_bool(), Some(false));
     let result = LuaValue::boolean(is_falsy);
 
-    vm.register_stack[base_ptr + a] = result; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    Ok(())
 }
 
 /// LEN: R[A] = #R[B]
@@ -1162,7 +1216,8 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     let result = LuaValue::integer(len);
-    vm.register_stack[base_ptr + a] = result; Ok(())
+    vm.register_stack[base_ptr + a] = result;
+    Ok(())
 }
 
 /// Get metamethod name for binary operation
