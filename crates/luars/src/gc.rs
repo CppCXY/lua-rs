@@ -74,28 +74,27 @@ pub struct GC {
     // Lua 5.4 GC debt mechanism
     // GC runs when: GCdebt > 0
     // totalbytes = actual_bytes - GCdebt
-    pub(crate) gc_debt: isize,          // Bytes allocated not yet compensated by collector
-    pub(crate) total_bytes: usize,      // Number of bytes currently allocated - GCdebt
-    gc_estimate: usize,                 // Estimate of non-garbage memory
-    
+    pub(crate) gc_debt: isize, // Bytes allocated not yet compensated by collector
+    pub(crate) total_bytes: usize, // Number of bytes currently allocated - GCdebt
+    gc_estimate: usize,        // Estimate of non-garbage memory
+
     // GC parameters (Lua 5.4 style)
-    gc_pause: usize,            // Pause parameter (default 200 = 200%)
-    gc_step_mul: usize,         // Step multiplier (default 100)
-    gen_minor_mul: u8,          // Minor generational control (default 20)
-    gen_major_mul: u8,          // Major generational control (default 100)
-    
+    gc_pause: usize, // Pause parameter (default 200 = 200%)
+
     // GC mode
-    gc_kind: GCKind,            // KGC_INC or KGC_GEN
-    last_atomic: usize,         // For generational mode
-    
+    gc_kind: GCKind, // KGC_INC or KGC_GEN
+
     // Shrink optimization - avoid frequent shrinking
-    shrink_cooldown: u32,       // Shrink 冷却计数器
-    shrink_threshold: u32,      // Shrink 阈值
-    
+    shrink_cooldown: u32,  // Shrink 冷却计数器
+    shrink_threshold: u32, // Shrink 阈值
+
     // Generational GC state
     allocations_since_minor_gc: usize,
     minor_gc_count: usize,
-    
+
+    // Finalization support (__gc metamethod)
+    finalize_queue: Vec<(GcObjectType, u32)>, // Objects awaiting finalization
+
     // Statistics
     collection_count: usize,
     stats: GCStats,
@@ -125,19 +124,16 @@ impl GC {
         GC {
             objects: HashMap::new(),
             next_gc_id: 1,
-            gc_debt: -(200 * 1024),       // Start with negative debt (can allocate 200KB)
+            gc_debt: -(200 * 1024), // Start with negative debt (can allocate 200KB)
             total_bytes: 0,
             gc_estimate: 0,
             gc_pause: 200,                 // 200% pause (LUAI_GCPAUSE)
-            gc_step_mul: 100,              // 100 step mul (LUAI_GCMUL)
-            gen_minor_mul: 20,             // LUAI_GENMINORMUL
-            gen_major_mul: 100,            // LUAI_GENMAJORMUL
             gc_kind: GCKind::Generational, // Default to generational (like Lua 5.4)
-            last_atomic: 0,
             shrink_cooldown: 0,
-            shrink_threshold: 10,          // 每 10 次 GC 才 shrink 一次
+            shrink_threshold: 10, // 每 10 次 GC 才 shrink 一次
             allocations_since_minor_gc: 0,
             minor_gc_count: 0,
+            finalize_queue: Vec::new(), // __gc finalizer queue
             collection_count: 0,
             stats: GCStats::default(),
         }
@@ -180,18 +176,19 @@ impl GC {
     pub fn should_collect(&self) -> bool {
         self.gc_debt > 0
     }
-    
+
     /// Perform one step of GC work (like luaC_step in Lua 5.4)
     pub fn step(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) {
         if !self.should_collect() {
             return;
         }
-        
+
         // Determine which collection to run
         match self.gc_kind {
             GCKind::Generational => {
                 // Simple generational: check if we should do minor or major
-                if self.minor_gc_count >= 10 {  // Every 10 minor GCs, do a major
+                if self.minor_gc_count >= 10 {
+                    // Every 10 minor GCs, do a major
                     self.major_collect_internal(roots, object_pool);
                 } else {
                     self.minor_collect_internal(roots, object_pool);
@@ -203,11 +200,11 @@ impl GC {
                 self.major_collect_internal(roots, object_pool);
             }
         }
-        
+
         // Reset debt based on estimate
         self.set_debt();
     }
-    
+
     /// Set GC debt based on current memory and pause parameter
     fn set_debt(&mut self) {
         let estimate = self.gc_estimate.max(1024);
@@ -267,6 +264,14 @@ impl GC {
 
                     survivors.push((key, obj));
                 } else {
+                    // Object is unreachable - check for __gc finalizer
+                    if self.check_finalizer(obj_type, obj_id, object_pool) {
+                        // Has finalizer, keep alive for one more cycle
+                        // (Finalization happens externally by VM)
+                        survivors.push((key, obj));
+                        continue;
+                    }
+
                     // Collect garbage - remove from object pool!
                     collected += 1;
                     match obj_type {
@@ -297,6 +302,20 @@ impl GC {
         // Re-insert survivors
         for (key, obj) in survivors {
             self.objects.insert(key, obj);
+        }
+
+        // Clean up weak tables after GC
+        let all_tables: Vec<_> = self
+            .objects
+            .iter()
+            .filter(|((obj_type, _), _)| *obj_type == GcObjectType::Table)
+            .map(|((_, obj_id), _)| crate::object_pool::TableId(*obj_id))
+            .collect();
+
+        for table_id in all_tables {
+            if let Some(weak_mode) = self.get_weak_mode(table_id, object_pool) {
+                self.clear_weak_entries(table_id, &weak_mode, object_pool);
+            }
         }
 
         self.stats.objects_collected += collected;
@@ -335,6 +354,12 @@ impl GC {
 
         for key @ (obj_type, obj_id) in keys {
             if !reachable.contains(&key) {
+                // Check for __gc finalizer before collecting
+                if self.check_finalizer(obj_type, obj_id, object_pool) {
+                    // Has finalizer, keep alive for one more cycle
+                    continue;
+                }
+
                 self.objects.remove(&key);
                 collected += 1;
 
@@ -366,6 +391,20 @@ impl GC {
         // Unmark all survivors
         for obj in self.objects.values_mut() {
             obj.unmark();
+        }
+
+        // Clean up weak tables after GC
+        let all_tables: Vec<_> = self
+            .objects
+            .iter()
+            .filter(|((obj_type, _), _)| *obj_type == GcObjectType::Table)
+            .map(|((_, obj_id), _)| crate::object_pool::TableId(*obj_id))
+            .collect();
+
+        for table_id in all_tables {
+            if let Some(weak_mode) = self.get_weak_mode(table_id, object_pool) {
+                self.clear_weak_entries(table_id, &weak_mode, object_pool);
+            }
         }
 
         self.stats.objects_collected += collected;
@@ -484,9 +523,9 @@ impl GC {
             crate::lua_value::LuaValueKind::Table => {
                 value.as_table_id().map(|id| (GcObjectType::Table, id.0))
             }
-            crate::lua_value::LuaValueKind::Function => {
-                value.as_function_id().map(|id| (GcObjectType::Function, id.0))
-            }
+            crate::lua_value::LuaValueKind::Function => value
+                .as_function_id()
+                .map(|id| (GcObjectType::Function, id.0)),
             _ => None,
         };
 
@@ -540,6 +579,146 @@ impl GC {
     pub fn tune_thresholds(&mut self) {
         // Adjust debt based on current memory
         self.adjust_threshold();
+    }
+
+    /// Check if object has __gc metamethod that needs to be called
+    /// This should be called during sweep phase before removing object
+    pub fn check_finalizer(
+        &mut self,
+        obj_type: GcObjectType,
+        obj_id: u32,
+        object_pool: &crate::object_pool::ObjectPool,
+    ) -> bool {
+        if obj_type != GcObjectType::Table {
+            return false; // Only tables can have metatables with __gc
+        }
+
+        let table_id = crate::object_pool::TableId(obj_id);
+        if let Some(table_rc) = object_pool.get_table(table_id) {
+            let table = table_rc.borrow();
+            if let Some(meta_value) = table.get_metatable() {
+                if let Some(meta_id) = meta_value.as_table_id() {
+                    if let Some(meta_table_rc) = object_pool.get_table(meta_id) {
+                        let meta_table = meta_table_rc.borrow();
+                        // Check for __gc key in metatable
+                        // We need to look for the string "__gc" in the metatable
+                        for (key, value) in meta_table.iter_all() {
+                            if let Some(string_id) = key.as_string_id() {
+                                if let Some(string_rc) = object_pool.get_string(string_id) {
+                                    if string_rc.as_str() == "__gc" && !value.is_nil() {
+                                        // Has __gc metamethod, add to finalize queue
+                                        self.finalize_queue.push((obj_type, obj_id));
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Get finalization queue (for external processing by VM)
+    /// VM should call __gc metamethods on these objects
+    pub fn take_finalize_queue(&mut self) -> Vec<(GcObjectType, u32)> {
+        std::mem::take(&mut self.finalize_queue)
+    }
+
+    /// Check if table has weak mode (__mode metamethod)
+    /// Returns: None if no weak mode, Some("k") for weak keys, Some("v") for weak values, Some("kv") for both
+    pub fn get_weak_mode(
+        &self,
+        table_id: crate::object_pool::TableId,
+        object_pool: &crate::object_pool::ObjectPool,
+    ) -> Option<String> {
+        if let Some(table_rc) = object_pool.get_table(table_id) {
+            let table = table_rc.borrow();
+            if let Some(meta_value) = table.get_metatable() {
+                if let Some(meta_id) = meta_value.as_table_id() {
+                    if let Some(meta_table_rc) = object_pool.get_table(meta_id) {
+                        let meta_table = meta_table_rc.borrow();
+                        // Look for __mode key
+                        for (key, value) in meta_table.iter_all() {
+                            if let Some(string_id) = key.as_string_id() {
+                                if let Some(string_rc) = object_pool.get_string(string_id) {
+                                    if string_rc.as_str() == "__mode" {
+                                        if let Some(mode_string_id) = value.as_string_id() {
+                                            if let Some(mode_string_rc) =
+                                                object_pool.get_string(mode_string_id)
+                                            {
+                                                return Some(mode_string_rc.as_str().to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Clear weak references from a weak table after GC
+    /// This removes entries where the key or value was collected
+    pub fn clear_weak_entries(
+        &self,
+        table_id: crate::object_pool::TableId,
+        weak_mode: &str,
+        object_pool: &crate::object_pool::ObjectPool,
+    ) {
+        if let Some(table_rc) = object_pool.get_table(table_id) {
+            let mut table = table_rc.borrow_mut();
+            let has_weak_keys = weak_mode.contains('k');
+            let has_weak_values = weak_mode.contains('v');
+
+            if !has_weak_keys && !has_weak_values {
+                return;
+            }
+
+            // Collect keys to remove
+            let mut keys_to_remove = Vec::new();
+
+            for (key, value) in table.iter_all() {
+                let mut should_remove = false;
+
+                // Check if weak key was collected
+                if has_weak_keys {
+                    if let Some(key_table_id) = key.as_table_id() {
+                        if !self
+                            .objects
+                            .contains_key(&(GcObjectType::Table, key_table_id.0))
+                        {
+                            should_remove = true;
+                        }
+                    }
+                }
+
+                // Check if weak value was collected
+                if has_weak_values && !should_remove {
+                    if let Some(val_table_id) = value.as_table_id() {
+                        if !self
+                            .objects
+                            .contains_key(&(GcObjectType::Table, val_table_id.0))
+                        {
+                            should_remove = true;
+                        }
+                    }
+                }
+
+                if should_remove {
+                    keys_to_remove.push(key);
+                }
+            }
+
+            // Remove collected weak references (set to nil removes from table)
+            for key in keys_to_remove {
+                table.raw_set(key, LuaValue::nil());
+            }
+        }
     }
 }
 
