@@ -1,14 +1,13 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
+mod dispatcher;
 mod lua_call_frame;
 mod lua_error;
 mod opcode;
-mod dispatcher;
 
 use crate::gc::GC;
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
-use dispatcher::{dispatch_instruction, DispatchAction};
 use crate::lua_value::{
     Chunk, CoroutineStatus, LuaFunction, LuaString, LuaTable, LuaThread, LuaUpvalue, LuaValue,
     LuaValueKind,
@@ -16,6 +15,7 @@ use crate::lua_value::{
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::{ObjectPool, lib_registry};
+use dispatcher::{DispatchAction, dispatch_instruction};
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -124,7 +124,7 @@ impl LuaVM {
 
     pub fn open_libs(&mut self) {
         let _ = lib_registry::create_standard_registry().load_all(self);
-        
+
         // Register async functions
         #[cfg(feature = "async")]
         crate::stdlib::async_lib::register_async_functions(self);
@@ -201,7 +201,7 @@ impl LuaVM {
         let base_ptr = 0; // Start from beginning of cleared stack
         let max_stack = func_ref.chunk.max_stack_size;
         let required_size = max_stack; // Need at least max_stack registers
-        
+
         // Initialize stack with nil values
         self.register_stack.resize(required_size, LuaValue::nil());
 
@@ -216,7 +216,8 @@ impl LuaVM {
         let code_ptr = func_ref.chunk.code.as_ptr();
         drop(func_ref);
 
-        let frame = LuaCallFrame::new_lua_function(frame_id, func, code_ptr, base_ptr, max_stack, 0, 0);
+        let frame =
+            LuaCallFrame::new_lua_function(frame_id, func, code_ptr, base_ptr, max_stack, 0, 0);
 
         self.frames.push(frame);
 
@@ -246,12 +247,15 @@ impl LuaVM {
     /// Main execution loop - interprets bytecode instructions
     /// Returns the final return value from the chunk
     fn run(&mut self) -> LuaResult<LuaValue> {
-
         loop {
             // Check if we have any frames to execute
             if self.frames.is_empty() {
                 // Execution finished
-                return Ok(self.return_values.first().copied().unwrap_or(LuaValue::nil()));
+                return Ok(self
+                    .return_values
+                    .first()
+                    .copied()
+                    .unwrap_or(LuaValue::nil()));
             }
 
             // OPTIMIZATION: 极简指令获取 - 仿照原生 Lua 的 vmfetch 宏
@@ -621,11 +625,11 @@ impl LuaVM {
         // CRITICAL FAST PATH: Direct pointer access, no metatable check!
         if let Some(ptr) = lua_table_value.as_table_ptr() {
             let lua_table = unsafe { &*ptr };
-            
+
             // OPTIMIZATION: Inline the borrow and raw_get to reduce overhead
             unsafe {
                 let table = &*lua_table.as_ptr();
-                
+
                 // Fast path for integer keys
                 if let Some(i) = key.as_integer() {
                     if i > 0 {
@@ -638,16 +642,16 @@ impl LuaVM {
                         }
                     }
                 }
-                
+
                 // Hash part lookup - use table's get_from_hash method
                 if let Some(val) = table.get_from_hash(key) {
                     return val;
                 }
             }
-            
+
             return LuaValue::nil();
         }
-        
+
         // Fallback: ObjectPool lookup (rare case)
         if let Some(table_id) = lua_table_value.as_table_id() {
             if let Some(lua_table) = self.object_pool.get_table(table_id) {
@@ -655,20 +659,24 @@ impl LuaVM {
                 return table.raw_get(key).unwrap_or(LuaValue::nil());
             }
         }
-        
+
         LuaValue::nil()
     }
 
     /// Get value from table with metatable support (__index metamethod)
     /// Use this for GETTABLE, GETFIELD, GETI instructions
     /// For raw access without metamethods, use table_get_raw() instead
-    pub fn table_get_with_meta(&mut self, lua_table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+    pub fn table_get_with_meta(
+        &mut self,
+        lua_table_value: &LuaValue,
+        key: &LuaValue,
+    ) -> Option<LuaValue> {
         // Handle strings with metatable support
         if lua_table_value.is_string() {
             // Strings use a shared metatable
             if let Some(string_mt) = self.get_string_metatable() {
                 let index_key = self.create_string("__index");
-                
+
                 // Get the __index field from string metatable
                 if let Some(index_table) = self.table_get_with_meta(&string_mt, &index_key) {
                     // Look up the key in the __index table (the string library)
@@ -714,7 +722,9 @@ impl LuaVM {
 
                     if let Some(index_val) = index_value {
                         match index_val.kind() {
-                            LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
+                            LuaValueKind::Table => {
+                                return self.table_get_with_meta(&index_val, key);
+                            }
                             LuaValueKind::CFunction | LuaValueKind::Function => {
                                 let args = vec![lua_table_value.clone(), key.clone()];
                                 match self.call_metamethod(&index_val, &args) {
@@ -735,7 +745,9 @@ impl LuaVM {
 
                     if let Some(index_val) = index_value {
                         match index_val.kind() {
-                            LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
+                            LuaValueKind::Table => {
+                                return self.table_get_with_meta(&index_val, key);
+                            }
                             LuaValueKind::CFunction | LuaValueKind::Function => {
                                 let args = vec![lua_table_value.clone(), key.clone()];
                                 match self.call_metamethod(&index_val, &args) {
@@ -1073,7 +1085,7 @@ impl LuaVM {
         // Remove closed upvalues from the open list
         self.open_upvalues.retain(|uv| uv.is_open());
     }
-    
+
     /// Close all open upvalues at or above the given stack position
     /// Used by RETURN (k bit) and CLOSE instructions
     pub fn close_upvalues_from(&mut self, stack_pos: usize) {
@@ -1205,18 +1217,15 @@ impl LuaVM {
             }
             LuaValueKind::Userdata => {
                 if let Some(id) = value.as_userdata_id() {
-                    self.object_pool.get_userdata(id)
-                        .and_then(|ud| {
-                            let mt = ud.borrow().get_metatable();
-                            if mt.is_nil() { None } else { Some(mt) }
-                        })
+                    self.object_pool.get_userdata(id).and_then(|ud| {
+                        let mt = ud.borrow().get_metatable();
+                        if mt.is_nil() { None } else { Some(mt) }
+                    })
                 } else {
                     None
                 }
             }
-            LuaValueKind::String => {
-                self.get_string_metatable()
-            }
+            LuaValueKind::String => self.get_string_metatable(),
             _ => None,
         }
     }
@@ -1505,7 +1514,8 @@ impl LuaVM {
                 }
 
                 // Get code pointer from metamethod function
-                let meta_func_ptr = metamethod.as_function_ptr()
+                let meta_func_ptr = metamethod
+                    .as_function_ptr()
                     .ok_or_else(|| LuaError::RuntimeError("Invalid metamethod".to_string()))?;
                 let meta_func = unsafe { &*meta_func_ptr };
                 let code_ptr = meta_func.borrow().chunk.code.as_ptr();
@@ -1644,7 +1654,11 @@ impl LuaVM {
 
     /// Execute a function with protected call (pcall semantics)
     /// Note: Yields are NOT caught by pcall - they propagate through
-    pub fn protected_call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
+    pub fn protected_call(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save current state
         let initial_frame_count = self.frames.len();
 
@@ -1688,7 +1702,7 @@ impl LuaVM {
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         eprintln!("[xpcall] protected_call_with_handler called");
         eprintln!("[xpcall] err_handler type: {:?}", err_handler.kind());
-        
+
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
@@ -1711,19 +1725,23 @@ impl LuaVM {
             }
             Err(err_msg) => {
                 eprintln!("[xpcall] Error encountered: {:?}", err_msg);
-                
+
                 // Clean up frames created by the failed function call
                 while self.frames.len() > initial_frame_count {
                     let frame = self.frames.pop().unwrap();
                     // Close upvalues belonging to this frame
                     self.close_upvalues_from(frame.base_ptr);
                 }
-                
+
                 eprintln!("[xpcall] Calling error handler");
                 // Extract the actual error message without the "Runtime Error: " prefix
                 let (err_value, err_display) = match &err_msg {
-                    LuaError::RuntimeError(msg) => (self.create_string(msg), format!("{}", err_msg)),
-                    LuaError::CompileError(msg) => (self.create_string(msg), format!("{}", err_msg)),
+                    LuaError::RuntimeError(msg) => {
+                        (self.create_string(msg), format!("{}", err_msg))
+                    }
+                    LuaError::CompileError(msg) => {
+                        (self.create_string(msg), format!("{}", err_msg))
+                    }
                     _ => {
                         let display = format!("{}", err_msg);
                         (self.create_string(&display), display)
@@ -1766,11 +1784,12 @@ impl LuaVM {
                 // to prevent overwriting ANY caller registers (including those beyond top)
                 let new_base = if let Some(current_frame) = self.frames.last() {
                     let caller_base = current_frame.base_ptr;
-                    let caller_max_stack = if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
-                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
-                    } else {
-                        256
-                    };
+                    let caller_max_stack =
+                        if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
+                            unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                        } else {
+                            256
+                        };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -1811,7 +1830,7 @@ impl LuaVM {
                 // Create empty code for dummy frame
                 let empty_code: Vec<u32> = vec![];
                 let code_ptr = empty_code.as_ptr();
-                
+
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     dummy_func_value,
@@ -1862,11 +1881,12 @@ impl LuaVM {
                 // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
                 let new_base = if let Some(current_frame) = self.frames.last() {
                     let caller_base = current_frame.base_ptr;
-                    let caller_max_stack = if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
-                        unsafe { (*func_ptr).borrow().chunk.max_stack_size }
-                    } else {
-                        256
-                    };
+                    let caller_max_stack =
+                        if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
+                            unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                        } else {
+                            256
+                        };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -1889,7 +1909,8 @@ impl LuaVM {
                 let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
 
                 // Get code pointer from function
-                let func_ptr = func.as_function_ptr()
+                let func_ptr = func
+                    .as_function_ptr()
                     .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
                 let func_obj = unsafe { &*func_ptr };
                 let code_ptr = func_obj.borrow().chunk.code.as_ptr();
@@ -1943,24 +1964,24 @@ impl LuaVM {
                             match action {
                                 DispatchAction::Continue => {
                                     // Continue to next instruction
-                                },
+                                }
                                 DispatchAction::Skip1 => {
                                     // Skip 1 additional instruction
                                     self.frames[frame_idx].pc += 1;
-                                },
+                                }
                                 DispatchAction::Return => {
                                     // Frame will be popped, loop will exit
-                                },
+                                }
                                 DispatchAction::Yield => {
                                     // Yield detected - propagate it up
                                     break Err(LuaError::Yield(self.return_values.clone()));
-                                },
+                                }
                                 DispatchAction::Call => {
                                     // CALL instruction already set up the frame
                                     // Continue execution in the new frame
-                                },
+                                }
                             }
-                        },
+                        }
                         Err(e) => {
                             // Real error occurred
                             break Err(e);
@@ -1986,7 +2007,12 @@ impl LuaVM {
 
     // Async bridge API: Call a registered async function (internal use)
     #[cfg(feature = "async")]
-    pub fn async_call(&mut self, func_name: &str, args: Vec<LuaValue>, coroutine: LuaValue) -> LuaResult<u64> {
+    pub fn async_call(
+        &mut self,
+        func_name: &str,
+        args: Vec<LuaValue>,
+        coroutine: LuaValue,
+    ) -> LuaResult<u64> {
         let task_id = self.async_executor.spawn_task(func_name, args, coroutine)?;
         Ok(task_id)
     }
@@ -1995,13 +2021,13 @@ impl LuaVM {
     #[cfg(feature = "async")]
     pub fn poll_async(&mut self) -> LuaResult<()> {
         let completed_tasks = self.async_executor.collect_completed_tasks();
-        
+
         for (_task_id, coroutine, result) in completed_tasks {
             // Resume the coroutine with the result values
             let values = result?;
             let (_success, _resume_result) = self.resume_thread(coroutine, values)?;
         }
-        
+
         Ok(())
     }
 
@@ -2012,7 +2038,8 @@ impl LuaVM {
         F: Fn(Vec<LuaValue>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = LuaResult<Vec<LuaValue>>> + Send + 'static,
     {
-        self.async_executor.register_async_function(name.to_string(), func);
+        self.async_executor
+            .register_async_function(name.to_string(), func);
     }
 
     // Get the number of active async tasks

@@ -14,19 +14,19 @@ use std::cell::RefCell;
 /// - 1 byte: flags
 /// - 1 byte: padding
 pub struct LuaCallFrame {
-    pub function_value: LuaValue,      // 16 bytes - 包含 ID + 指针
-    pub code_ptr: *const u32,          // 8 bytes - HOT PATH: 直接指向指令数组!
-    pub base_ptr: usize,               // 8 bytes - 寄存器栈基址
-    pub top: usize,                    // 8 bytes - 栈顶
-    pub pc: usize,                     // 8 bytes - 程序计数器
-    pub frame_id: usize,               // 8 bytes - 帧ID
-    pub vararg_start: usize,           // 8 bytes - 可变参数起始位置
-    pub result_reg: u16,               // 2 bytes - 结果寄存器索引
-    pub num_results: u16,              // 2 bytes - 期望返回数
-    pub vararg_count: u16,             // 2 bytes - 可变参数数量
-    flags: u8,                         // 1 byte - 标志位
-    _padding: u8,                      // 1 byte - 对齐
-                                       // Total: 72 bytes
+    pub function_value: LuaValue, // 16 bytes - 包含 ID + 指针
+    pub code_ptr: *const u32,     // 8 bytes - HOT PATH: 直接指向指令数组!
+    pub base_ptr: usize,          // 8 bytes - 寄存器栈基址
+    pub top: usize,               // 8 bytes - 栈顶
+    pub pc: usize,                // 8 bytes - 程序计数器
+    pub frame_id: usize,          // 8 bytes - 帧ID
+    pub vararg_start: usize,      // 8 bytes - 可变参数起始位置
+    pub result_reg: u16,          // 2 bytes - 结果寄存器索引
+    pub num_results: u16,         // 2 bytes - 期望返回数
+    pub vararg_count: u16,        // 2 bytes - 可变参数数量
+    flags: u8,                    // 1 byte - 标志位
+    _padding: u8,                 // 1 byte - 对齐
+                                  // Total: 72 bytes
 }
 
 // Flag bits
@@ -41,7 +41,7 @@ impl LuaCallFrame {
     pub fn new_lua_function(
         frame_id: usize,
         function_value: LuaValue,
-        code_ptr: *const u32,  // 新增：直接传入 code 指针
+        code_ptr: *const u32, // 新增：直接传入 code 指针
         base_ptr: usize,
         max_stack_size: usize,
         result_reg: usize,
@@ -77,7 +77,7 @@ impl LuaCallFrame {
     ) -> Self {
         LuaCallFrame {
             function_value: parent_function_value,
-            code_ptr: std::ptr::null(),  // C 函数没有 code
+            code_ptr: std::ptr::null(), // C 函数没有 code
             base_ptr,
             top: num_args,
             pc: parent_pc,

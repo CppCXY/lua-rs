@@ -56,7 +56,7 @@ pub struct IndexInfo {
 /// Local variable information
 #[derive(Debug, Clone, Copy)]
 pub struct VarInfo {
-    pub ridx: u32,   // Register index
+    pub ridx: u32, // Register index
     #[allow(unused)]
     pub vidx: usize, // Variable index in locals array
 }

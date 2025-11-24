@@ -39,7 +39,7 @@ pub fn gsub(
     let mut pos = 0;
     let text_chars: Vec<char> = text.chars().collect();
     let mut last_was_nonempty = false; // Track if last match was non-empty
-    
+
     // Fast path: if replacement doesn't contain %, no substitution needed
     let needs_substitution = replacement.contains('%');
 
@@ -64,7 +64,7 @@ pub fn gsub(
                 last_was_nonempty = false;
                 continue;
             }
-            
+
             // Found match (either non-empty, or empty not after non-empty)
             count += 1;
 

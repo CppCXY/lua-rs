@@ -52,7 +52,7 @@ impl ScopeChain {
 pub struct Compiler<'a> {
     pub(crate) chunk: Chunk,
     pub(crate) scope_depth: usize,
-    pub(crate) freereg: u32,   // First free register (replaces next_register)
+    pub(crate) freereg: u32, // First free register (replaces next_register)
     pub(crate) peak_freereg: u32, // Peak value of freereg (for max_stack_size)
     pub(crate) nactvar: usize, // Number of active local variables
     pub(crate) loop_stack: Vec<LoopInfo>,
@@ -179,18 +179,18 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     // Lua 5.4: Every chunk has _ENV as upvalue[0] for accessing globals
     // Add _ENV upvalue descriptor to the chunk and scope chain
     c.chunk.upvalue_descs.push(UpvalueDesc {
-        is_local: true,  // Main chunk's _ENV is provided by VM
+        is_local: true, // Main chunk's _ENV is provided by VM
         index: 0,
     });
     c.chunk.upvalue_count = 1;
-    
+
     // Add _ENV to scope chain so child functions can resolve it
     c.scope_chain.borrow_mut().upvalues.push(Upvalue {
         name: "_ENV".to_string(),
         is_local: true,
         index: 0,
     });
-    
+
     // Emit VARARGPREP at the beginning - Lua 5.4 always emits this for main chunks
     // It adjusts vararg parameters for functions that accept ... (varargs)
     // For non-vararg functions, nparams = param_count; for vararg functions, nparams is used

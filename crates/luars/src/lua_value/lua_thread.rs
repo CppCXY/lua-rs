@@ -1,4 +1,4 @@
-use crate::{lua_value::LuaUpvalue, lua_vm::LuaCallFrame, LuaValue};
+use crate::{LuaValue, lua_value::LuaUpvalue, lua_vm::LuaCallFrame};
 use std::rc::Rc;
 
 /// Lua Thread (coroutine)
@@ -74,20 +74,21 @@ impl LuaThread {
             .resize(max_stack_size, LuaValue::nil());
 
         // Get code pointer from function
-        let func_ptr = function.as_function_ptr()
+        let func_ptr = function
+            .as_function_ptr()
             .expect("Thread function must be a Lua function");
         let func_obj = unsafe { &*func_ptr };
         let code_ptr = func_obj.borrow().chunk.code.as_ptr();
 
         // Create initial call frame for the function
         let frame = LuaCallFrame::new_lua_function(
-            0,           // frame_id
-            function,    // function to execute
-            code_ptr,    // code pointer
-            0,           // base_ptr
+            0,        // frame_id
+            function, // function to execute
+            code_ptr, // code pointer
+            0,        // base_ptr
             max_stack_size,
-            0,           // result_reg
-            0,           // num_results (will be set by caller)
+            0, // result_reg
+            0, // num_results (will be set by caller)
         );
 
         thread.frames.push(frame);
@@ -160,4 +161,3 @@ impl CoroutineStatus {
         }
     }
 }
-

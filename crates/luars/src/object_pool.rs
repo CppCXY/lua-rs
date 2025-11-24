@@ -180,8 +180,10 @@ impl ObjectPool {
         let id = self.next_table_id;
         self.next_table_id = id.next();
 
-        self.tables
-            .insert(id, Rc::new(RefCell::new(LuaTable::new(array_size, hash_size))));
+        self.tables.insert(
+            id,
+            Rc::new(RefCell::new(LuaTable::new(array_size, hash_size))),
+        );
 
         id
     }

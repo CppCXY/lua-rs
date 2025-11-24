@@ -516,7 +516,8 @@ impl LuaValue {
     pub fn as_lua_function(&self) -> Option<&std::cell::RefCell<crate::lua_value::LuaFunction>> {
         if self.is_function() && self.secondary != 0 {
             unsafe {
-                let ptr = self.secondary as *const std::cell::RefCell<crate::lua_value::LuaFunction>;
+                let ptr =
+                    self.secondary as *const std::cell::RefCell<crate::lua_value::LuaFunction>;
                 Some(&*ptr)
             }
         } else {
@@ -695,17 +696,23 @@ impl PartialEq for LuaValue {
             let int_val = self.as_integer().unwrap();
             let float_val = other.as_float().unwrap();
             // Check if float is an exact integer and values match
-            if float_val.fract() == 0.0 && float_val >= i64::MIN as f64 && float_val <= i64::MAX as f64 {
+            if float_val.fract() == 0.0
+                && float_val >= i64::MIN as f64
+                && float_val <= i64::MAX as f64
+            {
                 return int_val == float_val as i64;
             }
             return false;
         }
-        
+
         if self.is_float() && other.is_integer() {
             let float_val = self.as_float().unwrap();
             let int_val = other.as_integer().unwrap();
             // Check if float is an exact integer and values match
-            if float_val.fract() == 0.0 && float_val >= i64::MIN as f64 && float_val <= i64::MAX as f64 {
+            if float_val.fract() == 0.0
+                && float_val >= i64::MIN as f64
+                && float_val <= i64::MAX as f64
+            {
                 return float_val as i64 == int_val;
             }
             return false;

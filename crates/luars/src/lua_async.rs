@@ -3,11 +3,11 @@
 // 使用tokio作为异步运行时
 
 use crate::LuaValue;
-use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 use crate::lua_value::MultiValue;
+use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 
@@ -16,7 +16,11 @@ pub type AsyncTaskId = u64;
 
 /// Rust异步函数的类型
 /// 接受参数Vec<LuaValue>，返回Future
-pub type AsyncFn = Arc<dyn Fn(Vec<LuaValue>) -> Pin<Box<dyn Future<Output = LuaResult<Vec<LuaValue>>> + Send>> + Send + Sync>;
+pub type AsyncFn = Arc<
+    dyn Fn(Vec<LuaValue>) -> Pin<Box<dyn Future<Output = LuaResult<Vec<LuaValue>>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// 异步任务状态
 #[derive(Debug, Clone)]
@@ -85,8 +89,12 @@ impl AsyncExecutor {
         args: Vec<LuaValue>,
         coroutine: LuaValue,
     ) -> Result<AsyncTaskId, LuaError> {
-        let func = self.async_functions.get(func_name)
-            .ok_or_else(|| LuaError::RuntimeError(format!("Async function '{}' not registered", func_name)))?
+        let func = self
+            .async_functions
+            .get(func_name)
+            .ok_or_else(|| {
+                LuaError::RuntimeError(format!("Async function '{}' not registered", func_name))
+            })?
             .clone();
 
         let task_id = self.next_task_id;
@@ -107,7 +115,7 @@ impl AsyncExecutor {
         let tasks_clone = Arc::clone(&self.tasks);
         self.runtime.spawn(async move {
             let result = func(args).await;
-            
+
             // 更新任务状态为完成
             let mut tasks = tasks_clone.lock().unwrap();
             if let Some(task) = tasks.get_mut(&task_id) {
@@ -120,7 +128,9 @@ impl AsyncExecutor {
 
     /// 检查并收集已完成的任务
     /// 返回已完成的任务列表（task_id, coroutine, result）
-    pub fn collect_completed_tasks(&mut self) -> Vec<(AsyncTaskId, LuaValue, LuaResult<Vec<LuaValue>>)> {
+    pub fn collect_completed_tasks(
+        &mut self,
+    ) -> Vec<(AsyncTaskId, LuaValue, LuaResult<Vec<LuaValue>>)> {
         let mut completed = Vec::new();
         let mut tasks = self.tasks.lock().unwrap();
         let mut to_remove = Vec::new();
@@ -161,15 +171,15 @@ impl AsyncExecutor {
 
 /// 创建一个包装器CFunction，用于注册async函数到Lua
 /// 当调用时，它会启动async任务并yield当前协程
-pub fn create_async_wrapper(
-    func_name: String,
-) -> impl Fn(&mut LuaVM) -> LuaResult<MultiValue> {
+pub fn create_async_wrapper(func_name: String) -> impl Fn(&mut LuaVM) -> LuaResult<MultiValue> {
     move |vm: &mut LuaVM| -> LuaResult<MultiValue> {
         // 检查是否在协程中
-        let coroutine = vm.current_thread_value.clone()
-            .ok_or_else(|| LuaError::RuntimeError(
-                format!("async function '{}' can only be called from within a coroutine", func_name)
-            ))?;
+        let coroutine = vm.current_thread_value.clone().ok_or_else(|| {
+            LuaError::RuntimeError(format!(
+                "async function '{}' can only be called from within a coroutine",
+                func_name
+            ))
+        })?;
 
         // 收集参数
         let frame = vm.frames.last().unwrap();
@@ -182,7 +192,7 @@ pub fn create_async_wrapper(
 
         // 启动异步任务
         let task_id = vm.async_executor.spawn_task(&func_name, args, coroutine)?;
-        
+
         // Yield协程，返回task_id
         Err(LuaError::Yield(vec![LuaValue::integer(task_id as i64)]))
     }

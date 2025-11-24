@@ -23,7 +23,7 @@ pub use ffi::FFIState;
 pub use gc::GC;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
-pub use lua_vm::{Instruction, LuaVM, OpCode, LuaResult};
+pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
 pub use object_pool::*;
 use std::rc::Rc;
 

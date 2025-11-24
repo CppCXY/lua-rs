@@ -471,7 +471,11 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         if let Some(dot_pos) = flags.find('.') {
                             let precision_str = &flags[dot_pos + 1..];
                             if let Ok(precision) = precision_str.parse::<usize>() {
-                                result.push_str(&format!("{:.precision$}", num, precision = precision));
+                                result.push_str(&format!(
+                                    "{:.precision$}",
+                                    num,
+                                    precision = precision
+                                ));
                             } else {
                                 result.push_str(&format!("{}", num));
                             }
@@ -766,7 +770,7 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     let arg2 = require_arg(vm, 2, "string.gsub")?;
-    
+
     let max = get_arg(vm, 3)
         .and_then(|v| v.as_integer())
         .map(|n| n as usize);
@@ -798,7 +802,7 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         gsub_with_table(vm, s.as_str(), &pattern, arg2, max)
     } else {
         Err(LuaError::RuntimeError(
-            "bad argument #3 to 'string.gsub' (string/function/table expected)".to_string()
+            "bad argument #3 to 'string.gsub' (string/function/table expected)".to_string(),
         ))
     }
 }
@@ -824,9 +828,10 @@ fn gsub_with_function(
             }
         }
 
-        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos) {
+        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos)
+        {
             count += 1;
-            
+
             // Prepare arguments for function call
             let args = if captures.is_empty() {
                 // No captures, pass the whole match
@@ -841,16 +846,17 @@ fn gsub_with_function(
             match vm.protected_call(func, args) {
                 Ok((success, mut results)) => {
                     if !success {
-                        let error_msg = results.first()
+                        let error_msg = results
+                            .first()
                             .and_then(|v| v.as_lua_string())
                             .map(|s| s.as_str().to_string())
                             .unwrap_or_else(|| "unknown error".to_string());
                         return Err(LuaError::RuntimeError(error_msg));
                     }
-                    
+
                     // Get the replacement from function result
                     let replacement = results.pop().unwrap_or(LuaValue::nil());
-                    
+
                     if replacement.is_string() {
                         // Use the returned string
                         if let Some(repl_str) = replacement.as_lua_string() {
@@ -903,9 +909,10 @@ fn gsub_with_table(
             }
         }
 
-        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos) {
+        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos)
+        {
             count += 1;
-            
+
             // Get the key for table lookup
             let key = if captures.is_empty() {
                 // No captures, use whole match
@@ -918,7 +925,7 @@ fn gsub_with_table(
 
             // Lookup in table
             let replacement = vm.table_get(&table, &key);
-            
+
             if replacement.is_string() {
                 // Use the value from table
                 if let Some(repl_str) = replacement.as_lua_string() {

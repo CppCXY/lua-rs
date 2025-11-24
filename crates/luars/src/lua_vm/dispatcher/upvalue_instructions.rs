@@ -1,9 +1,8 @@
-/// Upvalue and closure operations
-/// 
-/// These instructions handle upvalues, closures, and variable captures.
-
-use crate::lua_vm::{LuaVM, LuaResult, LuaError, Instruction};
 use super::DispatchAction;
+/// Upvalue and closure operations
+///
+/// These instructions handle upvalues, closures, and variable captures.
+use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
 
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
@@ -13,16 +12,17 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    
-    let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-        LuaError::RuntimeError("Not a Lua function".to_string())
-    })?;
+
+    let func_ptr = frame
+        .get_function_ptr()
+        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
     let func = unsafe { &*func_ptr };
     let func_ref = func.borrow();
 
-    let upvalue = func_ref.upvalues.get(b).ok_or_else(|| {
-        LuaError::RuntimeError(format!("Invalid upvalue index: {}", b))
-    })?;
+    let upvalue = func_ref
+        .upvalues
+        .get(b)
+        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid upvalue index: {}", b)))?;
 
     let value = upvalue.get_value(&vm.frames, &vm.register_stack);
     vm.register_stack[base_ptr + a] = value;
@@ -38,19 +38,20 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    
-    let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-        LuaError::RuntimeError("Not a Lua function".to_string())
-    })?;
+
+    let func_ptr = frame
+        .get_function_ptr()
+        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
     let func = unsafe { &*func_ptr };
     let func_ref = func.borrow();
-    
-    let upvalue = func_ref.upvalues.get(b).ok_or_else(|| {
-        LuaError::RuntimeError(format!("Invalid upvalue index: {}", b))
-    })?;
+
+    let upvalue = func_ref
+        .upvalues
+        .get(b)
+        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid upvalue index: {}", b)))?;
 
     let value = vm.register_stack[base_ptr + a];
-    
+
     upvalue.set_value(&mut vm.frames, &mut vm.register_stack, value);
 
     Ok(DispatchAction::Continue)
@@ -63,9 +64,9 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
     let close_from = base_ptr + a;
-    
+
     vm.close_upvalues_from(close_from);
-    
+
     Ok(DispatchAction::Continue)
 }
 
@@ -77,41 +78,44 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    
-    let func_ptr = frame.get_function_ptr().ok_or_else(|| {
-        LuaError::RuntimeError("Not a Lua function".to_string())
-    })?;
+
+    let func_ptr = frame
+        .get_function_ptr()
+        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
     let func = unsafe { &*func_ptr };
     let func_ref = func.borrow();
 
-    let proto = func_ref.chunk.child_protos.get(bx).ok_or_else(|| {
-        LuaError::RuntimeError(format!("Invalid prototype index: {}", bx))
-    })?.clone();
+    let proto = func_ref
+        .chunk
+        .child_protos
+        .get(bx)
+        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid prototype index: {}", bx)))?
+        .clone();
 
     // Get upvalue descriptors from the prototype
     let upvalue_descs = proto.upvalue_descs.clone();
     drop(func_ref);
-    
+
     // Create upvalues for the new closure based on descriptors
     let mut upvalues = Vec::new();
     let mut new_open_upvalues = Vec::new();
-    
+
     for (_i, desc) in upvalue_descs.iter().enumerate() {
         if desc.is_local {
             // Upvalue refers to a register in current function
-            
+
             // Check if this upvalue is already open
-            let existing_index = vm.open_upvalues.iter()
+            let existing_index = vm
+                .open_upvalues
+                .iter()
                 .position(|uv| uv.points_to(frame.frame_id, desc.index as usize));
-            
+
             if let Some(idx) = existing_index {
                 upvalues.push(vm.open_upvalues[idx].clone());
             } else {
                 // Create new open upvalue
-                let new_uv = crate::lua_vm::LuaUpvalue::new_open(
-                    frame.frame_id,
-                    desc.index as usize
-                );
+                let new_uv =
+                    crate::lua_vm::LuaUpvalue::new_open(frame.frame_id, desc.index as usize);
                 upvalues.push(new_uv.clone());
                 new_open_upvalues.push(new_uv);
             }
@@ -119,17 +123,18 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // Upvalue refers to an upvalue in the enclosing function
             let parent_func = unsafe { &*func_ptr };
             let parent_upvalues = &parent_func.borrow().upvalues;
-            
+
             if let Some(parent_uv) = parent_upvalues.get(desc.index as usize) {
                 upvalues.push(parent_uv.clone());
             } else {
-                return Err(LuaError::RuntimeError(
-                    format!("Invalid upvalue index in parent: {}", desc.index)
-                ));
+                return Err(LuaError::RuntimeError(format!(
+                    "Invalid upvalue index in parent: {}",
+                    desc.index
+                )));
             }
         }
     }
-    
+
     // Add all new upvalues to the open list
     vm.open_upvalues.extend(new_open_upvalues);
 
@@ -155,7 +160,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         // Update frame top to accommodate all varargs
         let new_top = a + vararg_count;
         vm.current_frame_mut().top = new_top.max(frame.top);
-        
+
         for i in 0..vararg_count {
             let value = if vararg_start + i < vm.register_stack.len() {
                 vm.register_stack[vararg_start + i]
@@ -184,7 +189,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// R[A] := R[A].. ... ..R[A+B]
 pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     use crate::lua_value::LuaValue;
-    
+
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -205,14 +210,14 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     // Concatenate values from R[A] to R[A+B]
     let mut result_value = vm.register_stack[base_ptr + a];
-    
+
     for i in 1..=b {
         let next_value = vm.register_stack[base_ptr + a + i];
-        
+
         // Try direct concatenation first
         let left_str = to_concat_string(result_value);
         let right_str = to_concat_string(next_value);
-        
+
         if let (Some(l), Some(r)) = (left_str, right_str) {
             let concat_result = l + &r;
             result_value = vm.create_string(&concat_result);
@@ -220,23 +225,27 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // Try __concat metamethod
             let mm_key = vm.create_string("__concat");
             let mut found_metamethod = false;
-            
+
             if let Some(mt) = vm.table_get_metatable(&result_value) {
                 if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
                     if !metamethod.is_nil() {
-                        if let Some(mm_result) = vm.call_metamethod(&metamethod, &[result_value, next_value])? {
+                        if let Some(mm_result) =
+                            vm.call_metamethod(&metamethod, &[result_value, next_value])?
+                        {
                             result_value = mm_result;
                             found_metamethod = true;
                         }
                     }
                 }
             }
-            
+
             if !found_metamethod {
                 if let Some(mt) = vm.table_get_metatable(&next_value) {
                     if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
                         if !metamethod.is_nil() {
-                            if let Some(mm_result) = vm.call_metamethod(&metamethod, &[result_value, next_value])? {
+                            if let Some(mm_result) =
+                                vm.call_metamethod(&metamethod, &[result_value, next_value])?
+                            {
                                 result_value = mm_result;
                                 found_metamethod = true;
                             }
@@ -244,7 +253,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                     }
                 }
             }
-            
+
             if !found_metamethod {
                 return Err(LuaError::RuntimeError(format!(
                     "attempt to concatenate a {} value",
@@ -302,24 +311,24 @@ pub fn exec_tbc(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    
+
     // In a full implementation, we would:
     // 1. Mark the variable at R[A] as to-be-closed
     // 2. When the variable goes out of scope (block end, return, etc.),
     //    call its __close metamethod if it exists
-    // 
+    //
     // For now, we just note the variable exists. The __close metamethod
     // should be called by:
     // - RETURN instruction (with k bit set)
     // - End of block (JMP with upvalue closing)
     // - Error unwinding
-    
+
     // Check if the value has a __close metamethod (optional validation)
     let value = vm.register_stack[base_ptr + a];
     if !value.is_nil() {
         // We could check for __close metamethod here, but Lua allows
         // any value to be marked as to-be-closed
     }
-    
+
     Ok(DispatchAction::Continue)
 }

@@ -41,7 +41,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     if !vm.frames.is_empty() {
         let caller_frame = vm.current_frame();
         let caller_base = caller_frame.base_ptr;
-        
+
         // 返回值目标位置：caller_base + result_reg
         let dest_base = caller_base + result_reg;
 
@@ -65,7 +65,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                     let src_end = src_start + return_count;
                     let dst_start = dest_base;
                     let dst_end = dst_start + return_count;
-                    
+
                     // 如果区域重叠，使用 copy；否则使用 copy_nonoverlapping
                     if (src_start < dst_end) && (dst_start < src_end) {
                         std::ptr::copy(
@@ -81,7 +81,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                         );
                     }
                 }
-                
+
                 // 更新 caller 的 top
                 vm.current_frame_mut().top = result_reg + return_count;
             } else {
@@ -95,7 +95,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                     };
                     *reg_ptr.add(dest_base + i) = val;
                 }
-                
+
                 // 更新 caller 的 top
                 vm.current_frame_mut().top = result_reg + num_results;
             }
@@ -108,7 +108,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
             let caller_max_stack = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
             let caller_end = caller_frame.base_ptr + caller_max_stack;
-            
+
             // 保留返回值所需的空间
             let needed_end = dest_end.max(caller_end);
             if vm.register_stack.len() > needed_end {
@@ -730,14 +730,14 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // === CRITICAL: 完全模仿Lua的precallC - 在原位调用 ===
             // Lua: L->ci = ci = prepCallInfo(L, func, nresults, CIST_C, L->top.p + LUA_MINSTACK);
             // 我们：直接把frame的base_ptr设置为 R[A] 的位置，不复制任何东西！
-            
+
             let frame_id = vm.next_frame_id;
             vm.next_frame_id += 1;
 
             // C函数的调用栈：R[A] = func, R[A+1..A+B-1] = args
             // 直接在这个位置创建frame，不需要复制到新地址！
             let call_base = base + a;
-            
+
             // Handle __call metamethod: need to insert self as first argument
             if use_call_metamethod {
                 // Shift arguments right by 1 to make room for self
@@ -746,7 +746,8 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 if arg_count > 0 {
                     // Move arguments: from back to front to avoid overwriting
                     for i in (0..arg_count).rev() {
-                        vm.register_stack[call_base + 2 + i] = vm.register_stack[call_base + 1 + i].clone();
+                        vm.register_stack[call_base + 2 + i] =
+                            vm.register_stack[call_base + 1 + i].clone();
                     }
                 }
                 vm.register_stack[call_base + 1] = call_metamethod_self;
@@ -774,7 +775,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             );
 
             vm.frames.push(temp_frame);
-            
+
             // Lua: n = (*f)(L);  // 直接调用
             let result = match cfunc(vm) {
                 Ok(r) => Ok(r),
@@ -809,7 +810,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                     std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, num_returns);
                 }
             }
-            
+
             // Fill remaining with nil if needed
             if return_count != usize::MAX {
                 for i in num_returns..return_count {
@@ -846,20 +847,20 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // Lua 5.4: 新frame的base直接指向 caller_base + a + 1
             // 参数已经在 R[A+1], R[A+2], ... 的位置了！
             // 只需要确保栈足够大，无需复制参数！
-            
+
             let caller_base = base;
-            
+
             // 零拷贝：新frame的base = R[A+1] 的位置
             // R[A] = func (不属于新frame)
             // R[A+1] = 第一个参数 = 新frame的 R[0]
             let new_base = caller_base + a + 1;
-            
+
             let actual_arg_count = if use_call_metamethod {
                 arg_count + 1
             } else {
                 arg_count
             };
-            
+
             let actual_stack_size = max_stack_size.max(actual_arg_count);
             let total_stack_size = if is_vararg && actual_arg_count > 0 {
                 actual_stack_size + actual_arg_count
@@ -886,7 +887,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                         *reg_ptr.add(new_base + i) = nil_val;
                     }
                 }
-                
+
                 // Vararg: 需要额外空间
                 if is_vararg && actual_arg_count > 0 {
                     for i in actual_stack_size..total_stack_size {
@@ -915,9 +916,9 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 frame_id,
                 func,
                 code_ptr,
-                new_base,          // 零拷贝：直接指向参数位置！
-                actual_arg_count,  // top = number of arguments passed
-                a,                 // result_reg: where to store return values (相对于caller的base)
+                new_base,         // 零拷贝：直接指向参数位置！
+                actual_arg_count, // top = number of arguments passed
+                a,                // result_reg: where to store return values (相对于caller的base)
                 return_count,
             );
 
@@ -1008,7 +1009,8 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             }
 
             // Get code pointer from function
-            let func_ptr = func.as_function_ptr()
+            let func_ptr = func
+                .as_function_ptr()
                 .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
             let func_obj = unsafe { &*func_ptr };
             let code_ptr = func_obj.borrow().chunk.code.as_ptr();

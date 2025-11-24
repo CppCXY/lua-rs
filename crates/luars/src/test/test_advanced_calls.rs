@@ -5,12 +5,14 @@ use crate::lua_vm::LuaVM;
 fn test_call_with_table_constructor() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function process(t)
             return t.a + t.b
         end
         assert(process({a = 3, b = 4}) == 7)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -18,12 +20,14 @@ fn test_call_with_table_constructor() {
 fn test_call_with_nested_table_constructor() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function sum_nested(t)
             return t.x.a + t.y.b
         end
         assert(sum_nested({x = {a = 1}, y = {b = 2}}) == 3)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -46,14 +50,16 @@ fn test_call_with_nested_table_constructor() {
 fn test_call_with_spread_operator_simple() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function sum(a, b, c)
             return a + b + c
         end
         local args = {1, 2, 3}
         local a, b, c = table.unpack(args)
         assert(sum(a, b, c) == 6)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -76,7 +82,8 @@ fn test_call_with_spread_operator_simple() {
 fn test_call_chaining_methods() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local builder = {
             value = ""
         }
@@ -93,7 +100,8 @@ fn test_call_chaining_methods() {
         end
         local result = builder:append("hello"):append(" "):append("world"):upper():get()
         assert(result == "HELLO WORLD")
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -101,7 +109,8 @@ fn test_call_chaining_methods() {
 fn test_call_with_assignment_expression() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local x
         local function set_and_return(v)
             x = v
@@ -109,7 +118,8 @@ fn test_call_with_assignment_expression() {
         end
         local y = set_and_return(5)
         assert(x == 5 and y == 10)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -117,7 +127,8 @@ fn test_call_with_assignment_expression() {
 fn test_call_in_table_constructor() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function double(x) return x * 2 end
         local t = {
             a = double(5),
@@ -125,7 +136,8 @@ fn test_call_in_table_constructor() {
             c = double(15)
         }
         assert(t.a == 10 and t.b == 20 and t.c == 30)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -133,11 +145,13 @@ fn test_call_in_table_constructor() {
 fn test_call_as_array_index() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function get_index() return 2 end
         local t = {10, 20, 30}
         assert(t[get_index()] == 20)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -145,13 +159,15 @@ fn test_call_as_array_index() {
 fn test_call_with_conditional_return() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function maybe(b, x, y)
             return b and x or y
         end
         assert(maybe(true, 10, 20) == 10)
         assert(maybe(false, 10, 20) == 20)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -159,13 +175,15 @@ fn test_call_with_conditional_return() {
 fn test_call_recursive_fibonacci() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function fib(n)
             if n <= 1 then return n end
             return fib(n - 1) + fib(n - 2)
         end
         assert(fib(10) == 55)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -198,7 +216,8 @@ fn test_call_recursive_fibonacci() {
 fn test_call_with_boolean_logic() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function is_valid(x)
             if x == nil then return false end
             if x > 0 then return true end
@@ -206,7 +225,8 @@ fn test_call_with_boolean_logic() {
         end
         assert(is_valid(5) == true)
         assert(is_valid(0) == false)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -214,10 +234,12 @@ fn test_call_with_boolean_logic() {
 fn test_call_string_function_on_literal() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local result = ("hello"):upper()
         assert(result == "HELLO")
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -225,10 +247,12 @@ fn test_call_string_function_on_literal() {
 fn test_call_table_method_on_literal() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local len = table.concat({"a", "b", "c"}, ",")
         assert(len == "a,b,c")
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -253,7 +277,8 @@ fn test_call_table_method_on_literal() {
 fn test_call_in_loop_condition() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local counter = 0
         local function increment()
             counter = counter + 1
@@ -263,7 +288,8 @@ fn test_call_in_loop_condition() {
             -- loop body
         end
         assert(counter == 5)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -271,7 +297,8 @@ fn test_call_in_loop_condition() {
 fn test_call_generator_pattern() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function range(n)
             local i = 0
             return function()
@@ -284,7 +311,8 @@ fn test_call_generator_pattern() {
             sum = sum + x
         end
         assert(sum == 15)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -292,14 +320,16 @@ fn test_call_generator_pattern() {
 fn test_call_with_error_handling() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function add_func(x, y)
             return x + y
         end
         local ok, result = pcall(add_func, 3, 4)
         assert(ok == true)
         assert(result == 7)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -332,7 +362,8 @@ fn test_call_with_error_handling() {
 fn test_call_curry_pattern() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function add(x, y)
             return x + y
         end
@@ -344,7 +375,8 @@ fn test_call_curry_pattern() {
         local add5 = curry(add, 5)
         assert(add5(10) == 15)
         assert(add5(20) == 25)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -352,7 +384,8 @@ fn test_call_curry_pattern() {
 fn test_call_compose_pattern() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function double(x) return x * 2 end
         local function increment(x) return x + 1 end
         local function compose(f, g)
@@ -362,7 +395,8 @@ fn test_call_compose_pattern() {
         end
         local f = compose(double, increment)
         assert(f(5) == 12)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -370,14 +404,16 @@ fn test_call_compose_pattern() {
 fn test_call_with_default_parameters() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function greet(name, greeting)
             greeting = greeting or "Hello"
             return greeting .. ", " .. name
         end
         assert(greet("World") == "Hello, World")
         assert(greet("World", "Hi") == "Hi, World")
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -385,7 +421,8 @@ fn test_call_with_default_parameters() {
 fn test_call_with_named_parameters_pattern() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function create_obj(params)
             return {
                 name = params.name or "unknown",
@@ -395,7 +432,8 @@ fn test_call_with_named_parameters_pattern() {
         end
         local obj = create_obj({name = "John", age = 30})
         assert(obj.name == "John" and obj.age == 30 and obj.city == "nowhere")
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -403,14 +441,16 @@ fn test_call_with_named_parameters_pattern() {
 fn test_call_immediate_function_expression() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local result = (function()
             local x = 10
             local y = 20
             return x + y
         end)()
         assert(result == 30)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -418,7 +458,8 @@ fn test_call_immediate_function_expression() {
 fn test_call_with_side_effects() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local log = {}
         local function logger(msg)
             table.insert(log, msg)
@@ -429,7 +470,8 @@ fn test_call_with_side_effects() {
         local c = logger("third")
         assert(a == 1 and b == 2 and c == 3)
         assert(#log == 3)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -489,7 +531,8 @@ fn test_call_with_side_effects() {
 fn test_call_retry_pattern() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function retry(f, times)
             for i = 1, times do
                 local ok, result = pcall(f)
@@ -507,7 +550,8 @@ fn test_call_retry_pattern() {
         end, 5)
         assert(result == "success")
         assert(attempt == 3)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -515,7 +559,8 @@ fn test_call_retry_pattern() {
 fn test_call_callback_pattern() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local function async_operation(callback)
             local result = 42
             callback(result)
@@ -525,7 +570,8 @@ fn test_call_callback_pattern() {
             received = value
         end)
         assert(received == 42)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }
 
@@ -533,7 +579,8 @@ fn test_call_callback_pattern() {
 fn test_call_event_handler_pattern() {
     let mut vm = LuaVM::new();
     vm.open_libs();
-    let result = vm.execute_string(r#"
+    let result = vm.execute_string(
+        r#"
         local event_system = {
             handlers = {}
         }
@@ -556,6 +603,7 @@ fn test_call_event_handler_pattern() {
         event_system:on("add", function(x) sum = sum + x * 2 end)
         event_system:emit("add", 5)
         assert(sum == 15)
-    "#);
+    "#,
+    );
     assert!(result.is_ok());
 }

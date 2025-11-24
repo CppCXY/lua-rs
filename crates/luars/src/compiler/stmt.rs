@@ -6,7 +6,9 @@ use super::expr::{
 };
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
-use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr, compile_closure_expr_to};
+use crate::compiler::expr::{
+    compile_call_expr_with_returns, compile_closure_expr, compile_closure_expr_to,
+};
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
@@ -141,7 +143,7 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
 
 /// Compile local variable declaration
 fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), String> {
-    use super::expr::{compile_expr_to, compile_call_expr_with_returns_and_dest};
+    use super::expr::{compile_call_expr_with_returns_and_dest, compile_expr_to};
     use emmylua_parser::LuaExpr;
 
     let names: Vec<_> = stat.get_local_name_list().collect();
@@ -152,12 +154,12 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
     // Example: `local a = f()` should place f's result directly into a's register
     let base_reg = c.freereg;
     let num_vars = names.len();
-    
+
     // Pre-allocate registers for all local variables
     for _ in 0..num_vars {
         alloc_register(c);
     }
-    
+
     // Now compile init expressions into the pre-allocated registers
     let mut regs = Vec::new();
 
@@ -208,13 +210,18 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             else if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
                     // Multi-return call: compile with dest = target_base
-                    let result_base = compile_call_expr_with_returns_and_dest(c, call_expr, remaining_vars, Some(target_base))?;
+                    let result_base = compile_call_expr_with_returns_and_dest(
+                        c,
+                        call_expr,
+                        remaining_vars,
+                        Some(target_base),
+                    )?;
 
                     // Add all return registers
                     for i in 0..remaining_vars {
                         regs.push(result_base + i as u32);
                     }
-                    
+
                     // Define locals and return
                     for (i, name) in names.iter().enumerate() {
                         if let Some(name_token) = name.get_name_token() {
@@ -310,13 +317,16 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                 let _result_reg = compile_expr_to(c, &exprs[0], Some(local.register))?;
                 return Ok(());
             }
-            
+
             // Check if it's an upvalue assignment
             if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
                 // Compile expression to a temporary register
                 let value_reg = compile_expr(c, &exprs[0])?;
                 // Emit SETUPVAL to copy value to upvalue
-                emit(c, Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0));
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0),
+                );
                 // Note: We don't free the register here to maintain compatibility
                 // Standard Lua may reuse it, but we need more careful analysis
                 return Ok(());
@@ -594,7 +604,10 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 // Check if last argument is ... (vararg)
                 if is_last_arg {
                     if let LuaExpr::LiteralExpr(lit) = arg {
-                        if matches!(lit.get_literal(), Some(emmylua_parser::LuaLiteralToken::Dots(_))) {
+                        if matches!(
+                            lit.get_literal(),
+                            Some(emmylua_parser::LuaLiteralToken::Dots(_))
+                        ) {
                             // Vararg as last argument: use "all out" mode
                             emit(c, Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0));
                             last_is_vararg_all_out = true;
@@ -641,7 +654,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     // Allocate new registers to avoid corrupting local variables
     let num_exprs = exprs.len();
     let base_reg = c.freereg; // Start from the first free register
-    
+
     // Handle last expression specially if it's varargs or call
     if last_is_multret && num_exprs > 0 {
         let last_expr = exprs.last().unwrap();
@@ -697,7 +710,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             emit_move(c, target_reg, src_reg);
         }
     }
-    
+
     // Use optimized Return0/Return1 when possible
     if num_exprs == 1 {
         // return single_value - use Return1 optimization
@@ -735,7 +748,7 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
             let stats: Vec<_> = b.get_stats().collect();
             stats.len() == 1 && matches!(stats[0], LuaStat::BreakStat(_))
         });
-        
+
         // Only invert for return statements, not for break
         // DISABLED: This optimization assumes the if statement is at the end of the block
         // But in cases like "if cond then return end; <more code>", we need normal mode
@@ -757,7 +770,7 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
                 // When condition is FALSE, execute then-block directly (no JMP needed)
                 // This optimization is only used when then-block is a single jump (return/break)
                 // and there are no elseif/else branches
-                
+
                 // Compile then block directly
                 if let Some(body) = then_body {
                     compile_block(c, &body)?;
@@ -1169,7 +1182,7 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
         c,
         Instruction::create_abck(OpCode::EqK, var_regs[0], nil_const, 0, true),
     );
-    
+
     // If equal (i.e., first value is nil), exit loop
     let end_jump = emit_jump(c, OpCode::Jmp);
 
@@ -1292,9 +1305,12 @@ fn compile_local_function_stat(
 
     // Compile the closure - use dest=Some(func_reg) to ensure it goes to the correct register
     let closure_reg = compile_closure_expr_to(c, &closure, Some(func_reg), false)?;
-    
+
     // Sanity check: closure should be compiled to func_reg
-    debug_assert_eq!(closure_reg, func_reg, "Closure should be compiled to func_reg");
+    debug_assert_eq!(
+        closure_reg, func_reg,
+        "Closure should be compiled to func_reg"
+    );
 
     Ok(())
 }

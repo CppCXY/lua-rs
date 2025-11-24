@@ -4,7 +4,7 @@
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
 
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
-use crate::lua_value::{LuaValue, LuaValueKind, MultiValue, LuaUpvalue};
+use crate::lua_value::{LuaUpvalue, LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 
 pub fn create_basic_lib() -> LibraryModule {
@@ -297,7 +297,7 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     if let Some(table_ptr) = table_val.as_table_ptr() {
         // Direct pointer dereference - ZERO ObjectPool overhead!
         let result = unsafe { (*table_ptr).borrow().next(&index_val) };
-        
+
         match result {
             Some((key, value)) => Ok(MultiValue::multiple(vec![key, value])),
             None => Ok(MultiValue::single(LuaValue::nil())),
@@ -378,10 +378,10 @@ fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let table_ref = vm
                 .get_table(&value)
                 .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-            
+
             // Get metatable, releasing the borrow immediately
             let mt = table_ref.borrow().get_metatable();
-            
+
             if let Some(mt) = mt {
                 // Check for __metatable field
                 let metatable_key = vm.create_string("__metatable");
@@ -422,7 +422,7 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             "setmetatable() first argument must be a table".to_string(),
         ));
     }
-    
+
     // Check if the current metatable has __metatable protection
     let has_protection = {
         let table_ref = vm
@@ -430,7 +430,7 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
         table_ref.borrow().get_metatable()
     }; // table_ref borrow ends here
-    
+
     if let Some(current_mt) = has_protection {
         let metatable_key = vm.create_string("__metatable");
         if let Some(mt_table) = vm.get_table(&current_mt) {
@@ -444,12 +444,12 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
         }
     }
-    
+
     // Set the new metatable
     let table_ref = vm
         .get_table(&table)
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-    
+
     match metatable.kind() {
         LuaValueKind::Nil => {
             table_ref.borrow_mut().set_metatable(None);
@@ -779,7 +779,7 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             // Loaded chunks need _ENV as upvalue[0]
             let env_upvalue = LuaUpvalue::new_closed(vm.global_value);
             let upvalues = vec![env_upvalue];
-            
+
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
             Ok(MultiValue::single(func))
         }

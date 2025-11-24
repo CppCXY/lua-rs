@@ -192,7 +192,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
 
     // Discharge left to any register (this will allocate if needed)
     let left_reg = exp_to_any_reg(c, &mut left_desc);
-    
+
     // CRITICAL: Ensure freereg is at least left_reg+1 to prevent right expression
     // from overwriting left's register during nested compilation
     if c.freereg <= left_reg {
@@ -227,7 +227,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
 
     // Save constant info before discharging
     let saved_right_desc = right_desc.clone();
-    
+
     // Discharge right to register ONLY if not using RK or immediate
     // This prevents unnecessary LOADK instructions before *K opcodes
     let right_reg = if !can_use_rk && !use_immediate {
@@ -275,12 +275,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 let neg_imm_mmbini = ((-int_val + 128) & 0xff) as u32;
                 emit(
                     c,
-                    Instruction::encode_abc(
-                        OpCode::AddI,
-                        result_reg,
-                        left_reg,
-                        neg_imm,
-                    ),
+                    Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, neg_imm),
                 );
                 emit(
                     c,
@@ -574,7 +569,7 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             // CRITICAL: CONCAT reads all operands BEFORE writing result to R[A]
             // So it's ALWAYS safe to reuse left_reg, even if it's a local variable!
             // The instruction will read R[A]'s old value, then overwrite it with the result.
-            
+
             // Check if operands are already consecutive
             if right_reg == left_reg + 1 {
                 // Perfect case: operands are consecutive, reuse left for result
@@ -587,12 +582,12 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 // Need to arrange right to be consecutive with left
                 result_reg = left_reg;
                 let right_target = left_reg + 1;
-                
+
                 // Allocate right_target if needed
                 while c.freereg <= right_target {
                     alloc_register(c);
                 }
-                
+
                 emit_move(c, right_target, right_reg);
                 emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, 1, 0));
                 // Reset freereg to result_reg + 1
@@ -748,7 +743,7 @@ fn compile_literal_expr(
     dest: Option<u32>,
 ) -> Result<u32, String> {
     let reg = dest.unwrap_or_else(|| alloc_register(c));
-    
+
     // Ensure max_stack_size can accommodate this register
     ensure_register(c, reg);
 
@@ -1131,7 +1126,13 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call (TM_ADD = 6)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 6, false),
+                                Instruction::create_abck(
+                                    OpCode::MmBinI,
+                                    left_reg,
+                                    imm_mmbini,
+                                    6,
+                                    false,
+                                ),
                             );
                             return Ok(result_reg);
                         }
@@ -1158,7 +1159,13 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call - use ORIGINAL immediate value from source (TM_SUB = 7)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 7, false),
+                                Instruction::create_abck(
+                                    OpCode::MmBinI,
+                                    left_reg,
+                                    imm_mmbini,
+                                    7,
+                                    false,
+                                ),
                             );
                             return Ok(result_reg);
                         }
@@ -1319,7 +1326,13 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call (TM_SHR = 17)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 17, false),
+                                Instruction::create_abck(
+                                    OpCode::MmBinI,
+                                    left_reg,
+                                    imm_mmbini,
+                                    17,
+                                    false,
+                                ),
                             );
                             return Ok(result_reg);
                         }
@@ -1351,23 +1364,38 @@ fn compile_binary_expr_to(
                             // Emit MMBINI for metamethod call (TM_SHL = 16)
                             emit(
                                 c,
-                                Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, 16, false),
+                                Instruction::create_abck(
+                                    OpCode::MmBinI,
+                                    left_reg,
+                                    imm_mmbini,
+                                    16,
+                                    false,
+                                ),
                             );
                             return Ok(result_reg);
                         }
                         // Immediate comparison operators - generate boolean result
-                        BinaryOperator::OpEq | BinaryOperator::OpNe |
-                        BinaryOperator::OpLt | BinaryOperator::OpLe |
-                        BinaryOperator::OpGt | BinaryOperator::OpGe => {
+                        BinaryOperator::OpEq
+                        | BinaryOperator::OpNe
+                        | BinaryOperator::OpLt
+                        | BinaryOperator::OpLe
+                        | BinaryOperator::OpGt
+                        | BinaryOperator::OpGe => {
                             // Comparison instructions use sB field: range [-128, 127]
                             if int_val >= -128 && int_val <= 127 {
                                 let left_reg = compile_expr(c, &left)?;
                                 // Allocate a new register for the boolean result
                                 // (can't reuse left_reg because comparison needs the original value)
                                 let result_reg = dest.unwrap_or_else(|| alloc_register(c));
-                                
+
                                 // Use immediate comparison instruction with boolean result pattern
-                                return compile_comparison_imm_to_bool(c, op_kind, left_reg, result_reg, int_val as i32);
+                                return compile_comparison_imm_to_bool(
+                                    c,
+                                    op_kind,
+                                    left_reg,
+                                    result_reg,
+                                    int_val as i32,
+                                );
                             }
                         }
                         _ => {}
@@ -1396,7 +1424,7 @@ fn compile_binary_expr_to(
                             // Fall through to normal code path
                             LuaValue::integer(int_val) // dummy, won't be used
                         }
-                        _ => LuaValue::integer(int_val)
+                        _ => LuaValue::integer(int_val),
                     }
                 } else {
                     LuaValue::integer(int_val)
@@ -1551,15 +1579,15 @@ fn compile_binary_expr_to(
             c.freereg = d + 1;
         }
     }
-    
+
     // Compile left and right first to get their registers
     let left_reg = compile_expr(c, &left)?;
-    
+
     // Ensure right doesn't overwrite left
     if c.freereg <= left_reg {
         c.freereg = left_reg + 1;
     }
-    
+
     let right_reg = compile_expr(c, &right)?;
     // Then allocate result register
     let result_reg = dest.unwrap_or_else(|| alloc_register(c));
@@ -1582,7 +1610,7 @@ fn compile_binary_expr_to(
             // CONCAT has special instruction format: CONCAT A B
             // Concatenates R[A] through R[A+B] (B+1 values), result in R[A]
             // Unlike other binary ops, it needs consecutive registers
-            
+
             // CRITICAL: CONCAT reads all operands BEFORE writing, so safe to reuse left_reg
             // Check if left and right are already consecutive
             if right_reg == left_reg + 1 {
@@ -1606,12 +1634,12 @@ fn compile_binary_expr_to(
                     left_reg
                 });
                 let right_target = concat_reg + 1;
-                
+
                 // Ensure right_target is available
                 while c.freereg <= right_target {
                     alloc_register(c);
                 }
-                
+
                 // Move operands to consecutive positions
                 if left_reg != concat_reg {
                     emit_move(c, concat_reg, left_reg);
@@ -1619,29 +1647,32 @@ fn compile_binary_expr_to(
                 if right_reg != right_target {
                     emit_move(c, right_target, right_reg);
                 }
-                
+
                 emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
                 return Ok(concat_reg);
             }
         }
-        
+
         // Comparison operators need special handling - they don't produce values directly
         // Instead, they skip the next instruction if the comparison is true
         // We need to generate: CMP + JMP + LFALSESKIP + LOADTRUE pattern
-        BinaryOperator::OpEq | BinaryOperator::OpNe |
-        BinaryOperator::OpLt | BinaryOperator::OpLe |
-        BinaryOperator::OpGt | BinaryOperator::OpGe => {
+        BinaryOperator::OpEq
+        | BinaryOperator::OpNe
+        | BinaryOperator::OpLt
+        | BinaryOperator::OpLe
+        | BinaryOperator::OpGt
+        | BinaryOperator::OpGe => {
             // Handle comparison operators with proper boolean result generation
             return compile_comparison_to_bool(c, op_kind, left_reg, right_reg, result_reg);
         }
-        
+
         BinaryOperator::OpAnd | BinaryOperator::OpOr => {
             // Boolean operators with proper short-circuit evaluation
             // Pattern: TESTSET + JMP + MOVE
-            // and: if left is false, return left; else return right  
+            // and: if left is false, return left; else return right
             // or: if left is true, return left; else return right
             let k_flag = matches!(op_kind, BinaryOperator::OpOr);
-            
+
             // TestSet: if (is_truthy == k) then R[A] := R[B] else pc++
             emit(
                 c,
@@ -1650,13 +1681,16 @@ fn compile_binary_expr_to(
             // JMP: skip the MOVE if TestSet assigned the value
             let jump_pos = emit_jump(c, OpCode::Jmp);
             // MOVE: use right operand if TestSet didn't assign
-            emit(c, Instruction::create_abc(OpCode::Move, result_reg, right_reg, 0));
+            emit(
+                c,
+                Instruction::create_abc(OpCode::Move, result_reg, right_reg, 0),
+            );
             // Patch the jump to point after MOVE
             patch_jump(c, jump_pos);
-            
+
             return Ok(result_reg);
         }
-        
+
         _ => return Err(format!("Unsupported binary operator: {:?}", op_kind)),
     };
 
@@ -1686,65 +1720,67 @@ fn compile_comparison_to_bool(
     right_reg: u32,
     result_reg: u32,
 ) -> Result<u32, String> {
-    
     // Pattern: CMP with k=1 (skip if true) + JMP to true_label + LFALSESKIP + LOADTRUE
     // If comparison is true: skip JMP, execute LFALSESKIP (skip LOADTRUE), wait that's wrong...
     // Actually: CMP with k=1 (skip if true) means "skip next if comparison IS true"
     // So: CMP(k=1) + JMP(to after_false) + LFALSESKIP + LOADTRUE
     // If true: skip JMP, go to LFALSESKIP... no that's still wrong.
-    
+
     // Let me trace luac output again:
     // EQI 0 8 1      # if (R[0] == 8) != 1 then skip; which means: if R[0] != 8 then skip
     // JMP 1          # jump over LFALSESKIP
     // LFALSESKIP 0   # R[0] = false, skip LOADTRUE
     // LOADTRUE 0     # R[0] = true
-    
+
     // So when R[0] == 8:
     //   - EQI: condition is true, DON'T skip (k=1 means skip if result != 1)
     //   - Execute JMP: jump to LOADTRUE
     //   - Execute LOADTRUE: R[0] = true ✓
-    
+
     // When R[0] != 8:
     //   - EQI: condition is false, skip JMP
     //   - Execute LFALSESKIP: R[0] = false, skip LOADTRUE ✓
-    
+
     let (cmp_opcode, swap_operands, negate) = match op_kind {
         BinaryOperator::OpEq => (OpCode::Eq, false, false),
         BinaryOperator::OpNe => (OpCode::Eq, false, true),
         BinaryOperator::OpLt => (OpCode::Lt, false, false),
         BinaryOperator::OpLe => (OpCode::Le, false, false),
-        BinaryOperator::OpGt => (OpCode::Lt, true, false),  // a > b == b < a
-        BinaryOperator::OpGe => (OpCode::Le, true, false),  // a >= b == b <= a
+        BinaryOperator::OpGt => (OpCode::Lt, true, false), // a > b == b < a
+        BinaryOperator::OpGe => (OpCode::Le, true, false), // a >= b == b <= a
         _ => unreachable!(),
     };
-    
+
     let (op1, op2) = if swap_operands {
         (right_reg, left_reg)
     } else {
         (left_reg, right_reg)
     };
-    
+
     // k=1 means "skip if comparison is true", k=0 means "skip if comparison is false"
     // For boolean result, we want: if true -> set true, if false -> set false
     // So we use k=1 (skip if true) with the JMP pattern
-    let k = if negate { false } else { true };  // k=1 for normal comparison
-    
+    let k = if negate { false } else { true }; // k=1 for normal comparison
+
     // EQ A B k: compare R[A] with R[B]
     // Note: comparison instructions don't produce results, they only test and skip
-    emit(
-        c,
-        Instruction::create_abck(cmp_opcode, op1, op2, 0, k),
-    );
-    
+    emit(c, Instruction::create_abck(cmp_opcode, op1, op2, 0, k));
+
     // JMP over LFALSESKIP (offset = 1)
     emit(c, Instruction::create_sj(OpCode::Jmp, 1));
-    
+
     // LFALSESKIP: load false into result register and skip next instruction
-    emit(c, Instruction::encode_abc(OpCode::LFalseSkip, result_reg, 0, 0));
-    
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::LFalseSkip, result_reg, 0, 0),
+    );
+
     // LOADTRUE: load true into result register
-    emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
-    
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0),
+    );
+
     Ok(result_reg)
 }
 
@@ -1759,7 +1795,7 @@ fn compile_comparison_imm_to_bool(
 ) -> Result<u32, String> {
     // Immediate comparison instructions: EQI, LTI, LEI, GTI, GEI
     // Pattern same as register comparison: CMPI(k=1) + JMP + LFALSESKIP + LOADTRUE
-    
+
     let (cmp_opcode, negate) = match op_kind {
         BinaryOperator::OpEq => (OpCode::EqI, false),
         BinaryOperator::OpNe => (OpCode::EqI, true),
@@ -1769,27 +1805,33 @@ fn compile_comparison_imm_to_bool(
         BinaryOperator::OpGe => (OpCode::GeI, false),
         _ => unreachable!(),
     };
-    
+
     // Encode immediate value with OFFSET_SB = 128 for signed B field
     let imm = ((imm_val + 128) & 0xFF) as u32;
-    
+
     let k = if negate { false } else { true };
-    
+
     // EQI A sB k: compare R[A] with immediate sB, k controls skip behavior
     emit(
         c,
         Instruction::create_abck(cmp_opcode, operand_reg, imm, 0, k),
     );
-    
+
     // JMP over LFALSESKIP (offset = 1)
     emit(c, Instruction::create_sj(OpCode::Jmp, 1));
-    
+
     // LFALSESKIP: load false and skip next instruction
-    emit(c, Instruction::encode_abc(OpCode::LFalseSkip, result_reg, 0, 0));
-    
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::LFalseSkip, result_reg, 0, 0),
+    );
+
     // LOADTRUE: load true
-    emit(c, Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0));
-    
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::LoadTrue, result_reg, 0, 0),
+    );
+
     Ok(result_reg)
 }
 
@@ -2021,21 +2063,21 @@ pub fn compile_call_expr_with_returns_and_dest(
     } else {
         // Regular call: compile function expression
         let temp_func_reg = compile_expr(c, &prefix_expr)?;
-        
+
         // CRITICAL FIX: When function call returns values and will be used in an expression,
         // we need to avoid overwriting the function value itself.
-        // 
+        //
         // Example: `f()` where f is in R[0] - if we call directly, return value overwrites f!
         // Solution: If temp_func_reg is an "old" register (< freereg when we started),
         // move the function to a new register first.
-        // 
+        //
         // However, we need to distinguish:
         // - `f = load(...)` - first assignment, can reuse register ✓
         // - `assert(f() == 30)` - f exists, must preserve it ✓
         //
         // The key insight: If dest is specified, caller wants a specific target.
         // If dest is NOT specified AND we need returns, allocate fresh register to be safe.
-        
+
         let func_reg = if let Some(d) = dest {
             // Caller specified a destination - use it
             // CRITICAL CHECK: Verify that arguments won't overwrite active local variables!
@@ -2043,7 +2085,7 @@ pub fn compile_call_expr_with_returns_and_dest(
             // If any of these overlap with active locals (< nactvar), we need to use a different register
             let nactvar = c.nactvar as u32;
             let args_start = d + 1;
-            
+
             // Check if args_start would overwrite active locals
             // Active locals occupy R[0] through R[nactvar-1]
             // If args_start < nactvar, arguments would overwrite locals!
@@ -2057,13 +2099,19 @@ pub fn compile_call_expr_with_returns_and_dest(
                 } else {
                     alloc_register(c)
                 };
-                emit(c, Instruction::encode_abc(OpCode::Move, new_func_reg, temp_func_reg, 0));
-                need_move_to_dest = true;  // Remember to move result back to original dest
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Move, new_func_reg, temp_func_reg, 0),
+                );
+                need_move_to_dest = true; // Remember to move result back to original dest
                 new_func_reg
             } else {
                 // No conflict - safe to use dest
                 if d != temp_func_reg {
-                    emit(c, Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0));
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0),
+                    );
                 }
                 // CRITICAL: Reset freereg to just past func_reg
                 // This ensures arguments compile into consecutive registers starting from func_reg+1
@@ -2078,7 +2126,10 @@ pub fn compile_call_expr_with_returns_and_dest(
             if temp_func_reg < nactvar {
                 // Function is a local variable - must preserve it!
                 let new_reg = alloc_register(c);
-                emit(c, Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0));
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
+                );
                 new_reg
             } else if temp_func_reg + 1 == c.freereg {
                 // Function was just loaded into a fresh temporary register - safe to reuse
@@ -2086,14 +2137,17 @@ pub fn compile_call_expr_with_returns_and_dest(
             } else {
                 // Function is in an "old" temporary register - must preserve it!
                 let new_reg = alloc_register(c);
-                emit(c, Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0));
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
+                );
                 new_reg
             }
         } else {
             // No return values needed - can reuse temp_func_reg
             temp_func_reg
         };
-        
+
         func_reg
     };
 
@@ -2116,7 +2170,7 @@ pub fn compile_call_expr_with_returns_and_dest(
     // This prevents nested call expressions from overwriting earlier argument registers
     let num_fixed_args = arg_exprs.len();
     let args_end = args_start + num_fixed_args as u32;
-    
+
     // Allocate all argument registers upfront
     while c.freereg < args_end {
         alloc_register(c);
@@ -2243,7 +2297,7 @@ pub fn compile_call_expr_with_returns_and_dest(
                 while c.freereg < call_args_end {
                     alloc_register(c);
                 }
-                
+
                 for (j, call_arg) in call_arg_exprs.iter().enumerate() {
                     let call_arg_dest = call_args_start + j as u32;
                     // Reset freereg before each argument to protect argument slots
@@ -2925,12 +2979,7 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
                         let encoded_b = (int_value + 128) as u32;
                         emit(
                             c,
-                            Instruction::encode_abc(
-                                OpCode::SetI,
-                                table_reg,
-                                encoded_b,
-                                value_reg,
-                            ),
+                            Instruction::encode_abc(OpCode::SetI, table_reg, encoded_b, value_reg),
                         );
                         return Ok(());
                     }
@@ -3142,7 +3191,7 @@ pub fn compile_closure_expr_to(
     // but max_stack_size may be higher due to direct register usage via dest parameter
     func_compiler.chunk.max_stack_size = std::cmp::max(
         func_compiler.peak_freereg as usize,
-        func_compiler.chunk.max_stack_size
+        func_compiler.chunk.max_stack_size,
     );
 
     // Store upvalue information from scope_chain

@@ -1,7 +1,7 @@
 // Coroutine library - Full implementation
 // Implements: create, resume, yield, status, running, wrap, isyieldable
 
-use crate::lib_registry::{LibraryModule, get_args, get_arg, arg_count, require_arg};
+use crate::lib_registry::{LibraryModule, arg_count, get_arg, get_args, require_arg};
 use crate::lua_value::{CoroutineStatus, LuaValue, MultiValue};
 use crate::lua_vm::{LuaError, LuaResult, LuaVM};
 use std::rc::Rc;
@@ -156,27 +156,28 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Create the coroutine (same as coroutine.create)
     let thread_rc = vm.create_thread(func);
     let thread_val = LuaValue::thread_ptr(Rc::into_raw(thread_rc));
-    
+
     // Create a wrapper table that will act as a callable object
     let wrapper_table = vm.create_table(0, 1);
-    
+
     // Store the coroutine in the table
     let thread_key = vm.create_string("__thread");
     vm.table_set_with_meta(wrapper_table, thread_key, thread_val)?;
-    
+
     // Create the __call metamethod
     let call_func = LuaValue::cfunction(coroutine_wrap_call);
-    
+
     // Create and set metatable
     let metatable = vm.create_table(0, 1);
     let call_key = vm.create_string("__call");
     vm.table_set_with_meta(metatable, call_key, call_func)?;
-    
+
     // Set metatable on wrapper table
-    let table_ref = wrapper_table.as_lua_table()
+    let table_ref = wrapper_table
+        .as_lua_table()
         .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
     table_ref.borrow_mut().set_metatable(Some(metatable));
-    
+
     Ok(MultiValue::single(wrapper_table))
 }
 
@@ -184,12 +185,13 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // First argument is the wrapper table itself (self)
     let wrapper_table = require_arg(vm, 0, "coroutine.wrap_call")?;
-    
+
     // Get the stored coroutine
     let thread_key = vm.create_string("__thread");
-    let thread_val = vm.table_get_with_meta(&wrapper_table, &thread_key)
+    let thread_val = vm
+        .table_get_with_meta(&wrapper_table, &thread_key)
         .ok_or_else(|| LuaError::RuntimeError("coroutine not found in wrapper".to_string()))?;
-    
+
     // Collect arguments (skip self at index 0)
     let mut args = Vec::new();
     let arg_cnt = arg_count(vm);
@@ -198,10 +200,10 @@ fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             args.push(arg);
         }
     }
-    
+
     // Resume the coroutine
     let (success, results) = vm.resume_thread(thread_val, args)?;
-    
+
     if !success {
         // If resume failed, propagate the error
         if !results.is_empty() {
@@ -211,7 +213,7 @@ fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
         return Err(LuaError::RuntimeError("coroutine error".to_string()));
     }
-    
+
     // Return results as MultiValue
     Ok(MultiValue::multiple(results))
 }

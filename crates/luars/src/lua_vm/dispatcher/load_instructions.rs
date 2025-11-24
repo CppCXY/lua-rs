@@ -1,51 +1,52 @@
-/// Load and Move instructions
-/// 
-/// These instructions handle loading constants and moving values between registers.
-
-use crate::LuaValue;
-use crate::lua_vm::{LuaVM, LuaResult, LuaError, Instruction};
 use super::DispatchAction;
+/// Load and Move instructions
+///
+/// These instructions handle loading constants and moving values between registers.
+use crate::LuaValue;
+use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
 
 /// VARARGPREP A
 /// Prepare stack for vararg function
 /// A is the number of fixed parameters
 pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
-    
+
     let frame_idx = vm.frames.len() - 1;
     let frame = &vm.frames[frame_idx];
     let base_ptr = frame.base_ptr;
     let top = frame.top;
-    
+
     // Get max_stack_size from the function
     let max_stack_size = if let Some(func_ref) = frame.function_value.as_lua_function() {
         func_ref.borrow().chunk.max_stack_size
     } else {
-        return Err(LuaError::RuntimeError("Invalid function in VARARGPREP".to_string()));
+        return Err(LuaError::RuntimeError(
+            "Invalid function in VARARGPREP".to_string(),
+        ));
     };
-    
+
     // Arguments were placed starting at base_ptr by CALL instruction
     // Fixed parameters are at base_ptr + 0 to base_ptr + a - 1
     // Extra arguments (varargs) are at base_ptr + a to base_ptr + top - 1
     // We need to move the varargs to base_ptr + max_stack_size
-    
+
     if top > a {
         let vararg_count = top - a;
         let vararg_dest = base_ptr + max_stack_size;
-        
+
         // Ensure we have enough space for the varargs
         vm.ensure_stack_capacity(vararg_dest + vararg_count);
-        
+
         // Move varargs from base_ptr + a to base_ptr + max_stack_size
         for i in 0..vararg_count {
             vm.register_stack[vararg_dest + i] = vm.register_stack[base_ptr + a + i].clone();
         }
-        
+
         vm.frames[frame_idx].set_vararg(vararg_dest, vararg_count);
     } else {
         vm.frames[frame_idx].set_vararg(base_ptr + max_stack_size, 0);
     }
-    
+
     Ok(DispatchAction::Continue)
 }
 
@@ -84,7 +85,7 @@ pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> 
     let base_ptr = frame.base_ptr;
 
     vm.register_stack[base_ptr + a] = LuaValue::boolean(false);
-    
+
     // Skip next instruction
     vm.current_frame_mut().pc += 1;
 
@@ -182,7 +183,9 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let chunk = &func_ref.chunk;
 
     if pc >= chunk.code.len() {
-        return Err(LuaError::RuntimeError("Missing EXTRAARG for LOADKX".to_string()));
+        return Err(LuaError::RuntimeError(
+            "Missing EXTRAARG for LOADKX".to_string(),
+        ));
     }
 
     let extra_instr = chunk.code[pc];
@@ -209,7 +212,7 @@ pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> Result<DispatchAction, Lua
     // EXTRAARG is consumed by the preceding instruction (like LOADKX)
     // It should never be executed directly
     Err(LuaError::RuntimeError(
-        "EXTRAARG should not be executed directly".to_string()
+        "EXTRAARG should not be executed directly".to_string(),
     ))
 }
 

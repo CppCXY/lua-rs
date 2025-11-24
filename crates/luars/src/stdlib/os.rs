@@ -27,12 +27,12 @@ pub fn create_os_lib() -> LibraryModule {
 
 fn os_clock(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use std::time::Instant;
-    
+
     // Use a thread-local static to track start time
     thread_local! {
         static START_TIME: std::cell::RefCell<Option<Instant>> = std::cell::RefCell::new(None);
     }
-    
+
     let elapsed = START_TIME.with(|start| {
         let mut start_ref = start.borrow_mut();
         if start_ref.is_none() {
@@ -40,7 +40,7 @@ fn os_clock(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
         start_ref.unwrap().elapsed().as_secs_f64()
     });
-    
+
     Ok(MultiValue::single(LuaValue::float(elapsed)))
 }
 
