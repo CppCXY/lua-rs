@@ -1609,15 +1609,45 @@ fn compile_binary_expr_to(
         BinaryOperator::OpConcat => {
             // CONCAT has special instruction format: CONCAT A B
             // Concatenates R[A] through R[A+B] (B+1 values), result in R[A]
-            // Unlike other binary ops, it needs consecutive registers
+            
+            // LUA 5.4 OPTIMIZATION: Merge consecutive CONCAT operations
+            // When compiling "e1 .. e2", if e2's code just generated a CONCAT instruction,
+            // we can merge them into a single CONCAT that concatenates all values at once.
+            // This is critical for performance with chains like "a" .. "b" .. "c"
+            
+            let code = &c.chunk.code;
+            if !code.is_empty() {
+                let prev_instr = code[code.len() - 1];
+                let prev_opcode = Instruction::get_opcode(prev_instr);
+                
+                if prev_opcode == OpCode::Concat {
+                    let prev_a = Instruction::get_a(prev_instr);
+                    let prev_b = Instruction::get_b(prev_instr);
+                    
+                    // Check if right_reg is the result of previous CONCAT
+                    // Previous CONCAT: R[prev_a] = R[prev_a]..R[prev_a+1]..R[prev_a+prev_b]
+                    // If right_reg == prev_a and left_reg == prev_a - 1, we can merge
+                    if right_reg as u32 == prev_a && left_reg as u32 + 1 == prev_a {
+                        // Perfect! Extend the CONCAT to include left_reg
+                        // New CONCAT: R[left_reg] = R[left_reg]..R[left_reg+1]..R[left_reg+1+prev_b]
+                        let last_idx = code.len() - 1;
+                        c.chunk.code[last_idx] = Instruction::encode_abc(
+                            OpCode::Concat,
+                            left_reg,          // Start from left_reg instead
+                            prev_b + 1,        // Increase count by 1
+                            0
+                        );
+                        return Ok(left_reg);
+                    }
+                }
+            }
 
-            // CRITICAL: CONCAT reads all operands BEFORE writing, so safe to reuse left_reg
-            // Check if left and right are already consecutive
+            // Standard case: No merge possible, emit new CONCAT
+            // Check if operands are already consecutive
             if right_reg == left_reg + 1 {
-                // Perfect: already consecutive, can use directly
+                // Perfect case: operands are consecutive
                 let concat_reg = left_reg;
                 emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
-                // Return left_reg as result (CONCAT modifies R[A] in place)
                 if let Some(d) = dest {
                     if d != concat_reg {
                         emit_move(c, d, concat_reg);
@@ -1628,19 +1658,13 @@ fn compile_binary_expr_to(
                 }
             } else {
                 // Need to arrange into consecutive registers
-                // Use result_reg (or alloc new) as base
-                let concat_reg = dest.unwrap_or_else(|| {
-                    // Prefer reusing left_reg if possible
-                    left_reg
-                });
+                let concat_reg = dest.unwrap_or_else(|| left_reg);
                 let right_target = concat_reg + 1;
 
-                // Ensure right_target is available
                 while c.freereg <= right_target {
                     alloc_register(c);
                 }
 
-                // Move operands to consecutive positions
                 if left_reg != concat_reg {
                     emit_move(c, concat_reg, left_reg);
                 }

@@ -146,6 +146,7 @@ pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// TEST A k
 /// if (not R[A] == k) then pc++
+/// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[inline(always)]
 pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -153,15 +154,20 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     let base_ptr = vm.current_frame().base_ptr;
 
-    // OPTIMIZATION: Use unsafe for unchecked register access (hot path)
-    let value = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
+    unsafe {
+        // OPTIMIZATION: Direct unsafe access and type tag comparison
+        let value = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-    // Lua truthiness: nil and false are falsy, everything else is truthy
-    let is_truthy = !value.is_nil() && value.as_bool().unwrap_or(true);
+        // OPTIMIZATION: Fast truthiness check using type tags
+        // nil = TAG_NIL, false = VALUE_FALSE
+        // Only nil and false are falsy
+        use crate::lua_value::{VALUE_FALSE, TAG_NIL};
+        let is_truthy = value.primary != TAG_NIL && value.primary != VALUE_FALSE;
 
-    // If (not value) == k, skip next instruction
-    if !is_truthy == k {
-        vm.current_frame_mut().pc += 1;
+        // If (not value) == k, skip next instruction
+        if !is_truthy == k {
+            vm.current_frame_mut().pc += 1;
+        }
     }
 
     Ok(())
@@ -169,6 +175,7 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// TESTSET A B k
 /// if (not R[B] == k) then R[A] := R[B] else pc++
+/// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[inline(always)]
 pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -177,20 +184,21 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     let base_ptr = vm.current_frame().base_ptr;
 
-    // OPTIMIZATION: Use unsafe for unchecked register access
-    let value = unsafe { *vm.register_stack.as_ptr().add(base_ptr + b) };
+    unsafe {
+        // OPTIMIZATION: Direct unsafe access
+        let reg_ptr = vm.register_stack.as_ptr().add(base_ptr);
+        let value = *reg_ptr.add(b);
 
-    // Lua truthiness: not l_isfalse(v) means v is truthy
-    let is_truthy = !value.is_nil() && value.as_bool().unwrap_or(true);
+        // OPTIMIZATION: Fast truthiness check
+        use crate::lua_value::{VALUE_FALSE, TAG_NIL};
+        let is_truthy = value.primary != TAG_NIL && value.primary != VALUE_FALSE;
 
-    // TESTSET: if ((not l_isfalse(R[B])) == k) then R[A] := R[B] else pc++
-    // If (is_truthy == k), assign R[A] = R[B], otherwise skip next instruction
-    if is_truthy == k {
-        unsafe {
+        // If (is_truthy == k), assign R[A] = R[B], otherwise skip next instruction
+        if is_truthy == k {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
+        } else {
+            vm.current_frame_mut().pc += 1;
         }
-    } else {
-        vm.current_frame_mut().pc += 1;
     }
 
     Ok(())
@@ -200,6 +208,7 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// EQ A B k
 /// if ((R[A] == R[B]) ~= k) then pc++
+/// ULTRA-OPTIMIZED: Fast path for common types (integers, floats, strings)
 #[inline(always)]
 pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -214,7 +223,33 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         (*reg_base.add(a), *reg_base.add(b))
     };
 
-    let mut is_equal = left == right;
+    // OPTIMIZATION: Fast path - check if primary fields are identical (same type and value/id)
+    use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TAG_STRING, TYPE_MASK};
+    let left_tag = left.primary & TYPE_MASK;
+    let right_tag = right.primary & TYPE_MASK;
+
+    let mut is_equal = if left.primary == right.primary && left.secondary == right.secondary {
+        // Identical values (same type, same bits)
+        true
+    } else if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
+        // Both integers but different values
+        false
+    } else if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+        // Both floats, compare values
+        f64::from_bits(left.secondary) == f64::from_bits(right.secondary)
+    } else if left_tag == TAG_STRING && right_tag == TAG_STRING {
+        // Different string IDs means different strings (strings are interned)
+        false
+    } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+        // Mixed integer/float comparison
+        (left.secondary as i64) as f64 == f64::from_bits(right.secondary)
+    } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+        // Mixed float/integer comparison
+        f64::from_bits(left.secondary) == (right.secondary as i64) as f64
+    } else {
+        // Slow path: check full equality (handles tables, etc.)
+        left == right
+    };
 
     // If not equal by value, try __eq metamethod
     // IMPORTANT: Both operands must have the SAME __eq metamethod (Lua 5.4 spec)
@@ -249,6 +284,7 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// LT A B k
 /// if ((R[A] < R[B]) ~= k) then pc++
+/// ULTRA-OPTIMIZED: Inline integer/float comparison, minimal type checks
 #[inline(always)]
 pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -263,18 +299,33 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         (*reg_base.add(a), *reg_base.add(b))
     };
 
-    // OPTIMIZATION: Direct type tag comparison (avoid method calls)
-    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-    let left_tag = left.primary;
-    let right_tag = right.primary;
+    // OPTIMIZATION: Direct type tag comparison (inline integer/float checks)
+    use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TAG_STRING, TYPE_MASK};
+    let left_tag = left.primary & TYPE_MASK;
+    let right_tag = right.primary & TYPE_MASK;
 
-    let is_less = if (left_tag & TYPE_MASK) == TAG_INTEGER && (right_tag & TYPE_MASK) == TAG_INTEGER
-    {
-        // Fast integer path - compare secondary values directly
+    // Combined type check for fast paths (single branch!)
+    let combined_tags = (left_tag << 16) | right_tag;
+    const INT_INT: u64 = (TAG_INTEGER << 16) | TAG_INTEGER;
+    const FLOAT_FLOAT: u64 = (TAG_FLOAT << 16) | TAG_FLOAT;
+    const INT_FLOAT: u64 = (TAG_INTEGER << 16) | TAG_FLOAT;
+    const FLOAT_INT: u64 = (TAG_FLOAT << 16) | TAG_INTEGER;
+    const STRING_STRING: u64 = (TAG_STRING << 16) | TAG_STRING;
+
+    let is_less = if combined_tags == INT_INT {
+        // Fast integer path - single branch!
         (left.secondary as i64) < (right.secondary as i64)
-    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-        l < r
-    } else if left.is_string() && right.is_string() {
+    } else if combined_tags == FLOAT_FLOAT {
+        // Fast float path
+        f64::from_bits(left.secondary) < f64::from_bits(right.secondary)
+    } else if combined_tags == INT_FLOAT {
+        // Mixed: integer < float
+        ((left.secondary as i64) as f64) < f64::from_bits(right.secondary)
+    } else if combined_tags == FLOAT_INT {
+        // Mixed: float < integer
+        f64::from_bits(left.secondary) < ((right.secondary as i64) as f64)
+    } else if combined_tags == STRING_STRING {
+        // String comparison
         left < right
     } else {
         // Try __lt metamethod

@@ -186,7 +186,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// CONCAT A B
 /// R[A] := R[A].. ... ..R[A+B]
-/// OPTIMIZED: Pre-allocate capacity and batch string operations
+/// OPTIMIZED: Pre-allocation for string/number combinations
 pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -194,26 +194,19 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    // Fast path: collect all strings first and compute total length
+    // Fast path: collect all strings/numbers first
     let mut all_strings = true;
-    let mut total_len = 0;
     let mut temp_strings: Vec<String> = Vec::with_capacity(b + 1);
     
     for i in 0..=b {
         let value = vm.register_stack[base_ptr + a + i];
         
         if let Some(s) = value.as_lua_string() {
-            let str_ref = s.as_str();
-            total_len += str_ref.len();
-            temp_strings.push(str_ref.to_string());
+            temp_strings.push(s.as_str().to_string());
         } else if let Some(int_val) = value.as_integer() {
-            let int_str = int_val.to_string();
-            total_len += int_str.len();
-            temp_strings.push(int_str);
+            temp_strings.push(int_val.to_string());
         } else if let Some(float_val) = value.as_number() {
-            let float_str = float_val.to_string();
-            total_len += float_str.len();
-            temp_strings.push(float_str);
+            temp_strings.push(float_val.to_string());
         } else {
             all_strings = false;
             break;
@@ -222,6 +215,8 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     
     // Fast path: all strings/numbers, no metamethods needed
     if all_strings && !temp_strings.is_empty() {
+        // Calculate total length for pre-allocation
+        let total_len: usize = temp_strings.iter().map(|s| s.len()).sum();
         let mut result = String::with_capacity(total_len);
         for s in temp_strings {
             result.push_str(&s);
