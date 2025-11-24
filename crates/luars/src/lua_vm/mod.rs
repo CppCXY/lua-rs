@@ -24,7 +24,7 @@ pub type LuaResult<T> = Result<T, LuaError>;
 
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
-    pub(crate) globals: LuaValue,
+    pub(crate) global_value: LuaValue,
 
     // Call stack
     pub frames: Vec<LuaCallFrame>,
@@ -74,7 +74,7 @@ pub struct LuaVM {
 impl LuaVM {
     pub fn new() -> Self {
         let mut vm = LuaVM {
-            globals: LuaValue::nil(),
+            global_value: LuaValue::nil(),
             frames: Vec::new(),
             register_stack: Vec::with_capacity(1024), // Pre-allocate for initial stack
             gc: GC::new(),
@@ -95,7 +95,7 @@ impl LuaVM {
 
         // Set _G to point to the global table itself
         let globals_ref = vm.create_table();
-        vm.globals = globals_ref;
+        vm.global_value = globals_ref;
         vm.set_global("_G", globals_ref);
         vm.set_global("_ENV", globals_ref);
 
@@ -137,7 +137,7 @@ impl LuaVM {
 
         // Create upvalue for _ENV (global table)
         // Main chunks in Lua 5.4 always have _ENV as upvalue[0]
-        let env_upvalue = LuaUpvalue::new_closed(self.globals);
+        let env_upvalue = LuaUpvalue::new_closed(self.global_value);
         let upvalues = vec![env_upvalue];
 
         // Create main function in object pool with _ENV upvalue
@@ -151,9 +151,13 @@ impl LuaVM {
         let required_size = base_ptr + chunk.max_stack_size;
         self.ensure_stack_capacity(required_size);
 
+        // Get code pointer from chunk
+        let code_ptr = chunk.code.as_ptr();
+
         let frame = LuaCallFrame::new_lua_function(
             frame_id,
             main_func_value,
+            code_ptr,
             base_ptr,
             chunk.max_stack_size,
             0,
@@ -208,9 +212,11 @@ impl LuaVM {
             }
         }
 
+        // Get code pointer before dropping func_ref
+        let code_ptr = func_ref.chunk.code.as_ptr();
         drop(func_ref);
 
-        let frame = LuaCallFrame::new_lua_function(frame_id, func, base_ptr, max_stack, 0, 0);
+        let frame = LuaCallFrame::new_lua_function(frame_id, func, code_ptr, base_ptr, max_stack, 0, 0);
 
         self.frames.push(frame);
 
@@ -240,11 +246,7 @@ impl LuaVM {
     /// Main execution loop - interprets bytecode instructions
     /// Returns the final return value from the chunk
     fn run(&mut self) -> LuaResult<LuaValue> {
-        // OPTIMIZATION: Cache chunk pointer across instructions to avoid RefCell::borrow() overhead
-        // This is safe because chunk doesn't change during function execution
-        let mut cached_chunk_ptr: Option<*const Chunk> = None;
-        let mut cached_func_ptr: Option<*const RefCell<LuaFunction>> = None;
-        
+
         loop {
             // Check if we have any frames to execute
             if self.frames.is_empty() {
@@ -252,36 +254,11 @@ impl LuaVM {
                 return Ok(self.return_values.first().copied().unwrap_or(LuaValue::nil()));
             }
 
-            // Get current frame
-            let frame = self.current_frame();
-            let func_ptr = match frame.get_function_ptr() {
-                Some(ptr) => ptr,
-                None => return Err(LuaError::RuntimeError("Not a Lua function".to_string())),
-            };
-
-            // OPTIMIZATION: Cache chunk pointer to avoid repeated RefCell::borrow()
-            // Only update cache when function changes
-            let chunk_ptr = if Some(func_ptr) == cached_func_ptr {
-                unsafe { cached_chunk_ptr.unwrap_unchecked() }
-            } else {
-                // Function changed (call/return), update cache
-                let func = unsafe { &*func_ptr };
-                let func_ref = func.borrow();
-                let chunk_ptr = Rc::as_ptr(&func_ref.chunk);
-                drop(func_ref);
-                cached_func_ptr = Some(func_ptr);
-                cached_chunk_ptr = Some(chunk_ptr);
-                chunk_ptr
-            };
-
-            // OPTIMIZATION: Use cached chunk pointer directly (zero overhead)
-            let chunk = unsafe { &*chunk_ptr };
-            let pc = frame.pc;
-            let instr = unsafe { *chunk.code.get_unchecked(pc) };
-
-            // Increment PC before dispatching (standard for most instructions)
-            // Some instructions (JMP, FORLOOP, etc.) will override this
-            self.current_frame_mut().pc += 1;
+            // OPTIMIZATION: 极简指令获取 - 仿照原生 Lua 的 vmfetch 宏
+            // 直接从 frame.code_ptr 读取，零开销！
+            let frame = unsafe { self.frames.last_mut().unwrap_unchecked() };
+            let instr = unsafe { *frame.code_ptr.add(frame.pc) };
+            frame.pc += 1;
 
             // Dispatch instruction using the dispatcher module
             let action = match dispatch_instruction(self, instr) {
@@ -299,9 +276,9 @@ impl LuaVM {
                 DispatchAction::Continue => {
                     // Continue to next instruction
                 }
-                DispatchAction::Skip(n) => {
-                    // Skip N additional instructions (PC already incremented by 1)
-                    self.current_frame_mut().pc += n;
+                DispatchAction::Skip1 => {
+                    // Skip 1 additional instruction (PC already incremented by 1)
+                    self.current_frame_mut().pc += 1;
                 }
                 DispatchAction::Return => {
                     // Function returned, check if execution is done
@@ -341,7 +318,7 @@ impl LuaVM {
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
         let key = self.create_string(name);
-        if let Some(global_id) = self.globals.as_table_id() {
+        if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
             global.borrow().raw_get(&key)
         } else {
@@ -350,7 +327,7 @@ impl LuaVM {
     }
 
     pub fn get_global_by_lua_value(&self, key: &LuaValue) -> Option<LuaValue> {
-        if let Some(global_id) = self.globals.as_table_id() {
+        if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
             global.borrow().raw_get(key)
         } else {
@@ -361,14 +338,14 @@ impl LuaVM {
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
         let key = self.create_string(name);
 
-        if let Some(global_id) = self.globals.as_table_id() {
+        if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
             global.borrow_mut().raw_set(key, value);
         }
     }
 
     pub fn set_global_by_lua_value(&self, key: &LuaValue, value: LuaValue) {
-        if let Some(global_id) = self.globals.as_table_id() {
+        if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
             global.borrow_mut().raw_set(key.clone(), value);
         }
@@ -1371,7 +1348,7 @@ impl LuaVM {
         let mut roots = Vec::new();
 
         // Add the global table itself as a root
-        roots.push(self.globals);
+        roots.push(self.global_value);
 
         // Add all frame registers as roots
         for frame in &self.frames {
@@ -1533,9 +1510,16 @@ impl LuaVM {
                     }
                 }
 
+                // Get code pointer from metamethod function
+                let meta_func_ptr = metamethod.as_function_ptr()
+                    .ok_or_else(|| LuaError::RuntimeError("Invalid metamethod".to_string()))?;
+                let meta_func = unsafe { &*meta_func_ptr };
+                let code_ptr = meta_func.borrow().chunk.code.as_ptr();
+
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     metamethod,
+                    code_ptr,
                     new_base,
                     max_stack_size,
                     result_reg,
@@ -1829,10 +1813,15 @@ impl LuaVM {
 
                 // Use new_base as result_reg (same as caller_base + caller_max_stack)
                 let safe_result_reg = new_base;
+
+                // Create empty code for dummy frame
+                let empty_code: Vec<u32> = vec![];
+                let code_ptr = empty_code.as_ptr();
                 
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     dummy_func_value,
+                    code_ptr,
                     new_base,
                     stack_size,
                     safe_result_reg,
@@ -1905,9 +1894,16 @@ impl LuaVM {
                 // Use caller's max_stack as result_reg (safe write position)
                 let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
 
+                // Get code pointer from function
+                let func_ptr = func.as_function_ptr()
+                    .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+                let func_obj = unsafe { &*func_ptr };
+                let code_ptr = func_obj.borrow().chunk.code.as_ptr();
+
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     func,
+                    code_ptr,
                     new_base,
                     max_stack_size,
                     safe_result_reg,
@@ -1954,9 +1950,9 @@ impl LuaVM {
                                 DispatchAction::Continue => {
                                     // Continue to next instruction
                                 },
-                                DispatchAction::Skip(n) => {
-                                    // Skip N additional instructions
-                                    self.frames[frame_idx].pc += n;
+                                DispatchAction::Skip1 => {
+                                    // Skip 1 additional instruction
+                                    self.frames[frame_idx].pc += 1;
                                 },
                                 DispatchAction::Return => {
                                     // Frame will be popped, loop will exit

@@ -300,10 +300,17 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // Copy arguments
             vm.register_stack[call_base] = state;
             vm.register_stack[call_base + 1] = control;
+
+            // Get code pointer from function
+            let func_ptr = func.as_function_ptr()
+                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+            let func_obj = unsafe { &*func_ptr };
+            let code_ptr = func_obj.borrow().chunk.code.as_ptr();
             
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
                 func,
+                code_ptr,
                 call_base,
                 max_stack_size,
                 a + 3, // result goes to R[A+3]

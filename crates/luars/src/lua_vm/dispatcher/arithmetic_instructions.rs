@@ -50,7 +50,7 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     unsafe {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
     }
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 #[cold]
@@ -99,7 +99,7 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     unsafe {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
     }
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 #[cold]
@@ -146,7 +146,7 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 #[cold]
@@ -181,7 +181,7 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let result = LuaValue::number(l_float / r_float);
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
@@ -219,7 +219,7 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// MOD: R[A] = R[B] % R[C]
@@ -257,7 +257,7 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// POW: R[A] = R[B] ^ R[C]
@@ -285,7 +285,7 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let result = LuaValue::number(l_float.powf(r_float));
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
@@ -394,14 +394,14 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         // Integer operation with wraparound, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(r));
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         // Float operation succeeded, skip fallback
         vm.register_stack[base_ptr + a] = LuaValue::number(l + r);
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     
     // Not numbers, fallthrough to MMBIN
@@ -434,13 +434,13 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // Try integer operation
     if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_sub(r));
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number(l - r);
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     Ok(DispatchAction::Continue)
 }
@@ -476,7 +476,7 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         let l = left.secondary as i64;
         let r = constant.secondary as i64;
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_mul(r));
-        return Ok(DispatchAction::Skip(1));
+        return Ok(DispatchAction::Skip1);
     }
     
     // Check if at least one is float (covers float*float, float*int, int*float)
@@ -499,7 +499,7 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         };
         
         vm.register_stack[base_ptr + a] = LuaValue::float(l * r);
-        return Ok(DispatchAction::Skip(1));
+        return Ok(DispatchAction::Skip1);
     }
 
     Ok(DispatchAction::Continue)
@@ -536,14 +536,14 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             ));
         }
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.rem_euclid(r));
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         let result = l - (l / r).floor() * r;
         vm.register_stack[base_ptr + a] = LuaValue::number(result);
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     Ok(DispatchAction::Continue)
 }
@@ -583,7 +583,7 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     let result = LuaValue::number(l_float.powf(r_float));
     vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
+    Ok(DispatchAction::Skip1)  // Skip MMBIN fallback
 }
 
 /// DIVK: R[A] = R[B] / K[C]
@@ -622,7 +622,7 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let result = LuaValue::number(l_float / r_float);
     vm.register_stack[base_ptr + a] = result;
     // Skip next instruction (MMBINK fallback) if operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// IDIVK: R[A] = R[B] // K[C]
@@ -656,13 +656,13 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             ));
         }
         vm.register_stack[base_ptr + a] = LuaValue::integer(l.div_euclid(r));
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     
     // Try float operation
     if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
         vm.register_stack[base_ptr + a] = LuaValue::number((l / r).floor());
-        return Ok(DispatchAction::Skip(1));  // Skip MMBIN fallback
+        return Ok(DispatchAction::Skip1);  // Skip MMBIN fallback
     }
     Ok(DispatchAction::Continue)
 }
@@ -693,7 +693,7 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let result = LuaValue::integer(l_int & r_int);
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// BOR: R[A] = R[B] | R[C]
@@ -720,7 +720,7 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let result = LuaValue::integer(l_int | r_int);
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// BXOR: R[A] = R[B] ~ R[C]
@@ -747,7 +747,7 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let result = LuaValue::integer(l_int ^ r_int);
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// SHL: R[A] = R[B] << R[C]
@@ -783,7 +783,7 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// SHR: R[A] = R[B] >> R[C]
@@ -815,7 +815,7 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = result;
     // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip(1))
+    Ok(DispatchAction::Skip1)
 }
 
 /// BANDK: R[A] = R[B] & K[C]
@@ -868,7 +868,7 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = LuaValue::integer(l_int & r_int);
-    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
+    Ok(DispatchAction::Skip1)  // Skip MMBIN fallback
 }
 
 /// BORK: R[A] = R[B] | K[C]
@@ -921,7 +921,7 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = LuaValue::integer(l_int | r_int);
-    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
+    Ok(DispatchAction::Skip1)  // Skip MMBIN fallback
 }
 
 /// BXORK: R[A] = R[B] ~ K[C]
@@ -974,7 +974,7 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     };
 
     vm.register_stack[base_ptr + a] = LuaValue::integer(l_int ^ r_int);
-    Ok(DispatchAction::Skip(1))  // Skip MMBIN fallback
+    Ok(DispatchAction::Skip1)  // Skip MMBIN fallback
 }
 
 /// SHRI: R[A] = R[B] >> sC

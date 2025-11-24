@@ -2,33 +2,31 @@ use crate::LuaFunction;
 use crate::LuaValue;
 use std::cell::RefCell;
 
-/// 极限优化的 LuaCallFrame: 80 bytes → 64 bytes (20% reduction!)
+/// ULTRA-OPTIMIZED LuaCallFrame - 仿照原生 Lua 的 CallInfo 设计
 ///
-/// 在保持代码兼容性的前提下，通过以下方式压缩：
-/// 1. result_reg: usize → u16 (寄存器索引 < 65536)
-/// 2. num_results: usize → u16 (返回值数量 < 65535, 0xFFFF = 多值)
-/// 3. vararg_count: usize → u16 (可变参数 < 65536)
-/// 4. flags: u8 合并布尔标志
+/// 关键优化：直接缓存 code 指针，避免每次循环都要解引用 function → chunk → code
 ///
-/// 内存布局（64 bytes，完美对齐）：
-/// - 16 bytes: function_value
+/// 内存布局（72 bytes）：
+/// - 16 bytes: function_value (LuaValue - 包含函数ID)
+/// - 8 bytes: code_ptr (直接指向指令数组 - HOT PATH!)
 /// - 40 bytes: base_ptr + top + pc + frame_id + vararg_start (5×usize)
 /// - 6 bytes: result_reg + num_results + vararg_count (3×u16)
 /// - 1 byte: flags
 /// - 1 byte: padding
 pub struct LuaCallFrame {
-    pub function_value: LuaValue, // 16 bytes - 包含 ID + 指针!
-    pub base_ptr: usize,          // 8 bytes - 保持 usize 避免类型转换
-    pub top: usize,               // 8 bytes
-    pub pc: usize,                // 8 bytes
-    pub frame_id: usize,          // 8 bytes
-    pub vararg_start: usize,      // 8 bytes
-    pub result_reg: u16,          // 2 bytes (was 8) - 寄存器索引
-    pub num_results: u16,         // 2 bytes (was 8) - 期望返回数
-    pub vararg_count: u16,        // 2 bytes (was 8) - vararg 数量
-    flags: u8,                    // 1 byte - 标志位
-    _padding: u8,                 // 1 byte - 对齐
-                                  // Total: 64 bytes (20% reduction from 80 bytes!)
+    pub function_value: LuaValue,      // 16 bytes - 包含 ID + 指针
+    pub code_ptr: *const u32,          // 8 bytes - HOT PATH: 直接指向指令数组!
+    pub base_ptr: usize,               // 8 bytes - 寄存器栈基址
+    pub top: usize,                    // 8 bytes - 栈顶
+    pub pc: usize,                     // 8 bytes - 程序计数器
+    pub frame_id: usize,               // 8 bytes - 帧ID
+    pub vararg_start: usize,           // 8 bytes - 可变参数起始位置
+    pub result_reg: u16,               // 2 bytes - 结果寄存器索引
+    pub num_results: u16,              // 2 bytes - 期望返回数
+    pub vararg_count: u16,             // 2 bytes - 可变参数数量
+    flags: u8,                         // 1 byte - 标志位
+    _padding: u8,                      // 1 byte - 对齐
+                                       // Total: 72 bytes
 }
 
 // Flag bits
@@ -43,6 +41,7 @@ impl LuaCallFrame {
     pub fn new_lua_function(
         frame_id: usize,
         function_value: LuaValue,
+        code_ptr: *const u32,  // 新增：直接传入 code 指针
         base_ptr: usize,
         max_stack_size: usize,
         result_reg: usize,
@@ -50,6 +49,7 @@ impl LuaCallFrame {
     ) -> Self {
         LuaCallFrame {
             function_value,
+            code_ptr,
             base_ptr,
             top: max_stack_size,
             pc: 0,
@@ -77,6 +77,7 @@ impl LuaCallFrame {
     ) -> Self {
         LuaCallFrame {
             function_value: parent_function_value,
+            code_ptr: std::ptr::null(),  // C 函数没有 code
             base_ptr,
             top: num_args,
             pc: parent_pc,

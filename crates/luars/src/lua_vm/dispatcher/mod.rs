@@ -149,8 +149,9 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAct
 pub enum DispatchAction {
     /// Continue executing next instruction
     Continue,
-    /// Skip next N instructions (used by *K instructions that skip their MMBIN* fallback)
-    Skip(usize),
+    /// Skip 1 instruction (used by *K instructions that skip their MMBIN* fallback)
+    /// OPTIMIZATION: Separate variant to avoid carrying data (all skips are Skip(1))
+    Skip1,
     /// Return from current function (includes return values in VM)
     Return,
     /// Yield from coroutine (yield values stored in thread)

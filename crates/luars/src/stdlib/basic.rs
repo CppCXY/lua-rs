@@ -777,7 +777,7 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
             // Loaded chunks need _ENV as upvalue[0]
-            let env_upvalue = LuaUpvalue::new_closed(vm.globals);
+            let env_upvalue = LuaUpvalue::new_closed(vm.global_value);
             let upvalues = vec![env_upvalue];
             
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);

@@ -902,12 +902,19 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 }
             }
 
+            // Get code pointer from function
+            let func_ptr = func.as_function_ptr()
+                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+            let func_obj = unsafe { &*func_ptr };
+            let code_ptr = func_obj.borrow().chunk.code.as_ptr();
+
             // Create and push new frame
             // IMPORTANT: For vararg functions, top should reflect actual arg count, not max_stack_size
             // VARARGPREP will use this to determine the number of varargs
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
                 func,
+                code_ptr,
                 new_base,
                 actual_arg_count, // top = number of arguments passed
                 a,                // result_reg: where to store return values
@@ -1000,9 +1007,16 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 vm.register_stack[old_base + i] = *arg;
             }
 
+            // Get code pointer from function
+            let func_ptr = func.as_function_ptr()
+                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+            let func_obj = unsafe { &*func_ptr };
+            let code_ptr = func_obj.borrow().chunk.code.as_ptr();
+
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
                 func,
+                code_ptr,
                 old_base,
                 arg_count,  // top = number of arguments passed
                 result_reg, // result_reg from the CALLER (not 0!)
