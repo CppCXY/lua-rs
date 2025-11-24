@@ -6,6 +6,7 @@ Lua-RS has achieved **production-ready performance** with **252/252 tests passin
 
 ## Latest Performance Results (November 24, 2025)
 
+
 ### Arithmetic Operations
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
