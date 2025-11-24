@@ -54,10 +54,10 @@ pub struct LuaTable {
 
 impl LuaTable {
     /// Create an empty table
-    pub fn new() -> Self {
+    pub fn new(array_size: usize, hash_size: usize) -> Self {
         LuaTable {
-            array: Vec::new(),
-            nodes: Vec::new(),
+            array: Vec::with_capacity(array_size),
+            nodes: Vec::with_capacity(hash_size),
             hash_size: 0,
             metatable: None,
         }

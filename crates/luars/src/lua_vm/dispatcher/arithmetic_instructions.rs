@@ -10,47 +10,55 @@ use crate::{
 };
 
 /// ADD: R[A] = R[B] + R[C]
+/// ULTRA-OPTIMIZED: Combined type check (branchless for integer fast path)
 #[inline(always)]
 pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let base_ptr = vm.current_frame().base_ptr;
-
-    // OPTIMIZATION: Use unsafe for unchecked register access
-    let (left, right) = unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
-        (*reg_base.add(b), *reg_base.add(c))
-    };
-
-    let left_tag = left.primary & TYPE_MASK;
-    let right_tag = right.primary & TYPE_MASK;
-    
-    // Fast path 1: both integers
-    let result = if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
-        LuaValue::integer((left.secondary as i64).wrapping_add(right.secondary as i64))
-    }
-    // Fast path 2: both floats
-    else if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-        LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
-    }
-    // Mixed: integer + float
-    else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-        LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
-    }
-    // Mixed: float + integer
-    else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-        LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
-    }
-    else {
-        return add_error(left, right);
-    };
-
     unsafe {
+        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
+        let right = *reg_base.add(c);
+
+        // OPTIMIZATION: Combined type check (same as FORLOOP)
+        // If both are integers, (left.primary | right.primary) & TYPE_MASK == TAG_INTEGER
+        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
+
+        // Fast path: Both integers (single branch!)
+        if combined_tags == TAG_INTEGER {
+            let result = LuaValue::integer(
+                (left.secondary as i64).wrapping_add(right.secondary as i64)
+            );
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            return Ok(DispatchAction::Skip1);
+        }
+
+        // Slow path: Check individual types
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
+        
+        // Both floats
+        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+            LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
+        }
+        // Mixed: integer + float
+        else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+            LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
+        }
+        // Mixed: float + integer
+        else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+            LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
+        }
+        else {
+            return add_error(left, right);
+        };
+
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        Ok(DispatchAction::Skip1)
     }
-    Ok(DispatchAction::Skip1)
 }
 
 #[cold]
@@ -61,45 +69,54 @@ fn add_error(_left: LuaValue, _right: LuaValue) -> LuaResult<DispatchAction> {
 }
 
 /// SUB: R[A] = R[B] - R[C]
+/// ULTRA-OPTIMIZED: Combined type check (branchless for integer fast path)
 #[inline(always)]
 pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
-
-    let left_tag = left.primary & TYPE_MASK;
-    let right_tag = right.primary & TYPE_MASK;
-    
-    // Fast path 1: both integers
-    let result = if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
-        LuaValue::integer((left.secondary as i64).wrapping_sub(right.secondary as i64))
-    }
-    // Fast path 2: both floats
-    else if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-        LuaValue::number(f64::from_bits(left.secondary) - f64::from_bits(right.secondary))
-    }
-    // Mixed: integer - float
-    else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-        LuaValue::number((left.secondary as i64) as f64 - f64::from_bits(right.secondary))
-    }
-    // Mixed: float - integer
-    else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-        LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
-    }
-    else {
-        return sub_error(left, right);
-    };
-
     unsafe {
+        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
+        let right = *reg_base.add(c);
+
+        // OPTIMIZATION: Combined type check
+        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
+
+        // Fast path: Both integers (single branch!)
+        if combined_tags == TAG_INTEGER {
+            let result = LuaValue::integer(
+                (left.secondary as i64).wrapping_sub(right.secondary as i64)
+            );
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            return Ok(DispatchAction::Skip1);
+        }
+
+        // Slow path: Check individual types
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
+        
+        // Both floats
+        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+            LuaValue::number(f64::from_bits(left.secondary) - f64::from_bits(right.secondary))
+        }
+        // Mixed: integer - float
+        else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+            LuaValue::number((left.secondary as i64) as f64 - f64::from_bits(right.secondary))
+        }
+        // Mixed: float - integer
+        else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+            LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
+        }
+        else {
+            return sub_error(left, right);
+        };
+
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        Ok(DispatchAction::Skip1)
     }
-    Ok(DispatchAction::Skip1)
 }
 
 #[cold]
@@ -110,43 +127,51 @@ fn sub_error(_left: LuaValue, _right: LuaValue) -> LuaResult<DispatchAction> {
 }
 
 /// MUL: R[A] = R[B] * R[C]
+/// ULTRA-OPTIMIZED: Combined type check
 #[inline(always)]
 pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
+        let right = *reg_base.add(c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
+        // OPTIMIZATION: Combined type check
+        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
-    let left_tag = left.primary & TYPE_MASK;
-    let right_tag = right.primary & TYPE_MASK;
-    
-    // Fast path 1: both are integers (most common, predict taken)
-    let result = if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
-        LuaValue::integer((left.secondary as i64).wrapping_mul(right.secondary as i64))
-    }
-    // Fast path 2: both are floats
-    else if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-        LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
-    }
-    // Mixed: integer * float
-    else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-        LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
-    }
-    // Mixed: float * integer
-    else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-        LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
-    }
-    else {
-        return mul_error(left, right);
-    };
+        // Fast path: Both integers
+        if combined_tags == TAG_INTEGER {
+            let result = LuaValue::integer(
+                (left.secondary as i64).wrapping_mul(right.secondary as i64)
+            );
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            return Ok(DispatchAction::Skip1);
+        }
 
-    vm.register_stack[base_ptr + a] = result;
-    Ok(DispatchAction::Skip1)
+        // Slow path
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
+        
+        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+            LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
+        }
+        else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+            LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
+        }
+        else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+            LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
+        }
+        else {
+            return mul_error(left, right);
+        };
+
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        Ok(DispatchAction::Skip1)
+    }
 }
 
 #[cold]
@@ -157,107 +182,152 @@ fn mul_error(_left: LuaValue, _right: LuaValue) -> LuaResult<DispatchAction> {
 }
 
 /// DIV: R[A] = R[B] / R[C]
+/// Division always returns float in Lua
+#[inline(always)]
 pub fn exec_div(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
+        let right = *reg_base.add(c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
+        // Fast type check
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
+        
+        // Convert to float and divide
+        let l_float = if left_tag == TAG_INTEGER {
+            (left.secondary as i64) as f64
+        } else if left_tag == TAG_FLOAT {
+            f64::from_bits(left.secondary)
+        } else {
+            return Ok(DispatchAction::Continue); // Let MMBIN handle
+        };
+        
+        let r_float = if right_tag == TAG_INTEGER {
+            (right.secondary as i64) as f64
+        } else if right_tag == TAG_FLOAT {
+            f64::from_bits(right.secondary)
+        } else {
+            return Ok(DispatchAction::Continue); // Let MMBIN handle
+        };
 
-    // Division always returns float in Lua
-    let l_float = match left.as_number() {
-        Some(n) => n,
-        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
-    };
-    let r_float = match right.as_number() {
-        Some(n) => n,
-        None => return Ok(DispatchAction::Continue), // Let MMBIN handle
-    };
-
-    let result = LuaValue::number(l_float / r_float);
-    vm.register_stack[base_ptr + a] = result;
-    // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip1)
+        let result = LuaValue::number(l_float / r_float);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        Ok(DispatchAction::Skip1)
+    }
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
+#[inline(always)]
 pub fn exec_idiv(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
+        let right = *reg_base.add(c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
+        // Combined type check for integer fast path
+        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        if r == 0 {
-            return Err(LuaError::RuntimeError(
-                "attempt to divide by zero".to_string(),
-            ));
-        }
-        // Integer floor division
-        let quot = l.div_euclid(r);
-        LuaValue::integer(quot)
-    } else {
-        let l_float = match left.as_number() {
-            Some(n) => n,
-            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+        let result = if combined_tags == TAG_INTEGER {
+            let r = right.secondary as i64;
+            if r == 0 {
+                return Err(LuaError::RuntimeError(
+                    "attempt to divide by zero".to_string(),
+                ));
+            }
+            let l = left.secondary as i64;
+            LuaValue::integer(l.div_euclid(r))
+        } else {
+            let left_tag = left.primary & TYPE_MASK;
+            let right_tag = right.primary & TYPE_MASK;
+            
+            let l_float = if left_tag == TAG_INTEGER {
+                (left.secondary as i64) as f64
+            } else if left_tag == TAG_FLOAT {
+                f64::from_bits(left.secondary)
+            } else {
+                return Ok(DispatchAction::Continue);
+            };
+            
+            let r_float = if right_tag == TAG_INTEGER {
+                (right.secondary as i64) as f64
+            } else if right_tag == TAG_FLOAT {
+                f64::from_bits(right.secondary)
+            } else {
+                return Ok(DispatchAction::Continue);
+            };
+            
+            LuaValue::number((l_float / r_float).floor())
         };
-        let r_float = match right.as_number() {
-            Some(n) => n,
-            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
-        };
-        LuaValue::number((l_float / r_float).floor())
-    };
 
-    vm.register_stack[base_ptr + a] = result;
-    // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip1)
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        Ok(DispatchAction::Skip1)
+    }
 }
 
 /// MOD: R[A] = R[B] % R[C]
+#[inline(always)]
 pub fn exec_mod(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
+        let right = *reg_base.add(c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
+        // Combined type check for integer fast path
+        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
-    let result = if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-        if r == 0 {
-            return Err(LuaError::RuntimeError(
-                "attempt to perform 'n%0'".to_string(),
-            ));
-        }
-        LuaValue::integer(l.rem_euclid(r))
-    } else {
-        let l_float = match left.as_number() {
-            Some(n) => n,
-            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
+        let result = if combined_tags == TAG_INTEGER {
+            let r = right.secondary as i64;
+            if r == 0 {
+                return Err(LuaError::RuntimeError(
+                    "attempt to perform 'n%0'".to_string(),
+                ));
+            }
+            let l = left.secondary as i64;
+            LuaValue::integer(l.rem_euclid(r))
+        } else {
+            let left_tag = left.primary & TYPE_MASK;
+            let right_tag = right.primary & TYPE_MASK;
+            
+            let l_float = if left_tag == TAG_INTEGER {
+                (left.secondary as i64) as f64
+            } else if left_tag == TAG_FLOAT {
+                f64::from_bits(left.secondary)
+            } else {
+                return Ok(DispatchAction::Continue);
+            };
+            
+            let r_float = if right_tag == TAG_INTEGER {
+                (right.secondary as i64) as f64
+            } else if right_tag == TAG_FLOAT {
+                f64::from_bits(right.secondary)
+            } else {
+                return Ok(DispatchAction::Continue);
+            };
+            
+            // Lua uses floored division modulo: a % b = a - floor(a/b) * b
+            let result = l_float - (l_float / r_float).floor() * r_float;
+            LuaValue::number(result)
         };
-        let r_float = match right.as_number() {
-            Some(n) => n,
-            None => return Ok(DispatchAction::Continue), // Let MMBIN handle
-        };
-        // Lua uses floored division modulo: a % b = a - floor(a/b) * b
-        let result = l_float - (l_float / r_float).floor() * r_float;
-        LuaValue::number(result)
-    };
 
-    vm.register_stack[base_ptr + a] = result;
-    // Skip the following MMBIN instruction since the operation succeeded
-    Ok(DispatchAction::Skip1)
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        Ok(DispatchAction::Skip1)
+    }
 }
 
 /// POW: R[A] = R[B] ^ R[C]
@@ -338,32 +408,29 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let b = Instruction::get_b(instr) as usize;
     let sc = Instruction::get_sc(instr); // Signed immediate value
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    let left = vm.register_stack[base_ptr + b];
-
-    if left.primary == TAG_INTEGER {
-        // Integer operation with wraparound
-        let l = left.secondary as i64;
-        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(sc as i64));
-        // Skip the following MMBINI instruction (PC already incremented by main loop)
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
+        if left.primary == TAG_INTEGER {
+            // Integer fast path
+            let l = left.secondary as i64;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = 
+                LuaValue::integer(l.wrapping_add(sc as i64));
+            return Ok(DispatchAction::Skip1);
+        }
+        
+        if left.primary == TAG_FLOAT {
+            // Float fast path
+            let l = f64::from_bits(left.secondary);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = 
+                LuaValue::float(l + sc as f64);
+            return Ok(DispatchAction::Skip1);
+        }
+        
+        // Not a number, fallthrough to MMBINI
+        Ok(DispatchAction::Continue)
     }
-    
-    if left.primary == TAG_FLOAT {
-        // Float operation
-        let l = f64::from_bits(left.secondary);
-        vm.register_stack[base_ptr + a] = LuaValue::float(l + sc as f64);
-        // Skip the following MMBINI instruction (PC already incremented by main loop)
-        vm.current_frame_mut().pc += 1;
-        return Ok(DispatchAction::Continue);
-    }
-    
-    // Not a number, fallthrough to MMBINI without setting result
-    // MMBINI will be next instruction and handle metamethod
-    Ok(DispatchAction::Continue)
 }
 
 /// ADDK: R[A] = R[B] + K[C]

@@ -110,7 +110,7 @@ impl LibraryRegistry {
     /// Load a specific module into the VM
     pub fn load_module(&self, vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> {
         // Create a table for the library
-        let lib_table = vm.create_table();
+        let lib_table = vm.create_table(0, 0);
 
         // Register all entries in the table
         for (name, entry) in &module.entries {

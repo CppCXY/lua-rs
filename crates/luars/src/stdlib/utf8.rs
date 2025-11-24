@@ -138,7 +138,7 @@ fn utf8_codes(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     // Create state table: {string = s, position = 0}
-    let state_table = vm.create_table();
+    let state_table = vm.create_table(0, 2);
     let string_key = vm.create_string("string");
     let position_key = vm.create_string("position");
     let state_ref = vm

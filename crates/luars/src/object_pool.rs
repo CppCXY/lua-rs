@@ -176,12 +176,12 @@ impl ObjectPool {
     // ============ Table Operations ============
 
     /// Create a new table
-    pub fn create_table(&mut self) -> TableId {
+    pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> TableId {
         let id = self.next_table_id;
         self.next_table_id = id.next();
 
         self.tables
-            .insert(id, Rc::new(RefCell::new(LuaTable::new())));
+            .insert(id, Rc::new(RefCell::new(LuaTable::new(array_size, hash_size))));
 
         id
     }

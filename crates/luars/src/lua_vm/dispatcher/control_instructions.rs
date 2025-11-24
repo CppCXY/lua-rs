@@ -28,20 +28,25 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let result_reg = frame.get_result_reg();
     let num_results = frame.get_num_results();
 
-    // OPTIMIZATION: Calculate return count once
+    // Calculate return count
     let return_count = if b == 0 {
         frame.top.saturating_sub(a)
     } else {
         b - 1
     };
 
-    // OPTIMIZATION: Direct copy to caller's registers using unsafe (skip intermediate vec)
+    // === 零拷贝返回值优化 ===
+    // 关键：返回值需要写回 caller 的 R[result_reg]
+    // 而不是写到 caller 的栈顶
     if !vm.frames.is_empty() {
         let caller_frame = vm.current_frame();
         let caller_base = caller_frame.base_ptr;
+        
+        // 返回值目标位置：caller_base + result_reg
+        let dest_base = caller_base + result_reg;
 
-        // Ensure destination has enough capacity before unsafe write
-        let dest_end = caller_base + result_reg + return_count;
+        // 确保目标位置有足够空间
+        let dest_end = dest_base + return_count.max(num_results.min(return_count));
         if vm.register_stack.len() < dest_end {
             vm.ensure_stack_capacity(dest_end);
             vm.register_stack.resize(dest_end, LuaValue::nil());
@@ -51,29 +56,36 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             let reg_ptr = vm.register_stack.as_mut_ptr();
 
             if num_results == usize::MAX {
-                // Copy all return values
-                let count = return_count.min(vm.register_stack.len().saturating_sub(base_ptr + a));
-                if count > 0 {
-                    std::ptr::copy_nonoverlapping(
-                        reg_ptr.add(base_ptr + a),
-                        reg_ptr.add(caller_base + result_reg),
-                        count,
-                    );
-                }
-                // Only update top if result_reg is within caller's normal range
-                let caller_frame = vm.current_frame();
-                let should_update_top =
-                    if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
-                        let max_stack = (*func_ptr).borrow().chunk.max_stack_size;
-                        result_reg < max_stack
+                // 返回所有值
+                if return_count > 0 {
+                    // 源：base_ptr + a
+                    // 目标：caller_base + result_reg
+                    // 检查是否重叠
+                    let src_start = base_ptr + a;
+                    let src_end = src_start + return_count;
+                    let dst_start = dest_base;
+                    let dst_end = dst_start + return_count;
+                    
+                    // 如果区域重叠，使用 copy；否则使用 copy_nonoverlapping
+                    if (src_start < dst_end) && (dst_start < src_end) {
+                        std::ptr::copy(
+                            reg_ptr.add(src_start),
+                            reg_ptr.add(dst_start),
+                            return_count,
+                        );
                     } else {
-                        result_reg < 256
-                    };
-                if should_update_top {
-                    vm.current_frame_mut().top = result_reg + count;
+                        std::ptr::copy_nonoverlapping(
+                            reg_ptr.add(src_start),
+                            reg_ptr.add(dst_start),
+                            return_count,
+                        );
+                    }
                 }
+                
+                // 更新 caller 的 top
+                vm.current_frame_mut().top = result_reg + return_count;
             } else {
-                // Fixed number of return values
+                // 固定数量的返回值
                 let nil_val = LuaValue::nil();
                 for i in 0..num_results {
                     let val = if i < return_count {
@@ -81,40 +93,31 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                     } else {
                         nil_val
                     };
-                    *reg_ptr.add(caller_base + result_reg + i) = val;
+                    *reg_ptr.add(dest_base + i) = val;
                 }
-                // Only update top for normal CALL instructions
-                let caller_frame = vm.current_frame();
-                let should_update_top =
-                    if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
-                        let max_stack = (*func_ptr).borrow().chunk.max_stack_size;
-                        result_reg < max_stack
-                    } else {
-                        result_reg < 256
-                    };
-                if should_update_top {
-                    vm.current_frame_mut().top = result_reg + num_results;
-                }
+                
+                // 更新 caller 的 top
+                vm.current_frame_mut().top = result_reg + num_results;
             }
         }
 
-        // Truncate register stack back to caller's frame
+        // 截断寄存器栈回到 caller 的范围
+        // 零拷贝设计：callee 的栈空间可能与 caller 重叠
+        // 需要保留 caller 需要的部分
         let caller_frame = vm.current_frame();
-        // OPTIMIZATION: Use direct pointer access instead of hash lookup
         if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
             let caller_max_stack = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
-            let caller_base = caller_frame.base_ptr;
-            let caller_stack_end = caller_base + caller_max_stack;
-
-            if vm.register_stack.len() < caller_stack_end {
-                vm.ensure_stack_capacity(caller_stack_end);
+            let caller_end = caller_frame.base_ptr + caller_max_stack;
+            
+            // 保留返回值所需的空间
+            let needed_end = dest_end.max(caller_end);
+            if vm.register_stack.len() > needed_end {
+                vm.register_stack.truncate(needed_end);
             }
-            vm.register_stack.truncate(caller_stack_end);
         }
     }
 
     // Handle upvalue closing (k bit)
-    // k=1 means close upvalues >= R[A]
     if _k {
         let close_from = base_ptr + a;
         vm.close_upvalues_from(close_from);
@@ -839,24 +842,24 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             let frame_id = vm.next_frame_id;
             vm.next_frame_id += 1;
 
-            // OPTIMIZATION: Calculate all sizes upfront and do ONE capacity check
-            let frame = vm.current_frame();
-            let caller_base = frame.base_ptr;
-            // OPTIMIZATION: Direct pointer access for caller function
-            let caller_max_stack = if let Some(func_ptr) = frame.function_value.as_function_ptr() {
-                unsafe { (*func_ptr).borrow().chunk.max_stack_size }
-            } else {
-                vm.register_stack.len().saturating_sub(caller_base)
-            };
-
-            let caller_stack_end = caller_base + caller_max_stack;
-            let new_base = caller_stack_end;
-
+            // === 零拷贝关键设计 ===
+            // Lua 5.4: 新frame的base直接指向 caller_base + a + 1
+            // 参数已经在 R[A+1], R[A+2], ... 的位置了！
+            // 只需要确保栈足够大，无需复制参数！
+            
+            let caller_base = base;
+            
+            // 零拷贝：新frame的base = R[A+1] 的位置
+            // R[A] = func (不属于新frame)
+            // R[A+1] = 第一个参数 = 新frame的 R[0]
+            let new_base = caller_base + a + 1;
+            
             let actual_arg_count = if use_call_metamethod {
                 arg_count + 1
             } else {
                 arg_count
             };
+            
             let actual_stack_size = max_stack_size.max(actual_arg_count);
             let total_stack_size = if is_vararg && actual_arg_count > 0 {
                 actual_stack_size + actual_arg_count
@@ -864,60 +867,57 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 actual_stack_size
             };
 
-            // OPTIMIZATION: Single capacity check for everything
-            let required_capacity = (base + a + 1 + arg_count)
-                .max(caller_stack_end)
-                .max(new_base + total_stack_size);
-            vm.ensure_stack_capacity(required_capacity);
+            // 确保栈容量足够
+            let required_capacity = new_base + total_stack_size;
+            if vm.register_stack.len() < required_capacity {
+                vm.ensure_stack_capacity(required_capacity);
+                vm.register_stack.resize(required_capacity, LuaValue::nil());
+            }
 
-            // OPTIMIZATION: Initialize with nil only once, then overwrite with arguments
-            // Use unsafe for faster bulk operations
+            // 零拷贝！只需要处理特殊情况
             unsafe {
                 let reg_ptr = vm.register_stack.as_mut_ptr();
-                let nil_val = crate::LuaValue::nil();
+                let nil_val = LuaValue::nil();
 
-                // Initialize entire frame with nil
-                for i in 0..total_stack_size {
-                    *reg_ptr.add(new_base + i) = nil_val;
+                // 参数已经在 new_base 位置了！
+                // 只需要初始化 new_base + arg_count 之后的局部变量槽位
+                if actual_arg_count < actual_stack_size {
+                    for i in actual_arg_count..actual_stack_size {
+                        *reg_ptr.add(new_base + i) = nil_val;
+                    }
+                }
+                
+                // Vararg: 需要额外空间
+                if is_vararg && actual_arg_count > 0 {
+                    for i in actual_stack_size..total_stack_size {
+                        *reg_ptr.add(new_base + i) = nil_val;
+                    }
                 }
 
-                // OPTIMIZATION: Use ptr::copy for argument copying (faster than loop)
-                // For all functions (including vararg), arguments are placed starting at new_base
-                // VARARGPREP will later move the varargs to their proper location
+                // __call metamethod: 需要插入 self 作为第一个参数
                 if use_call_metamethod {
-                    *reg_ptr.add(new_base) = call_metamethod_self;
+                    // 参数右移一位：R[0] <- self, R[1] <- 原R[0], R[2] <- 原R[1], ...
                     if arg_count > 0 {
-                        std::ptr::copy_nonoverlapping(
-                            reg_ptr.add(base + a + 1),
-                            reg_ptr.add(new_base + 1),
-                            arg_count,
-                        );
+                        // 从后往前复制，避免覆盖
+                        for i in (0..arg_count).rev() {
+                            *reg_ptr.add(new_base + 1 + i) = *reg_ptr.add(new_base + i);
+                        }
                     }
-                } else if actual_arg_count > 0 {
-                    std::ptr::copy_nonoverlapping(
-                        reg_ptr.add(base + a + 1),
-                        reg_ptr.add(new_base),
-                        actual_arg_count,
-                    );
+                    *reg_ptr.add(new_base) = call_metamethod_self;
                 }
             }
 
             // Get code pointer from function
-            let func_ptr = func.as_function_ptr()
-                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-            let func_obj = unsafe { &*func_ptr };
-            let code_ptr = func_obj.borrow().chunk.code.as_ptr();
+            let code_ptr = unsafe { (*func_ptr).borrow().chunk.code.as_ptr() };
 
             // Create and push new frame
-            // IMPORTANT: For vararg functions, top should reflect actual arg count, not max_stack_size
-            // VARARGPREP will use this to determine the number of varargs
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
                 func,
                 code_ptr,
-                new_base,
-                actual_arg_count, // top = number of arguments passed
-                a,                // result_reg: where to store return values
+                new_base,          // 零拷贝：直接指向参数位置！
+                actual_arg_count,  // top = number of arguments passed
+                a,                 // result_reg: where to store return values (相对于caller的base)
                 return_count,
             );
 

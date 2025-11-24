@@ -158,7 +158,7 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let thread_val = LuaValue::thread_ptr(Rc::into_raw(thread_rc));
     
     // Create a wrapper table that will act as a callable object
-    let wrapper_table = vm.create_table();
+    let wrapper_table = vm.create_table(0, 1);
     
     // Store the coroutine in the table
     let thread_key = vm.create_string("__thread");
@@ -168,7 +168,7 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let call_func = LuaValue::cfunction(coroutine_wrap_call);
     
     // Create and set metatable
-    let metatable = vm.create_table();
+    let metatable = vm.create_table(0, 1);
     let call_key = vm.create_string("__call");
     vm.table_set_with_meta(metatable, call_key, call_func)?;
     

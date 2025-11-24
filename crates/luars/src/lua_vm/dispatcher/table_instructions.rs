@@ -38,11 +38,11 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     // Calculate array size hint and hash size hint
     // These are size hints for preallocation (we currently ignore them)
-    let _array_size = if b > 0 { b - 1 } else { extra_arg };
-    let _hash_size = c;
+    let array_size = if b > 0 { b - 1 } else { extra_arg };
+    let hash_size = c;
 
     // Create new table (ignore size hints for now)
-    let table = vm.create_table();
+    let table = vm.create_table(array_size as usize, hash_size as usize);
     vm.register_stack[base_ptr + a] = table;
 
     Ok(DispatchAction::Continue)

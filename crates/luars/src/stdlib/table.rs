@@ -189,7 +189,7 @@ fn table_move(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// table.pack(...) - Pack values into table
 fn table_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let args = crate::lib_registry::get_args(vm);
-    let table = vm.create_table();
+    let table = vm.create_table(args.len(), 1);
     // Set 'n' field
     let n_key = vm.create_string("n");
     let table_ptr = table.as_table_ptr()

@@ -94,7 +94,7 @@ impl LuaVM {
         };
 
         // Set _G to point to the global table itself
-        let globals_ref = vm.create_table();
+        let globals_ref = vm.create_table(0, 20);
         vm.global_value = globals_ref;
         vm.set_global("_G", globals_ref);
         vm.set_global("_ENV", globals_ref);
@@ -355,7 +355,7 @@ impl LuaVM {
     /// In Lua, all strings share a metatable with __index pointing to the string library
     pub fn set_string_metatable(&mut self, string_lib: LuaValue) {
         // Create the metatable
-        let metatable = self.create_table();
+        let metatable = self.create_table(0, 1);
 
         // Create the __index key before any borrowing
         let index_key = self.create_string("__index");
@@ -1145,14 +1145,8 @@ impl LuaVM {
     }
 
     /// Create a new table in object pool
-    pub fn create_table(&mut self) -> LuaValue {
-        // TODO: Auto GC causes severe performance regression
-        // Need to optimize GC algorithm before enabling
-        // if self.gc.should_collect() {
-        //     self.collect_garbage();
-        // }
-
-        let id = self.object_pool.create_table();
+    pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
+        let id = self.object_pool.create_table(array_size, hash_size);
 
         // Register with GC for manual collection
         self.gc

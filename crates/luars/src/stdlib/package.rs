@@ -25,12 +25,12 @@ pub fn create_package_lib() -> LibraryModule {
 
 // Create the package.loaded table
 fn create_loaded_table(vm: &mut LuaVM) -> LuaValue {
-    vm.create_table()
+    vm.create_table(0, 0)
 }
 
 // Create the package.preload table
 fn create_preload_table(vm: &mut LuaVM) -> LuaValue {
-    vm.create_table()
+    vm.create_table(0, 0)
 }
 
 // Create package.path string
@@ -57,7 +57,7 @@ fn create_config_string(vm: &mut LuaVM) -> LuaValue {
 
 // Create package.searchers table with 4 standard searchers
 fn create_searchers_table(vm: &mut LuaVM) -> LuaValue {
-    let searchers = vm.create_table();
+    let searchers = vm.create_table(4, 0);
     let searchers_ref = searchers.as_lua_table().unwrap();
 
     searchers_ref

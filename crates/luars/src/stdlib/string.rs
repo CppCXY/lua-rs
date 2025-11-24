@@ -975,7 +975,7 @@ fn string_gmatch(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     // Create state table: {string = s, pattern = p, position = 0}
-    let state_table = vm.create_table();
+    let state_table = vm.create_table(0, 3);
     let string_key = vm.create_string("string");
     let pattern_key = vm.create_string("pattern");
     let position_key = vm.create_string("position");

@@ -172,10 +172,10 @@ impl LuaFile {
 
 /// Create file metatable with methods
 pub fn create_file_metatable(vm: &mut LuaVM) -> LuaResult<LuaValue> {
-    let mt = vm.create_table();
+    let mt = vm.create_table(0, 1);
 
     // Create __index table with methods
-    let index_table = vm.create_table();
+    let index_table = vm.create_table(0, 6);
 
     // file:read([format])
     let read_key = vm.create_string("read");
@@ -388,7 +388,7 @@ fn file_lines(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     // For now, return a simple iterator that reads lines
     // Create state table with file handle
-    let state_table = vm.create_table();
+    let state_table = vm.create_table(0, 1);
     let file_key = vm.create_string("file");
     let state_ref = vm
         .get_table(&state_table)
