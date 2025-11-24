@@ -186,36 +186,77 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// CONCAT A B
 /// R[A] := R[A].. ... ..R[A+B]
+/// OPTIMIZED: Pre-allocate capacity and batch string operations
 pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
-    use crate::lua_value::LuaValue;
-
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    // Helper function to convert value to string
-    fn to_concat_string(value: LuaValue) -> Option<String> {
+    // Fast path: collect all strings first and compute total length
+    let mut all_strings = true;
+    let mut total_len = 0;
+    let mut temp_strings: Vec<String> = Vec::with_capacity(b + 1);
+    
+    for i in 0..=b {
+        let value = vm.register_stack[base_ptr + a + i];
+        
         if let Some(s) = value.as_lua_string() {
-            return Some(s.as_str().to_string());
-        } else if let Some(i) = value.as_integer() {
-            return Some(i.to_string());
-        } else if let Some(f) = value.as_number() {
-            return Some(f.to_string());
+            let str_ref = s.as_str();
+            total_len += str_ref.len();
+            temp_strings.push(str_ref.to_string());
+        } else if let Some(int_val) = value.as_integer() {
+            let int_str = int_val.to_string();
+            total_len += int_str.len();
+            temp_strings.push(int_str);
+        } else if let Some(float_val) = value.as_number() {
+            let float_str = float_val.to_string();
+            total_len += float_str.len();
+            temp_strings.push(float_str);
+        } else {
+            all_strings = false;
+            break;
         }
-        None
+    }
+    
+    // Fast path: all strings/numbers, no metamethods needed
+    if all_strings && !temp_strings.is_empty() {
+        let mut result = String::with_capacity(total_len);
+        for s in temp_strings {
+            result.push_str(&s);
+        }
+        let result_value = vm.create_string(&result);
+        vm.register_stack[base_ptr + a] = result_value;
+        return Ok(());
     }
 
-    // Concatenate values from R[A] to R[A+B]
+    // Slow path: need to handle metamethods
     let mut result_value = vm.register_stack[base_ptr + a];
 
     for i in 1..=b {
         let next_value = vm.register_stack[base_ptr + a + i];
 
         // Try direct concatenation first
-        let left_str = to_concat_string(result_value);
-        let right_str = to_concat_string(next_value);
+        let left_str = if let Some(s) = result_value.as_lua_string() {
+            Some(s.as_str().to_string())
+        } else if let Some(int_val) = result_value.as_integer() {
+            Some(int_val.to_string())
+        } else if let Some(float_val) = result_value.as_number() {
+            Some(float_val.to_string())
+        } else {
+            None
+        };
+        
+        let right_str = if let Some(s) = next_value.as_lua_string() {
+            Some(s.as_str().to_string())
+        } else if let Some(int_val) = next_value.as_integer() {
+            Some(int_val.to_string())
+        } else if let Some(float_val) = next_value.as_number() {
+            Some(float_val.to_string())
+        } else {
+            None
+        };
 
         if let (Some(l), Some(r)) = (left_str, right_str) {
             let concat_result = l + &r;

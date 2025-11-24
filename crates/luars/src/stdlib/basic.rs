@@ -149,10 +149,37 @@ fn lua_tonumber(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// tostring(v) - Convert to string
+/// OPTIMIZED: Fast path for common types
 fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
 
-    // Check for __tostring metamethod
+    // Fast path: if already a string, return it directly
+    if value.is_string() {
+        return Ok(MultiValue::single(value));
+    }
+    
+    // Fast path: simple types without metamethods
+    if value.is_nil() {
+        let result = vm.create_string("nil");
+        return Ok(MultiValue::single(result));
+    }
+    
+    if let Some(b) = value.as_bool() {
+        let result = vm.create_string(if b { "true" } else { "false" });
+        return Ok(MultiValue::single(result));
+    }
+    
+    if let Some(i) = value.as_integer() {
+        let result = vm.create_string(&i.to_string());
+        return Ok(MultiValue::single(result));
+    }
+    
+    if let Some(f) = value.as_number() {
+        let result = vm.create_string(&f.to_string());
+        return Ok(MultiValue::single(result));
+    }
+
+    // Slow path: check for __tostring metamethod
     let value_str = vm.value_to_string(&value)?;
     let result = vm.create_string(&value_str);
     Ok(MultiValue::single(result))

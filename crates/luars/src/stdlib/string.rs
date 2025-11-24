@@ -91,6 +91,7 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// string.len(s) - Return string length
+/// OPTIMIZED: Use byte length directly, Lua string.len returns byte length not char count
 fn string_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.len")?;
 
@@ -98,6 +99,8 @@ fn string_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         LuaError::RuntimeError("bad argument #1 to 'string.len' (string expected)".to_string())
     })?;
 
+    // Lua string.len returns byte length, not UTF-8 character count
+    // This is correct and much faster than chars().count()
     let len = s.as_str().len() as i64;
     Ok(MultiValue::single(LuaValue::integer(len)))
 }
@@ -180,15 +183,15 @@ fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// string.sub(s, i [, j]) - Extract substring
+/// OPTIMIZED: Lua uses byte indices, not character indices!
 fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.sub")?;
     let s = s_value.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'string.sub' (string expected)".to_string())
     })?;
 
-    // Clone the string to avoid borrow checker issues
-    let s_str = s.as_str().to_string();
-    let char_count = s_str.chars().count() as i64;
+    let s_str = s.as_str();
+    let byte_len = s_str.len() as i64;
 
     let i = require_arg(vm, 1, "string.sub")?
         .as_integer()
@@ -198,35 +201,20 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     let j = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(-1);
 
+    // Lua string.sub uses byte positions, not character positions!
     // Convert negative indices
-    let start = if i < 0 { char_count + i + 1 } else { i };
-    let end = if j < 0 { char_count + j + 1 } else { j };
+    let start = if i < 0 { byte_len + i + 1 } else { i };
+    let end = if j < 0 { byte_len + j + 1 } else { j };
 
-    // Clamp to valid range
-    let start = start.max(1).min(char_count + 1);
-    let end = end.max(0).min(char_count);
+    // Clamp to valid range [1, byte_len]
+    let start = start.max(1).min(byte_len + 1) as usize;
+    let end = end.max(0).min(byte_len) as usize;
 
-    let result_str = if start > 0 && start <= end {
-        // Fast path: find byte indices for start and end character positions
-        let start_idx = (start - 1) as usize;
-        let end_idx = end as usize;
-
-        let mut byte_start = 0;
-        let mut byte_end = s_str.len();
-        let mut char_idx = 0;
-
-        for (byte_idx, _) in s_str.char_indices() {
-            if char_idx == start_idx {
-                byte_start = byte_idx;
-            }
-            if char_idx == end_idx {
-                byte_end = byte_idx;
-                break;
-            }
-            char_idx += 1;
-        }
-
-        &s_str[byte_start..byte_end]
+    let result_str = if start > 0 && start <= end + 1 {
+        // Direct byte slicing - much faster!
+        let start_byte = (start - 1).min(s_str.len());
+        let end_byte = end.min(s_str.len());
+        &s_str[start_byte..end_byte]
     } else {
         ""
     };
