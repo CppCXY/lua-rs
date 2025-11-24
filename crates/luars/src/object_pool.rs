@@ -8,6 +8,91 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Slot-based storage with free list for O(1) allocation and deallocation
+struct SlotVec<T> {
+    slots: Vec<Option<T>>,
+    free_list: Vec<u32>,
+    count: usize,
+}
+
+#[allow(unused)]
+impl<T> SlotVec<T> {
+    fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            free_list: Vec::new(),
+            count: 0,
+        }
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity),
+            free_list: Vec::with_capacity(capacity / 4),
+            count: 0,
+        }
+    }
+
+    /// O(1) insertion - reuse free slot or append new slot
+    #[inline]
+    fn insert(&mut self, value: T) -> u32 {
+        self.count += 1;
+        
+        if let Some(free_id) = self.free_list.pop() {
+            self.slots[free_id as usize] = Some(value);
+            free_id
+        } else {
+            let id = self.slots.len() as u32;
+            self.slots.push(Some(value));
+            id
+        }
+    }
+
+    /// O(1) lookup - direct array indexing
+    #[inline]
+    fn get(&self, id: u32) -> Option<&T> {
+        self.slots.get(id as usize).and_then(|slot| slot.as_ref())
+    }
+
+    /// O(1) removal - mark as free and add to free list
+    #[inline]
+    fn remove(&mut self, id: u32) -> Option<T> {
+        if let Some(slot) = self.slots.get_mut(id as usize) {
+            if let Some(value) = slot.take() {
+                self.free_list.push(id);
+                self.count -= 1;
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Shrink memory after GC
+    fn shrink_to_fit(&mut self) {
+        if self.free_list.len() < self.slots.len() / 4 {
+            self.free_list.shrink_to_fit();
+            return;
+        }
+
+        while let Some(None) = self.slots.last() {
+            let removed_id = self.slots.len() - 1;
+            self.slots.pop();
+            
+            if let Some(pos) = self.free_list.iter().rposition(|&id| id as usize == removed_id) {
+                self.free_list.swap_remove(pos);
+            }
+        }
+        
+        self.slots.shrink_to_fit();
+        self.free_list.shrink_to_fit();
+    }
+}
+
 /// Object IDs - u32 is enough for most use cases (4 billion objects)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct StringId(pub u32);
@@ -63,17 +148,10 @@ impl FunctionId {
 
 /// Object Pool for all heap-allocated Lua objects
 pub struct ObjectPool {
-    // Object storage - 所有类型都用 Rc 包装以防止 HashMap rehash 导致指针失效
-    strings: HashMap<StringId, Rc<LuaString>>,
-    tables: HashMap<TableId, Rc<RefCell<LuaTable>>>,
-    userdata: HashMap<UserdataId, Rc<RefCell<LuaUserdata>>>,
-    functions: HashMap<FunctionId, Rc<RefCell<lua_value::LuaFunction>>>,
-
-    // ID generators
-    next_string_id: StringId,
-    next_table_id: TableId,
-    next_userdata_id: UserdataId,
-    next_function_id: FunctionId,
+    strings: SlotVec<Rc<LuaString>>,
+    tables: SlotVec<Rc<RefCell<LuaTable>>>,
+    userdata: SlotVec<Rc<RefCell<LuaUserdata>>>,
+    functions: SlotVec<Rc<RefCell<lua_value::LuaFunction>>>,
 
     // String interning table (hash -> id mapping)
     // For strings ≤ 64 bytes, we intern them for memory efficiency
@@ -84,14 +162,10 @@ pub struct ObjectPool {
 impl ObjectPool {
     pub fn new() -> Self {
         ObjectPool {
-            strings: HashMap::with_capacity(128),
-            tables: HashMap::with_capacity(16),
-            userdata: HashMap::with_capacity(0),
-            functions: HashMap::with_capacity(64),
-            next_string_id: StringId(1), // 0 reserved for null/invalid
-            next_table_id: TableId(1),
-            next_userdata_id: UserdataId(1),
-            next_function_id: FunctionId(1),
+            strings: SlotVec::with_capacity(128),
+            tables: SlotVec::with_capacity(16),
+            userdata: SlotVec::with_capacity(0),
+            functions: SlotVec::with_capacity(64),
             string_intern: HashMap::with_capacity(128),
             max_intern_length: 64,
         }
@@ -115,7 +189,7 @@ impl ObjectPool {
             // Check intern table
             if let Some(&id) = self.string_intern.get(&hash) {
                 // Verify content (hash collision check)
-                if let Some(existing) = self.strings.get(&id) {
+                if let Some(existing) = self.strings.get(id.0) {
                     if existing.as_str() == s {
                         return id;
                     }
@@ -123,35 +197,29 @@ impl ObjectPool {
             }
 
             // Create new interned string
-            let id = self.next_string_id;
-            self.next_string_id = id.next();
-
             let lua_string = Rc::new(LuaString::new(s.to_string()));
-            self.strings.insert(id, lua_string);
+            let slot_id = self.strings.insert(lua_string);
+            let id = StringId(slot_id);
             self.string_intern.insert(hash, id);
 
             id
         } else {
             // Long string - no interning
-            let id = self.next_string_id;
-            self.next_string_id = id.next();
-
             let lua_string = Rc::new(LuaString::new(s.to_string()));
-            self.strings.insert(id, lua_string);
-
-            id
+            let slot_id = self.strings.insert(lua_string);
+            StringId(slot_id)
         }
     }
 
     /// Get string by ID
     #[inline]
     pub fn get_string(&self, id: StringId) -> Option<&Rc<LuaString>> {
-        self.strings.get(&id)
+        self.strings.get(id.0)
     }
 
     /// Remove string (called by GC)
     pub fn remove_string(&mut self, id: StringId) -> Option<Rc<LuaString>> {
-        if let Some(string) = self.strings.remove(&id) {
+        if let Some(string) = self.strings.remove(id.0) {
             // Also remove from intern table if present
             if string.as_str().len() <= self.max_intern_length {
                 use std::collections::hash_map::DefaultHasher;
@@ -177,78 +245,64 @@ impl ObjectPool {
 
     /// Create a new table
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> TableId {
-        let id = self.next_table_id;
-        self.next_table_id = id.next();
-
-        self.tables.insert(
-            id,
-            Rc::new(RefCell::new(LuaTable::new(array_size, hash_size))),
-        );
-
-        id
+        let table = Rc::new(RefCell::new(LuaTable::new(array_size, hash_size)));
+        let slot_id = self.tables.insert(table);
+        TableId(slot_id)
     }
 
     /// Get table by ID
     #[inline]
     pub fn get_table(&self, id: TableId) -> Option<&Rc<RefCell<LuaTable>>> {
-        self.tables.get(&id)
+        self.tables.get(id.0)
     }
 
     /// Remove table (called by GC)
     pub fn remove_table(&mut self, id: TableId) -> Option<Rc<RefCell<LuaTable>>> {
-        self.tables.remove(&id)
+        self.tables.remove(id.0)
     }
 
     // ============ Userdata Operations ============
 
     /// Create new userdata
     pub fn create_userdata(&mut self, data: LuaUserdata) -> UserdataId {
-        let id = self.next_userdata_id;
-        self.next_userdata_id = id.next();
-
-        self.userdata.insert(id, Rc::new(RefCell::new(data)));
-
-        id
+        let slot_id = self.userdata.insert(Rc::new(RefCell::new(data)));
+        UserdataId(slot_id)
     }
 
     /// Get userdata by ID
     #[inline]
     pub fn get_userdata(&self, id: UserdataId) -> Option<&Rc<RefCell<LuaUserdata>>> {
-        self.userdata.get(&id)
+        self.userdata.get(id.0)
     }
 
     /// Get mutable userdata by ID (actually returns &Rc<RefCell<>> - mutate via borrow_mut)
     #[inline]
     pub fn get_userdata_mut(&mut self, id: UserdataId) -> Option<&Rc<RefCell<LuaUserdata>>> {
-        self.userdata.get(&id)
+        self.userdata.get(id.0)
     }
 
     /// Remove userdata (called by GC)
     pub fn remove_userdata(&mut self, id: UserdataId) -> Option<Rc<RefCell<LuaUserdata>>> {
-        self.userdata.remove(&id)
+        self.userdata.remove(id.0)
     }
 
     // ============ Function Operations ============
 
     /// Create a new function
     pub fn create_function(&mut self, func: LuaFunction) -> FunctionId {
-        let id = self.next_function_id;
-        self.next_function_id = id.next();
-
-        self.functions
-            .insert(id, std::rc::Rc::new(RefCell::new(func)));
-        id
+        let slot_id = self.functions.insert(Rc::new(RefCell::new(func)));
+        FunctionId(slot_id)
     }
 
     /// Get function by ID
     #[inline]
     pub fn get_function(&self, id: FunctionId) -> Option<&std::rc::Rc<RefCell<LuaFunction>>> {
-        self.functions.get(&id)
+        self.functions.get(id.0)
     }
 
     /// Remove function (called by GC)
     pub fn remove_function(&mut self, id: FunctionId) -> Option<std::rc::Rc<RefCell<LuaFunction>>> {
-        self.functions.remove(&id)
+        self.functions.remove(id.0)
     }
 
     // ============ Statistics ============

@@ -88,6 +88,10 @@ pub struct GC {
     gc_kind: GCKind,            // KGC_INC or KGC_GEN
     last_atomic: usize,         // For generational mode
     
+    // Shrink optimization - avoid frequent shrinking
+    shrink_cooldown: u32,       // Shrink 冷却计数器
+    shrink_threshold: u32,      // Shrink 阈值
+    
     // Generational GC state
     allocations_since_minor_gc: usize,
     minor_gc_count: usize,
@@ -130,6 +134,8 @@ impl GC {
             gen_major_mul: 100,            // LUAI_GENMAJORMUL
             gc_kind: GCKind::Generational, // Default to generational (like Lua 5.4)
             last_atomic: 0,
+            shrink_cooldown: 0,
+            shrink_threshold: 10,          // 每 10 次 GC 才 shrink 一次
             allocations_since_minor_gc: 0,
             minor_gc_count: 0,
             collection_count: 0,
@@ -300,11 +306,14 @@ impl GC {
         self.allocations_since_minor_gc = 0;
         self.minor_gc_count += 1;
 
-        // Shrink ObjectPool HashMaps after collection
-        // This is critical for performance: after deleting many entries,
-        // HashMap capacity remains large, causing O(log n) lookups instead of O(1)
-        if collected > 100 {
+        // Shrink only if:
+        // 1. Collected many objects (>1000)
+        // 2. Cooldown expired
+        if collected > 1000 && self.shrink_cooldown == 0 {
             object_pool.shrink_to_fit();
+            self.shrink_cooldown = self.shrink_threshold;
+        } else if self.shrink_cooldown > 0 {
+            self.shrink_cooldown -= 1;
         }
 
         collected
@@ -366,8 +375,9 @@ impl GC {
         self.allocations_since_minor_gc = 0;
         self.adjust_threshold();
 
-        // Always shrink after major GC
+        // Major GC 后总是 shrink，但重置冷却期
         object_pool.shrink_to_fit();
+        self.shrink_cooldown = self.shrink_threshold;
 
         collected
     }
