@@ -1,4 +1,3 @@
-use super::DispatchAction;
 /// Control flow instructions
 ///
 /// These instructions handle function calls, returns, jumps, and coroutine operations.
@@ -9,7 +8,7 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM};
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
 #[inline(always)]
-pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let _c = Instruction::get_c(instr) as usize;
@@ -123,7 +122,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.close_upvalues_from(close_from);
     }
 
-    Ok(DispatchAction::Return)
+    Ok(())
 }
 
 // ============ Jump Instructions ============
@@ -131,14 +130,14 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// JMP sJ
 /// pc += sJ
 #[inline(always)]
-pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let sj = Instruction::get_sj(instr);
 
     let frame = vm.current_frame_mut();
     // PC already incremented by dispatcher, so we add offset directly
     frame.pc = (frame.pc as i32 + sj) as usize;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 // ============ Test Instructions ============
@@ -146,7 +145,7 @@ pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// TEST A k
 /// if (not R[A] == k) then pc++
 #[inline(always)]
-pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let k = Instruction::get_k(instr);
 
@@ -163,13 +162,13 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// TESTSET A B k
 /// if (not R[B] == k) then R[A] := R[B] else pc++
 #[inline(always)]
-pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -192,7 +191,7 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 // ============ Comparison Instructions ============
@@ -200,7 +199,7 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// EQ A B k
 /// if ((R[A] == R[B]) ~= k) then pc++
 #[inline(always)]
-pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -243,13 +242,13 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LT A B k
 /// if ((R[A] < R[B]) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -288,7 +287,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                         if is_less_result != k {
                             vm.current_frame_mut().pc += 1;
                         }
-                        return Ok(DispatchAction::Continue);
+                        return Ok(());
                     }
                     found_metamethod = true;
                 }
@@ -305,7 +304,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                             if is_less_result != k {
                                 vm.current_frame_mut().pc += 1;
                             }
-                            return Ok(DispatchAction::Continue);
+                            return Ok(());
                         }
                         found_metamethod = true;
                     }
@@ -320,20 +319,20 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 right.type_name()
             )));
         }
-        return Ok(DispatchAction::Continue);
+        return Ok(());
     };
 
     if is_less != k {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LE A B k
 /// if ((R[A] <= R[B]) ~= k) then pc++
 #[inline(always)]
-pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -369,7 +368,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                         if is_le_result != k {
                             vm.current_frame_mut().pc += 1;
                         }
-                        return Ok(DispatchAction::Continue);
+                        return Ok(());
                     }
                     found_metamethod = true;
                 }
@@ -385,7 +384,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                             if is_le_result != k {
                                 vm.current_frame_mut().pc += 1;
                             }
-                            return Ok(DispatchAction::Continue);
+                            return Ok(());
                         }
                         found_metamethod = true;
                     }
@@ -406,7 +405,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                             if is_le_result != k {
                                 vm.current_frame_mut().pc += 1;
                             }
-                            return Ok(DispatchAction::Continue);
+                            return Ok(());
                         }
                         found_metamethod = true;
                     }
@@ -424,7 +423,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                                 if is_le_result != k {
                                     vm.current_frame_mut().pc += 1;
                                 }
-                                return Ok(DispatchAction::Continue);
+                                return Ok(());
                             }
                             found_metamethod = true;
                         }
@@ -440,19 +439,19 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 right.type_name()
             )));
         }
-        return Ok(DispatchAction::Continue);
+        return Ok(());
     };
 
     if is_less_or_equal != k {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// EQK A B k
 /// if ((R[A] == K[B]) ~= k) then pc++
-pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -480,13 +479,13 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// EQI A sB k
 /// if ((R[A] == sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -508,13 +507,13 @@ pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LTI A sB k
 /// if ((R[A] < sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -542,13 +541,13 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LEI A sB k
 /// if ((R[A] <= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -573,13 +572,13 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// GTI A sB k
 /// if ((R[A] > sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -604,13 +603,13 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// GEI A sB k
 /// if ((R[A] >= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -635,7 +634,7 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc += 1;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 // ============ Call Instructions ============
@@ -643,7 +642,7 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// CALL A B C
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
 #[inline(always)]
-pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     use crate::lua_value::LuaValueKind;
     use crate::lua_vm::LuaCallFrame;
 
@@ -821,7 +820,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             // Update caller's top
             vm.current_frame_mut().top = a + num_returns;
 
-            Ok(DispatchAction::Continue)
+            Ok(())
         }
         LuaValueKind::Function => {
             // OPTIMIZATION: Direct pointer access - NO hash lookup!
@@ -924,7 +923,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
             vm.frames.push(new_frame);
 
-            Ok(DispatchAction::Call)
+            Ok(())
         }
         _ => Err(LuaError::RuntimeError(format!(
             "attempt to call a {} value",
@@ -935,7 +934,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// TAILCALL A B C k
 /// return R[A](R[A+1], ... ,R[A+B-1])
-pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // TAILCALL A B C: return R[A](R[A+1], ..., R[A+B-1])
     // Reuse current frame (tail call optimization)
     let a = Instruction::get_a(instr) as usize;
@@ -1026,7 +1025,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
             );
             vm.frames.push(new_frame);
 
-            Ok(DispatchAction::Call)
+            Ok(())
         }
         LuaValueKind::CFunction => {
             // C function: cannot use tail call optimization
@@ -1097,7 +1096,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
                 vm.current_frame_mut().top = result_reg + count;
             }
 
-            Ok(DispatchAction::Continue)
+            Ok(())
         }
         _ => Err(LuaError::RuntimeError(format!(
             "attempt to call a {} value",
@@ -1108,7 +1107,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
 /// RETURN0
 /// return (no values)
-pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
     // Close upvalues before popping the frame
     let base_ptr = vm.current_frame().base_ptr;
     vm.close_upvalues_from(base_ptr);
@@ -1138,12 +1137,12 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().top = result_reg; // No return values, so top = result_reg + 0
     }
 
-    Ok(DispatchAction::Return)
+    Ok(())
 }
 
 /// RETURN1 A
 /// return R[A]
-pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
 
     // Close upvalues before popping the frame
@@ -1195,5 +1194,5 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         }
     }
 
-    Ok(DispatchAction::Return)
+    Ok(())
 }

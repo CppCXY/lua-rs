@@ -1,4 +1,3 @@
-use super::DispatchAction;
 /// Load and Move instructions
 ///
 /// These instructions handle loading constants and moving values between registers.
@@ -8,7 +7,7 @@ use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
 /// VARARGPREP A
 /// Prepare stack for vararg function
 /// A is the number of fixed parameters
-pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
 
     let frame_idx = vm.frames.len() - 1;
@@ -47,12 +46,12 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> 
         vm.frames[frame_idx].set_vararg(base_ptr + max_stack_size, 0);
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LOADNIL A B
 /// R[A], R[A+1], ..., R[A+B] := nil
-pub fn exec_loadnil(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_loadnil(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let frame = vm.current_frame();
@@ -62,24 +61,24 @@ pub fn exec_loadnil(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.register_stack[base_ptr + a + i] = LuaValue::nil();
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LOADFALSE A
 /// R[A] := false
-pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
     vm.register_stack[base_ptr + a] = LuaValue::boolean(false);
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LFALSESKIP A
 /// R[A] := false; pc++
-pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
@@ -89,25 +88,25 @@ pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> 
     // Skip next instruction
     vm.current_frame_mut().pc += 1;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LOADTRUE A
 /// R[A] := true
-pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
     vm.register_stack[base_ptr + a] = LuaValue::boolean(true);
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LOADI A sBx
 /// R[A] := sBx (signed integer)
 #[inline(always)]
-pub fn exec_loadi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_loadi(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
     let base_ptr = vm.current_frame().base_ptr;
@@ -116,12 +115,12 @@ pub fn exec_loadi(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LOADF A sBx
 /// R[A] := (lua_Number)sBx
-pub fn exec_loadf(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_loadf(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
     let frame = vm.current_frame();
@@ -129,13 +128,13 @@ pub fn exec_loadf(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = LuaValue::number(sbx as f64);
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LOADK A Bx
 /// R[A] := K[Bx]
 #[inline(always)]
-pub fn exec_loadk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_loadk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -161,12 +160,12 @@ pub fn exec_loadk(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = constant;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// LOADKX A
 /// R[A] := K[extra arg]
-pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
 
     // Next instruction contains the constant index
@@ -204,11 +203,11 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = constant;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// ExtraArg: Extra argument for LOADKX and other instructions
-pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> Result<DispatchAction, LuaError> {
+pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
     // EXTRAARG is consumed by the preceding instruction (like LOADKX)
     // It should never be executed directly
     Err(LuaError::RuntimeError(
@@ -219,7 +218,7 @@ pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> Result<DispatchAction, Lua
 /// MOVE A B
 /// R[A] := R[B]
 #[inline(always)]
-pub fn exec_move(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_move(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let base_ptr = vm.current_frame().base_ptr;
@@ -230,5 +229,5 @@ pub fn exec_move(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         *reg_ptr.add(a) = *reg_ptr.add(b);
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }

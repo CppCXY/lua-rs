@@ -20,10 +20,10 @@ use super::{Instruction, LuaResult, LuaVM, OpCode};
 
 /// Main instruction dispatcher (force inline to eliminate function call overhead)
 ///
-/// This function executes a single instruction and returns whether execution should continue.
-/// MUST be inlined into the hot loop for performance.
+/// **ZERO RETURN VALUE** - Instructions directly mutate VM state
+/// This function executes a single instruction with NO abstraction overhead.
 #[inline(always)]
-pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let opcode = Instruction::get_opcode(instr);
 
     match opcode {
@@ -142,20 +142,4 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAct
         // Extra argument
         OpCode::ExtraArg => exec_extraarg(vm, instr),
     }
-}
-
-/// Action to take after dispatching an instruction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchAction {
-    /// Continue executing next instruction
-    Continue,
-    /// Skip 1 instruction (used by *K instructions that skip their MMBIN* fallback)
-    /// OPTIMIZATION: Separate variant to avoid carrying data (all skips are Skip(1))
-    Skip1,
-    /// Return from current function (includes return values in VM)
-    Return,
-    /// Yield from coroutine (yield values stored in thread)
-    Yield,
-    /// Call another function (caller should set up new frame)
-    Call,
 }

@@ -15,7 +15,7 @@ use crate::lua_value::{
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::{ObjectPool, lib_registry};
-use dispatcher::{DispatchAction, dispatch_instruction};
+use dispatcher::dispatch_instruction;
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -245,12 +245,12 @@ impl LuaVM {
     }
 
     /// Main execution loop - interprets bytecode instructions
-    /// Returns the final return value from the chunk
+    /// Main VM execution loop - MAXIMUM PERFORMANCE
+    /// 零返回值，零分支，直接调度
     fn run(&mut self) -> LuaResult<LuaValue> {
         loop {
-            // Check if we have any frames to execute
+            // 检查是否有帧
             if self.frames.is_empty() {
-                // Execution finished
                 return Ok(self
                     .return_values
                     .first()
@@ -258,54 +258,21 @@ impl LuaVM {
                     .unwrap_or(LuaValue::nil()));
             }
 
-            // OPTIMIZATION: 极简指令获取 - 仿照原生 Lua 的 vmfetch 宏
-            // 直接从 frame.code_ptr 读取，零开销！
+            // === 极简主循环：直接调度，无返回值 ===
             let frame = unsafe { self.frames.last_mut().unwrap_unchecked() };
             let instr = unsafe { *frame.code_ptr.add(frame.pc) };
             frame.pc += 1;
 
-            // Dispatch instruction using the dispatcher module
-            let action = match dispatch_instruction(self, instr) {
-                Ok(action) => action,
-                Err(LuaError::Yield(_)) => {
-                    // Coroutine yielded via CFunction (e.g., coroutine.yield)
-                    // Convert to Yield action
-                    DispatchAction::Yield
-                }
-                Err(e) => return Err(e),
-            };
-
-            // Handle dispatch action
-            match action {
-                DispatchAction::Continue => {
-                    // Continue to next instruction
-                }
-                DispatchAction::Skip1 => {
-                    // Skip 1 additional instruction (PC already incremented by 1)
-                    self.current_frame_mut().pc += 1;
-                }
-                DispatchAction::Return => {
-                    // Function returned, check if execution is done
-                    if self.frames.is_empty() {
-                        return Ok(self
-                            .return_values
-                            .first()
-                            .copied()
-                            .unwrap_or(LuaValue::nil()));
-                    }
-                    // NOTE: Caller's PC should remain unchanged - it was already incremented
-                    // before the CALL instruction was executed, and points to the next instruction.
-                }
-                DispatchAction::Yield => {
-                    // Coroutine yielded - return control to resume_thread
-                    // yield_values should already be set in the current thread
-                    return Ok(LuaValue::nil());
-                }
-                DispatchAction::Call => {
-                    // TODO: Handle function call (CALL instruction will set this)
-                    // For now, just continue
+            // 直接调度 - 指令自己处理一切（包括 Skip1、Return 等）
+            if let Err(e) = dispatch_instruction(self, instr) {
+                match e {
+                    LuaError::Yield(_) => return Ok(LuaValue::nil()),
+                    _ => return Err(e),
                 }
             }
+            
+            // 检查函数返回（通过 frames 是否改变来判断）
+            // 这个检查很便宜，因为大部分时候都不会返回
         }
     }
 
@@ -1957,35 +1924,9 @@ impl LuaVM {
                     let instr = chunk.code[pc];
                     self.frames[frame_idx].pc += 1;
 
-                    // Dispatch instruction
-                    match crate::lua_vm::dispatcher::dispatch_instruction(self, instr) {
-                        Ok(action) => {
-                            use crate::lua_vm::dispatcher::DispatchAction;
-                            match action {
-                                DispatchAction::Continue => {
-                                    // Continue to next instruction
-                                }
-                                DispatchAction::Skip1 => {
-                                    // Skip 1 additional instruction
-                                    self.frames[frame_idx].pc += 1;
-                                }
-                                DispatchAction::Return => {
-                                    // Frame will be popped, loop will exit
-                                }
-                                DispatchAction::Yield => {
-                                    // Yield detected - propagate it up
-                                    break Err(LuaError::Yield(self.return_values.clone()));
-                                }
-                                DispatchAction::Call => {
-                                    // CALL instruction already set up the frame
-                                    // Continue execution in the new frame
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // Real error occurred
-                            break Err(e);
-                        }
+                    // Dispatch instruction (zero-return-value design)
+                    if let Err(e) = crate::lua_vm::dispatcher::dispatch_instruction(self, instr) {
+                        break Err(e);
                     }
                 };
 

@@ -1,4 +1,3 @@
-use super::DispatchAction;
 /// Loop instructions
 ///
 /// These instructions handle for loops (numeric and generic iterators).
@@ -11,7 +10,7 @@ use crate::{
 /// FORPREP A Bx
 /// Prepare numeric for loop: R[A]-=R[A+2]; R[A+3]=R[A]; if (skip) pc+=Bx+1
 #[inline(always)]
-pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -96,7 +95,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         }
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// FORLOOP A Bx
@@ -108,7 +107,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 /// - Single type check for all 3 values (branchless fast path)
 /// - Zero function calls in hot path
 #[inline(always)]
-pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -195,13 +194,13 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         }
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// TFORPREP A Bx
 /// create upvalue for R[A + 3]; pc+=Bx
 /// In Lua 5.4, this creates a to-be-closed variable for the state
-pub fn exec_tforprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_tforprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -216,12 +215,12 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     // Jump to loop start
     vm.current_frame_mut().pc += bx;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// TFORCALL A C
 /// R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);
-pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -329,12 +328,12 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         }
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// TFORLOOP A Bx
 /// if R[A+1] ~= nil then { R[A]=R[A+1]; pc -= Bx }
-pub fn exec_tforloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_tforloop(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -349,5 +348,5 @@ pub fn exec_tforloop(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.current_frame_mut().pc -= bx;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }

@@ -1,4 +1,3 @@
-use super::DispatchAction;
 /// Upvalue and closure operations
 ///
 /// These instructions handle upvalues, closures, and variable captures.
@@ -6,7 +5,7 @@ use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
 
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
-pub fn exec_getupval(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_getupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -27,12 +26,12 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let value = upvalue.get_value(&vm.frames, &vm.register_stack);
     vm.register_stack[base_ptr + a] = value;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// SETUPVAL A B
 /// UpValue[B] := R[A]
-pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -54,12 +53,12 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     upvalue.set_value(&mut vm.frames, &mut vm.register_stack, value);
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// CLOSE A
 /// close all upvalues >= R[A]
-pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
@@ -67,12 +66,12 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.close_upvalues_from(close_from);
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// CLOSURE A Bx
 /// R[A] := closure(KPROTO[Bx])
-pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -141,12 +140,12 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let closure = vm.create_function(proto, upvalues);
     vm.register_stack[base_ptr + a] = closure;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// VARARG A C
 /// R[A], R[A+1], ..., R[A+C-2] = vararg
-pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -182,12 +181,12 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         }
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// CONCAT A B
 /// R[A] := R[A].. ... ..R[A+B]
-pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     use crate::lua_value::LuaValue;
 
     let a = Instruction::get_a(instr) as usize;
@@ -269,12 +268,12 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = result_value;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// SETLIST A B C k
 /// R[A][C+i] := R[A+i], 1 <= i <= B
-pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -301,13 +300,13 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         vm.table_set_with_meta(table, key, value)?;
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// TBC A
 /// mark variable A as to-be-closed
 /// This marks a variable to have its __close metamethod called when it goes out of scope
-pub fn exec_tbc(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_tbc(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
@@ -330,5 +329,5 @@ pub fn exec_tbc(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         // any value to be marked as to-be-closed
     }
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }

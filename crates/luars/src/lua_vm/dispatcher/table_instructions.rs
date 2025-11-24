@@ -1,4 +1,3 @@
-use super::DispatchAction;
 use crate::lua_value::LuaValue;
 /// Table operations
 ///
@@ -7,7 +6,7 @@ use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
 
 /// NEWTABLE A B C k
 /// R[A] := {} (size = B,C)
-pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr);
     let c = Instruction::get_c(instr);
@@ -44,13 +43,13 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let table = vm.create_table(array_size as usize, hash_size as usize);
     vm.register_stack[base_ptr + a] = table;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// GETTABLE A B C
 /// R[A] := R[B][R[C]]
 #[inline(always)]
-pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -73,13 +72,13 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let new_base_ptr = vm.current_frame().base_ptr;
     vm.register_stack[new_base_ptr + a] = value;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// SETTABLE A B C k
 /// R[A][R[B]] := RK(C)
 #[inline(always)]
-pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -119,13 +118,13 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// GETI A B C
 /// R[A] := R[B][C:integer]
 #[inline(always)]
-pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -142,13 +141,13 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         .unwrap_or(LuaValue::nil());
     vm.register_stack[base_ptr + a] = value;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// SETI A B C k
 /// R[A][B] := RK(C)
 #[inline(always)]
-pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_sb(instr);
     let c = Instruction::get_c(instr) as usize;
@@ -187,13 +186,13 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// GETFIELD A B C
 /// R[A] := R[B][K[C]:string]
 #[inline(always)]
-pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -230,13 +229,13 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let new_base_ptr = vm.current_frame().base_ptr;
     vm.register_stack[new_base_ptr + a] = value;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// SETFIELD A B C k
 /// R[A][K[B]:string] := RK(C)
 #[inline(always)]
-pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -284,12 +283,12 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// GETTABUP A B C
 /// R[A] := UpValue[B][K[C]:string]
-pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -323,12 +322,12 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.register_stack[base_ptr + a] = value;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// SETTABUP A B C k
 /// UpValue[A][K[B]:string] := RK(C)
-pub fn exec_settabup(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_settabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -372,12 +371,12 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
 
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
 
 /// SELF A B C
 /// R[A+1] := R[B]; R[A] := R[B][RK(C):string]
-pub fn exec_self(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
+pub fn exec_self(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -409,5 +408,5 @@ pub fn exec_self(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
         .unwrap_or(crate::LuaValue::nil());
     vm.register_stack[base_ptr + a] = method;
 
-    Ok(DispatchAction::Continue)
+    Ok(())
 }
