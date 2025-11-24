@@ -310,24 +310,14 @@ pub fn exec_tbc(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
+    let reg_idx = base_ptr + a;
 
-    // In a full implementation, we would:
-    // 1. Mark the variable at R[A] as to-be-closed
-    // 2. When the variable goes out of scope (block end, return, etc.),
-    //    call its __close metamethod if it exists
-    //
-    // For now, we just note the variable exists. The __close metamethod
-    // should be called by:
-    // - RETURN instruction (with k bit set)
-    // - End of block (JMP with upvalue closing)
-    // - Error unwinding
+    // Get the value to be marked as to-be-closed
+    let value = vm.register_stack[reg_idx];
 
-    // Check if the value has a __close metamethod (optional validation)
-    let value = vm.register_stack[base_ptr + a];
-    if !value.is_nil() {
-        // We could check for __close metamethod here, but Lua allows
-        // any value to be marked as to-be-closed
-    }
+    // Add to to_be_closed stack (will be processed in LIFO order)
+    // Store absolute register index for later closing
+    vm.to_be_closed.push((reg_idx, value));
 
     Ok(())
 }

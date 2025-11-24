@@ -41,6 +41,10 @@ pub struct LuaVM {
     // Open upvalues list (for closing when frames exit)
     pub(crate) open_upvalues: Vec<Rc<LuaUpvalue>>,
 
+    // To-be-closed variables stack (for __close metamethod)
+    // Stores (register_index, value) pairs that need __close called when they go out of scope
+    pub(crate) to_be_closed: Vec<(usize, LuaValue)>,
+
     // Next frame ID (for tracking frames)
     pub(crate) next_frame_id: usize,
 
@@ -80,6 +84,7 @@ impl LuaVM {
             gc: GC::new(),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
+            to_be_closed: Vec::new(),
             next_frame_id: 0,
             error_handler: None,
             #[cfg(feature = "loadlib")]
@@ -1127,6 +1132,42 @@ impl LuaVM {
 
         // Remove closed upvalues from the open list
         self.open_upvalues.retain(|uv| uv.is_open());
+    }
+
+    /// Call __close metamethods for to-be-closed variables >= stack_pos
+    pub fn close_to_be_closed(&mut self, stack_pos: usize) -> LuaResult<()> {
+        // Process in reverse order (LIFO - last marked is closed first)
+        while let Some(&(reg_idx, value)) = self.to_be_closed.last() {
+            if reg_idx < stack_pos {
+                break;
+            }
+            
+            self.to_be_closed.pop();
+            
+            // Skip nil values
+            if value.is_nil() {
+                continue;
+            }
+            
+            // Try to get __close metamethod
+            let close_key = self.create_string("__close");
+            let metamethod = if let Some(mt) = self.table_get_metatable(&value) {
+                self.table_get_with_meta(&mt, &close_key)
+            } else {
+                None
+            };
+            
+            if let Some(mm) = metamethod {
+                if !mm.is_nil() {
+                    // Call __close(value, error)
+                    // error is nil in normal close, contains error object during unwinding
+                    let args = vec![value, LuaValue::nil()];
+                    // Ignore errors from __close to prevent infinite loops
+                    let _ = self.call_metamethod(&mm, &args);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Create a new table and register it with GC

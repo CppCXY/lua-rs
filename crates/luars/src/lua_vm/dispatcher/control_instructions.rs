@@ -11,8 +11,8 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM};
 pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let _c = Instruction::get_c(instr) as usize;
-    let _k = Instruction::get_k(instr);
+    // let _c = Instruction::get_c(instr) as usize;
+    let k = Instruction::get_k(instr);
 
     // Close upvalues before popping the frame
     let base_ptr = vm.current_frame().base_ptr;
@@ -117,9 +117,11 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     }
 
     // Handle upvalue closing (k bit)
-    if _k {
+    if k {
         let close_from = base_ptr + a;
         vm.close_upvalues_from(close_from);
+        // Also call __close metamethods for to-be-closed variables
+        vm.close_to_be_closed(close_from)?;
     }
 
     Ok(())
