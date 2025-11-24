@@ -1073,7 +1073,10 @@ pub fn exec_not(vm: &mut LuaVM, instr: u32) -> LuaResult<DispatchAction> {
     let base_ptr = frame.base_ptr;
 
     let value = vm.register_stack[base_ptr + b];
-    let result = LuaValue::boolean(!(value.is_nil() || (value.as_bool().unwrap_or(true))));
+    // In Lua, only nil and false are falsy; everything else is truthy
+    // NOT returns true if value is nil or false, otherwise returns false
+    let is_falsy = value.is_nil() || matches!(value.as_bool(), Some(false));
+    let result = LuaValue::boolean(is_falsy);
 
     vm.register_stack[base_ptr + a] = result;
     Ok(DispatchAction::Continue)

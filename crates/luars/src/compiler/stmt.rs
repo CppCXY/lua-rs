@@ -637,38 +637,24 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         false
     };
 
-    // Base register for return values
-    // Lua 5.4: returns should not overlap with parameters
-    // Use first available clean register beyond parameters
-    let base_reg = c.chunk.param_count as u32;
+    // Compile expressions to consecutive registers for return
+    // Allocate new registers to avoid corrupting local variables
     let num_exprs = exprs.len();
-
-    // Make sure we have enough registers allocated
-    while c.freereg < base_reg + num_exprs as u32 {
-        alloc_register(c);
-    }
-
-    // Compile all expressions except the last one
-    for (i, expr) in exprs
-        .iter()
-        .take(if last_is_multret && num_exprs > 0 {
-            num_exprs - 1
-        } else {
-            num_exprs
-        })
-        .enumerate()
-    {
-        let target_reg = base_reg + i as u32;
-        let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
-        if src_reg != target_reg {
-            emit_move(c, target_reg, src_reg);
-        }
-    }
-
+    let base_reg = c.freereg; // Start from the first free register
+    
     // Handle last expression specially if it's varargs or call
     if last_is_multret && num_exprs > 0 {
         let last_expr = exprs.last().unwrap();
-        let last_target_reg = base_reg + (num_exprs - 1) as u32;
+
+        // First, compile all expressions except the last
+        for (i, expr) in exprs.iter().take(num_exprs - 1).enumerate() {
+            alloc_register(c);
+            let target_reg = base_reg + i as u32;
+            let src_reg = compile_expr(c, expr)?;
+            if src_reg != target_reg {
+                emit_move(c, target_reg, src_reg);
+            }
+        }
 
         if let LuaExpr::LiteralExpr(lit) = last_expr {
             if matches!(
@@ -676,6 +662,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 Some(emmylua_parser::LuaLiteralToken::Dots(_))
             ) {
                 // Varargs: emit VARARG with B=0 (all out)
+                let last_target_reg = base_reg + (num_exprs - 1) as u32;
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::Vararg, last_target_reg, 0, 0),
@@ -689,6 +676,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
         } else if let LuaExpr::CallExpr(call_expr) = last_expr {
             // Call expression: compile with "all out" mode
+            let last_target_reg = base_reg + (num_exprs - 1) as u32;
             compile_call_expr_with_returns_and_dest(c, call_expr, 0, Some(last_target_reg))?;
             // Return with B=0 (all out)
             emit(
@@ -700,6 +688,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     }
 
     // Normal return with fixed number of values
+    // Reserve registers and compile expressions
+    for i in 0..num_exprs {
+        alloc_register(c);
+        let target_reg = base_reg + i as u32;
+        let src_reg = compile_expr(c, &exprs[i])?;
+        if src_reg != target_reg {
+            emit_move(c, target_reg, src_reg);
+        }
+    }
+    
     // Use optimized Return0/Return1 when possible
     if num_exprs == 1 {
         // return single_value - use Return1 optimization
