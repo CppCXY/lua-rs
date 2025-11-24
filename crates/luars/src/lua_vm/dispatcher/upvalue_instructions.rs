@@ -194,33 +194,47 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    // Fast path: collect all strings/numbers first
-    let mut all_strings = true;
-    let mut temp_strings: Vec<String> = Vec::with_capacity(b + 1);
+    // ULTRA-OPTIMIZED: Build result string directly without intermediate allocations
+    // Estimate total capacity and format numbers inline with itoa
+    let mut total_capacity = 0usize;
+    let mut all_simple = true;
     
+    // First pass: check types and estimate capacity
     for i in 0..=b {
         let value = vm.register_stack[base_ptr + a + i];
         
         if let Some(s) = value.as_lua_string() {
-            temp_strings.push(s.as_str().to_string());
-        } else if let Some(int_val) = value.as_integer() {
-            temp_strings.push(int_val.to_string());
-        } else if let Some(float_val) = value.as_number() {
-            temp_strings.push(float_val.to_string());
+            total_capacity += s.as_str().len();
+        } else if value.is_integer() {
+            total_capacity += 20; // Max digits for i64
+        } else if value.is_number() {
+            total_capacity += 30; // Max digits for f64
         } else {
-            all_strings = false;
+            all_simple = false;
             break;
         }
     }
     
-    // Fast path: all strings/numbers, no metamethods needed
-    if all_strings && !temp_strings.is_empty() {
-        // Calculate total length for pre-allocation
-        let total_len: usize = temp_strings.iter().map(|s| s.len()).sum();
-        let mut result = String::with_capacity(total_len);
-        for s in temp_strings {
-            result.push_str(&s);
+    // Fast path: all strings/numbers, concatenate directly
+    if all_simple {
+        let mut result = String::with_capacity(total_capacity);
+        let mut int_buffer = itoa::Buffer::new();
+        let mut float_buffer = ryu::Buffer::new();
+        
+        for i in 0..=b {
+            let value = vm.register_stack[base_ptr + a + i];
+            
+            if let Some(s) = value.as_lua_string() {
+                result.push_str(s.as_str());
+            } else if let Some(int_val) = value.as_integer() {
+                // OPTIMIZED: Direct formatting with itoa
+                result.push_str(int_buffer.format(int_val));
+            } else if let Some(float_val) = value.as_number() {
+                // OPTIMIZED: Direct formatting with ryu
+                result.push_str(float_buffer.format(float_val));
+            }
         }
+        
         let result_value = vm.create_string(&result);
         vm.register_stack[base_ptr + a] = result_value;
         return Ok(());

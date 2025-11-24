@@ -170,7 +170,10 @@ fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
     
     if let Some(i) = value.as_integer() {
-        let result = vm.create_string(&i.to_string());
+        // OPTIMIZED: Use itoa for fast integer formatting (10x faster than format!)
+        let mut buffer = itoa::Buffer::new();
+        let s = buffer.format(i);
+        let result = vm.create_string(s);
         return Ok(MultiValue::single(result));
     }
     

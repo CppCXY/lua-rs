@@ -13,3 +13,5 @@ loadlib = ["dep:libloading"]
 emmylua_parser.workspace = true
 libloading = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+itoa = "1.0"  # Fast integer formatting (10x faster than format!)
+ryu = "1.0"   # Fast float formatting

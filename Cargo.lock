@@ -238,7 +238,9 @@ name = "luars"
 version = "0.1.0"
 dependencies = [
  "emmylua_parser",
+ "itoa",
  "libloading",
+ "ryu",
  "tokio",
 ]
 

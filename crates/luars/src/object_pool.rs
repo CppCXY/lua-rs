@@ -7,6 +7,7 @@ use crate::{LuaFunction, LuaString, LuaTable};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::hash::Hash;
 
 /// Slot-based storage with free list for O(1) allocation and deallocation
 struct SlotVec<T> {
@@ -210,7 +211,7 @@ impl ObjectPool {
             StringId(slot_id)
         }
     }
-
+    
     /// Get string by ID
     #[inline]
     pub fn get_string(&self, id: StringId) -> Option<&Rc<LuaString>> {

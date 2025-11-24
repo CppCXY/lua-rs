@@ -1190,7 +1190,7 @@ impl LuaVM {
             .unwrap_or(std::ptr::null());
         LuaValue::string_id_ptr(id, ptr)
     }
-
+    
     /// Get string by LuaValue (resolves ID from object pool)
     pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
         if let Some(id) = value.as_string_id() {
