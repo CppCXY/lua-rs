@@ -65,27 +65,42 @@ impl GcObject {
     }
 }
 
-/// Garbage collector state
+/// Garbage collector state (Lua 5.4 style: generational with GCdebt)
 pub struct GC {
     // Object tracking for generational GC - key is (type, id)
     objects: HashMap<(GcObjectType, u32), GcObject>,
     next_gc_id: usize, // Internal GC tracking ID
 
-    // GC triggers
+    // Lua 5.4 GC debt mechanism
+    // GC runs when: GCdebt > 0
+    // totalbytes = actual_bytes - GCdebt
+    pub(crate) gc_debt: isize,          // Bytes allocated not yet compensated by collector
+    pub(crate) total_bytes: usize,      // Number of bytes currently allocated - GCdebt
+    gc_estimate: usize,                 // Estimate of non-garbage memory
+    
+    // GC parameters (Lua 5.4 style)
+    gc_pause: usize,            // Pause parameter (default 200 = 200%)
+    gc_step_mul: usize,         // Step multiplier (default 100)
+    gen_minor_mul: u8,          // Minor generational control (default 20)
+    gen_major_mul: u8,          // Major generational control (default 100)
+    
+    // GC mode
+    gc_kind: GCKind,            // KGC_INC or KGC_GEN
+    last_atomic: usize,         // For generational mode
+    
+    // Generational GC state
     allocations_since_minor_gc: usize,
     minor_gc_count: usize,
-    minor_gc_threshold: usize,
-    major_gc_threshold: usize,
-
-    // Total bytes allocated
-    bytes_allocated: usize,
-
-    // GC threshold (trigger collection when exceeded)
-    threshold: usize,
-
+    
     // Statistics
     collection_count: usize,
     stats: GCStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GCKind {
+    Incremental,  // KGC_INC
+    Generational, // KGC_GEN
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,12 +121,17 @@ impl GC {
         GC {
             objects: HashMap::new(),
             next_gc_id: 1,
+            gc_debt: -(200 * 1024),       // Start with negative debt (can allocate 200KB)
+            total_bytes: 0,
+            gc_estimate: 0,
+            gc_pause: 200,                 // 200% pause (LUAI_GCPAUSE)
+            gc_step_mul: 100,              // 100 step mul (LUAI_GCMUL)
+            gen_minor_mul: 20,             // LUAI_GENMINORMUL
+            gen_major_mul: 100,            // LUAI_GENMAJORMUL
+            gc_kind: GCKind::Generational, // Default to generational (like Lua 5.4)
+            last_atomic: 0,
             allocations_since_minor_gc: 0,
             minor_gc_count: 0,
-            minor_gc_threshold: 10000,
-            major_gc_threshold: 50,
-            bytes_allocated: 0,
-            threshold: 8 * 1024 * 1024, // 8MB initial threshold
             collection_count: 0,
             stats: GCStats::default(),
         }
@@ -148,17 +168,46 @@ impl GC {
         }
     }
 
-    /// Check if GC should run
+    /// Check if GC should run (Lua 5.4 style: check GCdebt)
+    /// GC runs when GCdebt > 0
+    #[inline]
     pub fn should_collect(&self) -> bool {
-        self.bytes_allocated > self.threshold || self.should_collect_young()
+        self.gc_debt > 0
     }
-
-    pub fn should_collect_young(&self) -> bool {
-        self.allocations_since_minor_gc >= self.minor_gc_threshold
+    
+    /// Perform one step of GC work (like luaC_step in Lua 5.4)
+    pub fn step(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) {
+        if !self.should_collect() {
+            return;
+        }
+        
+        // Determine which collection to run
+        match self.gc_kind {
+            GCKind::Generational => {
+                // Simple generational: check if we should do minor or major
+                if self.minor_gc_count >= 10 {  // Every 10 minor GCs, do a major
+                    self.major_collect_internal(roots, object_pool);
+                } else {
+                    self.minor_collect_internal(roots, object_pool);
+                }
+            }
+            GCKind::Incremental => {
+                // For incremental, just do a full collection for now
+                // (Lua 5.4 has complex state machine, we simplify)
+                self.major_collect_internal(roots, object_pool);
+            }
+        }
+        
+        // Reset debt based on estimate
+        self.set_debt();
     }
-
-    pub fn should_collect_old(&self) -> bool {
-        self.minor_gc_count >= self.major_gc_threshold
+    
+    /// Set GC debt based on current memory and pause parameter
+    fn set_debt(&mut self) {
+        let estimate = self.gc_estimate.max(1024);
+        // debt = -(estimate * pause / 100)
+        let pause_bytes = (estimate * self.gc_pause) / 100;
+        self.gc_debt = -(pause_bytes as isize);
     }
 
     /// Perform garbage collection (chooses minor or major)
@@ -168,15 +217,16 @@ impl GC {
         roots: &[LuaValue],
         object_pool: &mut crate::object_pool::ObjectPool,
     ) -> usize {
-        if self.should_collect_old() {
-            self.major_collect(roots, object_pool)
+        // For public API, determine which to run based on state
+        if self.minor_gc_count >= 10 {
+            self.major_collect_internal(roots, object_pool)
         } else {
-            self.minor_collect(roots, object_pool)
+            self.minor_collect_internal(roots, object_pool)
         }
     }
 
     /// Minor GC - collect young generation only
-    fn minor_collect(
+    fn minor_collect_internal(
         &mut self,
         roots: &[LuaValue],
         object_pool: &mut crate::object_pool::ObjectPool,
@@ -261,7 +311,7 @@ impl GC {
     }
 
     /// Major GC - collect all generations
-    fn major_collect(
+    fn major_collect_internal(
         &mut self,
         roots: &[LuaValue],
         object_pool: &mut crate::object_pool::ObjectPool,
@@ -401,6 +451,42 @@ impl GC {
         }
     }
 
+    /// Write barrier (forward): called when an old object points to a new object
+    /// Lua 5.4: luaC_barrier - marks the object to be revisited in next GC cycle
+    pub fn barrier_forward(&mut self, obj_type: GcObjectType, obj_id: u32) {
+        // In generational GC, when an old object gets a reference to a new object,
+        // we need to mark the old object as "touched" so it will be revisited
+        if let Some(obj) = self.objects.get_mut(&(obj_type, obj_id)) {
+            // Mark as touched (will be scanned in next minor collection)
+            obj.mark();
+        }
+    }
+
+    /// Write barrier (backward): called when a value is stored in a table
+    /// Lua 5.4: luaC_barrierback - marks the value to keep it alive
+    pub fn barrier_back(&mut self, value: &LuaValue) {
+        // In generational GC, when storing a value in a table,
+        // ensure the value stays alive by marking it if needed
+        let key = match value.kind() {
+            crate::lua_value::LuaValueKind::String => {
+                value.as_string_id().map(|id| (GcObjectType::String, id.0))
+            }
+            crate::lua_value::LuaValueKind::Table => {
+                value.as_table_id().map(|id| (GcObjectType::Table, id.0))
+            }
+            crate::lua_value::LuaValueKind::Function => {
+                value.as_function_id().map(|id| (GcObjectType::Function, id.0))
+            }
+            _ => None,
+        };
+
+        if let Some(key) = key {
+            if let Some(obj) = self.objects.get_mut(&key) {
+                obj.mark();
+            }
+        }
+    }
+
     /// Update generation size statistics
     fn update_generation_sizes(&mut self) {
         let (young, old) = self
@@ -417,20 +503,22 @@ impl GC {
 
     /// Adjust GC threshold based on current usage
     fn adjust_threshold(&mut self) {
-        // Grow threshold based on current allocation
-        self.threshold = (self.bytes_allocated * 2).max(1024 * 1024);
+        // Update estimate
+        let alive_bytes: usize = self.objects.len() * 128; // Average size
+        self.gc_estimate = alive_bytes;
     }
 
-    /// Record allocation
+    /// Record allocation (Lua 5.4 style: increase GCdebt)
     pub fn record_allocation(&mut self, size: usize) {
-        self.bytes_allocated += size;
-        self.stats.bytes_allocated = self.bytes_allocated;
+        self.total_bytes += size;
+        self.gc_debt += size as isize;
+        self.stats.bytes_allocated = self.total_bytes;
     }
 
-    /// Record deallocation
+    /// Record deallocation (Lua 5.4 style: decrease totalbytes)
     pub fn record_deallocation(&mut self, size: usize) {
-        self.bytes_allocated = self.bytes_allocated.saturating_sub(size);
-        self.stats.bytes_allocated = self.bytes_allocated;
+        self.total_bytes = self.total_bytes.saturating_sub(size);
+        self.stats.bytes_allocated = self.total_bytes;
     }
 
     /// Get statistics
@@ -440,14 +528,8 @@ impl GC {
 
     /// Tune GC thresholds based on current state
     pub fn tune_thresholds(&mut self) {
-        let total = self.stats.young_gen_size + self.stats.old_gen_size;
-        self.minor_gc_threshold = (total / 2).max(50).min(500);
-
-        if self.stats.old_gen_size > 1000 {
-            self.major_gc_threshold = 5;
-        } else {
-            self.major_gc_threshold = 10;
-        }
+        // Adjust debt based on current memory
+        self.adjust_threshold();
     }
 }
 
@@ -516,7 +598,7 @@ mod tests {
     fn test_gc_creation() {
         let gc = GC::new();
         assert_eq!(gc.collection_count, 0);
-        assert!(gc.bytes_allocated == 0);
+        assert!(gc.total_bytes == 0);
     }
 
     #[test]
@@ -524,8 +606,8 @@ mod tests {
         let mut gc = GC::new();
         assert!(!gc.should_collect());
 
-        // GC threshold is 8MB by default
-        gc.record_allocation(9 * 1024 * 1024); // 9MB > 8MB threshold
+        // Allocate enough to trigger GC
+        gc.record_allocation(500 * 1024); // 500KB > initial debt
         assert!(gc.should_collect());
     }
 

@@ -248,6 +248,8 @@ impl LuaVM {
     /// Main VM execution loop - MAXIMUM PERFORMANCE
     /// 零返回值，零分支，直接调度
     fn run(&mut self) -> LuaResult<LuaValue> {
+        let mut instruction_count: u32 = 0;
+        
         loop {
             // 检查是否有帧
             if self.frames.is_empty() {
@@ -256,6 +258,12 @@ impl LuaVM {
                     .first()
                     .copied()
                     .unwrap_or(LuaValue::nil()));
+            }
+
+            // 周期性 GC 检查 (每 10000 条指令)
+            instruction_count += 1;
+            if instruction_count % 10000 == 0 {
+                self.check_gc();
             }
 
             // === 极简主循环：直接调度，无返回值 ===
@@ -311,14 +319,22 @@ impl LuaVM {
 
         if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
-            global.borrow_mut().raw_set(key, value);
+            global.borrow_mut().raw_set(key.clone(), value.clone());
+            
+            // Write barrier: global table (old) may now reference new object
+            self.gc.barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
+            self.gc.barrier_back(&value);
         }
     }
 
-    pub fn set_global_by_lua_value(&self, key: &LuaValue, value: LuaValue) {
+    pub fn set_global_by_lua_value(&mut self, key: &LuaValue, value: LuaValue) {
         if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
-            global.borrow_mut().raw_set(key.clone(), value);
+            global.borrow_mut().raw_set(key.clone(), value.clone());
+            
+            // Write barrier
+            self.gc.barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
+            self.gc.barrier_back(&value);
         }
     }
 
@@ -884,7 +900,13 @@ impl LuaVM {
 
             if has_key {
                 // Key exists, use raw set
-                lua_table.borrow_mut().raw_set(key, value);
+                lua_table.borrow_mut().raw_set(key.clone(), value.clone());
+                
+                // Write barrier: table may now reference new objects
+                if let Some(table_id) = lua_table_val.as_table_id() {
+                    self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                    self.gc.barrier_back(&value);
+                }
                 return Ok(());
             }
 
@@ -932,7 +954,13 @@ impl LuaVM {
             }
 
             // No metamethod, use raw set
-            lua_table.borrow_mut().raw_set(key, value);
+            lua_table.borrow_mut().raw_set(key.clone(), value.clone());
+            
+            // Write barrier for new insertion
+            if let Some(table_id) = lua_table_val.as_table_id() {
+                self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                self.gc.barrier_back(&value);
+            }
             return Ok(());
         }
 
@@ -954,7 +982,11 @@ impl LuaVM {
 
         if has_key {
             // Key exists, use raw set
-            lua_table.borrow_mut().raw_set(key, value);
+            lua_table.borrow_mut().raw_set(key.clone(), value.clone());
+            
+            // Write barrier
+            self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+            self.gc.barrier_back(&value);
             return Ok(());
         }
 
@@ -1002,7 +1034,11 @@ impl LuaVM {
             .get_table(table_id)
             .ok_or(LuaError::RuntimeError("invalid table".to_string()))?;
         // No metamethod or key doesn't exist, use raw set
-        lua_table.borrow_mut().raw_set(key, value);
+        lua_table.borrow_mut().raw_set(key.clone(), value.clone());
+        
+        // Write barrier for new insertion
+        self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+        self.gc.barrier_back(&value);
         Ok(())
     }
 
@@ -1279,6 +1315,67 @@ impl LuaVM {
         if self.gc.should_collect() {
             self.collect_garbage();
         }
+    }
+
+    /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
+    /// This should be called after allocating new objects
+    /// CURRENTLY DISABLED: Needs better object lifetime management
+    #[inline]
+    fn check_gc(&mut self) {
+        if !self.gc.should_collect() {
+            return;
+        }
+
+        // Collect roots: all reachable objects from VM state
+        let mut roots = Vec::new();
+
+        // 1. Global table
+        roots.push(self.global_value);
+
+        // 2. String metatable
+        if let Some(mt) = &self.string_metatable {
+            roots.push(*mt);
+        }
+
+        // 3. ALL frame registers (not just current frame)
+        // This is critical - any register in any active frame must be kept alive
+        for frame in &self.frames {
+            let base_ptr = frame.base_ptr;
+            let top = frame.top;
+            for i in 0..top {
+                if base_ptr + i < self.register_stack.len() {
+                    roots.push(self.register_stack[base_ptr + i]);
+                }
+            }
+        }
+
+        // 4. All registers beyond the frames (temporary values)
+        if let Some(last_frame) = self.frames.last() {
+            let last_frame_end = last_frame.base_ptr + last_frame.top;
+            for i in last_frame_end..self.register_stack.len() {
+                roots.push(self.register_stack[i]);
+            }
+        } else {
+            // No frames? Collect all registers
+            for reg in &self.register_stack {
+                roots.push(*reg);
+            }
+        }
+
+        // 5. Return values
+        for value in &self.return_values {
+            roots.push(*value);
+        }
+
+        // 6. Open upvalues - these point to stack locations that must stay alive
+        for upval in &self.open_upvalues {
+            if let Some(val) = upval.get_closed_value() {
+                roots.push(val);
+            }
+        }
+
+        // Perform GC step with complete root set
+        self.gc.step(&roots, &mut self.object_pool);
     }
 
     // ============ GC Management ============
