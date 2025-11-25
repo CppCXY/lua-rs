@@ -183,7 +183,7 @@ fn math_modf(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn math_rad(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.rad")?;
+    let x = get_number(vm, 1, "math.rad")?;
     Ok(MultiValue::single(LuaValue::float(x.to_radians())))
 }
 

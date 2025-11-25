@@ -220,11 +220,11 @@ pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
     let base_ptr = frame.base_ptr;
     let top = frame.top;
 
-    // Arguments are 0-indexed from caller's perspective
-    // But register 0 is the function, so arg 0 is at register 1
-    // get_arg(1) should return register[base_ptr + 1]
-    // get_arg(2) should return register[base_ptr + 2]
-    let reg_offset = index; // +1 to skip the function at register 0
+    // Arguments use 1-based indexing (Lua convention)
+    // Register 0 is the function itself
+    // get_arg(1) returns register[base_ptr + 1] (first argument)
+    // get_arg(2) returns register[base_ptr + 2] (second argument)
+    let reg_offset = index;
     if reg_offset < top {
         let reg_index = base_ptr + reg_offset;
         if reg_index < vm.register_stack.len() {

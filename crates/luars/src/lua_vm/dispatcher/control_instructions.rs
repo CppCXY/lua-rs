@@ -126,8 +126,15 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // CRITICAL: If frames are now empty, we're done - return control to caller
     // This prevents run() loop from trying to access empty frame
     if vm.frames.is_empty() {
-        // Signal end of execution - return_values are already set
-        return Err(vm.error("__VM_EXIT__".to_string()));
+        // Save return values before exiting
+        vm.return_values.clear();
+        for i in 0..return_count {
+            if base_ptr + a + i < vm.register_stack.len() {
+                vm.return_values.push(vm.register_stack[base_ptr + a + i]);
+            }
+        }
+        // Signal end of execution
+        return Err(LuaError::Exit);
     }
 
     Ok(())
@@ -1170,6 +1177,9 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
 
         // Update caller's top to indicate 0 return values (for variable returns)
         vm.current_frame_mut().top = result_reg; // No return values, so top = result_reg + 0
+    } else {
+        // If frames are empty, signal VM exit
+        return Err(LuaError::Exit);
     }
 
     Ok(())
@@ -1226,6 +1236,9 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         if should_update_top {
             vm.current_frame_mut().top = result_reg + 1;
         }
+    } else {
+        // If frames are empty, signal VM exit
+        return Err(LuaError::Exit);
     }
 
     Ok(())

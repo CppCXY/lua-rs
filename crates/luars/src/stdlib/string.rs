@@ -239,7 +239,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Copy the format string to avoid holding a borrow on vm throughout the loop
     let format = format_str.as_str();
     let mut result = String::new();
-    let mut arg_index = 1;
+    let mut arg_index = 2; // Start from 2 since arg 1 is the format string
     let mut chars = format.chars().peekable();
 
     while let Some(ch) = chars.next() {

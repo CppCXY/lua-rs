@@ -59,7 +59,7 @@ fn lua_print(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// type(v) - Return the type of a value as a string
 fn lua_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
+    let value = get_arg(vm, 1).unwrap_or(LuaValue::nil());
 
     let type_name = match value.kind() {
         LuaValueKind::Nil => "nil",
@@ -78,10 +78,10 @@ fn lua_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// assert(v [, message]) - Raise error if v is false or nil
 fn lua_assert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let condition = get_arg(vm, 0).unwrap_or(LuaValue::nil());
+    let condition = get_arg(vm, 1).unwrap_or(LuaValue::nil());
 
     if !condition.is_truthy() {
-        let message = get_arg(vm, 1)
+        let message = get_arg(vm, 2)
             .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
             .unwrap_or_else(|| "assertion failed!".to_string());
         return Err(vm.error(message));
@@ -93,7 +93,7 @@ fn lua_assert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// error(message) - Raise an error
 fn lua_error(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let message = get_arg(vm, 0)
+    let message = get_arg(vm, 1)
         .map(|v| {
             vm.value_to_string(&v)
                 .unwrap_or_else(|_| v.to_string_repr())
@@ -107,7 +107,7 @@ fn lua_error(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// tonumber(e [, base]) - Convert to number
 fn lua_tonumber(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let value = require_arg(vm, 1, "tonumber")?;
-    let base = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(10);
+    let base = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(10);
 
     if base < 2 || base > 36 {
         return Err(vm.error("bad argument #2 to 'tonumber' (base out of range)".to_string()));
@@ -250,13 +250,13 @@ fn lua_ipairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 #[inline]
 fn ipairs_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Ultra-fast path: direct argument access without validation
-    let table_val = if let Some(val) = get_arg(vm, 0) {
+    let table_val = if let Some(val) = get_arg(vm, 1) {
         val
     } else {
         return Err(vm.error("ipairs iterator: table expected".to_string()));
     };
 
-    let index_val = if let Some(val) = get_arg(vm, 1) {
+    let index_val = if let Some(val) = get_arg(vm, 2) {
         val
     } else {
         return Err(vm.error("ipairs iterator: index expected".to_string()));
@@ -428,6 +428,16 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("Invalid table".to_string()));
     };
 
+    // Check if current metatable has __metatable field (protection)
+    if let Some(current_mt) = table_ref.borrow().get_metatable() {
+        if let Some(mt_table) = current_mt.as_lua_table() {
+            let metatable_field = vm.create_string("__metatable");
+            if let Some(_) = mt_table.borrow().raw_get(&metatable_field) {
+                return Err(vm.error("cannot change a protected metatable".to_string()));
+            }
+        }
+    }
+
     match metatable.kind() {
         LuaValueKind::Nil => {
             table_ref.borrow_mut().set_metatable(None);
@@ -501,8 +511,8 @@ fn lua_rawlen(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// rawequal(v1, v2) - Equality without metamethods
 fn lua_rawequal(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let v1 = get_arg(vm, 0).unwrap_or(LuaValue::nil());
-    let v2 = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    let v1 = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    let v2 = get_arg(vm, 2).unwrap_or(LuaValue::nil());
 
     let result = v1 == v2;
     Ok(MultiValue::single(LuaValue::boolean(result)))

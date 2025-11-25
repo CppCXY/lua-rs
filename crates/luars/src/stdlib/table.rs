@@ -39,9 +39,9 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("Invalid table".to_string()));
     };
     let len = table_ref.borrow().len();
-    let i = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
+    let i = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(1);
 
-    let j = get_arg(vm, 3)
+    let j = get_arg(vm, 4)
         .and_then(|v| v.as_integer())
         .unwrap_or(len as i64);
 

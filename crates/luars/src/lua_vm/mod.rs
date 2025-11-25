@@ -275,6 +275,10 @@ impl LuaVM {
             if let Err(e) = dispatch_instruction(self, instr) {
                 match e {
                     LuaError::Yield => return Ok(LuaValue::nil()),
+                    LuaError::Exit => {
+                        // Normal exit when all frames are popped
+                        return Ok(LuaValue::nil());
+                    }
                     _ => return Err(e),
                 }
             }
@@ -523,7 +527,7 @@ impl LuaVM {
             self.return_values = args;
 
             // Continue execution from where it yielded
-            self.run().map(|v| vec![v])
+            self.run().map(|_| self.return_values.clone())
         };
 
         // Check if thread yielded by examining the result
@@ -564,9 +568,15 @@ impl LuaVM {
                     thread.status = CoroutineStatus::Dead;
                     Ok((true, values))
                 }
-                Err(e) => {
+                Err(LuaError::Exit) => {
+                    // Normal exit - coroutine finished successfully
                     thread.status = CoroutineStatus::Dead;
-                    Ok((false, vec![self.create_string(&format!("{}", e))]))
+                    Ok((true, thread.return_values.clone()))
+                }
+                Err(_) => {
+                    thread.status = CoroutineStatus::Dead;
+                    let error_msg = self.get_error_message().to_string();
+                    Ok((false, vec![self.create_string(&error_msg)]))
                 }
             }
         };
