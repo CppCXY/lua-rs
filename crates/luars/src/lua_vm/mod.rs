@@ -903,14 +903,21 @@ impl LuaVM {
             // SAFETY: Pointer is valid as long as table exists in ObjectPool
             let lua_table = unsafe { &*ptr };
 
-            // Check if key already exists
-            let has_key = {
+            // OPTIMIZATION: Check metatable and key existence in single borrow
+            let (has_metatable, has_key) = {
                 let table = lua_table.borrow();
-                table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false)
+                let has_mt = table.get_metatable().is_some();
+                // Only check key existence if there's a metatable (for __newindex)
+                let has_k = if has_mt {
+                    table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false)
+                } else {
+                    true  // Pretend key exists to skip metamethod check
+                };
+                (has_mt, has_k)
             };
 
-            if has_key {
-                // Key exists, use raw set
+            // If no metatable, or key exists, just do raw set
+            if !has_metatable || has_key {
                 lua_table.borrow_mut().raw_set(key.clone(), value.clone());
 
                 // Write barrier: table may now reference new objects
@@ -922,7 +929,7 @@ impl LuaVM {
                 return Ok(());
             }
 
-            // Key doesn't exist, check for __newindex metamethod
+            // Key doesn't exist and has metatable, check for __newindex metamethod
             let meta_value = {
                 let table = lua_table.borrow();
                 table.get_metatable()

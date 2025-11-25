@@ -217,6 +217,21 @@ impl LuaUpvalue {
             _ => None,
         }
     }
+
+    /// Fast path: Try to get value directly if closed (avoids frame lookup)
+    /// Returns None if the upvalue is open
+    #[inline(always)]
+    pub fn try_get_closed(&self) -> Option<LuaValue> {
+        // Use try_borrow to avoid panics
+        if let Ok(state) = self.value.try_borrow() {
+            match *state {
+                UpvalueState::Closed(ref val) => Some(*val),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Debug for LuaUpvalue {

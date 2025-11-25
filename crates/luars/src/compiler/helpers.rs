@@ -405,10 +405,11 @@ pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
     let lua_str = create_string_value(c, name);
     let const_idx = add_constant_dedup(c, lua_str);
     // SetTabUp: UpValue[A][K(B)] := RK(C)
-    // A is _ENV's upvalue index, B is constant index (k=1), C is source register
+    // A is _ENV's upvalue index, B is constant index for key, C is source register
+    // k=false means C is a register index (not constant)
     emit(
         c,
-        Instruction::create_abck(OpCode::SetTabUp, env_index as u32, const_idx, src_reg, true),
+        Instruction::create_abck(OpCode::SetTabUp, env_index as u32, const_idx, src_reg, false),
     );
 }
 

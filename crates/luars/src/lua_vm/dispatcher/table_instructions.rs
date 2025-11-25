@@ -134,9 +134,30 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = frame.base_ptr;
 
     let table = vm.register_stack[base_ptr + b];
-    let key = LuaValue::integer(c as i64);
 
-    // Use table_get_with_meta to support __index metamethod
+    // FAST PATH: Direct access for tables without metatable
+    if let Some(ptr) = table.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        let borrowed = lua_table.borrow();
+        let key = LuaValue::integer(c as i64);
+        
+        // Try raw_get which checks both array and hash parts
+        if let Some(val) = borrowed.raw_get(&key) {
+            if !val.is_nil() {
+                vm.register_stack[base_ptr + a] = val;
+                return Ok(());
+            }
+        }
+        
+        // Key not found - check if no metatable to skip metamethod handling
+        if borrowed.get_metatable().is_none() {
+            vm.register_stack[base_ptr + a] = LuaValue::nil();
+            return Ok(());
+        }
+    }
+
+    // Slow path: Use metamethod handling
+    let key = LuaValue::integer(c as i64);
     let value = vm
         .table_get_with_meta(&table, &key)
         .unwrap_or(LuaValue::nil());
@@ -181,6 +202,29 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         (table, key, value)
     };
 
+    // FAST PATH: Direct table access without metamethod check for common case
+    if let Some(ptr) = table_value.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        
+        // Quick check: no metatable means no __newindex to worry about
+        let has_metatable = lua_table.borrow().get_metatable().is_some();
+        
+        if !has_metatable {
+            // Ultra-fast path: direct set without any metamethod checks
+            lua_table.borrow_mut().raw_set(key_value.clone(), set_value.clone());
+            
+            // GC barrier - only for collectable values (like Lua)
+            if crate::gc::GC::is_collectable(&set_value) {
+                if let Some(table_id) = table_value.as_table_id() {
+                    vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                    vm.gc.barrier_back(&set_value);
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    // Slow path: use full metamethod handling
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(())
@@ -194,26 +238,46 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    // CRITICAL: Read frame info and values BEFORE any metamethod calls
-    // because metamethods can modify the register stack
-    let (table_value, key_value) = {
-        let frame = vm.current_frame();
-        let base_ptr = frame.base_ptr;
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
 
-        // OPTIMIZATION: Get constant directly
-        let Some(func_ref) = frame.get_lua_function() else {
-            return Err(vm.error("Not a Lua function".to_string()));
-        };
-
-        let Some(key) = func_ref.borrow().chunk.constants.get(c).copied() else {
-            return Err(vm.error(format!("Invalid constant index: {}", c)));
-        };
-
-        let table = vm.register_stack[base_ptr + b];
-        (table, key)
+    let Some(func_ptr) = frame.get_function_ptr() else {
+        return Err(vm.error("Not a Lua function".to_string()));
     };
 
-    // Use table_get_with_meta to support __index metamethod
+    // SAFETY: func_ptr is valid for the duration of this block
+    let func = unsafe { &*func_ptr };
+    let func_ref = func.borrow();
+
+    let Some(&key_value) = func_ref.chunk.constants.get(c) else {
+        drop(func_ref);
+        return Err(vm.error(format!("Invalid constant index: {}", c)));
+    };
+
+    let table_value = vm.register_stack[base_ptr + b];
+    drop(func_ref);
+
+    // FAST PATH: Direct hash access for tables without metatable
+    if let Some(ptr) = table_value.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        let borrowed = lua_table.borrow();
+        
+        // Try direct access
+        if let Some(val) = borrowed.raw_get(&key_value) {
+            if !val.is_nil() {
+                vm.register_stack[base_ptr + a] = val;
+                return Ok(());
+            }
+        }
+        
+        // Check if no metatable - can return nil directly
+        if borrowed.get_metatable().is_none() {
+            vm.register_stack[base_ptr + a] = LuaValue::nil();
+            return Ok(());
+        }
+    }
+
+    // Slow path: Use metamethod handling
     let value = vm
         .table_get_with_meta(&table_value, &key_value)
         .unwrap_or(LuaValue::nil());
@@ -240,22 +304,26 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         let frame = vm.current_frame();
         let base_ptr = frame.base_ptr;
 
-        let Some(func_ref) = frame.get_lua_function() else {
+        let Some(func_ptr) = frame.get_function_ptr() else {
             return Err(vm.error("Not a Lua function".to_string()));
         };
 
-        let Some(key) = func_ref.borrow().chunk.constants.get(b).copied() else {
+        // SAFETY: func_ptr is valid for the duration of this block
+        let func = unsafe { &*func_ptr };
+        let func_ref = func.borrow();
+
+        let Some(&key) = func_ref.chunk.constants.get(b) else {
+            drop(func_ref);
             return Err(vm.error(format!("Invalid constant index: {}", b)));
         };
 
         let table = vm.register_stack[base_ptr + a];
 
         let value = if k {
-            // OPTIMIZATION: Get constant directly
-            let Some(constant) = func_ref.borrow().chunk.constants.get(c).copied() else {
+            let Some(&constant) = func_ref.chunk.constants.get(c) else {
+                drop(func_ref);
                 return Err(vm.error(format!("Invalid constant index: {}", c)));
             };
-
             constant
         } else {
             vm.register_stack[base_ptr + c]
@@ -264,6 +332,29 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         (table, key, value)
     };
 
+    // FAST PATH: Direct table access without metamethod check for common case
+    if let Some(ptr) = table_value.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        
+        // Quick check: no metatable means no __newindex to worry about
+        let has_metatable = lua_table.borrow().get_metatable().is_some();
+        
+        if !has_metatable {
+            // Ultra-fast path: direct set without any metamethod checks
+            lua_table.borrow_mut().raw_set(key_value.clone(), set_value.clone());
+            
+            // GC barrier - only for collectable values
+            if crate::gc::GC::is_collectable(&set_value) {
+                if let Some(table_id) = table_value.as_table_id() {
+                    vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                    vm.gc.barrier_back(&set_value);
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    // Slow path: use full metamethod handling
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(())
@@ -271,6 +362,7 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// GETTABUP A B C
 /// R[A] := UpValue[B][K[C]:string]
+#[inline(always)]
 pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -279,22 +371,57 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let Some(func_ref) = frame.get_lua_function() else {
+    let Some(func_ptr) = frame.get_function_ptr() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
 
-    let Some(key) = func_ref.borrow().chunk.constants.get(c).copied() else {
+    // SAFETY: func_ptr is valid for the duration of this instruction
+    let func = unsafe { &*func_ptr };
+    let func_ref = func.borrow();
+
+    let Some(&key_value) = func_ref.chunk.constants.get(c) else {
+        drop(func_ref);
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
-    let Some(upvalue) = func_ref.borrow().upvalues.get(b).cloned() else {
+    let Some(upvalue) = func_ref.upvalues.get(b) else {
+        drop(func_ref);
         return Err(vm.error(format!("Invalid upvalue index: {}", b)));
     };
 
-    let table = upvalue.get_value(&vm.frames, &vm.register_stack);
+    // FAST PATH: Try to get closed upvalue directly (common case for _ENV)
+    let table_value = if let Some(val) = upvalue.try_get_closed() {
+        val
+    } else {
+        // Slow path: open upvalue, need full lookup
+        upvalue.get_value(&vm.frames, &vm.register_stack)
+    };
 
+    drop(func_ref);
+
+    // FAST PATH: Direct hash access for tables without metatable
+    if let Some(ptr) = table_value.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        let borrowed = lua_table.borrow();
+        
+        // Try direct access
+        if let Some(val) = borrowed.raw_get(&key_value) {
+            if !val.is_nil() {
+                vm.register_stack[base_ptr + a] = val;
+                return Ok(());
+            }
+        }
+        
+        // Check if no metatable - can return nil directly
+        if borrowed.get_metatable().is_none() {
+            vm.register_stack[base_ptr + a] = LuaValue::nil();
+            return Ok(());
+        }
+    }
+
+    // Slow path: Use metamethod handling
     let value = vm
-        .table_get_with_meta(&table, &key)
+        .table_get_with_meta(&table_value, &key_value)
         .unwrap_or(LuaValue::nil());
 
     vm.register_stack[base_ptr + a] = value;
@@ -304,46 +431,78 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// SETTABUP A B C k
 /// UpValue[A][K[B]:string] := RK(C)
+#[inline(always)]
 pub fn exec_settabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    // CRITICAL: Read all values BEFORE any metamethod calls
-    // because metamethods can modify the register stack
-    let (table_value, key_value, set_value) = {
-        let frame = vm.current_frame();
-        let base_ptr = frame.base_ptr;
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
 
-        let Some(func_ref) = frame.get_lua_function() else {
-            return Err(vm.error("Not a Lua function".to_string()));
-        };
-
-        let Some(key) = func_ref.borrow().chunk.constants.get(b).copied() else {
-            return Err(vm.error(format!("Invalid constant index: {}", b)));
-        };
-
-        let Some(upvalue) = func_ref.borrow().upvalues.get(a).cloned() else {
-            return Err(vm.error(format!("Invalid upvalue index: {}", a)));
-        };
-
-        let table = upvalue.get_value(&vm.frames, &vm.register_stack);
-
-        let value = if k {
-            // OPTIMIZATION: Get constant directly
-            let Some(constant) = func_ref.borrow().chunk.constants.get(c).copied() else {
-                return Err(vm.error(format!("Invalid constant index: {}", c)));
-            };
-
-            constant
-        } else {
-            vm.register_stack[base_ptr + c]
-        };
-
-        (table, key, value)
+    let Some(func_ptr) = frame.get_function_ptr() else {
+        return Err(vm.error("Not a Lua function".to_string()));
     };
 
+    // SAFETY: func_ptr is valid for the duration of this instruction
+    let func = unsafe { &*func_ptr };
+    let func_ref = func.borrow();
+    
+    let Some(&key_value) = func_ref.chunk.constants.get(b) else {
+        drop(func_ref);
+        return Err(vm.error(format!("Invalid constant index: {}", b)));
+    };
+
+    let Some(upvalue) = func_ref.upvalues.get(a) else {
+        drop(func_ref);
+        return Err(vm.error(format!("Invalid upvalue index: {}", a)));
+    };
+
+    // FAST PATH: Try to get closed upvalue directly (common case for _ENV)
+    let table_value = if let Some(val) = upvalue.try_get_closed() {
+        val
+    } else {
+        // Slow path: open upvalue, need full lookup
+        upvalue.get_value(&vm.frames, &vm.register_stack)
+    };
+
+    let set_value = if k {
+        let Some(&constant) = func_ref.chunk.constants.get(c) else {
+            drop(func_ref);
+            return Err(vm.error(format!("Invalid constant index: {}", c)));
+        };
+        constant
+    } else {
+        vm.register_stack[base_ptr + c]
+    };
+
+    // Release borrow before table operations
+    drop(func_ref);
+
+    // FAST PATH: Direct table access without metamethod check for common case
+    if let Some(ptr) = table_value.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        
+        // Quick check: no metatable means no __newindex to worry about
+        let has_metatable = lua_table.borrow().get_metatable().is_some();
+        
+        if !has_metatable {
+            // Ultra-fast path: direct set without any metamethod checks
+            lua_table.borrow_mut().raw_set(key_value, set_value);
+            
+            // GC barrier - only for collectable values
+            if crate::gc::GC::is_collectable(&set_value) {
+                if let Some(table_id) = table_value.as_table_id() {
+                    vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                    vm.gc.barrier_back(&set_value);
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    // Slow path: use full metamethod handling
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(())

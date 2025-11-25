@@ -532,6 +532,7 @@ impl GC {
 
     /// Write barrier (forward): called when an old object points to a new object
     /// Lua 5.4: luaC_barrier - marks the object to be revisited in next GC cycle
+    #[inline(always)]
     pub fn barrier_forward(&mut self, obj_type: GcObjectType, obj_id: u32) {
         // In generational GC, when an old object gets a reference to a new object,
         // we need to mark the old object as "touched" so it will be revisited
@@ -543,6 +544,8 @@ impl GC {
 
     /// Write barrier (backward): called when a value is stored in a table
     /// Lua 5.4: luaC_barrierback - marks the value to keep it alive
+    /// OPTIMIZATION: Only call this for collectable values (table, string, function)
+    #[inline(always)]
     pub fn barrier_back(&mut self, value: &LuaValue) {
         // In generational GC, when storing a value in a table,
         // ensure the value stays alive by marking it if needed
@@ -564,6 +567,17 @@ impl GC {
                 obj.mark();
             }
         }
+    }
+    
+    /// Check if a value is collectable (needs GC barrier)
+    #[inline(always)]
+    pub fn is_collectable(value: &LuaValue) -> bool {
+        matches!(
+            value.kind(),
+            crate::lua_value::LuaValueKind::String
+                | crate::lua_value::LuaValueKind::Table
+                | crate::lua_value::LuaValueKind::Function
+        )
     }
 
     /// Update generation size statistics
