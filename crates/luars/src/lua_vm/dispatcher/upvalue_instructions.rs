@@ -355,39 +355,59 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     if let Some(ptr) = table.as_table_ptr() {
         let lua_table = unsafe { &*ptr };
         
-        // CRITICAL: Single borrow_mut for all operations (huge perf win!)
-        {
-            let mut table_mut = lua_table.borrow_mut();
-            for i in 0..count {
-                let key_int = (start_idx + i) as i64;
-                let value = vm.register_stack[base_ptr + a + i + 1];
-                
-                // Skip nil values - Lua doesn't insert them into array part
-                if value.is_nil() {
-                    continue;
+        // ULTRA-OPTIMIZED: Sequential insertion from start_idx
+        let mut table_mut = lua_table.borrow_mut();
+        
+        // Reserve capacity upfront to avoid reallocations  
+        let expected_end_idx = (start_idx - 1 + count) as usize;
+        let current_len = table_mut.array.len();
+        if table_mut.array.capacity() < expected_end_idx && expected_end_idx > current_len {
+            table_mut.array.reserve(expected_end_idx - current_len);
+        }
+        
+        // Batch process all values with proper index handling
+        for i in 0..count {
+            let key_int = (start_idx + i) as i64;
+            let value = vm.register_stack[base_ptr + a + i + 1];
+            
+            // Use optimized set_int which correctly handles nils and gaps
+            let idx = (key_int - 1) as usize;
+            
+            if value.is_nil() {
+                // Nil values: only store if filling a gap in existing array
+                if idx < table_mut.array.len() {
+                    table_mut.array[idx] = crate::LuaValue::nil();
                 }
-                
-                // Inline fast path for sequential array insertion
-                let idx = (key_int - 1) as usize;
-                if idx == table_mut.array.len() {
-                    // Fast append path (most common case for table constructors)
-                    table_mut.array.push(value);
-                } else if idx < table_mut.array.len() {
+                // Don't extend array for trailing nils
+            } else {
+                // Non-nil value: ensure array is large enough
+                if idx < table_mut.array.len() {
                     table_mut.array[idx] = value;
+                } else if idx == table_mut.array.len() {
+                    // Fast append
+                    table_mut.array.push(value);
                 } else {
-                    // Out of order, use normal set_int
-                    table_mut.set_int(key_int, value);
+                    // Gap: fill with nils then append value
+                    while table_mut.array.len() < idx {
+                        table_mut.array.push(crate::LuaValue::nil());
+                    }
+                    table_mut.array.push(value);
                 }
             }
         }
+        drop(table_mut); // Release borrow early
         
         // Write barrier for GC (outside borrow scope)
+        // OPTIMIZATION: Only check for GC-relevant values
         if let Some(table_id) = table.as_table_id() {
             vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
-            // Barrier for all values inserted (conservative)
+            
+            // Optimized barrier: skip primitives
             for i in 0..count {
                 let value = vm.register_stack[base_ptr + a + i + 1];
-                vm.gc.barrier_back(&value);
+                if !value.is_nil() && !value.is_number() && !value.is_boolean() {
+                    vm.gc.barrier_back(&value);
+                }
             }
         }
     } else {
