@@ -4,25 +4,24 @@
 use crate::{
     LuaValue,
     lua_value::{TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
-    lua_vm::{Instruction, LuaResult, LuaVM},
+    lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
 };
 
 /// ADD: R[A] = R[B] + R[C]
-/// ULTRA-OPTIMIZED: Combined type check (branchless for integer fast path)
+/// ULTRA-OPTIMIZED: Uses pre-fetched frame_ptr to avoid Vec lookups
 #[inline(always)]
-pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // OPTIMIZATION: Combined type check (same as FORLOOP)
-        // If both are integers, (left.primary | right.primary) & TYPE_MASK == TAG_INTEGER
+        // OPTIMIZATION: Combined type check
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
         // Fast path: Both integers (single branch!)
@@ -30,7 +29,7 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let result =
                 LuaValue::integer((left.secondary as i64).wrapping_add(right.secondary as i64));
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-            vm.current_frame_mut().pc += 1;
+            (*frame_ptr).pc += 1;
             return Ok(());
         }
 
@@ -38,119 +37,89 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
-        // Both floats
         let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
             LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
-        }
-        // Mixed: integer + float
-        else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
             LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
-        }
-        // Mixed: float + integer
-        else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
             LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
         } else {
-            return add_error(left, right);
+            return Ok(());
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-        vm.current_frame_mut().pc += 1;
+        (*frame_ptr).pc += 1;
         Ok(())
     }
 }
 
-#[cold]
-#[inline(never)]
-fn add_error(_left: LuaValue, _right: LuaValue) -> LuaResult<()> {
-    // Don't throw error - let MMBIN handle metamethod
-    Ok(())
-}
-
 /// SUB: R[A] = R[B] - R[C]
-/// ULTRA-OPTIMIZED: Combined type check (branchless for integer fast path)
+/// ULTRA-OPTIMIZED: Uses pre-fetched frame_ptr
 #[inline(always)]
-pub fn exec_sub(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // OPTIMIZATION: Combined type check
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
-        // Fast path: Both integers (single branch!)
         if combined_tags == TAG_INTEGER {
             let result =
                 LuaValue::integer((left.secondary as i64).wrapping_sub(right.secondary as i64));
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-            vm.current_frame_mut().pc += 1;
+            (*frame_ptr).pc += 1;
             return Ok(());
         }
 
-        // Slow path: Check individual types
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
-        // Both floats
         let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
             LuaValue::number(f64::from_bits(left.secondary) - f64::from_bits(right.secondary))
-        }
-        // Mixed: integer - float
-        else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
             LuaValue::number((left.secondary as i64) as f64 - f64::from_bits(right.secondary))
-        }
-        // Mixed: float - integer
-        else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
             LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
         } else {
-            return sub_error(left, right);
+            return Ok(());
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-        vm.current_frame_mut().pc += 1;
+        (*frame_ptr).pc += 1;
         Ok(())
     }
 }
 
-#[cold]
-#[inline(never)]
-fn sub_error(_left: LuaValue, _right: LuaValue) -> LuaResult<()> {
-    // Don't throw error - let MMBIN handle metamethod
-    Ok(())
-}
-
 /// MUL: R[A] = R[B] * R[C]
-/// ULTRA-OPTIMIZED: Combined type check
+/// ULTRA-OPTIMIZED: Uses pre-fetched frame_ptr
 #[inline(always)]
-pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // OPTIMIZATION: Combined type check
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
-        // Fast path: Both integers
         if combined_tags == TAG_INTEGER {
             let result =
                 LuaValue::integer((left.secondary as i64).wrapping_mul(right.secondary as i64));
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-            vm.current_frame_mut().pc += 1;
+            (*frame_ptr).pc += 1;
             return Ok(());
         }
 
-        // Slow path
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
@@ -161,47 +130,38 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
             LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
         } else {
-            return mul_error(left, right);
+            return Ok(());
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-        vm.current_frame_mut().pc += 1;
+        (*frame_ptr).pc += 1;
         Ok(())
     }
-}
-
-#[cold]
-#[inline(never)]
-fn mul_error(_left: LuaValue, _right: LuaValue) -> LuaResult<()> {
-    // Don't throw error - let MMBIN handle metamethod
-    Ok(())
 }
 
 /// DIV: R[A] = R[B] / R[C]
 /// Division always returns float in Lua
 #[inline(always)]
-pub fn exec_div(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // Fast type check
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
-        // Convert to float and divide
         let l_float = if left_tag == TAG_INTEGER {
             (left.secondary as i64) as f64
         } else if left_tag == TAG_FLOAT {
             f64::from_bits(left.secondary)
         } else {
-            return Ok(()); // Let MMBIN handle
+            return Ok(());
         };
 
         let r_float = if right_tag == TAG_INTEGER {
@@ -209,30 +169,28 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         } else if right_tag == TAG_FLOAT {
             f64::from_bits(right.secondary)
         } else {
-            return Ok(()); // Let MMBIN handle
+            return Ok(());
         };
 
-        let result = LuaValue::number(l_float / r_float);
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-        vm.current_frame_mut().pc += 1; // Skip MMBIN
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
+        (*frame_ptr).pc += 1;
         Ok(())
     }
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
 #[inline(always)]
-pub fn exec_idiv(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // Combined type check for integer fast path
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
         let result = if combined_tags == TAG_INTEGER {
@@ -266,25 +224,24 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-        vm.current_frame_mut().pc += 1;
+        (*frame_ptr).pc += 1;
         Ok(())
     }
 }
 
 /// MOD: R[A] = R[B] % R[C]
 #[inline(always)]
-pub fn exec_mod(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // Combined type check for integer fast path
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
         let result = if combined_tags == TAG_INTEGER {
@@ -314,43 +271,41 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 return Ok(());
             };
 
-            // Lua uses floored division modulo: a % b = a - floor(a/b) * b
             let result = l_float - (l_float / r_float).floor() * r_float;
             LuaValue::number(result)
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
-        vm.current_frame_mut().pc += 1;
+        (*frame_ptr).pc += 1;
         Ok(())
     }
 }
 
 /// POW: R[A] = R[B] ^ R[C]
-pub fn exec_pow(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
+        let l_float = match left.as_number() {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+        let r_float = match right.as_number() {
+            Some(n) => n,
+            None => return Ok(()),
+        };
 
-    // Power always uses float
-    let l_float = match left.as_number() {
-        Some(n) => n,
-        None => return Ok(()), // Let MMBIN handle
-    };
-    let r_float = match right.as_number() {
-        Some(n) => n,
-        None => return Ok(()), // Let MMBIN handle
-    };
-
-    let result = LuaValue::number(l_float.powf(r_float));
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
+        (*frame_ptr).pc += 1;
+        Ok(())
+    }
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
@@ -399,33 +354,30 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// ADDI: R[A] = R[B] + sC
 #[inline(always)]
-pub fn exec_addi(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let sc = Instruction::get_sc(instr); // Signed immediate value
+    let sc = Instruction::get_sc(instr);
 
     unsafe {
-        let base_ptr = (*vm.frames.last().unwrap_unchecked()).base_ptr;
+        let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         if left.primary == TAG_INTEGER {
-            // Integer fast path
             let l = left.secondary as i64;
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
                 LuaValue::integer(l.wrapping_add(sc as i64));
-            vm.current_frame_mut().pc += 1;
+            (*frame_ptr).pc += 1;
             return Ok(());
         }
 
         if left.primary == TAG_FLOAT {
-            // Float fast path
             let l = f64::from_bits(left.secondary);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(l + sc as f64);
-            vm.current_frame_mut().pc += 1;
+            (*frame_ptr).pc += 1;
             return Ok(());
         }
 
-        // Not a number, fallthrough to MMBINI
         Ok(())
     }
 }

@@ -2,7 +2,7 @@
 ///
 /// These instructions handle loading constants and moving values between registers.
 use crate::LuaValue;
-use crate::lua_vm::{Instruction, LuaResult, LuaVM};
+use crate::lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM};
 
 /// VARARGPREP A
 /// Prepare stack for vararg function
@@ -104,12 +104,12 @@ pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// LOADI A sBx
 /// R[A] := sBx (signed integer)
 #[inline(always)]
-pub fn exec_loadi(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_loadi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
-    let base_ptr = vm.current_frame().base_ptr;
 
     unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
     }
 
@@ -202,13 +202,12 @@ pub fn exec_extraarg(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
 /// MOVE A B
 /// R[A] := R[B]
 #[inline(always)]
-pub fn exec_move(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_move(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let base_ptr = vm.current_frame().base_ptr;
 
-    // OPTIMIZATION: Use unsafe for direct register access
     unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
         *reg_ptr.add(a) = *reg_ptr.add(b);
     }

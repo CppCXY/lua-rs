@@ -102,32 +102,23 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// R[A]+=R[A+2];
 /// if R[A] <?= R[A+1] then { pc-=Bx; R[A+3]=R[A] }
 ///
-/// ULTRA-OPTIMIZED V2: Cache frame pointer + direct bit-mask type checking
-/// - Eliminate Vec::len() call by using last_mut() directly
-/// - Single type check for all 3 values (branchless fast path)
-/// - Zero function calls in hot path
+/// ULTRA-OPTIMIZED: Uses pre-fetched frame_ptr + direct bit-mask type checking
 #[inline(always)]
-pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    // OPTIMIZATION: Single unsafe block + direct bit-mask type checking
-    // Use last_mut() to avoid len() call
     unsafe {
-        let frame_ptr = vm.frames.last_mut().unwrap_unchecked() as *mut LuaCallFrame;
         let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
 
-        // Load all 3 values
         let idx = *reg_base;
         let counter_or_limit = *reg_base.add(1);
         let step = *reg_base.add(2);
 
-        // OPTIMIZATION: Combined type check - single OR operation to detect if all are integers
-        // If all 3 are TAG_INTEGER, then (a|b|c) & TYPE_MASK == TAG_INTEGER
         let combined_tags = (idx.primary | counter_or_limit.primary | step.primary) & TYPE_MASK;
 
-        // Fast path: All integers (single branch!)
+        // Fast path: All integers
         if combined_tags == TAG_INTEGER {
             let count = counter_or_limit.secondary as i64;
 
@@ -136,7 +127,6 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 let step_i = step.secondary as i64;
                 let new_idx = idx_i.wrapping_add(step_i);
 
-                // Update registers
                 *reg_base = LuaValue::integer(new_idx);
                 *reg_base.add(1) = LuaValue::integer(count - 1);
                 *reg_base.add(3) = LuaValue::integer(new_idx);
@@ -150,12 +140,10 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let counter_tag = counter_or_limit.primary & TYPE_MASK;
             let idx_tag = idx.primary & TYPE_MASK;
 
-            // Check if all are numbers (integer or float)
             if (step_tag == TAG_FLOAT || step_tag == TAG_INTEGER)
                 && (counter_tag == TAG_FLOAT || counter_tag == TAG_INTEGER)
                 && (idx_tag == TAG_FLOAT || idx_tag == TAG_INTEGER)
             {
-                // Convert to float
                 let idx_f = if idx_tag == TAG_FLOAT {
                     f64::from_bits(idx.secondary)
                 } else {

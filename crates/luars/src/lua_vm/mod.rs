@@ -268,11 +268,12 @@ impl LuaVM {
         // This removes 100M+ unnecessary checks for tight loops
         loop {
             // ULTRA-FAST PATH: Direct unsafe access, no bounds checks
-            let frame = unsafe { self.frames.last_mut().unwrap_unchecked() };
-            let instr = unsafe { *frame.code_ptr.add(frame.pc) };
-            frame.pc += 1;
+            // Get frame_ptr ONCE and pass to dispatch to avoid repeated Vec lookups
+            let frame_ptr = unsafe { self.frames.last_mut().unwrap_unchecked() as *mut LuaCallFrame };
+            let instr = unsafe { (*frame_ptr).code_ptr.add((*frame_ptr).pc).read() };
+            unsafe { (*frame_ptr).pc += 1; }
 
-            if let Err(e) = dispatch_instruction(self, instr) {
+            if let Err(e) = dispatch_instruction(self, instr, frame_ptr) {
                 match e {
                     LuaError::Yield => return Ok(LuaValue::nil()),
                     LuaError::Exit => {
@@ -2100,7 +2101,9 @@ impl LuaVM {
                     self.frames[frame_idx].pc += 1;
 
                     // Dispatch instruction (zero-return-value design)
-                    if let Err(e) = dispatch_instruction(self, instr) {
+                    // Get frame_ptr for optimization
+                    let frame_ptr = &mut self.frames[frame_idx] as *mut LuaCallFrame;
+                    if let Err(e) = dispatch_instruction(self, instr, frame_ptr) {
                         break Err(e);
                     }
                 };

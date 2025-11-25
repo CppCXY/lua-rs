@@ -16,14 +16,17 @@ pub use loop_instructions::*;
 pub use table_instructions::*;
 pub use upvalue_instructions::*;
 
-use super::{Instruction, LuaResult, LuaVM, OpCode};
+use super::{Instruction, LuaCallFrame, LuaResult, LuaVM, OpCode};
 
 /// Main instruction dispatcher (force inline to eliminate function call overhead)
 ///
 /// **ZERO RETURN VALUE** - Instructions directly mutate VM state
 /// This function executes a single instruction with NO abstraction overhead.
+/// 
+/// OPTIMIZATION: frame_ptr is passed in to avoid repeated Vec lookups
+/// The frame_ptr must be valid and point to the current frame
 #[inline(always)]
-pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let opcode = Instruction::get_opcode(instr);
 
     match opcode {
@@ -33,26 +36,26 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         OpCode::LoadFalse => exec_loadfalse(vm, instr),
         OpCode::LFalseSkip => exec_lfalseskip(vm, instr),
         OpCode::LoadTrue => exec_loadtrue(vm, instr),
-        OpCode::LoadI => exec_loadi(vm, instr),
+        OpCode::LoadI => exec_loadi(vm, instr, frame_ptr),
         OpCode::LoadF => exec_loadf(vm, instr),
         OpCode::LoadK => exec_loadk(vm, instr),
         OpCode::LoadKX => exec_loadkx(vm, instr),
-        OpCode::Move => exec_move(vm, instr),
+        OpCode::Move => exec_move(vm, instr, frame_ptr),
 
-        // Arithmetic instructions (register-register) - inlined for performance
-        OpCode::Add => exec_add(vm, instr),
-        OpCode::Sub => exec_sub(vm, instr),
-        OpCode::Mul => exec_mul(vm, instr),
-        OpCode::Div => exec_div(vm, instr),
-        OpCode::IDiv => exec_idiv(vm, instr),
-        OpCode::Mod => exec_mod(vm, instr),
-        OpCode::Pow => exec_pow(vm, instr),
+        // Arithmetic instructions (register-register) - use frame_ptr for hot path
+        OpCode::Add => exec_add(vm, instr, frame_ptr),
+        OpCode::Sub => exec_sub(vm, instr, frame_ptr),
+        OpCode::Mul => exec_mul(vm, instr, frame_ptr),
+        OpCode::Div => exec_div(vm, instr, frame_ptr),
+        OpCode::IDiv => exec_idiv(vm, instr, frame_ptr),
+        OpCode::Mod => exec_mod(vm, instr, frame_ptr),
+        OpCode::Pow => exec_pow(vm, instr, frame_ptr),
 
         // Unary operations
         OpCode::Unm => exec_unm(vm, instr),
 
-        // Arithmetic with immediate/constant
-        OpCode::AddI => exec_addi(vm, instr),
+        // Arithmetic with immediate/constant - use frame_ptr for hot paths
+        OpCode::AddI => exec_addi(vm, instr, frame_ptr),
         OpCode::AddK => exec_addk(vm, instr),
         OpCode::SubK => exec_subk(vm, instr),
         OpCode::MulK => exec_mulk(vm, instr),
@@ -125,9 +128,9 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         OpCode::SetList => exec_setlist(vm, instr),
         OpCode::Tbc => exec_tbc(vm, instr),
 
-        // Loop operations
+        // Loop operations - use frame_ptr for FORLOOP hot path
         OpCode::ForPrep => exec_forprep(vm, instr),
-        OpCode::ForLoop => exec_forloop(vm, instr),
+        OpCode::ForLoop => exec_forloop(vm, instr, frame_ptr),
         OpCode::TForPrep => exec_tforprep(vm, instr),
         OpCode::TForCall => exec_tforcall(vm, instr),
         OpCode::TForLoop => exec_tforloop(vm, instr),
