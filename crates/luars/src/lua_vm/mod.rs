@@ -68,7 +68,7 @@ pub struct LuaVM {
     pub(crate) string_metatable: Option<LuaValue>,
 
     // Object pool for unified object management (new architecture)
-    pub(crate) object_pool: crate::object_pool::ObjectPool,
+    pub(crate) object_pool: ObjectPool,
 
     // Async executor for Lua-Rust async bridge
     #[cfg(feature = "async")]
@@ -80,7 +80,7 @@ impl LuaVM {
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
             frames: Vec::new(),
-            register_stack: Vec::with_capacity(1024), // Pre-allocate for initial stack
+            register_stack: Vec::with_capacity(128), // Pre-allocate for initial stack
             gc: GC::new(),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
@@ -621,11 +621,13 @@ impl LuaVM {
                 // Fast path for integer keys
                 if let Some(i) = key.as_integer() {
                     if i > 0 {
-                        let idx = (i - 1) as usize;
-                        if idx < table.array.len() {
-                            let val = table.array.get_unchecked(idx);
-                            if !val.is_nil() {
-                                return *val;
+                        if let Some(array) = &table.array {
+                            let idx = (i - 1) as usize;
+                            if idx < array.len() {
+                                let val = array.get_unchecked(idx);
+                                if !val.is_nil() {
+                                    return *val;
+                                }
                             }
                         }
                     }
