@@ -625,13 +625,11 @@ impl LuaVM {
                 // Fast path for integer keys
                 if let Some(i) = key.as_integer() {
                     if i > 0 {
-                        if let Some(array) = &table.array {
-                            let idx = (i - 1) as usize;
-                            if idx < array.len() {
-                                let val = array.get_unchecked(idx);
-                                if !val.is_nil() {
-                                    return *val;
-                                }
+                        let idx = (i - 1) as usize;
+                        if idx < table.array.len() {
+                            let val = table.array.get_unchecked(idx);
+                            if !val.is_nil() {
+                                return *val;
                             }
                         }
                     }

@@ -684,42 +684,37 @@ impl std::fmt::Display for LuaValue {
 // ============ Additional Trait Implementations ============
 
 impl PartialEq for LuaValue {
+    #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
-        // Fast path: exact bit match (works for all types including string IDs)
-        if self.primary() == other.primary() && self.secondary() == other.secondary() {
+        // FAST PATH: exact bit match (99% of cases)
+        // Works for: nil, bool, int, float, string ID, table ID, function ID, etc.
+        if self.primary == other.primary && self.secondary == other.secondary {
             return true;
         }
 
-        // Lua 5.4 semantics: integer and float with same numeric value are equal
-        // Check if one is integer and the other is float
-        if self.is_integer() && other.is_float() {
-            let int_val = self.as_integer().unwrap();
-            let float_val = other.as_float().unwrap();
-            // Check if float is an exact integer and values match
-            if float_val.fract() == 0.0
-                && float_val >= i64::MIN as f64
-                && float_val <= i64::MAX as f64
-            {
-                return int_val == float_val as i64;
-            }
+        // SLOW PATH: Lua 5.4 semantics - integer/float cross-comparison
+        // Only check if types differ AND both are numeric
+        let self_type = self.primary & TYPE_MASK;
+        let other_type = other.primary & TYPE_MASK;
+        
+        // Quick reject: same type but different bits = not equal
+        if self_type == other_type {
             return false;
         }
-
-        if self.is_float() && other.is_integer() {
-            let float_val = self.as_float().unwrap();
-            let int_val = other.as_integer().unwrap();
-            // Check if float is an exact integer and values match
-            if float_val.fract() == 0.0
-                && float_val >= i64::MIN as f64
-                && float_val <= i64::MAX as f64
-            {
-                return float_val as i64 == int_val;
-            }
-            return false;
+        
+        // Only handle int/float cross-comparison
+        if self_type == TAG_INTEGER && other_type == TAG_FLOAT {
+            let int_val = self.secondary as i64;
+            let float_val = f64::from_bits(other.secondary);
+            return float_val.fract() == 0.0 && int_val == float_val as i64;
+        }
+        
+        if self_type == TAG_FLOAT && other_type == TAG_INTEGER {
+            let float_val = f64::from_bits(self.secondary);
+            let int_val = other.secondary as i64;
+            return float_val.fract() == 0.0 && float_val as i64 == int_val;
         }
 
-        // For ID-based architecture, same ID means same object
-        // No need for deep comparison
         false
     }
 }

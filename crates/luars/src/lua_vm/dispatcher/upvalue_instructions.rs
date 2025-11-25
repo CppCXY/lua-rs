@@ -348,18 +348,11 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         // ULTRA-OPTIMIZED: Sequential insertion from start_idx
         let mut table_mut = lua_table.borrow_mut();
 
-        // Initialize array if needed
-        if table_mut.array.is_none() {
-            table_mut.array = Some(Vec::new());
-        }
-
-        let array = table_mut.array.as_mut().unwrap();
-
         // Reserve capacity upfront to avoid reallocations
         let expected_end_idx = (start_idx - 1 + count) as usize;
-        let current_len = array.len();
-        if array.capacity() < expected_end_idx && expected_end_idx > current_len {
-            array.reserve(expected_end_idx - current_len);
+        let current_len = table_mut.array.len();
+        if table_mut.array.capacity() < expected_end_idx && expected_end_idx > current_len {
+            table_mut.array.reserve(expected_end_idx - current_len);
         }
 
         // Batch process all values with proper index handling
@@ -372,23 +365,23 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
             if value.is_nil() {
                 // Nil values: only store if filling a gap in existing array
-                if idx < array.len() {
-                    array[idx] = crate::LuaValue::nil();
+                if idx < table_mut.array.len() {
+                    table_mut.array[idx] = crate::LuaValue::nil();
                 }
                 // Don't extend array for trailing nils
             } else {
                 // Non-nil value: ensure array is large enough
-                if idx < array.len() {
-                    array[idx] = value;
-                } else if idx == array.len() {
+                if idx < table_mut.array.len() {
+                    table_mut.array[idx] = value;
+                } else if idx == table_mut.array.len() {
                     // Fast append
-                    array.push(value);
+                    table_mut.array.push(value);
                 } else {
                     // Gap: fill with nils then append value
-                    while array.len() < idx {
-                        array.push(crate::LuaValue::nil());
+                    while table_mut.array.len() < idx {
+                        table_mut.array.push(crate::LuaValue::nil());
                     }
-                    array.push(value);
+                    table_mut.array.push(value);
                 }
             }
         }

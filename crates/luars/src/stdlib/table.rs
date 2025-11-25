@@ -38,29 +38,38 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let Some(table_ref) = table_val.as_lua_table() else {
         return Err(vm.error("Invalid table".to_string()));
     };
-    let len = table_ref.borrow().len();
     let i = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(1);
+    
+    let (len, parts) = {
+        let table_borrowed = table_ref.borrow();
+        let len = table_borrowed.len();
+        let j = get_arg(vm, 4)
+            .and_then(|v| v.as_integer())
+            .unwrap_or(len as i64);
 
-    let j = get_arg(vm, 4)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(len as i64);
+        if table_borrowed.array.is_empty() {
+            (len, Vec::new())
+        } else {
+            let mut parts = Vec::new();
+            for idx in i..=j {
+                if let Some(value) = table_borrowed.array.get(idx as usize - 1) {
+                    if let Some(s) = value.as_lua_string() {
+                        parts.push(s.as_str().to_string());
+                    } else {
+                        return Err(vm.error(format!(
+                            "bad value at index {} in 'table.concat' (string expected)",
+                            idx
+                        )));
+                    }
+                }
+            }
+            (len, parts)
+        }
+    };
 
-    let mut parts = Vec::new();
-    let Some(array_parts) = &table_ref.borrow().array else {
+    if parts.is_empty() && len == 0 {
         let s: LuaValue = vm.create_string("");
         return Ok(MultiValue::single(s));
-    };
-    for idx in i..=j {
-        if let Some(value) = array_parts.get(idx as usize - 1) {
-            if let Some(s) = value.as_lua_string() {
-                parts.push(s.as_str());
-            } else {
-                return Err(vm.error(format!(
-                    "bad value at index {} in 'table.concat' (string expected)",
-                    idx
-                )));
-            }
-        }
     }
 
     let result = vm.create_string(&parts.join(&sep));
@@ -252,22 +261,25 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Ok(MultiValue::empty());
     }
 
-    // Extract values from array part [1..len]
-    let Some(values) = &mut table_ref.borrow_mut().array else {
-        return Ok(MultiValue::empty());
-    };
-
-    // If no comparison function, use default ordering
-    if comp.is_none() || comp.as_ref().map(|v| v.is_nil()).unwrap_or(true) {
-        values.sort();
+    // Get mutable borrow to sort in place
+    let mut table_mut = table_ref.borrow_mut();
+    
+    if table_mut.array.is_empty() {
         return Ok(MultiValue::empty());
     }
 
+    // If no comparison function, use default ordering
+    if comp.is_none() || comp.as_ref().map(|v| v.is_nil()).unwrap_or(true) {
+        table_mut.array.sort();
+        return Ok(MultiValue::empty());
+    }
+
+    drop(table_mut); // Release borrow for custom comparison
     let comp_func = comp.unwrap();
 
-    // Custom comparison using Lua function - use sort_by with comparator
-    // We need to use sort_by_cached_key or manual sort_by to handle comparison errors
-    values.sort_by(|a, b| {
+    // Custom comparison - need to re-borrow for each comparison
+    let mut table_mut = table_ref.borrow_mut();
+    table_mut.array.sort_by(|a, b| {
         // Call comparison function: comp(a, b) should return true if a < b
         let args = vec![a.clone(), b.clone()];
         match vm.call_function_internal(comp_func.clone(), args) {
