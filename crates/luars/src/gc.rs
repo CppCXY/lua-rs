@@ -140,6 +140,7 @@ impl GC {
     }
 
     /// Register a new object for GC tracking
+    #[inline]
     pub fn register_object(&mut self, obj_id: u32, obj_type: GcObjectType) -> usize {
         let gc_id = self.next_gc_id;
         self.next_gc_id += 1;

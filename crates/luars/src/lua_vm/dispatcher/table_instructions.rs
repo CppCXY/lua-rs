@@ -6,11 +6,11 @@ use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
 
 /// NEWTABLE A B C k
 /// R[A] := {} (size = B,C)
+#[inline]
 pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr);
     let c = Instruction::get_c(instr);
-    let _k = Instruction::get_k(instr);
 
     let frame = vm.current_frame_mut();
     let base_ptr = frame.base_ptr;
@@ -20,27 +20,26 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let pc = frame.pc;
     frame.pc += 1; // Skip the EXTRAARG instruction
 
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-
-    let func = unsafe { &*func_ptr };
-    let func_ref = func.borrow();
-    let chunk = &func_ref.chunk;
-
-    let extra_arg = if pc < chunk.code.len() {
-        Instruction::get_ax(chunk.code[pc])
-    } else {
-        0
+    // OPTIMIZATION: Inline EXTRAARG reading to avoid function pointer overhead
+    let extra_arg = unsafe {
+        let func_ptr = frame.get_function_ptr().unwrap_unchecked();
+        let func = &*func_ptr;
+        let func_ref = func.borrow();
+        let chunk = &func_ref.chunk;
+        
+        if pc < chunk.code.len() {
+            Instruction::get_ax(chunk.code[pc])
+        } else {
+            0
+        }
     };
 
     // Calculate array size hint and hash size hint
-    // These are size hints for preallocation (we currently ignore them)
-    let array_size = if b > 0 { b - 1 } else { extra_arg };
-    let hash_size = c;
+    let array_size = if b > 0 { (b - 1) as usize } else { extra_arg as usize };
+    let hash_size = c as usize;
 
-    // Create new table (ignore size hints for now)
-    let table = vm.create_table(array_size as usize, hash_size as usize);
+    // Create new table with size hints
+    let table = vm.create_table(array_size, hash_size);
     vm.register_stack[base_ptr + a] = table;
 
     Ok(())

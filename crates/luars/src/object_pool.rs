@@ -245,6 +245,7 @@ impl ObjectPool {
     // ============ Table Operations ============
 
     /// Create a new table
+    #[inline]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> TableId {
         let table = Rc::new(RefCell::new(LuaTable::new(array_size, hash_size)));
         let slot_id = self.tables.insert(table);

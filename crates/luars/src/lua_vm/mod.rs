@@ -1201,6 +1201,7 @@ impl LuaVM {
     }
 
     /// Create a new table in object pool
+    #[inline]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
 
@@ -1209,11 +1210,13 @@ impl LuaVM {
             .register_object(id.0, crate::gc::GcObjectType::Table);
 
         // Get pointer from object pool for direct access
-        let ptr = self
-            .object_pool
-            .get_table(id)
-            .map(|t| Rc::as_ptr(t) as *const std::cell::RefCell<LuaTable>)
-            .unwrap_or(std::ptr::null());
+        // OPTIMIZATION: Use unwrap_unchecked in release mode since we just created the table
+        let ptr = unsafe {
+            self.object_pool
+                .get_table(id)
+                .map(|t| Rc::as_ptr(t) as *const std::cell::RefCell<LuaTable>)
+                .unwrap_unchecked()
+        };
         LuaValue::table_id_ptr(id, ptr)
     }
 
