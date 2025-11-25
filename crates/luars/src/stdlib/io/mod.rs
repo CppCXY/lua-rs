@@ -133,7 +133,7 @@ fn io_flush(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn io_open(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use crate::lib_registry::{get_arg, require_arg};
 
-    let filename_val = require_arg(vm, 0, "io.open")?;
+    let filename_val = require_arg(vm, 1, "io.open")?;
     let filename = filename_val.as_lua_string().ok_or_else(|| {
         LuaError::RuntimeError("bad argument #1 to 'io.open' (string expected)".to_string())
     })?;

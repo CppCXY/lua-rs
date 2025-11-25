@@ -57,60 +57,60 @@ fn get_number(vm: &mut LuaVM, idx: usize, func_name: &str) -> LuaResult<f64> {
 }
 
 fn math_abs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.abs")?;
+    let x = get_number(vm, 1, "math.abs")?;
     Ok(MultiValue::single(LuaValue::float(x.abs())))
 }
 
 fn math_acos(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.acos")?;
+    let x = get_number(vm, 1, "math.acos")?;
     Ok(MultiValue::single(LuaValue::float(x.acos())))
 }
 
 fn math_asin(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.asin")?;
+    let x = get_number(vm, 1, "math.asin")?;
     Ok(MultiValue::single(LuaValue::float(x.asin())))
 }
 
 fn math_atan(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let y = get_number(vm, 0, "math.atan")?;
-    let x = get_arg(vm, 1).and_then(|v| v.as_number()).unwrap_or(1.0);
+    let y = get_number(vm, 1, "math.atan")?;
+    let x = get_arg(vm, 2).and_then(|v| v.as_number()).unwrap_or(1.0);
     Ok(MultiValue::single(LuaValue::float(y.atan2(x))))
 }
 
 fn math_ceil(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.ceil")?;
+    let x = get_number(vm, 1, "math.ceil")?;
     Ok(MultiValue::single(LuaValue::float(x.ceil())))
 }
 
 fn math_cos(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.cos")?;
+    let x = get_number(vm, 1, "math.cos")?;
     Ok(MultiValue::single(LuaValue::float(x.cos())))
 }
 
 fn math_deg(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.deg")?;
+    let x = get_number(vm, 1, "math.deg")?;
     Ok(MultiValue::single(LuaValue::float(x.to_degrees())))
 }
 
 fn math_exp(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.exp")?;
+    let x = get_number(vm, 1, "math.exp")?;
     Ok(MultiValue::single(LuaValue::float(x.exp())))
 }
 
 fn math_floor(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.floor")?;
+    let x = get_number(vm, 1, "math.floor")?;
     Ok(MultiValue::single(LuaValue::integer(x.floor() as i64)))
 }
 
 fn math_fmod(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.fmod")?;
-    let y = get_number(vm, 1, "math.fmod")?;
+    let x = get_number(vm, 1, "math.fmod")?;
+    let y = get_number(vm, 2, "math.fmod")?;
     Ok(MultiValue::single(LuaValue::float(x % y)))
 }
 
 fn math_log(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.log")?;
-    let base = get_arg(vm, 1).and_then(|v| v.as_number());
+    let x = get_number(vm, 1, "math.log")?;
+    let base = get_arg(vm, 2).and_then(|v| v.as_number());
 
     let result = if let Some(b) = base { x.log(b) } else { x.ln() };
 
@@ -172,7 +172,7 @@ fn math_min(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn math_modf(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.modf")?;
+    let x = get_number(vm, 1, "math.modf")?;
     let int_part = x.trunc();
     let frac_part = x - int_part;
 
@@ -202,13 +202,13 @@ fn math_random(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match argc {
         0 => Ok(MultiValue::single(LuaValue::float(random))),
         1 => {
-            let m = get_number(vm, 0, "math.random")? as i64;
+            let m = get_number(vm, 1, "math.random")? as i64;
             let result = (random * m as f64).floor() as i64 + 1;
             Ok(MultiValue::single(LuaValue::integer(result)))
         }
         _ => {
-            let m = get_number(vm, 0, "math.random")? as i64;
-            let n = get_number(vm, 1, "math.random")? as i64;
+            let m = get_number(vm, 1, "math.random")? as i64;
+            let n = get_number(vm, 2, "math.random")? as i64;
             let range = (n - m + 1) as f64;
             let result = m + (random * range).floor() as i64;
             Ok(MultiValue::single(LuaValue::integer(result)))
@@ -218,27 +218,27 @@ fn math_random(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 fn math_randomseed(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Seed is ignored in our simple implementation
-    let _x = get_number(vm, 0, "math.randomseed")?;
+    let _x = get_number(vm, 1, "math.randomseed")?;
     Ok(MultiValue::empty())
 }
 
 fn math_sin(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.sin")?;
+    let x = get_number(vm, 1, "math.sin")?;
     Ok(MultiValue::single(LuaValue::float(x.sin())))
 }
 
 fn math_sqrt(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.sqrt")?;
+    let x = get_number(vm, 1, "math.sqrt")?;
     Ok(MultiValue::single(LuaValue::float(x.sqrt())))
 }
 
 fn math_tan(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 0, "math.tan")?;
+    let x = get_number(vm, 1, "math.tan")?;
     Ok(MultiValue::single(LuaValue::float(x.tan())))
 }
 
 fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let val = require_arg(vm, 0, "math.tointeger")?;
+    let val = require_arg(vm, 1, "math.tointeger")?;
 
     let result = if let Some(i) = val.as_integer() {
         LuaValue::integer(i)
@@ -271,7 +271,7 @@ fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn math_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let val = require_arg(vm, 0, "math.type")?;
+    let val = require_arg(vm, 1, "math.type")?;
 
     let type_str = match val.kind() {
         LuaValueKind::Integer => "integer",
@@ -284,11 +284,11 @@ fn math_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn math_ult(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let m_value = require_arg(vm, 0, "math.ult")?;
+    let m_value = require_arg(vm, 1, "math.ult")?;
     let Some(m) = m_value.as_integer() else {
         return Err(vm.error("bad argument #1 to 'math.ult' (integer expected)".to_string()));
     };
-    let n_value = require_arg(vm, 1, "math.ult")?;
+    let n_value = require_arg(vm, 2, "math.ult")?;
     let Some(n) = n_value.as_integer() else {
         return Err(vm.error("bad argument #2 to 'math.ult' (integer expected)".to_string()));
     };

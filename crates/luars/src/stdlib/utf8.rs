@@ -26,7 +26,7 @@ pub fn create_utf8_lib() -> LibraryModule {
 }
 
 fn utf8_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 0, "utf8.len")?;
+    let s_value = require_arg(vm, 1, "utf8.len")?;
     let Some(s) = s_value.as_lua_string() else {
         return Err(vm.error("bad argument #1 to 'utf8.len' (string expected)".to_string()));
     };
@@ -35,9 +35,9 @@ fn utf8_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let len = bytes.len() as i64;
 
     // Fast path: no range specified, count entire string
-    let i_arg = get_arg(vm, 1);
-    let j_arg = get_arg(vm, 2);
-    let lax = get_arg(vm, 3).and_then(|v| v.as_bool()).unwrap_or(false);
+    let i_arg = get_arg(vm, 2);
+    let j_arg = get_arg(vm, 3);
+    let lax = get_arg(vm, 4).and_then(|v| v.as_bool()).unwrap_or(false);
 
     if i_arg.is_none() && j_arg.is_none() {
         // Fast path: validate and count entire string
@@ -128,7 +128,7 @@ fn utf8_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// utf8.codes(s) - Returns an iterator for UTF-8 characters
 fn utf8_codes(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 0, "utf8.codes")?;
+    let s_value = require_arg(vm, 1, "utf8.codes")?;
     if !s_value.is_string() {
         return Err(vm.error("bad argument #1 to 'utf8.codes' (string expected)".to_string()));
     }
@@ -152,7 +152,7 @@ fn utf8_codes(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// Iterator function for utf8.codes
 fn utf8_codes_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let t_value = require_arg(vm, 0, "utf8.codes iterator")?;
+    let t_value = require_arg(vm, 1, "utf8.codes iterator")?;
 
     let string_key = 1;
     let position_key = 2;
@@ -201,14 +201,14 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// utf8.codepoint(s [, i [, j]]) - Returns code points of characters
 fn utf8_codepoint(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 0, "utf8.codepoint")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        vm.error("bad argument #1 to 'utf8.codepoint' (string expected)".to_string())
-    })?;
+    let s_value = require_arg(vm, 1, "utf8.codepoint")?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'utf8.codepoint' (string expected)".to_string()));
+    };
 
-    let i = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
+    let i = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
 
-    let j = get_arg(vm, 2)
+    let j = get_arg(vm, 3)
         .and_then(|v| v.as_integer())
         .map(|v| v as usize)
         .unwrap_or(i);
@@ -239,16 +239,16 @@ fn utf8_codepoint(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// utf8.offset(s, n [, i]) - Returns byte position of n-th character
 fn utf8_offset(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 0, "utf8.offset")?;
+    let s_value = require_arg(vm, 1, "utf8.offset")?;
     let Some(s) = s_value.as_lua_string() else {
         return Err(vm.error("bad argument #1 to 'utf8.offset' (string expected)".to_string()));
     };
 
-    let n_value = require_arg(vm, 1, "utf8.offset")?;
+    let n_value = require_arg(vm, 2, "utf8.offset")?;
     let Some(n) = n_value.as_integer() else {
         return Err(vm.error("bad argument #2 to 'utf8.offset' (number expected)".to_string()));
     };
-    let i = get_arg(vm, 2)
+    let i = get_arg(vm, 3)
         .and_then(|v| v.as_integer())
         .unwrap_or(if n >= 0 {
             1

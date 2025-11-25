@@ -80,7 +80,7 @@ fn create_searchers_table(vm: &mut LuaVM) -> LuaValue {
 
 // Searcher 1: Check package.preload
 fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_val = require_arg(vm, 0, "preload searcher")?;
+    let modname_val = require_arg(vm, 1, "preload searcher")?;
     let Some(modname) = modname_val.as_lua_string() else {
         return Err(vm.error("module name expected".to_string()));
     };
@@ -116,7 +116,7 @@ fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 // Searcher 2: Search package.path
 fn searcher_lua(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_val = require_arg(vm, 0, "Lua searcher")?;
+    let modname_val = require_arg(vm, 1, "Lua searcher")?;
     let Some(modname) = modname_val.as_lua_string() else {
         return Err(vm.error("module name expected".to_string()));
     };
@@ -241,8 +241,8 @@ fn package_loadlib(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn package_searchpath(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let name_val = require_arg(vm, 0, "searchpath")?;
-    let path_val = require_arg(vm, 1, "searchpath")?;
+    let name_val = require_arg(vm, 1, "searchpath")?;
+    let path_val = require_arg(vm, 2, "searchpath")?;
     // let sep_val = get_arg(vm, 2).unwrap_or(vm.create_string("."));
     // let rep_val = get_arg(vm, 3).unwrap_or(vm.create_string("/"));
 

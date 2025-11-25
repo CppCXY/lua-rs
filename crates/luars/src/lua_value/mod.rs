@@ -19,8 +19,8 @@ pub use lua_table::LuaTable;
 pub use lua_thread::*;
 pub use lua_value::{
     LuaValue, LuaValueKind, NAN_BASE, TAG_BOOLEAN, TAG_CFUNCTION, TAG_FLOAT, TAG_FUNCTION,
-    TAG_INTEGER, TAG_NIL, TAG_STRING, TAG_TABLE, TAG_USERDATA, TYPE_MASK,
-    VALUE_TRUE, VALUE_FALSE, VALUE_NIL,
+    TAG_INTEGER, TAG_NIL, TAG_STRING, TAG_TABLE, TAG_USERDATA, TYPE_MASK, VALUE_FALSE, VALUE_NIL,
+    VALUE_TRUE,
 };
 
 /// Multi-return values from Lua functions

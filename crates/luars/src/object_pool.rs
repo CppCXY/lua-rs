@@ -6,8 +6,8 @@ use crate::lua_value::{self, LuaUserdata};
 use crate::{LuaFunction, LuaString, LuaTable};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::hash::Hash;
+use std::rc::Rc;
 
 /// Slot-based storage with free list for O(1) allocation and deallocation
 struct SlotVec<T> {
@@ -38,7 +38,7 @@ impl<T> SlotVec<T> {
     #[inline]
     fn insert(&mut self, value: T) -> u32 {
         self.count += 1;
-        
+
         if let Some(free_id) = self.free_list.pop() {
             self.slots[free_id as usize] = Some(value);
             free_id
@@ -83,12 +83,16 @@ impl<T> SlotVec<T> {
         while let Some(None) = self.slots.last() {
             let removed_id = self.slots.len() - 1;
             self.slots.pop();
-            
-            if let Some(pos) = self.free_list.iter().rposition(|&id| id as usize == removed_id) {
+
+            if let Some(pos) = self
+                .free_list
+                .iter()
+                .rposition(|&id| id as usize == removed_id)
+            {
                 self.free_list.swap_remove(pos);
             }
         }
-        
+
         self.slots.shrink_to_fit();
         self.free_list.shrink_to_fit();
     }
@@ -211,7 +215,7 @@ impl ObjectPool {
             StringId(slot_id)
         }
     }
-    
+
     /// Get string by ID
     #[inline]
     pub fn get_string(&self, id: StringId) -> Option<&Rc<LuaString>> {

@@ -28,17 +28,13 @@ pub fn register_async_functions(vm: &mut LuaVM) {
 /// Async sleep implementation (runs in tokio)
 async fn async_sleep_impl(args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
     if args.is_empty() {
-        return Err(vm.error(
-            "sleep requires 1 argument (milliseconds)".to_string(),
-        ));
+        return Err(vm.error("sleep requires 1 argument (milliseconds)".to_string()));
     }
 
     let ms = match args[0].as_number() {
         Some(n) => n as u64,
         None => {
-            return Err(vm.error(
-                "sleep argument must be a number".to_string(),
-            ));
+            return Err(vm.error("sleep argument must be a number".to_string()));
         }
     };
 

@@ -196,9 +196,7 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 pub fn exec_extraarg(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
     // EXTRAARG is consumed by the preceding instruction (like LOADKX)
     // It should never be executed directly
-    Err(vm.error(
-        "EXTRAARG should not be executed directly".to_string(),
-    ))
+    Err(vm.error("EXTRAARG should not be executed directly".to_string()))
 }
 
 /// MOVE A B

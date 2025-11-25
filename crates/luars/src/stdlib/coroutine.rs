@@ -21,7 +21,7 @@ pub fn create_coroutine_lib() -> LibraryModule {
 
 /// coroutine.create(f) - Create a new coroutine
 fn coroutine_create(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let func = require_arg(vm, 0, "coroutine.create")?;
+    let func = require_arg(vm, 1, "coroutine.create")?;
 
     if !func.is_function() && !func.is_cfunction() {
         return Err(vm.error("coroutine.create requires a function argument".to_string()));
@@ -35,7 +35,7 @@ fn coroutine_create(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// coroutine.resume(co, ...) - Resume a coroutine
 fn coroutine_resume(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let thread_val = require_arg(vm, 0, "coroutine.resume")?;
+    let thread_val = require_arg(vm, 1, "coroutine.resume")?;
 
     if !thread_val.is_thread() {
         return Err(vm.error("coroutine.resume requires a thread argument".to_string()));
@@ -61,7 +61,7 @@ fn coroutine_resume(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// coroutine.yield(...) - Yield from current coroutine
 fn coroutine_yield(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let args = crate::lib_registry::get_args(vm);
+    let args = get_args(vm);
 
     // Check if we're in a coroutine
     if vm.current_thread.is_none() {
@@ -79,7 +79,7 @@ fn coroutine_yield(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// coroutine.status(co) - Get coroutine status
 fn coroutine_status(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let thread_val = require_arg(vm, 0, "coroutine.status")?;
+    let thread_val = require_arg(vm, 1, "coroutine.status")?;
 
     if !thread_val.is_thread() {
         return Err(vm.error("coroutine.status requires a thread argument".to_string()));
@@ -137,7 +137,7 @@ fn coroutine_running(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// coroutine.wrap(f) - Create a wrapped coroutine
 /// This is placeholder - the actual implementation is injected as Lua code in lib_registry
 fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let func = require_arg(vm, 0, "coroutine.wrap")?;
+    let func = require_arg(vm, 1, "coroutine.wrap")?;
 
     if !func.is_function() && !func.is_cfunction() {
         return Err(vm.error("coroutine.wrap requires a function argument".to_string()));
@@ -174,7 +174,7 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// Helper function for coroutine.wrap - called when the wrapper is invoked
 fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // First argument is the wrapper table itself (self)
-    let wrapper_table = require_arg(vm, 0, "coroutine.wrap_call")?;
+    let wrapper_table = require_arg(vm, 1, "coroutine.wrap_call")?;
 
     // Get the stored coroutine
     let thread_key = vm.create_string("__thread");
@@ -216,7 +216,7 @@ fn coroutine_isyieldable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// coroutine.close(co) - Close a coroutine, marking it as dead
 fn coroutine_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let thread_val = require_arg(vm, 0, "coroutine.close")?;
+    let thread_val = require_arg(vm, 1, "coroutine.close")?;
 
     if !thread_val.is_thread() {
         return Err(vm.error("coroutine.close requires a thread argument".to_string()));

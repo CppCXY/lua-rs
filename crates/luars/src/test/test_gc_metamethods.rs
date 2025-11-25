@@ -8,7 +8,7 @@ mod tests {
     fn test_gc_metamethod() {
         let mut vm = LuaVM::new();
         vm.open_libs();
-        
+
         let code = r#"
             local finalized = {}
             
@@ -33,7 +33,7 @@ mod tests {
             -- Check that finalizers were called
             return #finalized
         "#;
-        
+
         match vm.execute_string(code) {
             Ok(result) => {
                 println!("Finalized count: {:?}", result);
@@ -50,7 +50,7 @@ mod tests {
     fn test_weak_keys_mode() {
         let mut vm = LuaVM::new();
         vm.open_libs();
-        
+
         let code = r#"
             local weak_table = {}
             setmetatable(weak_table, {__mode = "k"})
@@ -79,7 +79,7 @@ mod tests {
             
             return count_before, count_after
         "#;
-        
+
         match vm.execute_string(code) {
             Ok(result) => {
                 println!("Weak keys test result: {:?}", result);
@@ -93,7 +93,7 @@ mod tests {
     fn test_weak_values_mode() {
         let mut vm = LuaVM::new();
         vm.open_libs();
-        
+
         let code = r#"
             local weak_table = {}
             setmetatable(weak_table, {__mode = "v"})
@@ -122,7 +122,7 @@ mod tests {
             
             return count_before, count_after
         "#;
-        
+
         match vm.execute_string(code) {
             Ok(result) => {
                 println!("Weak values test result: {:?}", result);
@@ -136,7 +136,7 @@ mod tests {
     fn test_weak_keys_and_values_mode() {
         let mut vm = LuaVM::new();
         vm.open_libs();
-        
+
         let code = r#"
             local weak_table = {}
             setmetatable(weak_table, {__mode = "kv"})
@@ -158,7 +158,7 @@ mod tests {
             
             return count
         "#;
-        
+
         match vm.execute_string(code) {
             Ok(result) => {
                 println!("Weak keys+values test result: {:?}", result);
@@ -176,7 +176,7 @@ mod tests {
     fn test_gc_resurrection_prevention() {
         let mut vm = LuaVM::new();
         vm.open_libs();
-        
+
         let code = r#"
             local resurrected = nil
             
@@ -199,7 +199,7 @@ mod tests {
             -- In Lua 5.4, resurrection is allowed but object won't be finalized again
             return resurrected ~= nil
         "#;
-        
+
         match vm.execute_string(code) {
             Ok(result) => {
                 println!("Resurrection test result: {:?}", result);
@@ -212,7 +212,7 @@ mod tests {
     fn test_finalizer_ordering() {
         let mut vm = LuaVM::new();
         vm.open_libs();
-        
+
         let code = r#"
             local order = {}
             
@@ -242,7 +242,7 @@ mod tests {
             
             return #order
         "#;
-        
+
         match vm.execute_string(code) {
             Ok(result) => {
                 println!("Finalizer ordering test result: {:?}", result);

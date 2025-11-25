@@ -1609,21 +1609,21 @@ fn compile_binary_expr_to(
         BinaryOperator::OpConcat => {
             // CONCAT has special instruction format: CONCAT A B
             // Concatenates R[A] through R[A+B] (B+1 values), result in R[A]
-            
+
             // LUA 5.4 OPTIMIZATION: Merge consecutive CONCAT operations
             // When compiling "e1 .. e2", if e2's code just generated a CONCAT instruction,
             // we can merge them into a single CONCAT that concatenates all values at once.
             // This is critical for performance with chains like "a" .. "b" .. "c"
-            
+
             let code = &c.chunk.code;
             if !code.is_empty() {
                 let prev_instr = code[code.len() - 1];
                 let prev_opcode = Instruction::get_opcode(prev_instr);
-                
+
                 if prev_opcode == OpCode::Concat {
                     let prev_a = Instruction::get_a(prev_instr);
                     let prev_b = Instruction::get_b(prev_instr);
-                    
+
                     // Check if right_reg is the result of previous CONCAT
                     // Previous CONCAT: R[prev_a] = R[prev_a]..R[prev_a+1]..R[prev_a+prev_b]
                     // If right_reg == prev_a and left_reg == prev_a - 1, we can merge
@@ -1633,11 +1633,11 @@ fn compile_binary_expr_to(
                         let last_idx = code.len() - 1;
                         c.chunk.code[last_idx] = Instruction::encode_abc(
                             OpCode::Concat,
-                            left_reg,          // Start from left_reg instead
-                            prev_b + 1,        // Increase count by 1
-                            0
+                            left_reg,   // Start from left_reg instead
+                            prev_b + 1, // Increase count by 1
+                            0,
                         );
-                        
+
                         // BUGFIX: Respect dest parameter
                         if let Some(d) = dest {
                             if d != left_reg {
