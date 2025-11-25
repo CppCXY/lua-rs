@@ -262,8 +262,8 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         let lua_table = unsafe { &*ptr };
         let borrowed = lua_table.borrow();
         
-        // Try direct access
-        if let Some(val) = borrowed.raw_get(&key_value) {
+        // Use optimized hash-only lookup (GETFIELD always uses string keys, never integers)
+        if let Some(val) = borrowed.get_from_hash(&key_value) {
             if !val.is_nil() {
                 vm.register_stack[base_ptr + a] = val;
                 return Ok(());

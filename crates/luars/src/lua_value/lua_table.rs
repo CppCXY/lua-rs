@@ -5,7 +5,7 @@ use super::LuaValue;
 use crate::LuaVM;
 
 /// Hash node - mimics Lua 5.4's Node structure
-/// Contains key+value pair and next index for collision chaining
+/// Contains key+value pair
 #[derive(Clone, Copy)]
 struct Node {
     key: LuaValue,
@@ -75,29 +75,26 @@ impl LuaTable {
         }
     }
 
-    /// Hash function for LuaValue - matches Lua's hashing strategy
-    #[inline]
+    /// Hash function for LuaValue - optimized for speed
+    #[inline(always)]
     fn hash_key(key: &LuaValue, size: usize) -> usize {
         if size == 0 {
             return 0;
         }
 
-        // Use Lua's approach: extract a numeric hash from the value
-        let hash = if let Some(i) = key.as_integer() {
-            i as u64
-        } else if let Some(f) = key.as_float() {
-            f.to_bits()
-        } else {
-            // For other types, use the primary value as hash
-            key.primary
-        };
+        // Use XOR of both words for good distribution
+        // This is faster than type-checking and works for all value types
+        let raw = key.primary ^ key.secondary;
+        
+        // Simple but effective mixing (from FxHash)
+        let hash = raw.wrapping_mul(0x517cc1b727220a95);
 
-        // Simple modulo - Lua uses power-of-2 sizes for fast masking
+        // Fast modulo using bitmask (size is power of 2)
         (hash as usize) & (size - 1)
     }
 
     /// Find a node with the given key, returns Some(index) if found
-    #[inline]
+    #[inline(always)]
     fn find_node(&self, key: &LuaValue) -> Option<usize> {
         let size = self.nodes.len();
         if size == 0 {
@@ -107,22 +104,29 @@ impl LuaTable {
         let mut idx = Self::hash_key(key, size);
         let start_idx = idx;
         
+        // Fast path: check first slot (no collision case - most common)
+        let node = unsafe { self.nodes.get_unchecked(idx) };
+        if node.is_empty() {
+            return None;
+        }
+        if node.key == *key {
+            return Some(idx);
+        }
+        
+        // Collision path: linear probe
         loop {
-            let node = &self.nodes[idx];
+            idx = (idx + 1) & (size - 1);
+            
+            if idx == start_idx {
+                return None;
+            }
+            
+            let node = unsafe { self.nodes.get_unchecked(idx) };
             if node.is_empty() {
                 return None;
             }
-
             if node.key == *key {
                 return Some(idx);
-            }
-
-            // Linear probing
-            idx = (idx + 1) & (size - 1);
-
-            // Avoid infinite loop
-            if idx == start_idx {
-                return None;
             }
         }
     }
@@ -150,25 +154,28 @@ impl LuaTable {
     }
 
     /// Simple insert using linear probing (no complex chaining)
+    #[inline]
     fn insert_node_simple(&mut self, key: LuaValue, value: LuaValue) {
         let size = self.nodes.len();
         debug_assert!(size > 0, "insert_node_simple called with empty nodes");
         
         let mut idx = Self::hash_key(&key, size);
+        
+        // Fast path: first slot is empty (common case)
+        let node = unsafe { self.nodes.get_unchecked(idx) };
+        if node.is_empty() {
+            self.nodes[idx] = Node { key, value };
+            self.hash_size += 1;
+            return;
+        }
+        if node.key == key {
+            self.nodes[idx].value = value;
+            return;
+        }
+        
+        // Collision path
         let start_idx = idx;
-
         loop {
-            if self.nodes[idx].is_empty() {
-                // New insertion
-                self.nodes[idx] = Node { key, value };
-                self.hash_size += 1;
-                return;
-            } else if self.nodes[idx].key == key {
-                // Update existing
-                self.nodes[idx].value = value;
-                return;
-            }
-
             idx = (idx + 1) & (size - 1);
 
             if idx == start_idx {
@@ -177,6 +184,17 @@ impl LuaTable {
                     "Hash table is full during insert: size={}, hash_size={}, key={:?}",
                     size, self.hash_size, key
                 );
+            }
+
+            let node = unsafe { self.nodes.get_unchecked(idx) };
+            if node.is_empty() {
+                self.nodes[idx] = Node { key, value };
+                self.hash_size += 1;
+                return;
+            }
+            if node.key == key {
+                self.nodes[idx].value = value;
+                return;
             }
         }
     }
