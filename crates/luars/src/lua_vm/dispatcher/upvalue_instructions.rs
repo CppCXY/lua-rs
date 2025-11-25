@@ -344,10 +344,59 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         b
     };
 
-    for i in 0..count {
-        let key = crate::LuaValue::integer((start_idx + i) as i64);
-        let value = vm.register_stack[base_ptr + a + i + 1];
-        vm.table_set_with_meta(table, key, value)?;
+    // OPTIMIZATION: SETLIST is typically used for table initialization
+    // Batch all operations in a single borrow_mut() to minimize RefCell overhead
+    // This is safe because:
+    // 1. SETLIST is only emitted by compiler for table constructors
+    // 2. Newly created tables don't have metatables yet
+    // 3. Even if metatable exists, Lua doesn't call __newindex for array part
+    
+    // Fast path: Use cached pointer (avoids ObjectPool lookup)
+    if let Some(ptr) = table.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        
+        // CRITICAL: Single borrow_mut for all operations (huge perf win!)
+        {
+            let mut table_mut = lua_table.borrow_mut();
+            for i in 0..count {
+                let key_int = (start_idx + i) as i64;
+                let value = vm.register_stack[base_ptr + a + i + 1];
+                
+                // Skip nil values - Lua doesn't insert them into array part
+                if value.is_nil() {
+                    continue;
+                }
+                
+                // Inline fast path for sequential array insertion
+                let idx = (key_int - 1) as usize;
+                if idx == table_mut.array.len() {
+                    // Fast append path (most common case for table constructors)
+                    table_mut.array.push(value);
+                } else if idx < table_mut.array.len() {
+                    table_mut.array[idx] = value;
+                } else {
+                    // Out of order, use normal set_int
+                    table_mut.set_int(key_int, value);
+                }
+            }
+        }
+        
+        // Write barrier for GC (outside borrow scope)
+        if let Some(table_id) = table.as_table_id() {
+            vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+            // Barrier for all values inserted (conservative)
+            for i in 0..count {
+                let value = vm.register_stack[base_ptr + a + i + 1];
+                vm.gc.barrier_back(&value);
+            }
+        }
+    } else {
+        // Slow path: fallback to table_set_with_meta
+        for i in 0..count {
+            let key = crate::LuaValue::integer((start_idx + i) as i64);
+            let value = vm.register_stack[base_ptr + a + i + 1];
+            vm.table_set_with_meta(table, key, value)?;
+        }
     }
 
     Ok(())
