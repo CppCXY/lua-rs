@@ -139,7 +139,7 @@ impl GC {
             allocations_since_minor_gc: 0,
             minor_gc_count: 0,
             check_counter: 0,
-            check_interval: 1000, // Run GC every 1000 checks when debt > 0 (reduce overhead)
+            check_interval: 10000, // Run GC every 10000 checks when debt > 0 (massive overhead reduction)
             finalize_queue: Vec::new(), // __gc finalizer queue
             collection_count: 0,
             stats: GCStats::default(),

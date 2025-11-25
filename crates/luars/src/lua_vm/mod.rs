@@ -252,22 +252,16 @@ impl LuaVM {
     /// Main execution loop - interprets bytecode instructions
     /// Main VM execution loop - MAXIMUM PERFORMANCE
     /// 零返回值，零分支，直接调度
-    fn run(&mut self) -> LuaResult<LuaValue> {        
+    fn run(&mut self) -> LuaResult<LuaValue> {
+        // CRITICAL OPTIMIZATION: Check frames.is_empty() OUTSIDE the loop
+        // RETURN instruction will pop frames and check if empty
+        // This removes 100M+ unnecessary checks for tight loops
         loop {
-            // 检查是否有帧
-            if self.frames.is_empty() {
-                return Ok(self
-                    .return_values
-                    .first()
-                    .copied()
-                    .unwrap_or(LuaValue::nil()));
-            }
-
+            // ULTRA-FAST PATH: Direct unsafe access, no bounds checks
             let frame = unsafe { self.frames.last_mut().unwrap_unchecked() };
             let instr = unsafe { *frame.code_ptr.add(frame.pc) };
             frame.pc += 1;
 
-         
             if let Err(e) = dispatch_instruction(self, instr) {
                 match e {
                     LuaError::Yield(_) => return Ok(LuaValue::nil()),

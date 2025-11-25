@@ -124,6 +124,13 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         vm.close_to_be_closed(close_from)?;
     }
 
+    // CRITICAL: If frames are now empty, we're done - return control to caller
+    // This prevents run() loop from trying to access empty frame
+    if vm.frames.is_empty() {
+        // Signal end of execution - return_values are already set
+        return Err(LuaError::RuntimeError("__VM_EXIT__".to_string()));
+    }
+
     Ok(())
 }
 
