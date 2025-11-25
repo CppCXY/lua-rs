@@ -1637,6 +1637,14 @@ fn compile_binary_expr_to(
                             prev_b + 1,        // Increase count by 1
                             0
                         );
+                        
+                        // BUGFIX: Respect dest parameter
+                        if let Some(d) = dest {
+                            if d != left_reg {
+                                emit_move(c, d, left_reg);
+                                return Ok(d);
+                            }
+                        }
                         return Ok(left_reg);
                     }
                 }

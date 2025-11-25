@@ -135,7 +135,7 @@ fn test_math_deg_rad() {
         r#"
         local rad = math.rad(180)
         assert(rad > 3.14 and rad < 3.15)
-        assert(math.deg(math.pi) > 179 and math.deg(math.pi) < 181)
+        assert(math.deg(math.pi) >= 179 and math.deg(math.pi) <= 181)
     "#,
     );
 
