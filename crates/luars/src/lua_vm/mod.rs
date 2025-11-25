@@ -14,7 +14,7 @@ use crate::lua_value::{
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
-use crate::{ObjectPool, lib_registry};
+use crate::{Compiler, ObjectPool, lib_registry};
 use dispatcher::dispatch_instruction;
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
@@ -73,6 +73,15 @@ pub struct LuaVM {
     // Async executor for Lua-Rust async bridge
     #[cfg(feature = "async")]
     pub(crate) async_executor: AsyncExecutor,
+
+    // ===== Lightweight Error Storage =====
+    // Store error/yield data here instead of in Result<T, LuaError>
+    // This reduces Result size from ~24 bytes to 1 byte!
+    /// Error message for RuntimeError/CompileError
+    pub(crate) error_message: String,
+
+    /// Yield values for coroutine yield
+    pub(crate) yield_values: Vec<LuaValue>,
 }
 
 impl LuaVM {
@@ -96,6 +105,9 @@ impl LuaVM {
             object_pool: ObjectPool::new(),
             #[cfg(feature = "async")]
             async_executor: AsyncExecutor::new(),
+            // Initialize error storage
+            error_message: String::new(),
+            yield_values: Vec::new(),
         };
 
         // Set _G to point to the global table itself
@@ -189,9 +201,9 @@ impl LuaVM {
         self.open_upvalues.clear();
 
         // Get function pointer
-        let func_ptr = func
-            .as_function_ptr()
-            .ok_or_else(|| LuaError::RuntimeError("Not a function".to_string()))?;
+        let Some(func_ptr) = func.as_function_ptr() else {
+            return Err(self.error("Not a function".to_string()));
+        };
 
         let func_obj = unsafe { &*func_ptr };
         let func_ref = func_obj.borrow();
@@ -239,11 +251,9 @@ impl LuaVM {
 
     /// Compile source code using VM's string pool
     pub fn compile(&mut self, source: &str) -> LuaResult<Chunk> {
-        use crate::compiler::Compiler;
-
         let chunk = match Compiler::compile(self, source) {
             Ok(c) => c,
-            Err(e) => return Err(LuaError::CompileError(e)),
+            Err(e) => return Err(self.compile_error(e)),
         };
 
         Ok(chunk)
@@ -252,25 +262,23 @@ impl LuaVM {
     /// Main execution loop - interprets bytecode instructions
     /// Main VM execution loop - MAXIMUM PERFORMANCE
     /// 零返回值，零分支，直接调度
-    fn run(&mut self) -> LuaResult<LuaValue> {        
+    fn run(&mut self) -> LuaResult<LuaValue> {
+        // CRITICAL OPTIMIZATION: Check frames.is_empty() OUTSIDE the loop
+        // RETURN instruction will pop frames and check if empty
+        // This removes 100M+ unnecessary checks for tight loops
         loop {
-            // 检查是否有帧
-            if self.frames.is_empty() {
-                return Ok(self
-                    .return_values
-                    .first()
-                    .copied()
-                    .unwrap_or(LuaValue::nil()));
-            }
-
+            // ULTRA-FAST PATH: Direct unsafe access, no bounds checks
             let frame = unsafe { self.frames.last_mut().unwrap_unchecked() };
             let instr = unsafe { *frame.code_ptr.add(frame.pc) };
             frame.pc += 1;
 
-         
             if let Err(e) = dispatch_instruction(self, instr) {
                 match e {
-                    LuaError::Yield(_) => return Ok(LuaValue::nil()),
+                    LuaError::Yield => return Ok(LuaValue::nil()),
+                    LuaError::Exit => {
+                        // Normal exit when all frames are popped
+                        return Ok(LuaValue::nil());
+                    }
                     _ => return Err(e),
                 }
             }
@@ -313,9 +321,10 @@ impl LuaVM {
         if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
             global.borrow_mut().raw_set(key.clone(), value.clone());
-            
+
             // Write barrier: global table (old) may now reference new object
-            self.gc.barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
+            self.gc
+                .barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
             self.gc.barrier_back(&value);
         }
     }
@@ -324,9 +333,10 @@ impl LuaVM {
         if let Some(global_id) = self.global_value.as_table_id() {
             let global = self.object_pool.get_table(global_id).unwrap();
             global.borrow_mut().raw_set(key.clone(), value.clone());
-            
+
             // Write barrier
-            self.gc.barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
+            self.gc
+                .barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
             self.gc.barrier_back(&value);
         }
     }
@@ -403,11 +413,11 @@ impl LuaVM {
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Extract Rc from LuaValue
         let thread_rc = unsafe {
-            let ptr = thread_val
-                .as_thread_ptr()
-                .ok_or(LuaError::RuntimeError("invalid thread".to_string()))?;
+            let Some(ptr) = thread_val.as_thread_ptr() else {
+                return Err(self.error("invalid thread".to_string()));
+            };
             if ptr.is_null() {
-                return Err(LuaError::RuntimeError("invalid thread".to_string()));
+                return Err(self.error("invalid thread".to_string()));
             }
             let rc = Rc::from_raw(ptr);
             let cloned = rc.clone();
@@ -470,8 +480,9 @@ impl LuaVM {
                 .unwrap_or(LuaValue::nil());
             match self.call_function_internal(func, args) {
                 Ok(values) => Ok(values),
-                Err(LuaError::Yield(values)) => {
+                Err(LuaError::Yield) => {
                     // Function yielded - this is expected
+                    let values = self.take_yield_values();
                     Ok(values)
                 }
                 Err(e) => Err(e),
@@ -516,7 +527,7 @@ impl LuaVM {
             self.return_values = args;
 
             // Continue execution from where it yielded
-            self.run().map(|v| vec![v])
+            self.run().map(|_| self.return_values.clone())
         };
 
         // Check if thread yielded by examining the result
@@ -557,9 +568,15 @@ impl LuaVM {
                     thread.status = CoroutineStatus::Dead;
                     Ok((true, values))
                 }
-                Err(e) => {
+                Err(LuaError::Exit) => {
+                    // Normal exit - coroutine finished successfully
                     thread.status = CoroutineStatus::Dead;
-                    Ok((false, vec![self.create_string(&format!("{}", e))]))
+                    Ok((true, thread.return_values.clone()))
+                }
+                Err(_) => {
+                    thread.status = CoroutineStatus::Dead;
+                    let error_msg = self.get_error_message().to_string();
+                    Ok((false, vec![self.create_string(&error_msg)]))
                 }
             }
         };
@@ -584,11 +601,9 @@ impl LuaVM {
             thread_rc.borrow_mut().yield_values = values.clone();
             thread_rc.borrow_mut().status = CoroutineStatus::Suspended;
             // Return Yield "error" to unwind the call stack
-            Err(LuaError::Yield(values))
+            Err(self.do_yield(values))
         } else {
-            Err(LuaError::RuntimeError(
-                "attempt to yield from outside a coroutine".to_string(),
-            ))
+            Err(self.error("attempt to yield from outside a coroutine".to_string()))
         }
     }
 
@@ -896,10 +911,11 @@ impl LuaVM {
             if has_key {
                 // Key exists, use raw set
                 lua_table.borrow_mut().raw_set(key.clone(), value.clone());
-                
+
                 // Write barrier: table may now reference new objects
                 if let Some(table_id) = lua_table_val.as_table_id() {
-                    self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                    self.gc
+                        .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
                     self.gc.barrier_back(&value);
                 }
                 return Ok(());
@@ -923,10 +939,9 @@ impl LuaVM {
                     mt_borrowed.raw_get(&newindex_key)
                 } else {
                     // Fallback to ObjectPool lookup
-                    let metatable = self
-                        .object_pool
-                        .get_table(table_id)
-                        .ok_or(LuaError::RuntimeError("missing metatable".to_string()))?;
+                    let Some(metatable) = self.object_pool.get_table(table_id) else {
+                        return Err(self.error("missing metatable".to_string()));
+                    };
                     let mt_borrowed = metatable.borrow();
                     mt_borrowed.raw_get(&newindex_key)
                 };
@@ -950,10 +965,11 @@ impl LuaVM {
 
             // No metamethod, use raw set
             lua_table.borrow_mut().raw_set(key.clone(), value.clone());
-            
+
             // Write barrier for new insertion
             if let Some(table_id) = lua_table_val.as_table_id() {
-                self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                self.gc
+                    .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
                 self.gc.barrier_back(&value);
             }
             return Ok(());
@@ -961,13 +977,12 @@ impl LuaVM {
 
         // Slow path: no cached pointer, use ObjectPool lookup
         let Some(table_id) = lua_table_val.as_table_id() else {
-            return Err(LuaError::RuntimeError("table_set: not a table".to_string()));
+            return Err(self.error("table_set: not a table".to_string()));
         };
 
-        let lua_table = self
-            .object_pool
-            .get_table(table_id)
-            .ok_or(LuaError::RuntimeError("invalid table".to_string()))?;
+        let Some(lua_table) = self.object_pool.get_table(table_id) else {
+            return Err(self.error("invalid table".to_string()));
+        };
 
         // Check if key already exists
         let has_key = {
@@ -978,9 +993,10 @@ impl LuaVM {
         if has_key {
             // Key exists, use raw set
             lua_table.borrow_mut().raw_set(key.clone(), value.clone());
-            
+
             // Write barrier
-            self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+            self.gc
+                .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
             self.gc.barrier_back(&value);
             return Ok(());
         }
@@ -995,10 +1011,9 @@ impl LuaVM {
             && let Some(table_id) = mt.as_table_id()
         {
             let newindex_key = self.create_string("__newindex");
-            let metatable = self
-                .object_pool
-                .get_table(table_id)
-                .ok_or(LuaError::RuntimeError("missing metatable".to_string()))?;
+            let Some(metatable) = self.object_pool.get_table(table_id) else {
+                return Err(self.error("missing metatable".to_string()));
+            };
 
             let newindex_value = {
                 let mt_borrowed = metatable.borrow();
@@ -1024,15 +1039,15 @@ impl LuaVM {
             }
         }
 
-        let lua_table = self
-            .object_pool
-            .get_table(table_id)
-            .ok_or(LuaError::RuntimeError("invalid table".to_string()))?;
+        let Some(lua_table) = self.object_pool.get_table(table_id) else {
+            return Err(self.error("invalid table".to_string()));
+        };
         // No metamethod or key doesn't exist, use raw set
         lua_table.borrow_mut().raw_set(key.clone(), value.clone());
-        
+
         // Write barrier for new insertion
-        self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+        self.gc
+            .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
         self.gc.barrier_back(&value);
         Ok(())
     }
@@ -1131,14 +1146,14 @@ impl LuaVM {
             if reg_idx < stack_pos {
                 break;
             }
-            
+
             self.to_be_closed.pop();
-            
+
             // Skip nil values
             if value.is_nil() {
                 continue;
             }
-            
+
             // Try to get __close metamethod
             let close_key = self.create_string("__close");
             let metamethod = if let Some(mt) = self.table_get_metatable(&value) {
@@ -1146,7 +1161,7 @@ impl LuaVM {
             } else {
                 None
             };
-            
+
             if let Some(mm) = metamethod {
                 if !mm.is_nil() {
                     // Call __close(value, error)
@@ -1172,15 +1187,15 @@ impl LuaVM {
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let id = self.object_pool.create_string(s);
-        
+
         // Estimate memory cost: string data + LuaString struct overhead
         // LuaString: ~32 bytes base + string length
         let estimated_bytes = 32 + s.len();
         self.gc.record_allocation(estimated_bytes);
-        
+
         // GC check MUST NOT happen here - object not yet protected!
         // Caller must call check_gc() AFTER storing value in register
-        
+
         // Get pointer from object pool for direct access
         let ptr = self
             .object_pool
@@ -1189,7 +1204,7 @@ impl LuaVM {
             .unwrap_or(std::ptr::null());
         LuaValue::string_id_ptr(id, ptr)
     }
-    
+
     /// Get string by LuaValue (resolves ID from object pool)
     pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
         if let Some(id) = value.as_string_id() {
@@ -1365,7 +1380,7 @@ impl LuaVM {
     /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
     /// This is called after allocating new objects (strings, tables, functions)
     /// Uses GC debt mechanism: runs when debt > 0
-    /// 
+    ///
     /// OPTIMIZATION: Use incremental collection with work budget
     fn check_gc(&mut self) {
         // Fast path: check debt without collecting roots
@@ -1521,6 +1536,48 @@ impl LuaVM {
         )
     }
 
+    // ===== Lightweight Error Handling API =====
+
+    /// Set runtime error and return lightweight error enum
+    #[inline]
+    pub fn error(&mut self, message: impl Into<String>) -> LuaError {
+        self.error_message = message.into();
+        LuaError::RuntimeError
+    }
+
+    /// Set compile error and return lightweight error enum
+    #[inline]
+    pub fn compile_error(&mut self, message: impl Into<String>) -> LuaError {
+        self.error_message = message.into();
+        LuaError::CompileError
+    }
+
+    /// Set yield values and return lightweight error enum
+    #[inline]
+    pub fn do_yield(&mut self, values: Vec<LuaValue>) -> LuaError {
+        self.yield_values = values;
+        LuaError::Yield
+    }
+
+    /// Get the current error message
+    #[inline]
+    pub fn get_error_message(&self) -> &str {
+        &self.error_message
+    }
+
+    /// Take the yield values (clears internal storage)
+    #[inline]
+    pub fn take_yield_values(&mut self) -> Vec<LuaValue> {
+        std::mem::take(&mut self.yield_values)
+    }
+
+    /// Clear error state
+    #[inline]
+    pub fn clear_error(&mut self) {
+        self.error_message.clear();
+        self.yield_values.clear();
+    }
+
     /// Try to get a metamethod from a value
     fn get_metamethod(&mut self, value: &LuaValue, event: &str) -> Option<LuaValue> {
         match value.kind() {
@@ -1604,16 +1661,10 @@ impl LuaVM {
     ) -> LuaResult<bool> {
         match metamethod.kind() {
             LuaValueKind::Function => {
-                let func_id = metamethod
-                    .as_function_id()
-                    .ok_or(LuaError::RuntimeError("Invalid function ID".to_string()))?;
-                let max_stack_size =
-                    {
-                        let func_ref = self.object_pool.get_function(func_id).ok_or(
-                            LuaError::RuntimeError("Invalid function reference".to_string()),
-                        )?;
-                        func_ref.borrow().chunk.max_stack_size
-                    };
+                let Some(func_ref) = metamethod.as_lua_function() else {
+                    return Err(self.error("Invalid function ID".to_string()));
+                };
+                let max_stack_size = func_ref.borrow().chunk.max_stack_size;
 
                 // Save current state
                 let frame_id = self.next_frame_id;
@@ -1631,11 +1682,7 @@ impl LuaVM {
                 }
 
                 // Get code pointer from metamethod function
-                let meta_func_ptr = metamethod
-                    .as_function_ptr()
-                    .ok_or_else(|| LuaError::RuntimeError("Invalid metamethod".to_string()))?;
-                let meta_func = unsafe { &*meta_func_ptr };
-                let code_ptr = meta_func.borrow().chunk.code.as_ptr();
+                let code_ptr = func_ref.borrow().chunk.code.as_ptr();
 
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
@@ -1729,9 +1776,7 @@ impl LuaVM {
             if let Some(str) = self.get_string(&s) {
                 Ok(str.as_str().to_string())
             } else {
-                Err(LuaError::RuntimeError(
-                    "`__tostring` metamethod did not return a string".to_string(),
-                ))
+                Err(self.error("`__tostring` metamethod did not return a string".to_string()))
             }
         } else {
             Ok(value.to_string_repr())
@@ -1787,9 +1832,10 @@ impl LuaVM {
                 // Success: return true and the return values
                 Ok((true, return_values))
             }
-            Err(LuaError::Yield(values)) => {
+            Err(LuaError::Yield) => {
                 // Yield is not an error - propagate it
-                Err(LuaError::Yield(values))
+                let values = self.take_yield_values();
+                Err(self.do_yield(values))
             }
             Err(error_msg) => {
                 // Real error: clean up frames and return false with error message
@@ -1817,32 +1863,19 @@ impl LuaVM {
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        eprintln!("[xpcall] protected_call_with_handler called");
-        eprintln!("[xpcall] err_handler type: {:?}", err_handler.kind());
-
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
         let initial_frame_count = self.frames.len();
-        eprintln!("[xpcall] initial_frame_count: {}", initial_frame_count);
 
         let result = self.call_function_internal(func, args);
 
         self.error_handler = old_handler;
 
         match result {
-            Ok(values) => {
-                eprintln!("[xpcall] Success, returning {} values", values.len());
-                Ok((true, values))
-            }
-            Err(LuaError::Yield(values)) => {
-                eprintln!("[xpcall] Yield encountered");
-                // Yield is not an error - propagate it
-                Err(LuaError::Yield(values))
-            }
+            Ok(values) => Ok((true, values)),
+            Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(err_msg) => {
-                eprintln!("[xpcall] Error encountered: {:?}", err_msg);
-
                 // Clean up frames created by the failed function call
                 while self.frames.len() > initial_frame_count {
                     let frame = self.frames.pop().unwrap();
@@ -1853,11 +1886,13 @@ impl LuaVM {
                 eprintln!("[xpcall] Calling error handler");
                 // Extract the actual error message without the "Runtime Error: " prefix
                 let (err_value, err_display) = match &err_msg {
-                    LuaError::RuntimeError(msg) => {
-                        (self.create_string(msg), format!("{}", err_msg))
+                    LuaError::RuntimeError => {
+                        let msg = self.get_error_message().to_string();
+                        (self.create_string(&msg), format!("Runtime Error: {}", msg))
                     }
-                    LuaError::CompileError(msg) => {
-                        (self.create_string(msg), format!("{}", err_msg))
+                    LuaError::CompileError => {
+                        let msg = self.get_error_message().to_string();
+                        (self.create_string(&msg), format!("Compile Error: {}", msg))
                     }
                     _ => {
                         let display = format!("{}", err_msg);
@@ -1865,13 +1900,13 @@ impl LuaVM {
                     }
                 };
                 let handler_result = self.call_function_internal(err_handler, vec![err_value]);
-                eprintln!("[xpcall] Handler result: {:?}", handler_result.is_ok());
 
                 match handler_result {
                     Ok(handler_values) => Ok((false, handler_values)),
-                    Err(LuaError::Yield(values)) => {
+                    Err(LuaError::Yield) => {
                         // Yield from error handler - propagate it
-                        Err(LuaError::Yield(values))
+                        let values = self.take_yield_values();
+                        Err(self.do_yield(values))
                     }
                     Err(_) => {
                         let err_str =
@@ -1962,11 +1997,9 @@ impl LuaVM {
 
                 // Call CFunction - ensure frame is always popped even on error
                 let result = match cfunc(self) {
-                    Ok(r) => Ok(r),
-                    Err(LuaError::Yield(values)) => {
-                        // CFunction yielded - this is valid for coroutine.yield
-                        // Don't pop frame, just return the yield
-                        return Err(LuaError::Yield(values));
+                    Ok(r) => r,
+                    Err(LuaError::Yield) => {
+                        return Err(LuaError::Yield);
                     }
                     Err(e) => {
                         self.frames.pop();
@@ -1976,16 +2009,15 @@ impl LuaVM {
 
                 self.frames.pop();
 
-                Ok(result?.all_values())
+                Ok(result.all_values())
             }
             LuaValueKind::Function => {
-                let lua_func_id = func.as_function_id().unwrap();
+                let Some(lua_func_ref) = func.as_lua_function() else {
+                    return Err(self.error("Invalid function reference".to_string()));
+                };
 
                 // Get max_stack_size before entering the execution loop
                 let max_stack_size = {
-                    let lua_func_ref = self.object_pool.get_function(lua_func_id).ok_or(
-                        LuaError::RuntimeError("Invalid function reference".to_string()),
-                    )?;
                     let size = lua_func_ref.borrow().chunk.max_stack_size;
                     // Ensure at least 1 register for function body
                     if size == 0 { 1 } else { size }
@@ -2026,12 +2058,7 @@ impl LuaVM {
                 let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
 
                 // Get code pointer from function
-                let func_ptr = func
-                    .as_function_ptr()
-                    .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-                let func_obj = unsafe { &*func_ptr };
-                let code_ptr = func_obj.borrow().chunk.code.as_ptr();
-
+                let code_ptr = lua_func_ref.borrow().chunk.code.as_ptr();
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     func,
@@ -2060,9 +2087,7 @@ impl LuaVM {
                     let chunk = if let Some(func_ref) = self.get_function(&function_value) {
                         func_ref.borrow().chunk.clone()
                     } else {
-                        break Err(LuaError::RuntimeError(
-                            "Invalid function in frame".to_string(),
-                        ));
+                        break Err(self.error("Invalid function in frame".to_string()));
                     };
 
                     if pc >= chunk.code.len() {
@@ -2075,7 +2100,7 @@ impl LuaVM {
                     self.frames[frame_idx].pc += 1;
 
                     // Dispatch instruction (zero-return-value design)
-                    if let Err(e) = crate::lua_vm::dispatcher::dispatch_instruction(self, instr) {
+                    if let Err(e) = dispatch_instruction(self, instr) {
                         break Err(e);
                     }
                 };
@@ -2090,9 +2115,7 @@ impl LuaVM {
                     Err(e) => Err(e),
                 }
             }
-            _ => Err(LuaError::RuntimeError(
-                "attempt to call a non-function value".to_string(),
-            )),
+            _ => Err(self.error("attempt to call a non-function value".to_string())),
         }
     }
 

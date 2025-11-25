@@ -101,6 +101,14 @@ impl LuaCallFrame {
         }
     }
 
+    pub fn get_lua_function(&self) -> Option<&RefCell<LuaFunction>> {
+        if self.is_lua() {
+            self.function_value.as_lua_function()
+        } else {
+            None
+        }
+    }
+
     #[inline(always)]
     pub fn is_lua(&self) -> bool {
         self.flags & FLAG_IS_LUA != 0

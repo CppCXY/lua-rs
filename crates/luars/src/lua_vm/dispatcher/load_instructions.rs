@@ -2,7 +2,7 @@
 ///
 /// These instructions handle loading constants and moving values between registers.
 use crate::LuaValue;
-use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{Instruction, LuaResult, LuaVM};
 
 /// VARARGPREP A
 /// Prepare stack for vararg function
@@ -19,9 +19,7 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let max_stack_size = if let Some(func_ref) = frame.function_value.as_lua_function() {
         func_ref.borrow().chunk.max_stack_size
     } else {
-        return Err(LuaError::RuntimeError(
-            "Invalid function in VARARGPREP".to_string(),
-        ));
+        return Err(vm.error("Invalid function in VARARGPREP".to_string()));
     };
 
     // Arguments were placed starting at base_ptr by CALL instruction
@@ -139,23 +137,16 @@ pub fn exec_loadk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let bx = Instruction::get_bx(instr) as usize;
 
     let frame = vm.current_frame();
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+    let Some(func_ref) = frame.get_lua_function() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
 
-    let func = unsafe { &*func_ptr };
-    let func_ref = func.borrow();
-    let chunk = &func_ref.chunk;
-
-    if bx >= chunk.constants.len() {
-        return Err(LuaError::RuntimeError(format!(
-            "Constant index out of bounds: {} >= {}",
-            bx,
-            chunk.constants.len()
-        )));
+    let len = func_ref.borrow().chunk.constants.len();
+    if bx >= len {
+        return Err(vm.error(format!("Constant index out of bounds: {} >= {}", bx, len)));
     }
 
-    let constant = chunk.constants[bx];
+    let constant = func_ref.borrow().chunk.constants[bx];
     let base_ptr = frame.base_ptr;
 
     vm.register_stack[base_ptr + a] = constant;
@@ -173,32 +164,27 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let pc = frame.pc;
     frame.pc += 1; // Skip the extra arg instruction
 
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
+    let Some(func_ref) = frame.get_lua_function() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
 
-    let func = unsafe { &*func_ptr };
-    let func_ref = func.borrow();
-    let chunk = &func_ref.chunk;
+    let code_len = func_ref.borrow().chunk.code.len();
 
-    if pc >= chunk.code.len() {
-        return Err(LuaError::RuntimeError(
-            "Missing EXTRAARG for LOADKX".to_string(),
-        ));
+    if pc >= code_len {
+        return Err(vm.error("Missing EXTRAARG for LOADKX".to_string()));
     }
 
-    let extra_instr = chunk.code[pc];
+    let extra_instr = func_ref.borrow().chunk.code[pc];
     let bx = Instruction::get_ax(extra_instr) as usize;
-
-    if bx >= chunk.constants.len() {
-        return Err(LuaError::RuntimeError(format!(
+    let const_len = func_ref.borrow().chunk.constants.len();
+    if bx >= const_len {
+        return Err(vm.error(format!(
             "Constant index out of bounds: {} >= {}",
-            bx,
-            chunk.constants.len()
+            bx, const_len
         )));
     }
 
-    let constant = chunk.constants[bx];
+    let constant = func_ref.borrow().chunk.constants[bx];
     let base_ptr = vm.current_frame().base_ptr;
 
     vm.register_stack[base_ptr + a] = constant;
@@ -207,12 +193,10 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 }
 
 /// ExtraArg: Extra argument for LOADKX and other instructions
-pub fn exec_extraarg(_vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
+pub fn exec_extraarg(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
     // EXTRAARG is consumed by the preceding instruction (like LOADKX)
     // It should never be executed directly
-    Err(LuaError::RuntimeError(
-        "EXTRAARG should not be executed directly".to_string(),
-    ))
+    Err(vm.error("EXTRAARG should not be executed directly".to_string()))
 }
 
 /// MOVE A B

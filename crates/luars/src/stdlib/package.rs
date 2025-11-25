@@ -1,9 +1,11 @@
 // Package library
 // Implements: config, cpath, loaded, loadlib, path, preload, searchers, searchpath
 
-use crate::lib_registry::{LibraryModule, get_arg, require_arg};
+use std::rc::Rc;
+
+use crate::lib_registry::{LibraryModule, require_arg};
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_package_lib() -> LibraryModule {
     let mut module = LibraryModule::new("package");
@@ -78,44 +80,34 @@ fn create_searchers_table(vm: &mut LuaVM) -> LuaValue {
 
 // Searcher 1: Check package.preload
 fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_val = require_arg(vm, 0, "preload searcher")?;
-    let modname = unsafe {
-        modname_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("module name expected".to_string()))?
-            .as_str()
-            .to_string()
+    let modname_val = require_arg(vm, 1, "preload searcher")?;
+    let Some(modname) = modname_val.as_lua_string() else {
+        return Err(vm.error("module name expected".to_string()));
     };
 
-    let package_table = vm
-        .get_global("package")
-        .ok_or_else(|| LuaError::RuntimeError("package table not found".to_string()))?;
+    let Some(package_table) = vm.get_global("package") else {
+        return Err(vm.error("package table not found".to_string()));
+    };
 
+    let Some(package_ref) = package_table.as_lua_table() else {
+        return Err(vm.error("Invalid package table".to_string()));
+    };
     let preload_key = vm.create_string("preload");
-    let package_ref_cell = vm
-        .get_table(&package_table)
-        .ok_or_else(|| LuaError::RuntimeError("Invalid package table".to_string()))?;
-    let preload_val = package_ref_cell
+    let preload_val = package_ref
         .borrow()
         .raw_get(&preload_key)
         .unwrap_or(LuaValue::nil());
 
-    if preload_val.is_nil() || preload_val.as_table_id().is_none() {
-        let err = format!("\n\tno field package.preload['{}']", modname);
-        return Ok(MultiValue::single(vm.create_string(&err)));
-    }
-
-    let modname_key = vm.create_string(&modname);
-    let preload_ref_cell = vm
-        .get_table(&preload_val)
-        .ok_or_else(|| LuaError::RuntimeError("Invalid preload table".to_string()))?;
-    let loader = preload_ref_cell
+    let Some(preload_ref) = preload_val.as_lua_table() else {
+        return Err(vm.error("package.preload is not a table".to_string()));
+    };
+    let loader = preload_ref
         .borrow()
-        .raw_get(&modname_key)
+        .raw_get(&modname_val)
         .unwrap_or(LuaValue::nil());
 
     if loader.is_nil() {
-        let err = format!("\n\tno field package.preload['{}']", modname);
+        let err = format!("\n\tno field package.preload['{}']", modname.as_str());
         Ok(MultiValue::single(vm.create_string(&err)))
     } else {
         Ok(MultiValue::single(loader))
@@ -124,38 +116,30 @@ fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 // Searcher 2: Search package.path
 fn searcher_lua(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_val = require_arg(vm, 0, "Lua searcher")?;
-    let modname = unsafe {
-        modname_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("module name expected".to_string()))?
-            .as_str()
-            .to_string()
+    let modname_val = require_arg(vm, 1, "Lua searcher")?;
+    let Some(modname) = modname_val.as_lua_string() else {
+        return Err(vm.error("module name expected".to_string()));
     };
 
-    let path = unsafe {
-        let package_table = vm
-            .get_global("package")
-            .ok_or_else(|| LuaError::RuntimeError("package table not found".to_string()))?;
+    let Some(package_table) = vm.get_global("package") else {
+        return Err(vm.error("package table not found".to_string()));
+    };
 
-        let path_key = vm.create_string("path");
-        let package_ref_cell = vm
-            .get_table(&package_table)
-            .ok_or_else(|| LuaError::RuntimeError("Invalid package table".to_string()))?;
-        let path_val = package_ref_cell
-            .borrow()
-            .raw_get(&path_key)
-            .unwrap_or(LuaValue::nil());
+    let Some(package_ref) = package_table.as_lua_table() else {
+        return Err(vm.error("Invalid package table".to_string()));
+    };
 
-        path_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("package.path is not a string".to_string()))?
-            .as_str()
-            .to_string()
+    let path_key = vm.create_string("path");
+    let Some(path_value) = package_ref.borrow().raw_get(&path_key) else {
+        return Err(vm.error("package.path not found".to_string()));
+    };
+
+    let Some(path) = path_value.as_lua_string() else {
+        return Err(vm.error("package.path is not a string".to_string()));
     };
 
     // Search for the file
-    let result = search_path(&modname, &path, ".", "/")?;
+    let result = search_path(&modname.as_str(), &path.as_str(), ".", "/")?;
 
     match result {
         Some(filepath) => Ok(MultiValue::multiple(vec![
@@ -165,8 +149,9 @@ fn searcher_lua(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         None => {
             let err = format!(
                 "\n\tno file '{}'",
-                path.split(';')
-                    .map(|template| { template.replace('?', &modname.replace('.', "/")) })
+                path.as_str()
+                    .split(';')
+                    .map(|template| { template.replace('?', &modname.as_str().replace('.', "/")) })
                     .collect::<Vec<_>>()
                     .join("'\n\tno file '")
             );
@@ -177,28 +162,23 @@ fn searcher_lua(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 // Loader function for Lua files (called by searcher_lua)
 fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let _modname = get_arg(vm, 0);
     let filepath_val = require_arg(vm, 1, "Lua file loader")?;
 
-    let filepath = unsafe {
-        filepath_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("filepath expected".to_string()))?
-            .as_str()
-            .to_string()
+    let Some(filepath) = filepath_val.as_lua_string() else {
+        return Err(vm.error("file path must be a string".to_string()));
+    };
+    // Read the file
+    let source = match std::fs::read_to_string(&filepath.as_str()) {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok(MultiValue::single(LuaValue::nil()));
+        }
     };
 
-    // Read the file
-    let source = std::fs::read_to_string(&filepath)
-        .map_err(|e| LuaError::RuntimeError(format!("cannot read file '{}': {}", filepath, e)))?;
-
     // Compile it using VM's string pool
-    let chunk = vm.compile(&source).map_err(|e| {
-        LuaError::RuntimeError(format!("error loading module '{}': {}", filepath, e))
-    })?;
-
+    let chunk = vm.compile(&source)?;
     // Create a function from the chunk
-    let func = vm.create_function(std::rc::Rc::new(chunk), vec![]);
+    let func = vm.create_function(Rc::new(chunk), vec![]);
 
     // Call the function
     let (success, results) = vm.protected_call(func, vec![])?;
@@ -211,9 +191,10 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_else(|| "unknown error".to_string())
         };
-        return Err(LuaError::RuntimeError(format!(
+        return Err(vm.error(format!(
             "error loading module '{}': {}",
-            filepath, error_msg
+            filepath.as_str(),
+            error_msg
         )));
     }
 
@@ -228,68 +209,13 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 // Searcher 3: Search package.cpath (C libraries)
-fn searcher_c(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_val = require_arg(vm, 0, "C searcher")?;
-    let modname = unsafe {
-        modname_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("module name expected".to_string()))?
-            .as_str()
-            .to_string()
-    };
-
-    let cpath = unsafe {
-        let package_table = vm
-            .get_global("package")
-            .ok_or_else(|| LuaError::RuntimeError("package table not found".to_string()))?;
-
-        let cpath_key = vm.create_string("cpath");
-        let package_ref_cell = vm
-            .get_table(&package_table)
-            .ok_or_else(|| LuaError::RuntimeError("Invalid package table".to_string()))?;
-        let cpath_val = package_ref_cell
-            .borrow()
-            .raw_get(&cpath_key)
-            .unwrap_or(LuaValue::nil());
-
-        cpath_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("package.cpath is not a string".to_string()))?
-            .as_str()
-            .to_string()
-    };
-
-    // For now, just return error message (C loader not implemented)
-    let err = format!(
-        "\n\tC loader not implemented\n\tno file '{}'",
-        cpath
-            .split(';')
-            .map(|template| { template.replace('?', &modname.replace('.', "/")) })
-            .collect::<Vec<_>>()
-            .join("'\n\tno file '")
-    );
-    Ok(MultiValue::single(vm.create_string(&err)))
+fn searcher_c(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    return Ok(MultiValue::single(LuaValue::nil()));
 }
 
 // Searcher 4: all-in-one loader (stub)
-fn searcher_allinone(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_val = require_arg(vm, 0, "all-in-one searcher")?;
-    let modname = unsafe {
-        modname_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("module name expected".to_string()))?
-            .as_str()
-            .to_string()
-    };
-
-    // Only try if this is a submodule (contains '.')
-    if !modname.contains('.') {
-        let err = format!("\n\tno module '{}' in all-in-one loader", modname);
-        return Ok(MultiValue::single(vm.create_string(&err)));
-    }
-
-    let err = format!("\n\tall-in-one loader not fully implemented");
-    Ok(MultiValue::single(vm.create_string(&err)))
+fn searcher_allinone(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    return Ok(MultiValue::single(LuaValue::nil()));
 }
 
 // Helper: Search for a file in path templates
@@ -315,66 +241,27 @@ fn package_loadlib(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn package_searchpath(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let name_val = require_arg(vm, 0, "searchpath")?;
-    let path_val = require_arg(vm, 1, "searchpath")?;
-    let sep_val = get_arg(vm, 2).unwrap_or(vm.create_string("."));
-    let rep_val = get_arg(vm, 3).unwrap_or(vm.create_string("/"));
+    let name_val = require_arg(vm, 1, "searchpath")?;
+    let path_val = require_arg(vm, 2, "searchpath")?;
+    // let sep_val = get_arg(vm, 2).unwrap_or(vm.create_string("."));
+    // let rep_val = get_arg(vm, 3).unwrap_or(vm.create_string("/"));
 
-    let name = unsafe {
-        name_val
-            .as_string()
-            .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #1 to 'searchpath' (string expected)".to_string(),
-                )
-            })?
-            .as_str()
-            .to_string()
+    let Some(name) = name_val.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'searchpath' (string expected)".to_string()));
     };
 
-    let path = unsafe {
-        path_val
-            .as_string()
-            .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #2 to 'searchpath' (string expected)".to_string(),
-                )
-            })?
-            .as_str()
-            .to_string()
+    let Some(path) = path_val.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'searchpath' (string expected)".to_string()));
     };
 
-    let sep = unsafe {
-        sep_val
-            .as_string()
-            .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #3 to 'searchpath' (string expected)".to_string(),
-                )
-            })?
-            .as_str()
-            .to_string()
-    };
-
-    let rep = unsafe {
-        rep_val
-            .as_string()
-            .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #4 to 'searchpath' (string expected)".to_string(),
-                )
-            })?
-            .as_str()
-            .to_string()
-    };
-
-    match search_path(&name, &path, &sep, &rep)? {
+    match search_path(name.as_str(), path.as_str(), ".", "/")? {
         Some(filepath) => Ok(MultiValue::single(vm.create_string(&filepath))),
         None => {
-            let searchname = name.replace(&sep, &rep);
+            let searchname = name.as_str().replace(".", "/");
             let err = format!(
                 "\n\tno file '{}'",
-                path.split(';')
+                path.as_str()
+                    .split(';')
                     .map(|template| { template.replace('?', &searchname) })
                     .collect::<Vec<_>>()
                     .join("'\n\tno file '")

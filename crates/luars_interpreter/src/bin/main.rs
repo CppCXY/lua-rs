@@ -161,10 +161,11 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
 
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute(Rc::new(chunk)).map_err(|e| format!("{}", e))?;
+            vm.execute(Rc::new(chunk))
+                .map_err(|e| format!("{}: {}", e, vm.get_error_message()))?;
             Ok(())
         }
-        Err(e) => Err(format!("{}: {}", filename, e)),
+        Err(e) => Err(format!("{}: {}: {}", filename, e, vm.get_error_message())),
     }
 }
 

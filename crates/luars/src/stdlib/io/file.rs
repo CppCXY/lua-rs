@@ -212,7 +212,7 @@ pub fn create_file_metatable(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 /// file:read([format])
 fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = require_arg(vm, 0, "file.read")?;
+    let file_val = require_arg(vm, 1, "file.read")?;
 
     // Extract LuaFile from userdata
     unsafe {
@@ -277,7 +277,7 @@ fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// file:write(...)
 fn file_write(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = require_arg(vm, 0, "file.write")?;
+    let file_val = require_arg(vm, 1, "file.write")?;
 
     // Extract LuaFile from userdata
     unsafe {
@@ -344,7 +344,7 @@ fn file_write(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// file:flush()
 fn file_flush(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = require_arg(vm, 0, "file.flush")?;
+    let file_val = require_arg(vm, 1, "file.flush")?;
 
     // Extract LuaFile from userdata
     if let Some(ud) = vm.get_userdata(&file_val) {
@@ -364,7 +364,7 @@ fn file_flush(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// file:close()
 fn file_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // For method calls from Lua, register 1 is self (file object)
-    let file_val = require_arg(vm, 0, "file.close")?;
+    let file_val = require_arg(vm, 1, "file.close")?;
 
     // Extract LuaFile from userdata
     if let Some(ud) = vm.get_userdata(&file_val) {
@@ -384,7 +384,7 @@ fn file_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// file:lines([formats]) - Returns an iterator for reading lines
 fn file_lines(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Get file handle from self
-    let file_val = require_arg(vm, 0, "file.lines")?;
+    let file_val = require_arg(vm, 1, "file.lines")?;
 
     // For now, return a simple iterator that reads lines
     // Create state table with file handle
@@ -404,7 +404,7 @@ fn file_lines(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// Iterator function for file:lines()
 fn file_lines_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let state_val = require_arg(vm, 0, "iterator requires state")?;
+    let state_val = require_arg(vm, 1, "iterator requires state")?;
     let file_key = vm.create_string("file");
     let state_ref_cell = vm
         .get_table(&state_val)
@@ -436,7 +436,7 @@ fn file_lines_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// file:seek([whence [, offset]]) - Sets and gets the file position
 fn file_seek(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let file_val = require_arg(vm, 0, "file.seek")?;
+    let file_val = require_arg(vm, 1, "file.seek")?;
 
     let whence = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
@@ -487,7 +487,7 @@ fn file_seek(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// file:setvbuf(mode [, size]) - Sets the buffering mode
 fn file_setvbuf(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let file_val = require_arg(vm, 0, "file.setvbuf")?;
+    let file_val = require_arg(vm, 1, "file.setvbuf")?;
 
     let _mode = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })

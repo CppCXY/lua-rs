@@ -3,9 +3,11 @@
 // select, ipairs, pairs, next, pcall, xpcall, getmetatable, setmetatable,
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
 
+use std::rc::Rc;
+
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaUpvalue, LuaValue, LuaValueKind, MultiValue};
-use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_basic_lib() -> LibraryModule {
     crate::lib_module!("_G", {
@@ -57,7 +59,7 @@ fn lua_print(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// type(v) - Return the type of a value as a string
 fn lua_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
+    let value = get_arg(vm, 1).unwrap_or(LuaValue::nil());
 
     let type_name = match value.kind() {
         LuaValueKind::Nil => "nil",
@@ -76,13 +78,13 @@ fn lua_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// assert(v [, message]) - Raise error if v is false or nil
 fn lua_assert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let condition = get_arg(vm, 0).unwrap_or(LuaValue::nil());
+    let condition = get_arg(vm, 1).unwrap_or(LuaValue::nil());
 
     if !condition.is_truthy() {
-        let message = get_arg(vm, 1)
+        let message = get_arg(vm, 2)
             .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
             .unwrap_or_else(|| "assertion failed!".to_string());
-        return Err(LuaError::RuntimeError(message));
+        return Err(vm.error(message));
     }
 
     // Return all arguments
@@ -91,7 +93,7 @@ fn lua_assert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// error(message) - Raise an error
 fn lua_error(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let message = get_arg(vm, 0)
+    let message = get_arg(vm, 1)
         .map(|v| {
             vm.value_to_string(&v)
                 .unwrap_or_else(|_| v.to_string_repr())
@@ -99,18 +101,16 @@ fn lua_error(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         .unwrap_or_else(|| "error".to_string());
 
     // Return error message directly for now
-    Err(LuaError::RuntimeError(message))
+    Err(vm.error(message))
 }
 
 /// tonumber(e [, base]) - Convert to number
 fn lua_tonumber(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
-    let base = get_arg(vm, 1).and_then(|v| v.as_integer()).unwrap_or(10);
+    let value = require_arg(vm, 1, "tonumber")?;
+    let base = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(10);
 
     if base < 2 || base > 36 {
-        return Err(LuaError::RuntimeError(
-            "bad argument #2 to 'tonumber' (base out of range)".to_string(),
-        ));
+        return Err(vm.error("bad argument #2 to 'tonumber' (base out of range)".to_string()));
     }
 
     let result = match value.kind() {
@@ -151,24 +151,24 @@ fn lua_tonumber(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// tostring(v) - Convert to string
 /// OPTIMIZED: Fast path for common types
 fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let value = get_arg(vm, 0).unwrap_or(LuaValue::nil());
+    let value = require_arg(vm, 1, "tostring")?;
 
     // Fast path: if already a string, return it directly
     if value.is_string() {
         return Ok(MultiValue::single(value));
     }
-    
+
     // Fast path: simple types without metamethods
     if value.is_nil() {
         let result = vm.create_string("nil");
         return Ok(MultiValue::single(result));
     }
-    
+
     if let Some(b) = value.as_bool() {
         let result = vm.create_string(if b { "true" } else { "false" });
         return Ok(MultiValue::single(result));
     }
-    
+
     if let Some(i) = value.as_integer() {
         // OPTIMIZED: Use itoa for fast integer formatting (10x faster than format!)
         let mut buffer = itoa::Buffer::new();
@@ -176,7 +176,7 @@ fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let result = vm.create_string(s);
         return Ok(MultiValue::single(result));
     }
-    
+
     if let Some(f) = value.as_number() {
         let result = vm.create_string(&f.to_string());
         return Ok(MultiValue::single(result));
@@ -190,7 +190,7 @@ fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// select(index, ...) - Return subset of arguments
 fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let index_arg = require_arg(vm, 0, "select")?;
+    let index_arg = require_arg(vm, 1, "select")?;
     let args = get_args(vm);
 
     // Handle "#" special case
@@ -204,14 +204,12 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
     }
 
-    let index = index_arg.as_integer().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'select' (number expected)".to_string())
-    })?;
+    let index = index_arg
+        .as_integer()
+        .ok_or_else(|| vm.error("bad argument #1 to 'select' (number expected)".to_string()))?;
 
     if index == 0 {
-        return Err(LuaError::RuntimeError(
-            "bad argument #1 to 'select' (index out of range)".to_string(),
-        ));
+        return Err(vm.error("bad argument #1 to 'select' (index out of range)".to_string()));
     }
 
     let start = if index > 0 {
@@ -231,13 +229,11 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// ipairs(t) - Return iterator for array part of table
 fn lua_ipairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let table_val = require_arg(vm, 0, "ipairs")?;
+    let table_val = require_arg(vm, 1, "ipairs")?;
 
     // Validate that it's a table
     if !table_val.is_table() {
-        return Err(LuaError::RuntimeError(
-            "bad argument #1 to 'ipairs' (table expected)".to_string(),
-        ));
+        return Err(vm.error("bad argument #1 to 'ipairs' (table expected)".to_string()));
     }
 
     // Return iterator function, table, and 0
@@ -254,20 +250,16 @@ fn lua_ipairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 #[inline]
 fn ipairs_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Ultra-fast path: direct argument access without validation
-    let table_val = if let Some(val) = get_arg(vm, 0) {
+    let table_val = if let Some(val) = get_arg(vm, 1) {
         val
     } else {
-        return Err(LuaError::RuntimeError(
-            "ipairs iterator: table expected".to_string(),
-        ));
+        return Err(vm.error("ipairs iterator: table expected".to_string()));
     };
 
-    let index_val = if let Some(val) = get_arg(vm, 1) {
+    let index_val = if let Some(val) = get_arg(vm, 2) {
         val
     } else {
-        return Err(LuaError::RuntimeError(
-            "ipairs iterator: index expected".to_string(),
-        ));
+        return Err(vm.error("ipairs iterator: index expected".to_string()));
     };
 
     // Fast type check using direct pointer (ZERO ObjectPool lookup!)
@@ -292,20 +284,16 @@ fn ipairs_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     // Slow path with proper validation
-    Err(LuaError::RuntimeError(
-        "ipairs iterator: invalid table or index".to_string(),
-    ))
+    Err(vm.error("ipairs iterator: invalid table or index".to_string()))
 }
 
 /// pairs(t) - Return iterator for all key-value pairs
 fn lua_pairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let table_val = require_arg(vm, 0, "pairs")?;
+    let table_val = require_arg(vm, 1, "pairs")?;
 
     // Validate that it's a table
     if table_val.as_table_id().is_none() {
-        return Err(LuaError::RuntimeError(
-            "bad argument #1 to 'pairs' (table expected)".to_string(),
-        ));
+        return Err(vm.error("bad argument #1 to 'pairs' (table expected)".to_string()));
     }
 
     // TODO: Check for __pairs metamethod
@@ -319,8 +307,8 @@ fn lua_pairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// next(table [, index]) - Return next key-value pair
 fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let table_val = require_arg(vm, 0, "next")?;
-    let index_val = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    let table_val = require_arg(vm, 1, "next")?;
+    let index_val = get_arg(vm, 2).unwrap_or(LuaValue::nil());
 
     // CRITICAL OPTIMIZATION: Use direct pointer access instead of ObjectPool lookup!
     // This eliminates HashMap lookup on every iteration
@@ -333,7 +321,7 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             None => Ok(MultiValue::single(LuaValue::nil())),
         }
     } else {
-        Err(LuaError::RuntimeError("Invalid table".to_string()))
+        Err(vm.error("Invalid table".to_string()))
     }
 }
 
@@ -341,8 +329,8 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // pcall(f, arg1, arg2, ...) -> status, result or error
 
-    // Get the function to call (argument 0)
-    let func = require_arg(vm, 0, "pcall")?;
+    // Get the function to call (argument 1)
+    let func = require_arg(vm, 1, "pcall")?;
 
     // Get all arguments after the function
     let all_args = get_args(vm);
@@ -365,26 +353,15 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
 fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // xpcall(f, msgh, arg1, arg2, ...) -> status, result or error
-
-    eprintln!("[lua_xpcall] Called");
-    let all_args = get_args(vm);
-    eprintln!("[lua_xpcall] Total args: {}", all_args.len());
-    for (i, arg) in all_args.iter().enumerate() {
-        eprintln!("[lua_xpcall] Arg {}: {:?}", i, arg.kind());
-    }
-
-    // Get the function to call (argument 0)
-    let func = require_arg(vm, 0, "xpcall")?;
-    eprintln!("[lua_xpcall] func type: {:?}", func.kind());
-
-    // Get the error handler (argument 1)
-    let err_handler = require_arg(vm, 1, "xpcall")?;
-    eprintln!("[lua_xpcall] err_handler type: {:?}", err_handler.kind());
+    // Get the function to call (argument 1)
+    let func = require_arg(vm, 1, "xpcall")?;
+    // Get the error handler (argument 2)
+    let err_handler = require_arg(vm, 2, "xpcall")?;
 
     // Get all arguments after the function and error handler
     let all_args = get_args(vm);
     let args: Vec<LuaValue> = if all_args.len() > 2 {
-        all_args[2..].to_vec()
+        all_args[3..].to_vec()
     } else {
         Vec::new()
     };
@@ -401,13 +378,13 @@ fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// getmetatable(object) - Get metatable
 fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let value = require_arg(vm, 0, "getmetatable")?;
+    let value = require_arg(vm, 1, "getmetatable")?;
 
     match value.kind() {
         LuaValueKind::Table => {
-            let table_ref = vm
-                .get_table(&value)
-                .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
+            let Some(table_ref) = value.as_lua_table() else {
+                return Err(vm.error("Invalid table".to_string()));
+            };
 
             // Get metatable, releasing the borrow immediately
             let mt = table_ref.borrow().get_metatable();
@@ -443,42 +420,23 @@ fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// setmetatable(table, metatable) - Set metatable
 fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let table = require_arg(vm, 0, "setmetatable")?;
-    let metatable = require_arg(vm, 1, "setmetatable")?;
+    let table = require_arg(vm, 1, "setmetatable")?;
+    let metatable = require_arg(vm, 2, "setmetatable")?;
 
-    // First argument must be a table
-    if !table.is_table() {
-        return Err(LuaError::RuntimeError(
-            "setmetatable() first argument must be a table".to_string(),
-        ));
-    }
+    // Set the new metatable
+    let Some(table_ref) = table.as_lua_table() else {
+        return Err(vm.error("Invalid table".to_string()));
+    };
 
-    // Check if the current metatable has __metatable protection
-    let has_protection = {
-        let table_ref = vm
-            .get_table(&table)
-            .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-        table_ref.borrow().get_metatable()
-    }; // table_ref borrow ends here
-
-    if let Some(current_mt) = has_protection {
-        let metatable_key = vm.create_string("__metatable");
-        if let Some(mt_table) = vm.get_table(&current_mt) {
-            if let Some(protected) = mt_table.borrow().raw_get(&metatable_key) {
-                if !protected.is_nil() {
-                    // Metatable is protected, cannot change it
-                    return Err(LuaError::RuntimeError(
-                        "cannot change a protected metatable".to_string(),
-                    ));
-                }
+    // Check if current metatable has __metatable field (protection)
+    if let Some(current_mt) = table_ref.borrow().get_metatable() {
+        if let Some(mt_table) = current_mt.as_lua_table() {
+            let metatable_field = vm.create_string("__metatable");
+            if let Some(_) = mt_table.borrow().raw_get(&metatable_field) {
+                return Err(vm.error("cannot change a protected metatable".to_string()));
             }
         }
     }
-
-    // Set the new metatable
-    let table_ref = vm
-        .get_table(&table)
-        .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
 
     match metatable.kind() {
         LuaValueKind::Nil => {
@@ -491,9 +449,9 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .set_metatable(Some(metatable.clone()));
         }
         _ => {
-            return Err(LuaError::RuntimeError(
-                "setmetatable() second argument must be a table or nil".to_string(),
-            ));
+            return Err(
+                vm.error("setmetatable() second argument must be a table or nil".to_string())
+            );
         }
     }
 
@@ -503,48 +461,34 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// rawget(table, index) - Get without metamethods
 fn lua_rawget(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let table = require_arg(vm, 0, "rawget")?;
-    let key = require_arg(vm, 1, "rawget")?;
+    let table = require_arg(vm, 1, "rawget")?;
+    let key = require_arg(vm, 2, "rawget")?;
 
-    if table.is_table() {
-        let table_ref = vm
-            .get_table(&table)
-            .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
+    if let Some(table_ref) = table.as_lua_table() {
         let value = table_ref.borrow().raw_get(&key).unwrap_or(LuaValue::nil());
         Ok(MultiValue::single(value))
     } else {
-        Err(LuaError::RuntimeError(
-            "rawget() first argument must be a table".to_string(),
-        ))
+        Err(vm.error("rawget() first argument must be a table".to_string()))
     }
 }
 
 /// rawset(table, index, value) - Set without metamethods
 fn lua_rawset(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let table = require_arg(vm, 0, "rawset")?;
-    let key = require_arg(vm, 1, "rawset")?;
-    let value = require_arg(vm, 2, "rawset")?;
+    let table = require_arg(vm, 1, "rawset")?;
+    let key = require_arg(vm, 2, "rawset")?;
+    let value = require_arg(vm, 3, "rawset")?;
 
-    if table.is_table() {
-        if key.is_nil() {
-            return Err(LuaError::RuntimeError("table index is nil".to_string()));
-        }
-
-        let table_ref = vm
-            .get_table(&table)
-            .ok_or(LuaError::RuntimeError("Invalid table".to_string()))?;
-        table_ref.borrow_mut().raw_set(key.clone(), value.clone());
-        Ok(MultiValue::single(table.clone()))
+    if let Some(table_ref) = table.as_lua_table() {
+        table_ref.borrow_mut().raw_set(key, value);
+        Ok(MultiValue::single(table))
     } else {
-        Err(LuaError::RuntimeError(
-            "rawset() first argument must be a table".to_string(),
-        ))
+        Err(vm.error("rawset() first argument must be a table".to_string()))
     }
 }
 
 /// rawlen(v) - Length without metamethods
 fn lua_rawlen(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let value = require_arg(vm, 0, "rawlen")?;
+    let value = require_arg(vm, 1, "rawlen")?;
 
     let len = unsafe {
         match value.kind() {
@@ -553,15 +497,11 @@ fn lua_rawlen(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 if let Some(s) = value.as_string() {
                     s.as_str().len() as i64
                 } else {
-                    return Err(LuaError::RuntimeError(
-                        "rawlen() argument must be a table or string".to_string(),
-                    ));
+                    return Err(vm.error("rawlen() argument must be a table or string".to_string()));
                 }
             }
             _ => {
-                return Err(LuaError::RuntimeError(
-                    "rawlen() argument must be a table or string".to_string(),
-                ));
+                return Err(vm.error("rawlen() argument must be a table or string".to_string()));
             }
         }
     };
@@ -571,8 +511,8 @@ fn lua_rawlen(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// rawequal(v1, v2) - Equality without metamethods
 fn lua_rawequal(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let v1 = get_arg(vm, 0).unwrap_or(LuaValue::nil());
-    let v2 = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    let v1 = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    let v2 = get_arg(vm, 2).unwrap_or(LuaValue::nil());
 
     let result = v1 == v2;
     Ok(MultiValue::single(LuaValue::boolean(result)))
@@ -580,7 +520,7 @@ fn lua_rawequal(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// collectgarbage([opt [, arg]]) - Garbage collector control
 fn lua_collectgarbage(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let opt = get_arg(vm, 0)
+    let opt = get_arg(vm, 1)
         .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "=(load)".to_string());
 
@@ -597,10 +537,7 @@ fn lua_collectgarbage(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             // Simplified: just return 0
             Ok(MultiValue::single(LuaValue::integer(0)))
         }
-        _ => Err(LuaError::RuntimeError(format!(
-            "collectgarbage: invalid option '{}'",
-            opt
-        ))),
+        _ => Err(vm.error(format!("collectgarbage: invalid option '{}'", opt))),
     }
 }
 
@@ -612,71 +549,52 @@ fn lua_version(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// require(modname) - Load a module  
 fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_str = require_arg(vm, 0, "require")?;
+    let modname_str = require_arg(vm, 1, "require")?;
     if !modname_str.is_string() {
-        return Err(LuaError::RuntimeError(
-            "module name must be a string".to_string(),
-        ));
+        return Err(vm.error("module name must be a string".to_string()));
     }
 
     // Check if module is already loaded in package.loaded
-    if let Some(package_table) = vm.get_global("package") {
-        if let Some(_package_id) = package_table.as_table_id() {
+    let package_table = if let Some(package_table) = vm.get_global("package") {
+        if let Some(package_ref) = package_table.as_lua_table() {
             let loaded_key = vm.create_string("loaded");
-            let package_ref = vm
-                .get_table(&package_table)
-                .ok_or(LuaError::RuntimeError("Invalid package table".to_string()))?;
             if let Some(loaded_table) = package_ref.borrow().raw_get(&loaded_key) {
-                if loaded_table.is_table() {
-                    if let Some(module_value) = vm
-                        .get_table(&loaded_table)
-                        .ok_or(LuaError::RuntimeError("Invalid loaded table".to_string()))?
-                        .borrow()
-                        .raw_get(&modname_str)
-                    {
-                        if !module_value.is_nil() {
-                            return Ok(MultiValue::single(module_value));
+                if let Some(loaded_ref) = loaded_table.as_lua_table() {
+                    if let Some(module_val) = loaded_ref.borrow().raw_get(&modname_str) {
+                        if !module_val.is_nil() {
+                            // Module already loaded - return it
+                            return Ok(MultiValue::single(module_val));
                         }
                     }
                 }
                 // Module not in loaded table - continue to searchers
             }
         }
-    }
+        package_table
+    } else {
+        return Err(vm.error("package table not found".to_string()));
+    };
 
     // Try each searcher in package.searchers
     let mut error_messages = Vec::new();
-
-    let package_table = vm
-        .get_global("package")
-        .ok_or_else(|| LuaError::RuntimeError("package table not found".to_string()))?;
-
     let key = vm.create_string("searchers");
-    let package_ref = vm
-        .get_table(&package_table)
-        .ok_or(LuaError::RuntimeError("Invalid package table".to_string()))?;
+    let Some(package_ref) = package_table.as_lua_table() else {
+        return Err(vm.error("Invalid package table".to_string()));
+    };
     let searchers_val = package_ref
         .borrow()
         .raw_get(&key)
         .unwrap_or(LuaValue::nil());
 
-    let searchers_table_val = searchers_val;
-    let _searchers_id = searchers_table_val
-        .as_table_id()
-        .ok_or_else(|| LuaError::RuntimeError("package.searchers is not a table".to_string()))?;
-
+    let Some(searchers_table) = searchers_val.as_lua_table() else {
+        return Err(vm.error("package.searchers is not a table".to_string()));
+    };
     // Try each searcher (1-based indexing)
     let mut i = 1;
     loop {
-        let searcher_key = LuaValue::integer(i);
-        let searchers_ref = vm
-            .get_table(&searchers_table_val)
-            .ok_or(LuaError::RuntimeError(
-                "Invalid searchers table".to_string(),
-            ))?;
-        let searcher = searchers_ref
+        let searcher = searchers_table
             .borrow()
-            .raw_get(&searcher_key)
+            .get_int(i)
             .unwrap_or(LuaValue::nil());
 
         if searcher.is_nil() {
@@ -692,10 +610,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .and_then(|v| v.as_lua_string())
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_else(|| "unknown error in searcher".to_string());
-            return Err(LuaError::RuntimeError(format!(
-                "error calling searcher: {}",
-                error_msg
-            )));
+            return Err(vm.error(format!("error calling searcher: {}", error_msg)));
         }
 
         // Check result
@@ -720,7 +635,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         .and_then(|v| v.as_lua_string())
                         .map(|s| s.as_str().to_string())
                         .unwrap_or_else(|| "unknown error".to_string());
-                    return Err(LuaError::RuntimeError(format!(
+                    return Err(vm.error(format!(
                         "error loading module '{}': {}",
                         modname_str, error_msg
                     )));
@@ -733,19 +648,15 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     load_results[0].clone()
                 };
 
-                // Store in package.loaded
-                let loaded_key = vm.create_string("loaded");
-                let package_ref = vm
-                    .get_table(&package_table)
-                    .ok_or(LuaError::RuntimeError("Invalid package table".to_string()))?;
-                if let Some(loaded_table) = package_ref.borrow().raw_get(&loaded_key) {
-                    if let Some(_loaded_id) = loaded_table.as_table_id() {
-                        let loaded_ref = vm
-                            .get_table(&loaded_table)
-                            .ok_or(LuaError::RuntimeError("Invalid loaded table".to_string()))?;
-                        loaded_ref
-                            .borrow_mut()
-                            .raw_set(modname_str, module_value.clone());
+                if let Some(package_ref) = package_table.as_lua_table() {
+                    let loaded_key = vm.create_string("loaded");
+                    if let Some(loaded_table) = package_ref.borrow().raw_get(&loaded_key) {
+                        if let Some(loaded_ref) = loaded_table.as_lua_table() {
+                            loaded_ref
+                                .borrow_mut()
+                                .raw_set(modname_str, module_value.clone());
+                        }
+                        // Module not in loaded table - continue to searchers
                     }
                 }
 
@@ -761,12 +672,9 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     // All searchers failed
     if error_messages.is_empty() {
-        Err(LuaError::RuntimeError(format!(
-            "module '{}' not found",
-            modname_str
-        )))
+        Err(vm.error(format!("module '{}' not found", modname_str)))
     } else {
-        Err(LuaError::RuntimeError(format!(
+        Err(vm.error(format!(
             "module '{}' not found:{}",
             modname_str,
             error_messages.join("")
@@ -776,41 +684,39 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
 fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let chunk_val = require_arg(vm, 0, "load")?;
+    let chunk_val = require_arg(vm, 1, "load")?;
 
     // Get the chunk string
-    let code = unsafe {
-        chunk_val
-            .as_string()
-            .ok_or_else(|| {
-                LuaError::RuntimeError("bad argument #1 to 'load' (string expected)".to_string())
-            })?
-            .as_str()
-            .to_string()
+    let Some(code) = chunk_val.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'load' (string expected)".to_string()));
     };
 
     // Optional chunk name for error messages
-    let _chunkname = get_arg(vm, 1)
+    let _chunkname = get_arg(vm, 2)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
         .unwrap_or_else(|| "=(load)".to_string());
 
     // Optional mode ("b", "t", or "bt") - we only support "t" (text)
-    let _mode = get_arg(vm, 2)
+    let _mode = get_arg(vm, 3)
         .and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) })
         .unwrap_or_else(|| "bt".to_string());
 
     // Optional environment table
-    let _env = get_arg(vm, 3);
+    let env = get_arg(vm, 4);
 
     // Compile the code using VM's string pool
-    match vm.compile(&code) {
+    match vm.compile(&code.as_str()) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
             // Loaded chunks need _ENV as upvalue[0]
-            let env_upvalue = LuaUpvalue::new_closed(vm.global_value);
+            let env_upvalue = if let Some(env) = env {
+                LuaUpvalue::new_closed(env)
+            } else {
+                LuaUpvalue::new_closed(vm.global_value)
+            };
             let upvalues = vec![env_upvalue];
 
-            let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
+            let func = vm.create_function(Rc::new(chunk), upvalues);
             Ok(MultiValue::single(func))
         }
         Err(e) => {
@@ -823,22 +729,19 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// loadfile([filename [, mode [, env]]]) - Load a file as a chunk
 fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let filename =
-        get_arg(vm, 0).and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
+    let filename = require_arg(vm, 1, "loadfile")?;
+    let Some(filename_str) = filename.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'loadfile' (string expected)".to_string()));
+    };
 
-    let code = if let Some(fname) = filename {
-        // Load from specified file
-        match std::fs::read_to_string(&fname) {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = vm.create_string(&format!("cannot open {}: {}", fname, e));
-                return Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]));
-            }
+    // Load from specified file
+    let code = match std::fs::read_to_string(&filename_str.as_str()) {
+        Ok(c) => c,
+        Err(e) => {
+            let err_msg =
+                vm.create_string(&format!("cannot open {}: {}", filename_str.as_str(), e));
+            return Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]));
         }
-    } else {
-        // Load from stdin (simplified: return nil for now)
-        let err_msg = vm.create_string("stdin loading not implemented");
-        return Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]));
     };
 
     // Compile the code using VM's string pool
@@ -857,24 +760,19 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// dofile([filename]) - Execute a file
 fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let filename =
-        get_arg(vm, 0).and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
+        get_arg(vm, 1).and_then(|v| unsafe { v.as_string().map(|s| s.as_str().to_string()) });
 
     let code = if let Some(fname) = filename {
         // Load from specified file
         match std::fs::read_to_string(&fname) {
             Ok(c) => c,
             Err(e) => {
-                return Err(LuaError::RuntimeError(format!(
-                    "cannot open {}: {}",
-                    fname, e
-                )));
+                return Err(vm.error(format!("cannot open {}: {}", fname, e)));
             }
         }
     } else {
         // Load from stdin (simplified: return error for now)
-        return Err(LuaError::RuntimeError(
-            "stdin loading not implemented".to_string(),
-        ));
+        return Err(vm.error("stdin loading not implemented".to_string()));
     };
 
     // Compile and execute using VM's string pool
@@ -895,10 +793,10 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         .map(|s| s.as_str().to_string())
                         .unwrap_or_else(|| "unknown error".to_string())
                 };
-                Err(LuaError::RuntimeError(error_msg))
+                Err(vm.error(error_msg))
             }
         }
-        Err(e) => Err(LuaError::RuntimeError(format!("load error: {}", e))),
+        Err(e) => Err(vm.error(format!("load error: {}", e))),
     }
 }
 

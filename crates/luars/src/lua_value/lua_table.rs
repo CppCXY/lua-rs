@@ -1,10 +1,8 @@
 // High-performance Lua table implementation following Lua 5.4 design
 // - Array part for integer keys [1..n]
 // - Hash part using open addressing (same as Lua 5.4)
-use crate::LuaVM;
-use crate::lua_vm::{LuaError, LuaResult};
-
 use super::LuaValue;
+use crate::LuaVM;
 
 /// Hash node - mimics Lua 5.4's Node structure
 /// Contains key+value pair and next index for collision chaining
@@ -61,7 +59,7 @@ impl LuaTable {
         } else {
             0
         };
-        
+
         LuaTable {
             array: if array_size > 0 {
                 Some(Vec::with_capacity(array_size))
@@ -162,7 +160,7 @@ impl LuaTable {
         if self.nodes.is_none() {
             panic!("insert_node_simple called with uninitialized nodes - this is a bug");
         }
-        
+
         let nodes = self.nodes.as_mut().unwrap();
         let size = nodes.len();
         let mut idx = Self::hash_key(&key, size);
@@ -291,15 +289,15 @@ impl LuaTable {
 
         if key > 0 {
             let idx = (key - 1) as usize;
-            
+
             // Initialize array if needed
             if self.array.is_none() {
                 self.array = Some(Vec::new());
             }
-            
+
             let array = self.array.as_mut().unwrap();
             let array_len = array.len();
-            
+
             // Limit array growth to reasonable size (64K elements)
             if idx < array_len {
                 array[idx] = value;
@@ -410,19 +408,17 @@ impl LuaTable {
 
     /// Insert value at position in array part, shifting elements to the right
     /// Position is 0-indexed internally but Lua uses 1-indexed
-    pub fn insert_array_at(&mut self, pos: usize, value: LuaValue) -> LuaResult<()> {
+    pub fn insert_array_at(&mut self, pos: usize, value: LuaValue) -> Result<(), String> {
         let len = self.len();
         if pos > len {
-            return Err(LuaError::RuntimeError(
-                "insert position out of bounds".to_string(),
-            ));
+            return Err("insert position out of bounds".to_string());
         }
 
         // Initialize array if needed
         if self.array.is_none() {
             self.array = Some(Vec::new());
         }
-        
+
         let array = self.array.as_mut().unwrap();
 
         // CRITICAL OPTIMIZATION: Fast path for appending at end (no shift needed!)
@@ -439,12 +435,10 @@ impl LuaTable {
 
     /// Remove value at position in array part, shifting elements to the left
     /// Position is 0-indexed internally but Lua uses 1-indexed
-    pub fn remove_array_at(&mut self, pos: usize) -> LuaResult<LuaValue> {
+    pub fn remove_array_at(&mut self, pos: usize) -> Result<LuaValue, String> {
         let len = self.len();
         if pos >= len {
-            return Err(LuaError::RuntimeError(
-                "remove position out of bounds".to_string(),
-            ));
+            return Err("remove position out of bounds".to_string());
         }
 
         let array = self.array.as_mut().expect("array should exist");

@@ -1,7 +1,10 @@
 /// Upvalue and closure operations
 ///
 /// These instructions handle upvalues, closures, and variable captures.
-use crate::lua_vm::{Instruction, LuaError, LuaResult, LuaVM};
+use crate::{
+    LuaValue,
+    lua_vm::{Instruction, LuaResult, LuaVM},
+};
 
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
@@ -12,16 +15,13 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-    let func = unsafe { &*func_ptr };
-    let func_ref = func.borrow();
+    let Some(func_ref) = frame.get_lua_function() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
 
-    let upvalue = func_ref
-        .upvalues
-        .get(b)
-        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid upvalue index: {}", b)))?;
+    let Some(upvalue) = func_ref.borrow().upvalues.get(b).cloned() else {
+        return Err(vm.error(format!("Invalid upvalue index: {}", b)));
+    };
 
     let value = upvalue.get_value(&vm.frames, &vm.register_stack);
     vm.register_stack[base_ptr + a] = value;
@@ -38,16 +38,13 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-    let func = unsafe { &*func_ptr };
-    let func_ref = func.borrow();
+    let Some(func_ref) = frame.get_lua_function() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
 
-    let upvalue = func_ref
-        .upvalues
-        .get(b)
-        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid upvalue index: {}", b)))?;
+    let Some(upvalue) = func_ref.borrow().upvalues.get(b).cloned() else {
+        return Err(vm.error(format!("Invalid upvalue index: {}", b)));
+    };
 
     let value = vm.register_stack[base_ptr + a];
 
@@ -78,28 +75,22 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-    let func = unsafe { &*func_ptr };
-    let func_ref = func.borrow();
+    let Some(func_ref) = frame.get_lua_function() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
 
-    let proto = func_ref
-        .chunk
-        .child_protos
-        .get(bx)
-        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid prototype index: {}", bx)))?
-        .clone();
+    let Some(proto) = func_ref.borrow().chunk.child_protos.get(bx).cloned() else {
+        return Err(vm.error(format!("Invalid prototype index: {}", bx)));
+    };
 
     // Get upvalue descriptors from the prototype
     let upvalue_descs = proto.upvalue_descs.clone();
-    drop(func_ref);
 
     // Create upvalues for the new closure based on descriptors
     let mut upvalues = Vec::new();
     let mut new_open_upvalues = Vec::new();
 
-    for (_i, desc) in upvalue_descs.iter().enumerate() {
+    for desc in upvalue_descs.iter() {
         if desc.is_local {
             // Upvalue refers to a register in current function
 
@@ -120,16 +111,10 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             }
         } else {
             // Upvalue refers to an upvalue in the enclosing function
-            let parent_func = unsafe { &*func_ptr };
-            let parent_upvalues = &parent_func.borrow().upvalues;
-
-            if let Some(parent_uv) = parent_upvalues.get(desc.index as usize) {
+            if let Some(parent_uv) = func_ref.borrow().upvalues.get(desc.index as usize) {
                 upvalues.push(parent_uv.clone());
             } else {
-                return Err(LuaError::RuntimeError(format!(
-                    "Invalid upvalue index in parent: {}",
-                    desc.index
-                )));
+                return Err(vm.error(format!("Invalid upvalue index in parent: {}", desc.index)));
             }
         }
     }
@@ -167,7 +152,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let value = if vararg_start + i < vm.register_stack.len() {
                 vm.register_stack[vararg_start + i]
             } else {
-                crate::LuaValue::nil()
+                LuaValue::nil()
             };
             vm.register_stack[base_ptr + a + i] = value;
         }
@@ -178,7 +163,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             let value = if i < vararg_count && vararg_start + i < vm.register_stack.len() {
                 vm.register_stack[vararg_start + i]
             } else {
-                crate::LuaValue::nil()
+                LuaValue::nil()
             };
             vm.register_stack[base_ptr + a + i] = value;
         }
@@ -201,11 +186,11 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // Estimate total capacity and format numbers inline with itoa
     let mut total_capacity = 0usize;
     let mut all_simple = true;
-    
+
     // First pass: check types and estimate capacity
     for i in 0..=b {
         let value = vm.register_stack[base_ptr + a + i];
-        
+
         if let Some(s) = value.as_lua_string() {
             total_capacity += s.as_str().len();
         } else if value.is_integer() {
@@ -217,16 +202,16 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             break;
         }
     }
-    
+
     // Fast path: all strings/numbers, concatenate directly
     if all_simple {
         let mut result = String::with_capacity(total_capacity);
         let mut int_buffer = itoa::Buffer::new();
         let mut float_buffer = ryu::Buffer::new();
-        
+
         for i in 0..=b {
             let value = vm.register_stack[base_ptr + a + i];
-            
+
             if let Some(s) = value.as_lua_string() {
                 result.push_str(s.as_str());
             } else if let Some(int_val) = value.as_integer() {
@@ -237,10 +222,10 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 result.push_str(float_buffer.format(float_val));
             }
         }
-        
+
         let result_value = vm.create_string(&result);
         vm.register_stack[base_ptr + a] = result_value;
-        
+
         // No GC check for fast path - rely on debt mechanism
         // Only large allocations trigger automatic GC
         return Ok(());
@@ -262,7 +247,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         } else {
             None
         };
-        
+
         let right_str = if let Some(s) = next_value.as_lua_string() {
             Some(s.as_str().to_string())
         } else if let Some(int_val) = next_value.as_integer() {
@@ -310,7 +295,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             }
 
             if !found_metamethod {
-                return Err(LuaError::RuntimeError(format!(
+                return Err(vm.error(format!(
                     "attempt to concatenate a {} value",
                     if result_value.is_string() || result_value.is_number() {
                         next_value.type_name()
@@ -357,36 +342,34 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // 1. SETLIST is only emitted by compiler for table constructors
     // 2. Newly created tables don't have metatables yet
     // 3. Even if metatable exists, Lua doesn't call __newindex for array part
-    
+
     // Fast path: Use cached pointer (avoids ObjectPool lookup)
-    if let Some(ptr) = table.as_table_ptr() {
-        let lua_table = unsafe { &*ptr };
-        
+    if let Some(lua_table) = table.as_lua_table() {
         // ULTRA-OPTIMIZED: Sequential insertion from start_idx
         let mut table_mut = lua_table.borrow_mut();
-        
+
         // Initialize array if needed
         if table_mut.array.is_none() {
             table_mut.array = Some(Vec::new());
         }
-        
+
         let array = table_mut.array.as_mut().unwrap();
-        
-        // Reserve capacity upfront to avoid reallocations  
+
+        // Reserve capacity upfront to avoid reallocations
         let expected_end_idx = (start_idx - 1 + count) as usize;
         let current_len = array.len();
         if array.capacity() < expected_end_idx && expected_end_idx > current_len {
             array.reserve(expected_end_idx - current_len);
         }
-        
+
         // Batch process all values with proper index handling
         for i in 0..count {
             let key_int = (start_idx + i) as i64;
             let value = vm.register_stack[base_ptr + a + i + 1];
-            
+
             // Use optimized set_int which correctly handles nils and gaps
             let idx = (key_int - 1) as usize;
-            
+
             if value.is_nil() {
                 // Nil values: only store if filling a gap in existing array
                 if idx < array.len() {
@@ -410,12 +393,13 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             }
         }
         drop(table_mut); // Release borrow early
-        
+
         // Write barrier for GC (outside borrow scope)
         // OPTIMIZATION: Only check for GC-relevant values
         if let Some(table_id) = table.as_table_id() {
-            vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
-            
+            vm.gc
+                .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+
             // Optimized barrier: skip primitives
             for i in 0..count {
                 let value = vm.register_stack[base_ptr + a + i + 1];
@@ -427,7 +411,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     } else {
         // Slow path: fallback to table_set_with_meta
         for i in 0..count {
-            let key = crate::LuaValue::integer((start_idx + i) as i64);
+            let key = LuaValue::integer((start_idx + i) as i64);
             let value = vm.register_stack[base_ptr + a + i + 1];
             vm.table_set_with_meta(table, key, value)?;
         }
