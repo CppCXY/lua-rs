@@ -42,6 +42,9 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let table = vm.create_table(array_size, hash_size);
     vm.register_stack[base_ptr + a] = table;
 
+    // GC checkpoint: table now safely stored in register
+    vm.check_gc();
+
     Ok(())
 }
 

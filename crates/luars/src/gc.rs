@@ -92,6 +92,11 @@ pub struct GC {
     allocations_since_minor_gc: usize,
     minor_gc_count: usize,
 
+    // Incremental collection throttling
+    // To avoid overhead of collecting roots every check, only run GC every N checks
+    check_counter: u32,
+    check_interval: u32, // Run GC every N checks (default: 10)
+
     // Finalization support (__gc metamethod)
     finalize_queue: Vec<(GcObjectType, u32)>, // Objects awaiting finalization
 
@@ -133,6 +138,8 @@ impl GC {
             shrink_threshold: 10, // 每 10 次 GC 才 shrink 一次
             allocations_since_minor_gc: 0,
             minor_gc_count: 0,
+            check_counter: 0,
+            check_interval: 1000, // Run GC every 1000 checks when debt > 0 (reduce overhead)
             finalize_queue: Vec::new(), // __gc finalizer queue
             collection_count: 0,
             stats: GCStats::default(),
@@ -178,11 +185,33 @@ impl GC {
         self.gc_debt > 0
     }
 
+    /// Increment check counter for throttling GC collection
+    #[inline]
+    pub fn increment_check_counter(&mut self) {
+        self.check_counter += 1;
+    }
+
+    /// Check if we should actually run GC collection (throttled)
+    /// This reduces overhead by not collecting roots on every check
+    #[inline]
+    pub fn should_run_collection(&self) -> bool {
+        self.check_counter >= self.check_interval
+    }
+
+    /// Reset check counter after running GC
+    #[inline]
+    fn reset_check_counter(&mut self) {
+        self.check_counter = 0;
+    }
+
     /// Perform one step of GC work (like luaC_step in Lua 5.4)
     pub fn step(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) {
         if !self.should_collect() {
             return;
         }
+
+        // Reset throttling counter
+        self.reset_check_counter();
 
         // Determine which collection to run
         match self.gc_kind {

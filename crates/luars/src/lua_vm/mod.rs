@@ -252,9 +252,7 @@ impl LuaVM {
     /// Main execution loop - interprets bytecode instructions
     /// Main VM execution loop - MAXIMUM PERFORMANCE
     /// 零返回值，零分支，直接调度
-    fn run(&mut self) -> LuaResult<LuaValue> {
-        let mut instruction_count: u32 = 0;
-        
+    fn run(&mut self) -> LuaResult<LuaValue> {        
         loop {
             // 检查是否有帧
             if self.frames.is_empty() {
@@ -265,27 +263,17 @@ impl LuaVM {
                     .unwrap_or(LuaValue::nil()));
             }
 
-            // 周期性 GC 检查 (每 10000 条指令)
-            instruction_count += 1;
-            if instruction_count % 10000 == 0 {
-                self.check_gc();
-            }
-
-            // === 极简主循环：直接调度，无返回值 ===
             let frame = unsafe { self.frames.last_mut().unwrap_unchecked() };
             let instr = unsafe { *frame.code_ptr.add(frame.pc) };
             frame.pc += 1;
 
-            // 直接调度 - 指令自己处理一切（包括 Skip1、Return 等）
+         
             if let Err(e) = dispatch_instruction(self, instr) {
                 match e {
                     LuaError::Yield(_) => return Ok(LuaValue::nil()),
                     _ => return Err(e),
                 }
             }
-
-            // 检查函数返回（通过 frames 是否改变来判断）
-            // 这个检查很便宜，因为大部分时候都不会返回
         }
     }
 
@@ -1184,6 +1172,15 @@ impl LuaVM {
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let id = self.object_pool.create_string(s);
+        
+        // Estimate memory cost: string data + LuaString struct overhead
+        // LuaString: ~32 bytes base + string length
+        let estimated_bytes = 32 + s.len();
+        self.gc.record_allocation(estimated_bytes);
+        
+        // GC check MUST NOT happen here - object not yet protected!
+        // Caller must call check_gc() AFTER storing value in register
+        
         // Get pointer from object pool for direct access
         let ptr = self
             .object_pool
@@ -1207,9 +1204,19 @@ impl LuaVM {
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
 
+        // Estimate memory cost: base overhead + array + hash part
+        // Base: ~64 bytes for LuaTable struct + Rc overhead
+        // Array: array_size * 16 bytes per LuaValue
+        // Hash: hash_size * 32 bytes per Node (key+value pair)
+        let estimated_bytes = 64 + (array_size * 16) + (hash_size * 32);
+        self.gc.record_allocation(estimated_bytes);
+
         // Register with GC for manual collection
         self.gc
             .register_object(id.0, crate::gc::GcObjectType::Table);
+
+        // GC check MUST NOT happen here - object not yet protected!
+        // Caller must call check_gc() AFTER storing value in register
 
         // Get pointer from object pool for direct access
         // OPTIMIZATION: Use unwrap_unchecked in release mode since we just created the table
@@ -1355,20 +1362,20 @@ impl LuaVM {
         }
     }
 
-    /// Check if GC should run and collect garbage if needed
-    #[allow(unused)]
-    fn maybe_collect_garbage(&mut self) {
-        if self.gc.should_collect() {
-            self.collect_garbage();
-        }
-    }
-
     /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
-    /// This should be called after allocating new objects
-    /// CURRENTLY DISABLED: Needs better object lifetime management
-    #[inline]
+    /// This is called after allocating new objects (strings, tables, functions)
+    /// Uses GC debt mechanism: runs when debt > 0
+    /// 
+    /// OPTIMIZATION: Use incremental collection with work budget
     fn check_gc(&mut self) {
+        // Fast path: check debt without collecting roots
         if !self.gc.should_collect() {
+            return;
+        }
+
+        // Incremental GC: only collect every N checks to reduce overhead
+        self.gc.increment_check_counter();
+        if !self.gc.should_run_collection() {
             return;
         }
 

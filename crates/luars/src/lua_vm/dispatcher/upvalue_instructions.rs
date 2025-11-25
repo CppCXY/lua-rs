@@ -140,6 +140,9 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let closure = vm.create_function(proto, upvalues);
     vm.register_stack[base_ptr + a] = closure;
 
+    // GC checkpoint: closure now safely stored in register
+    vm.check_gc();
+
     Ok(())
 }
 
@@ -237,6 +240,9 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         
         let result_value = vm.create_string(&result);
         vm.register_stack[base_ptr + a] = result_value;
+        
+        // No GC check for fast path - rely on debt mechanism
+        // Only large allocations trigger automatic GC
         return Ok(());
     }
 
@@ -318,6 +324,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     vm.register_stack[base_ptr + a] = result_value;
 
+    // No GC check - rely on debt mechanism
     Ok(())
 }
 
