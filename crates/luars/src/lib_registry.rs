@@ -2,7 +2,7 @@
 // Provides a clean way to register Rust functions as Lua libraries
 
 use crate::lua_value::{CFunction, LuaValue};
-use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{LuaResult, LuaVM};
 use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
@@ -213,6 +213,7 @@ pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
 }
 
 /// Helper to get a specific argument
+/// 1 based index
 #[inline(always)]
 pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
     let frame = vm.frames.last().unwrap();
@@ -221,9 +222,9 @@ pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
 
     // Arguments are 0-indexed from caller's perspective
     // But register 0 is the function, so arg 0 is at register 1
-    // get_arg(0) should return register[base_ptr + 1]
-    // get_arg(1) should return register[base_ptr + 2]
-    let reg_offset = index + 1; // +1 to skip the function at register 0
+    // get_arg(1) should return register[base_ptr + 1]
+    // get_arg(2) should return register[base_ptr + 2]
+    let reg_offset = index; // +1 to skip the function at register 0
     if reg_offset < top {
         let reg_index = base_ptr + reg_offset;
         if reg_index < vm.register_stack.len() {
@@ -237,11 +238,13 @@ pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
 }
 
 /// Helper to require an argument
+/// 1 based index
 #[inline]
-pub fn require_arg(vm: &LuaVM, index: usize, func_name: &str) -> LuaResult<LuaValue> {
-    get_arg(vm, index).ok_or_else(|| {
-        LuaError::RuntimeError(format!("{}() requires argument {}", func_name, index + 1))
-    })
+pub fn require_arg(vm: &mut LuaVM, index: usize, func_name: &str) -> LuaResult<LuaValue> {
+    let Some(arg) = get_arg(vm, index) else {
+        return Err(vm.error(format!("{}() requires argument {}", func_name, index + 1)));
+    };
+    Ok(arg)
 }
 
 /// Helper to get argument count
@@ -250,20 +253,4 @@ pub fn arg_count(vm: &LuaVM) -> usize {
     let frame = vm.frames.last().unwrap();
     // Subtract 1 for the function itself
     frame.top.saturating_sub(1)
-}
-
-/// Helper to get string argument
-pub fn get_string(vm: &LuaVM, index: usize, func_name: &str) -> LuaResult<String> {
-    let arg = require_arg(vm, index, func_name)?;
-    unsafe {
-        arg.as_string()
-            .map(|s| s.as_str().to_string())
-            .ok_or_else(|| {
-                LuaError::RuntimeError(format!(
-                    "{}() requires string argument {}",
-                    func_name,
-                    index + 1
-                ))
-            })
-    }
 }

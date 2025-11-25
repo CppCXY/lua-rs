@@ -5,7 +5,7 @@
 
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
-use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_math_lib() -> LibraryModule {
     let mut module = crate::lib_module!("math", {
@@ -43,14 +43,17 @@ pub fn create_math_lib() -> LibraryModule {
     module
 }
 
-fn get_number(vm: &LuaVM, idx: usize, func_name: &str) -> LuaResult<f64> {
-    require_arg(vm, idx, func_name)?.as_number().ok_or_else(|| {
-        LuaError::RuntimeError(format!(
+fn get_number(vm: &mut LuaVM, idx: usize, func_name: &str) -> LuaResult<f64> {
+    let value = require_arg(vm, idx, func_name)?;
+    if let Some(value) = value.as_number() {
+        Ok(value)
+    } else {
+        Err(vm.error(format!(
             "bad argument #{} to '{}' (number expected)",
             idx + 1,
             func_name
-        ))
-    })
+        )))
+    }
 }
 
 fn math_abs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
@@ -118,21 +121,19 @@ fn math_max(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let args = get_args(vm);
 
     if args.is_empty() {
-        return Err(LuaError::RuntimeError(
-            "bad argument to 'math.max' (value expected)".to_string(),
-        ));
+        return Err(vm.error("bad argument to 'math.max' (value expected)".to_string()));
     }
 
     // Keep the original value and its index to preserve type (integer vs float)
     let mut max_idx = 0;
-    let mut max_val = args[0].as_number().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument to 'math.max' (number expected)".to_string())
-    })?;
+    let mut max_val = args[0]
+        .as_number()
+        .ok_or_else(|| vm.error("bad argument to 'math.max' (number expected)".to_string()))?;
 
     for (i, arg) in args.iter().enumerate().skip(1) {
-        let val = arg.as_number().ok_or_else(|| {
-            LuaError::RuntimeError("bad argument to 'math.max' (number expected)".to_string())
-        })?;
+        let val = arg
+            .as_number()
+            .ok_or_else(|| vm.error("bad argument to 'math.max' (number expected)".to_string()))?;
         if val > max_val {
             max_val = val;
             max_idx = i;
@@ -147,21 +148,19 @@ fn math_min(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let args = get_args(vm);
 
     if args.is_empty() {
-        return Err(LuaError::RuntimeError(
-            "bad argument to 'math.min' (value expected)".to_string(),
-        ));
+        return Err(vm.error("bad argument to 'math.min' (value expected)".to_string()));
     }
 
     // Keep the original value and its index to preserve type (integer vs float)
     let mut min_idx = 0;
-    let mut min_val = args[0].as_number().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument to 'math.min' (number expected)".to_string())
-    })?;
+    let mut min_val = args[0]
+        .as_number()
+        .ok_or_else(|| vm.error("bad argument to 'math.min' (number expected)".to_string()))?;
 
     for (i, arg) in args.iter().enumerate().skip(1) {
-        let val = arg.as_number().ok_or_else(|| {
-            LuaError::RuntimeError("bad argument to 'math.min' (number expected)".to_string())
-        })?;
+        let val = arg
+            .as_number()
+            .ok_or_else(|| vm.error("bad argument to 'math.min' (number expected)".to_string()))?;
         if val < min_val {
             min_val = val;
             min_idx = i;
@@ -285,17 +284,14 @@ fn math_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn math_ult(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let m = require_arg(vm, 0, "math.ult")?
-        .as_integer()
-        .ok_or_else(|| {
-            LuaError::RuntimeError("bad argument #1 to 'math.ult' (integer expected)".to_string())
-        })?;
-
-    let n = require_arg(vm, 1, "math.ult")?
-        .as_integer()
-        .ok_or_else(|| {
-            LuaError::RuntimeError("bad argument #2 to 'math.ult' (integer expected)".to_string())
-        })?;
+    let m_value = require_arg(vm, 0, "math.ult")?;
+    let Some(m) = m_value.as_integer() else {
+        return Err(vm.error("bad argument #1 to 'math.ult' (integer expected)".to_string()));
+    };
+    let n_value = require_arg(vm, 1, "math.ult")?;
+    let Some(n) = n_value.as_integer() else {
+        return Err(vm.error("bad argument #2 to 'math.ult' (integer expected)".to_string()));
+    };
     // Unsigned less than
     let result = (m as u64) < (n as u64);
     Ok(MultiValue::single(LuaValue::boolean(result)))

@@ -5,7 +5,7 @@
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_pattern;
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
@@ -31,9 +31,9 @@ pub fn create_string_lib() -> LibraryModule {
 /// string.byte(s [, i [, j]]) - Return byte values
 fn string_byte(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.byte")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.byte' (string expected)".to_string())
-    })?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
+    };
 
     let str_bytes = s.as_str().as_bytes();
     let len = str_bytes.len() as i64;
@@ -67,15 +67,14 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     let mut bytes = Vec::new();
     for (i, arg) in args.iter().enumerate() {
-        let byte = arg.as_integer().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
+        let Some(byte) = arg.as_integer() else {
+            return Err(vm.error(format!(
                 "bad argument #{} to 'string.char' (number expected)",
                 i + 1
-            ))
-        })?;
-
+            )));
+        };
         if byte < 0 || byte > 255 {
-            return Err(LuaError::RuntimeError(format!(
+            return Err(vm.error(format!(
                 "bad argument #{} to 'string.char' (value out of range)",
                 i + 1
             )));
@@ -84,8 +83,12 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         bytes.push(byte as u8);
     }
 
-    let result_str = String::from_utf8(bytes)
-        .map_err(|_| LuaError::RuntimeError("string.char: invalid UTF-8".to_string()))?;
+    let result_str = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return Err(vm.error("invalid byte sequence in 'string.char'".to_string()));
+        }
+    };
     let result = vm.create_string(&result_str);
     Ok(MultiValue::single(result))
 }
@@ -95,9 +98,9 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn string_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.len")?;
 
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.len' (string expected)".to_string())
-    })?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.len' (string expected)".to_string()));
+    };
 
     // Lua string.len returns byte length, not UTF-8 character count
     // This is correct and much faster than chars().count()
@@ -108,9 +111,9 @@ fn string_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.lower(s) - Convert to lowercase
 fn string_lower(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.lower")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.lower' (string expected)".to_string())
-    })?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.lower' (string expected)".to_string()));
+    };
 
     let result = vm.create_string(&s.as_str().to_lowercase());
     Ok(MultiValue::single(result))
@@ -119,9 +122,9 @@ fn string_lower(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.upper(s) - Convert to uppercase
 fn string_upper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.upper")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.upper' (string expected)".to_string())
-    })?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.upper' (string expected)".to_string()));
+    };
 
     let result = vm.create_string(&s.as_str().to_uppercase());
     Ok(MultiValue::single(result))
@@ -130,27 +133,13 @@ fn string_upper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.rep(s, n [, sep]) - Repeat string
 fn string_rep(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.rep")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.rep' (string expected)".to_string())
-    })?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.rep' (string expected)".to_string()));
+    };
 
-    let n = require_arg(vm, 1, "string.rep")?
-        .as_integer()
-        .ok_or_else(|| {
-            LuaError::RuntimeError("bad argument #2 to 'string.rep' (number expected)".to_string())
-        })?;
-    let sep_value = get_arg(vm, 2);
-    let sep = match sep_value {
-        Some(v) => vm
-            .get_string(&v)
-            .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #3 to 'string.rep' (string expected)".to_string(),
-                )
-            })?
-            .as_str()
-            .to_string(),
-        None => "".to_string(),
+    let n_value = require_arg(vm, 1, "string.rep")?;
+    let Some(n) = n_value.as_integer() else {
+        return Err(vm.error("bad argument #2 to 'string.rep' (number expected)".to_string()));
     };
 
     if n <= 0 {
@@ -158,13 +147,32 @@ fn string_rep(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Ok(MultiValue::single(empty));
     }
 
+    let sep_value = get_arg(vm, 2);
+
     let mut result = String::new();
-    for i in 0..n {
-        if i > 0 && !sep.is_empty() {
-            result.push_str(&sep.as_str());
+    match sep_value {
+        Some(v) => {
+            let sep_str = if let Some(sep_str) = v.as_lua_string() {
+                sep_str.as_str()
+            } else {
+                return Err(
+                    vm.error("bad argument #3 to 'string.rep' (string expected)".to_string())
+                );
+            };
+
+            for i in 0..n {
+                if i > 0 && !sep_str.is_empty() {
+                    result.push_str(sep_str);
+                }
+                result.push_str(s.as_str());
+            }
         }
-        result.push_str(s.as_str());
-    }
+        None => {
+            for _ in 0..n {
+                result.push_str(s.as_str());
+            }
+        }
+    };
 
     let result = vm.create_string(&result);
     Ok(MultiValue::single(result))
@@ -174,7 +182,7 @@ fn string_rep(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.reverse")?;
     let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.reverse' (string expected)".to_string())
+        vm.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
     })?;
 
     let reversed: String = s.as_str().chars().rev().collect();
@@ -186,18 +194,17 @@ fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// OPTIMIZED: Lua uses byte indices, not character indices!
 fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.sub")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.sub' (string expected)".to_string())
-    })?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.rep' (string expected)".to_string()));
+    };
 
     let s_str = s.as_str();
     let byte_len = s_str.len() as i64;
 
-    let i = require_arg(vm, 1, "string.sub")?
-        .as_integer()
-        .ok_or_else(|| {
-            LuaError::RuntimeError("bad argument #2 to 'string.sub' (number expected)".to_string())
-        })?;
+    let i_value = require_arg(vm, 1, "string.sub")?;
+    let Some(i) = i_value.as_integer() else {
+        return Err(vm.error("bad argument #2 to 'string.sub' (number expected)".to_string()));
+    };
 
     let j = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(-1);
 
@@ -226,12 +233,12 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.format(formatstring, ...) - Format string (simplified)
 fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let format_str_value = require_arg(vm, 0, "string.format")?;
-    let format_str = format_str_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.format' (string expected)".to_string())
-    })?;
+    let Some(format_str) = format_str_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.format' (string expected)".to_string()));
+    };
 
     // Copy the format string to avoid holding a borrow on vm throughout the loop
-    let format = format_str.as_str().to_string();
+    let format = format_str.as_str();
     let mut result = String::new();
     let mut arg_index = 1;
     let mut chars = format.chars().peekable();
@@ -262,9 +269,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 }
 
                 if !has_format_char {
-                    return Err(LuaError::RuntimeError(
-                        "incomplete format string".to_string(),
-                    ));
+                    return Err(vm.error("incomplete format string".to_string()));
                 }
 
                 let format_char = chars.next().unwrap();
@@ -276,13 +281,13 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'c' => {
                         // Character
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
                         })?;
                         let num = val.as_integer().ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (number expected)",
                                 arg_index + 1
                             ))
@@ -290,7 +295,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         if num >= 0 && num <= 255 {
                             result.push(num as u8 as char);
                         } else {
-                            return Err(LuaError::RuntimeError(format!(
+                            return Err(vm.error(format!(
                                 "bad argument #{} to 'format' (invalid value for '%%c')",
                                 arg_index + 1
                             )));
@@ -300,7 +305,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'd' | 'i' => {
                         // Integer
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -309,7 +314,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_integer()
                             .or_else(|| val.as_number().map(|n| n as i64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -320,7 +325,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'o' => {
                         // Octal
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -329,7 +334,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_integer()
                             .or_else(|| val.as_number().map(|n| n as i64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -340,7 +345,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'u' => {
                         // Unsigned integer
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -349,7 +354,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_integer()
                             .or_else(|| val.as_number().map(|n| n as i64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -360,7 +365,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'x' => {
                         // Lowercase hexadecimal
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -369,7 +374,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_integer()
                             .or_else(|| val.as_number().map(|n| n as i64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -380,7 +385,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'X' => {
                         // Uppercase hexadecimal
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -389,7 +394,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_integer()
                             .or_else(|| val.as_number().map(|n| n as i64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -400,7 +405,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'e' => {
                         // Scientific notation (lowercase)
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -409,7 +414,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_number()
                             .or_else(|| val.as_integer().map(|i| i as f64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -420,7 +425,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'E' => {
                         // Scientific notation (uppercase)
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -429,7 +434,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_number()
                             .or_else(|| val.as_integer().map(|i| i as f64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -440,7 +445,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'f' => {
                         // Floating point
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -449,7 +454,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_number()
                             .or_else(|| val.as_integer().map(|i| i as f64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -475,7 +480,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'g' => {
                         // Automatic format (lowercase) - use shorter of %e or %f
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -484,7 +489,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_number()
                             .or_else(|| val.as_integer().map(|i| i as f64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -501,7 +506,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'G' => {
                         // Automatic format (uppercase) - use shorter of %E or %f
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -510,7 +515,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             .as_number()
                             .or_else(|| val.as_integer().map(|i| i as f64))
                             .ok_or_else(|| {
-                                LuaError::RuntimeError(format!(
+                                vm.error(format!(
                                     "bad argument #{} to 'format' (number expected)",
                                     arg_index + 1
                                 ))
@@ -527,7 +532,7 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     's' => {
                         // String
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
@@ -567,13 +572,13 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     'q' => {
                         // Quoted string
                         let val = get_arg(vm, arg_index).ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (no value)",
                                 arg_index + 1
                             ))
                         })?;
                         let s = val.as_lua_string().ok_or_else(|| {
-                            LuaError::RuntimeError(format!(
+                            vm.error(format!(
                                 "bad argument #{} to 'format' (string expected)",
                                 arg_index + 1
                             ))
@@ -595,16 +600,13 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         arg_index += 1;
                     }
                     _ => {
-                        return Err(LuaError::RuntimeError(format!(
-                            "invalid option '%{}' to 'format'",
-                            format_char
-                        )));
+                        return Err(
+                            vm.error(format!("invalid option '%{}' to 'format'", format_char))
+                        );
                     }
                 }
             } else {
-                return Err(LuaError::RuntimeError(
-                    "incomplete format string".to_string(),
-                ));
+                return Err(vm.error("incomplete format string".to_string()));
             }
         } else {
             result.push(ch);
@@ -618,13 +620,13 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
 fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 0, "string.find")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.find' (string expected)".to_string())
-    })?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.find' (string expected)".to_string()));
+    };
     let pattern_str_value = require_arg(vm, 1, "string.find")?;
-    let pattern_str = pattern_str_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #2 to 'string.find' (string expected)".to_string())
-    })?;
+    let Some(pattern_str) = pattern_str_value.as_lua_string() else {
+        return Err(vm.error("bad argument #2 to 'string.find' (string expected)".to_string()));
+    };
 
     let init = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
     let plain = get_arg(vm, 3).map(|v| v.is_truthy()).unwrap_or(false);
@@ -661,7 +663,7 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
     } else {
         // Pattern matching - parse and check if it's a simple literal
-        match crate::lua_pattern::parse_pattern(pattern) {
+        match lua_pattern::parse_pattern(pattern) {
             Ok(parsed_pattern) => {
                 // Fast path: if pattern is just a literal string, use plain search
                 if let Some(literal) = parsed_pattern.as_literal_string() {
@@ -682,7 +684,7 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 } else {
                     // Complex pattern - use full pattern matcher
                     if let Some((start, end, captures)) =
-                        crate::lua_pattern::find(s_str, &parsed_pattern, start_pos)
+                        lua_pattern::find(s_str, &parsed_pattern, start_pos)
                     {
                         let mut results = vec![
                             LuaValue::integer((start + 1) as i64),
@@ -698,24 +700,24 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     }
                 }
             }
-            Err(e) => Err(LuaError::RuntimeError(format!("invalid pattern: {}", e))),
+            Err(e) => Err(vm.error(format!("invalid pattern: {}", e))),
         }
     }
 }
 
 /// string.match(s, pattern [, init]) - Match pattern
 fn string_match(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 0, "string.match")?;
-    let s = s_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'string.match' (string expected)".to_string())
-    })?;
+    let s_value = require_arg(vm, 1, "string.match")?;
+    let Some(s) = s_value.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.match' (string expected)".to_string()));
+    };
 
-    let pattern_str_value = require_arg(vm, 1, "string.match")?;
-    let pattern_str = pattern_str_value.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #2 to 'string.match' (string expected)".to_string())
-    })?;
+    let pattern_str_value = require_arg(vm, 2, "string.match")?;
+    let Some(pattern_str) = pattern_str_value.as_lua_string() else {
+        return Err(vm.error("bad argument #2 to 'string.match' (string expected)".to_string()));
+    };
 
-    let init = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
+    let init = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(1);
 
     let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
     let text = s.as_str()[start_pos..].to_string();
@@ -737,35 +739,31 @@ fn string_match(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 Ok(MultiValue::single(LuaValue::nil()))
             }
         }
-        Err(e) => Err(LuaError::RuntimeError(format!("invalid pattern: {}", e))),
+        Err(e) => Err(vm.error(format!("invalid pattern: {}", e))),
     }
 }
 
 /// string.gsub(s, pattern, repl [, n]) - Global substitution
 fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let arg0 = require_arg(vm, 0, "string.gsub")?;
-    let s = unsafe {
-        arg0.as_string().ok_or_else(|| {
-            LuaError::RuntimeError("bad argument #1 to 'string.gsub' (string expected)".to_string())
-        })?
+    let arg0 = require_arg(vm, 1, "string.gsub")?;
+    let Some(s) = arg0.as_lua_string() else {
+        return Err(vm.error("bad argument #1 to 'string.gsub' (string expected)".to_string()));
     };
 
-    let arg1 = require_arg(vm, 1, "string.gsub")?;
-    let pattern_str = unsafe {
-        arg1.as_string().ok_or_else(|| {
-            LuaError::RuntimeError("bad argument #2 to 'string.gsub' (string expected)".to_string())
-        })?
+    let arg1 = require_arg(vm, 2, "string.gsub")?;
+    let Some(pattern_str) = arg1.as_lua_string() else {
+        return Err(vm.error("bad argument #2 to 'string.gsub' (string expected)".to_string()));
     };
 
-    let arg2 = require_arg(vm, 2, "string.gsub")?;
+    let arg2 = require_arg(vm, 3, "string.gsub")?;
 
-    let max = get_arg(vm, 3)
+    let max = get_arg(vm, 4)
         .and_then(|v| v.as_integer())
         .map(|n| n as usize);
 
     let pattern = match lua_pattern::parse_pattern(pattern_str.as_str()) {
         Ok(p) => p,
-        Err(e) => return Err(LuaError::RuntimeError(format!("invalid pattern: {}", e))),
+        Err(e) => return Err(vm.error(format!("invalid pattern: {}", e))),
     };
 
     // Check replacement type: string, function, or table
@@ -780,7 +778,7 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     LuaValue::integer(count as i64),
                 ]))
             }
-            Err(e) => Err(LuaError::RuntimeError(e)),
+            Err(e) => Err(vm.error(e)),
         }
     } else if arg2.is_function() || arg2.is_cfunction() {
         // Function replacement
@@ -789,9 +787,8 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         // Table replacement (lookup)
         gsub_with_table(vm, s.as_str(), &pattern, arg2, max)
     } else {
-        Err(LuaError::RuntimeError(
-            "bad argument #3 to 'string.gsub' (string/function/table expected)".to_string(),
-        ))
+        Err(vm
+            .error("bad argument #3 to 'string.gsub' (string/function/table expected)".to_string()))
     }
 }
 
@@ -839,7 +836,7 @@ fn gsub_with_function(
                             .and_then(|v| v.as_lua_string())
                             .map(|s| s.as_str().to_string())
                             .unwrap_or_else(|| "unknown error".to_string());
-                        return Err(LuaError::RuntimeError(error_msg));
+                        return Err(vm.error(error_msg));
                     }
 
                     // Get the replacement from function result
@@ -897,8 +894,7 @@ fn gsub_with_table(
             }
         }
 
-        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos)
-        {
+        if let Some((end_pos, captures)) = lua_pattern::try_match(pattern, &text_chars, pos) {
             count += 1;
 
             // Get the key for table lookup
@@ -945,47 +941,24 @@ fn gsub_with_table(
 /// string.gmatch(s, pattern) - Returns an iterator function
 /// Usage: for capture in string.gmatch(s, pattern) do ... end
 fn string_gmatch(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let arg0 = require_arg(vm, 0, "string.gmatch")?;
-    let s = unsafe {
-        arg0.as_string().ok_or_else(|| {
-            LuaError::RuntimeError(
-                "bad argument #1 to 'string.gmatch' (string expected)".to_string(),
-            )
-        })?
+    let s_value = require_arg(vm, 1, "string.gmatch")?;
+    if !s_value.is_string() {
+        return Err(vm.error("bad argument #1 to 'string.gmatch' (string expected)".to_string()));
     };
 
-    let arg1 = require_arg(vm, 1, "string.gmatch")?;
-    let pattern_str = unsafe {
-        arg1.as_string().ok_or_else(|| {
-            LuaError::RuntimeError(
-                "bad argument #2 to 'string.gmatch' (string expected)".to_string(),
-            )
-        })?
-    };
-
-    // Validate pattern early
-    let _pattern = match lua_pattern::parse_pattern(pattern_str.as_str()) {
-        Ok(p) => p,
-        Err(e) => return Err(LuaError::RuntimeError(format!("invalid pattern: {}", e))),
+    let pattern_value = require_arg(vm, 2, "string.gmatch")?;
+    if !pattern_value.is_string() {
+        return Err(vm.error("bad argument #2 to 'string.gmatch' (string expected)".to_string()));
     };
 
     // Create state table: {string = s, pattern = p, position = 0}
-    let state_table = vm.create_table(0, 3);
-    let string_key = vm.create_string("string");
-    let pattern_key = vm.create_string("pattern");
-    let position_key = vm.create_string("position");
-    let s_value = vm.create_string(s.as_str());
-    let pattern_value = vm.create_string(pattern_str.as_str());
-
-    let state_ref = vm
-        .get_table(&state_table)
-        .ok_or_else(|| LuaError::RuntimeError("Invalid state table".to_string()))?;
-    state_ref.borrow_mut().raw_set(string_key, s_value);
-    state_ref.borrow_mut().raw_set(pattern_key, pattern_value);
-    state_ref
-        .borrow_mut()
-        .raw_set(position_key, LuaValue::integer(0));
-
+    let state_table = vm.create_table(3, 0);
+    let Some(state_ref) = state_table.as_lua_table() else {
+        return Err(vm.error("failed to create state table for gmatch".to_string()));
+    };
+    state_ref.borrow_mut().set_int(1, s_value);
+    state_ref.borrow_mut().set_int(2, pattern_value);
+    state_ref.borrow_mut().set_int(3, LuaValue::integer(0));
     // Return: iterator function, state table, nil (initial control variable)
     Ok(MultiValue::multiple(vec![
         LuaValue::cfunction(gmatch_iterator),
@@ -999,61 +972,46 @@ fn string_gmatch(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn gmatch_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Arg 0: state table
     // Arg 1: control variable (unused, we use state.position)
-    let state_table_value = require_arg(vm, 0, "gmatch iterator")?;
+    let state_table_value = require_arg(vm, 1, "gmatch iterator")?;
 
     // Extract string, pattern, and position from state
-    let string_key = vm.create_string("string");
-    let pattern_key = vm.create_string("pattern");
-    let position_key = vm.create_string("position");
-
-    let state_ref_cell = vm
-        .get_table(&state_table_value)
-        .ok_or_else(|| LuaError::RuntimeError("Invalid state table".to_string()))?;
-    let s_val = state_ref_cell
-        .borrow()
-        .raw_get(&string_key)
-        .ok_or_else(|| {
-            LuaError::RuntimeError("gmatch iterator: string not found in state".to_string())
-        })?;
-    let s = unsafe {
-        s_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("gmatch iterator: string invalid".to_string()))?
+    let Some(state_ref) = state_table_value.as_lua_table() else {
+        return Err(vm.error("gmatch iterator: state is not a table".to_string()));
+    };
+    let Some(s_val) = state_ref.borrow().get_int(1) else {
+        return Err(vm.error("gmatch iterator: string not found in state".to_string()));
+    };
+    let Some(s) = s_val.as_lua_string() else {
+        return Err(vm.error("gmatch iterator: string invalid".to_string()));
     };
 
-    let pattern_val = state_ref_cell
-        .borrow()
-        .raw_get(&pattern_key)
-        .ok_or_else(|| {
-            LuaError::RuntimeError("gmatch iterator: pattern not found in state".to_string())
-        })?;
-    let pattern_str = unsafe {
-        pattern_val
-            .as_string()
-            .ok_or_else(|| LuaError::RuntimeError("gmatch iterator: pattern invalid".to_string()))?
+    let Some(pattern_val) = state_ref.borrow().get_int(2) else {
+        return Err(vm.error("gmatch iterator: pattern not found in state".to_string()));
     };
 
-    let position = state_ref_cell
+    let Some(pattern_str) = pattern_val.as_lua_string() else {
+        return Err(vm.error("gmatch iterator: pattern invalid".to_string()));
+    };
+
+    let position_value = state_ref
         .borrow()
-        .raw_get(&position_key)
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| {
-            LuaError::RuntimeError("gmatch iterator: position not found in state".to_string())
-        })? as usize;
+        .get_int(3)
+        .unwrap_or(LuaValue::integer(0));
+    let position = position_value.as_integer().unwrap_or(0) as usize;
 
     // Parse pattern
     let pattern = match lua_pattern::parse_pattern(pattern_str.as_str()) {
         Ok(p) => p,
-        Err(e) => return Err(LuaError::RuntimeError(format!("invalid pattern: {}", e))),
+        Err(e) => return Err(vm.error(format!("invalid pattern: {}", e))),
     };
 
     // Find next match
     if let Some((start, end, captures)) = lua_pattern::find(s.as_str(), &pattern, position) {
         // Update position for next iteration
         let next_pos = if end > start { end } else { end + 1 };
-        state_ref_cell
+        state_ref
             .borrow_mut()
-            .raw_set(position_key, LuaValue::integer(next_pos as i64));
+            .set_int(3, LuaValue::integer(next_pos as i64));
 
         // Return captures if any, otherwise return the matched string
         if captures.is_empty() {
@@ -1080,9 +1038,7 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         fmt_arg
             .as_string()
             .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #1 to 'string.pack' (string expected)".to_string(),
-                )
+                vm.error("bad argument #1 to 'string.pack' (string expected)".to_string())
             })?
             .as_str()
     };
@@ -1100,14 +1056,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'b' => {
                 // signed byte
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_integer().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })?;
                 result.push((n & 0xFF) as u8);
                 value_idx += 1;
@@ -1115,14 +1069,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'B' => {
                 // unsigned byte
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_integer().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })?;
                 result.push((n & 0xFF) as u8);
                 value_idx += 1;
@@ -1130,14 +1082,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'h' => {
                 // signed short (2 bytes, little-endian)
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_integer().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })? as i16;
                 result.extend_from_slice(&n.to_le_bytes());
                 value_idx += 1;
@@ -1145,14 +1095,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'H' => {
                 // unsigned short (2 bytes, little-endian)
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_integer().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })? as u16;
                 result.extend_from_slice(&n.to_le_bytes());
                 value_idx += 1;
@@ -1160,14 +1108,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'i' | 'l' => {
                 // signed int (4 bytes, little-endian)
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_integer().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })? as i32;
                 result.extend_from_slice(&n.to_le_bytes());
                 value_idx += 1;
@@ -1175,14 +1121,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'I' | 'L' => {
                 // unsigned int (4 bytes, little-endian)
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_integer().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })? as u32;
                 result.extend_from_slice(&n.to_le_bytes());
                 value_idx += 1;
@@ -1190,14 +1134,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'f' => {
                 // float (4 bytes, little-endian)
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_number().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })? as f32;
                 result.extend_from_slice(&n.to_le_bytes());
                 value_idx += 1;
@@ -1205,14 +1147,12 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'd' => {
                 // double (8 bytes, little-endian)
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let n = values[value_idx].as_number().ok_or_else(|| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (number expected)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (number expected)".to_string())
                 })?;
                 result.extend_from_slice(&n.to_le_bytes());
                 value_idx += 1;
@@ -1220,15 +1160,13 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'z' => {
                 // zero-terminated string
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let s = unsafe {
                     values[value_idx].as_string().ok_or_else(|| {
-                        LuaError::RuntimeError(
-                            "bad argument to 'string.pack' (string expected)".to_string(),
-                        )
+                        vm.error("bad argument to 'string.pack' (string expected)".to_string())
                     })?
                 };
                 result.extend_from_slice(s.as_str().as_bytes());
@@ -1245,21 +1183,17 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     }
                 }
                 let size: usize = size_str.parse().map_err(|_| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (invalid size)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.pack' (invalid size)".to_string())
                 })?;
 
                 if value_idx >= values.len() {
-                    return Err(LuaError::RuntimeError(
-                        "bad argument to 'string.pack' (not enough values)".to_string(),
-                    ));
+                    return Err(
+                        vm.error("bad argument to 'string.pack' (not enough values)".to_string())
+                    );
                 }
                 let s = unsafe {
                     values[value_idx].as_string().ok_or_else(|| {
-                        LuaError::RuntimeError(
-                            "bad argument to 'string.pack' (string expected)".to_string(),
-                        )
+                        vm.error("bad argument to 'string.pack' (string expected)".to_string())
                     })?
                 };
                 let bytes = s.as_str().as_bytes();
@@ -1271,7 +1205,7 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 value_idx += 1;
             }
             _ => {
-                return Err(LuaError::RuntimeError(format!(
+                return Err(vm.error(format!(
                     "bad argument to 'string.pack' (invalid format option '{}')",
                     ch
                 )));
@@ -1292,9 +1226,7 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         fmt_arg
             .as_string()
             .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #1 to 'string.packsize' (string expected)".to_string(),
-                )
+                vm.error("bad argument #1 to 'string.packsize' (string expected)".to_string())
             })?
             .as_str()
     };
@@ -1310,9 +1242,7 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             'i' | 'I' | 'l' | 'L' | 'f' => size += 4,
             'd' => size += 8,
             'z' => {
-                return Err(LuaError::RuntimeError(
-                    "variable-length format in 'string.packsize'".to_string(),
-                ));
+                return Err(vm.error("variable-length format in 'string.packsize'".to_string()));
             }
             'c' => {
                 let mut size_str = String::new();
@@ -1323,14 +1253,12 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     }
                 }
                 let n: usize = size_str.parse().map_err(|_| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.packsize' (invalid size)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.packsize' (invalid size)".to_string())
                 })?;
                 size += n;
             }
             _ => {
-                return Err(LuaError::RuntimeError(format!(
+                return Err(vm.error(format!(
                     "bad argument to 'string.packsize' (invalid format option '{}')",
                     ch
                 )));
@@ -1348,9 +1276,7 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         fmt_arg
             .as_string()
             .ok_or_else(|| {
-                LuaError::RuntimeError(
-                    "bad argument #1 to 'string.unpack' (string expected)".to_string(),
-                )
+                vm.error("bad argument #1 to 'string.unpack' (string expected)".to_string())
             })?
             .as_str()
     };
@@ -1358,9 +1284,7 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_arg = require_arg(vm, 1, "string.unpack")?;
     let s = unsafe {
         s_arg.as_string().ok_or_else(|| {
-            LuaError::RuntimeError(
-                "bad argument #2 to 'string.unpack' (string expected)".to_string(),
-            )
+            vm.error("bad argument #2 to 'string.unpack' (string expected)".to_string())
         })?
     };
     let bytes = s.as_str().as_bytes();
@@ -1376,21 +1300,21 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             ' ' | '\t' | '\n' | '\r' => continue,
             'b' => {
                 if idx >= bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 results.push(LuaValue::integer(bytes[idx] as i8 as i64));
                 idx += 1;
             }
             'B' => {
                 if idx >= bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 results.push(LuaValue::integer(bytes[idx] as i64));
                 idx += 1;
             }
             'h' => {
                 if idx + 2 > bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 let val = i16::from_le_bytes([bytes[idx], bytes[idx + 1]]);
                 results.push(LuaValue::integer(val as i64));
@@ -1398,7 +1322,7 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
             'H' => {
                 if idx + 2 > bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 let val = u16::from_le_bytes([bytes[idx], bytes[idx + 1]]);
                 results.push(LuaValue::integer(val as i64));
@@ -1406,7 +1330,7 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
             'i' | 'l' => {
                 if idx + 4 > bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 let val = i32::from_le_bytes([
                     bytes[idx],
@@ -1419,7 +1343,7 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
             'I' | 'L' => {
                 if idx + 4 > bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 let val = u32::from_le_bytes([
                     bytes[idx],
@@ -1432,7 +1356,7 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
             'f' => {
                 if idx + 4 > bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 let val = f32::from_le_bytes([
                     bytes[idx],
@@ -1445,7 +1369,7 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
             'd' => {
                 if idx + 8 > bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 let mut arr = [0u8; 8];
                 arr.copy_from_slice(&bytes[idx..idx + 8]);
@@ -1472,20 +1396,18 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     }
                 }
                 let size: usize = size_str.parse().map_err(|_| {
-                    LuaError::RuntimeError(
-                        "bad argument to 'string.unpack' (invalid size)".to_string(),
-                    )
+                    vm.error("bad argument to 'string.unpack' (invalid size)".to_string())
                 })?;
 
                 if idx + size > bytes.len() {
-                    return Err(LuaError::RuntimeError("data string too short".to_string()));
+                    return Err(vm.error("data string too short".to_string()));
                 }
                 let s = String::from_utf8_lossy(&bytes[idx..idx + size]);
                 results.push(vm.create_string(&s));
                 idx += size;
             }
             _ => {
-                return Err(LuaError::RuntimeError(format!(
+                return Err(vm.error(format!(
                     "bad argument to 'string.unpack' (invalid format option '{}')",
                     ch
                 )));

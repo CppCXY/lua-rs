@@ -4,7 +4,7 @@
 use crate::{
     LuaValue,
     lua_value::{LuaValueKind, TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
-    lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM},
+    lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
 };
 
 /// FORPREP A Bx
@@ -26,7 +26,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         (init.as_integer(), limit.as_integer(), step.as_integer())
     {
         if step_i == 0 {
-            return Err(LuaError::RuntimeError("'for' step is zero".to_string()));
+            return Err(vm.error("'for' step is zero".to_string()));
         }
 
         // Set control variable (R[A+3] = init)
@@ -63,18 +63,18 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         }
     } else {
         // Float loop
-        let init_f = init.as_number().ok_or_else(|| {
-            LuaError::RuntimeError("'for' initial value must be a number".to_string())
-        })?;
-        let limit_f = limit
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' limit must be a number".to_string()))?;
-        let step_f = step
-            .as_number()
-            .ok_or_else(|| LuaError::RuntimeError("'for' step must be a number".to_string()))?;
+        let Some(init_f) = init.as_number() else {
+            return Err(vm.error("'for' initial value must be a number".to_string()));
+        };
+        let Some(limit_f) = limit.as_number() else {
+            return Err(vm.error("'for' limit must be a number".to_string()));
+        };
+        let Some(step_f) = step.as_number() else {
+            return Err(vm.error("'for' step must be a number".to_string()));
+        };
 
         if step_f == 0.0 {
-            return Err(LuaError::RuntimeError("'for' step is zero".to_string()));
+            return Err(vm.error("'for' step is zero".to_string()));
         }
 
         // Set control variable
@@ -187,9 +187,7 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                     (*frame_ptr).pc -= bx;
                 }
             } else {
-                return Err(LuaError::RuntimeError(
-                    "'for' values must be numbers".to_string(),
-                ));
+                return Err(vm.error("'for' values must be numbers".to_string()));
             }
         }
     }
@@ -236,9 +234,9 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // This is similar to CALL instruction but with fixed arguments
     match func.kind() {
         LuaValueKind::CFunction => {
-            let cfunc = func
-                .as_cfunction()
-                .ok_or_else(|| LuaError::RuntimeError("Invalid CFunction".to_string()))?;
+            let Some(cfunc) = func.as_cfunction() else {
+                return Err(vm.error("Invalid CFunction".to_string()));
+            };
 
             // Create temporary frame for the call
             let frame_id = vm.next_frame_id;
@@ -280,11 +278,11 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             vm.register_stack[base_ptr + a + 5] = control;
 
             // OPTIMIZATION: Use direct pointer access instead of hash lookup
-            let func_ptr = func
-                .as_function_ptr()
-                .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
+            let Some(func_ref) = func.as_lua_function() else {
+                return Err(vm.error("Not a Lua function".to_string()));
+            };
 
-            let max_stack_size = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
+            let max_stack_size = func_ref.borrow().chunk.max_stack_size;
 
             let frame_id = vm.next_frame_id;
             vm.next_frame_id += 1;
@@ -302,11 +300,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             vm.register_stack[call_base + 1] = control;
 
             // Get code pointer from function
-            let func_ptr = func
-                .as_function_ptr()
-                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-            let func_obj = unsafe { &*func_ptr };
-            let code_ptr = func_obj.borrow().chunk.code.as_ptr();
+            let code_ptr = func_ref.borrow().chunk.code.as_ptr();
 
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
@@ -322,9 +316,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             // Execution will continue in the new frame
         }
         _ => {
-            return Err(LuaError::RuntimeError(
-                "attempt to call a non-function value in for loop".to_string(),
-            ));
+            return Err(vm.error("attempt to call a non-function value in for loop".to_string()));
         }
     }
 

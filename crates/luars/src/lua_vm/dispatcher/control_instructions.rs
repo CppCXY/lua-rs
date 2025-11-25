@@ -18,10 +18,9 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = vm.current_frame().base_ptr;
     vm.close_upvalues_from(base_ptr);
 
-    let frame = vm
-        .frames
-        .pop()
-        .ok_or_else(|| LuaError::RuntimeError("RETURN with no frame on stack".to_string()))?;
+    let Some(frame) = vm.frames.pop() else {
+        return Err(vm.error("RETURN with no frame on stack".to_string()));
+    };
 
     let base_ptr = frame.base_ptr;
     let result_reg = frame.get_result_reg();
@@ -128,7 +127,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // This prevents run() loop from trying to access empty frame
     if vm.frames.is_empty() {
         // Signal end of execution - return_values are already set
-        return Err(LuaError::RuntimeError("__VM_EXIT__".to_string()));
+        return Err(vm.error("__VM_EXIT__".to_string()));
     }
 
     Ok(())
@@ -168,7 +167,7 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         // OPTIMIZATION: Fast truthiness check using type tags
         // nil = TAG_NIL, false = VALUE_FALSE
         // Only nil and false are falsy
-        use crate::lua_value::{VALUE_FALSE, TAG_NIL};
+        use crate::lua_value::{TAG_NIL, VALUE_FALSE};
         let is_truthy = value.primary != TAG_NIL && value.primary != VALUE_FALSE;
 
         // If (not value) == k, skip next instruction
@@ -197,7 +196,7 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         let value = *reg_ptr.add(b);
 
         // OPTIMIZATION: Fast truthiness check
-        use crate::lua_value::{VALUE_FALSE, TAG_NIL};
+        use crate::lua_value::{TAG_NIL, VALUE_FALSE};
         let is_truthy = value.primary != TAG_NIL && value.primary != VALUE_FALSE;
 
         // If (is_truthy == k), assign R[A] = R[B], otherwise skip next instruction
@@ -231,7 +230,7 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     // OPTIMIZATION: Fast path - check if primary fields are identical (same type and value/id)
-    use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TAG_STRING, TYPE_MASK};
+    use crate::lua_value::{TAG_FLOAT, TAG_INTEGER, TAG_STRING, TYPE_MASK};
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
 
@@ -307,7 +306,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     // OPTIMIZATION: Direct type tag comparison (inline integer/float checks)
-    use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TAG_STRING, TYPE_MASK};
+    use crate::lua_value::{TAG_FLOAT, TAG_INTEGER, TAG_STRING, TYPE_MASK};
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
 
@@ -373,7 +372,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         }
 
         if !found_metamethod {
-            return Err(LuaError::RuntimeError(format!(
+            return Err(vm.error(format!(
                 "attempt to compare {} with {}",
                 left.type_name(),
                 right.type_name()
@@ -493,7 +492,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         }
 
         if !found_metamethod {
-            return Err(LuaError::RuntimeError(format!(
+            return Err(vm.error(format!(
                 "attempt to compare {} with {}",
                 left.type_name(),
                 right.type_name()
@@ -519,17 +518,12 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let func_ptr = frame
-        .get_function_ptr()
-        .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-    let func = unsafe { &*func_ptr };
-    let constant = func
-        .borrow()
-        .chunk
-        .constants
-        .get(b)
-        .copied()
-        .ok_or_else(|| LuaError::RuntimeError(format!("Invalid constant index: {}", b)))?;
+    let Some(func) = frame.get_lua_function() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
+    let Some(constant) = func.borrow().chunk.constants.get(b).copied() else {
+        return Err(vm.error(format!("Invalid constant index: {}", b)));
+    };
 
     let left = vm.register_stack[base_ptr + a];
 
@@ -591,7 +585,7 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     } else if let Some(l) = left.as_number() {
         l < sb as f64
     } else {
-        return Err(LuaError::RuntimeError(format!(
+        return Err(vm.error(format!(
             "attempt to compare {} with number",
             left.type_name()
         )));
@@ -622,7 +616,7 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     } else if let Some(l) = left.as_number() {
         l <= sb as f64
     } else {
-        return Err(LuaError::RuntimeError(format!(
+        return Err(vm.error(format!(
             "attempt to compare {} with number",
             left.type_name()
         )));
@@ -653,7 +647,7 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     } else if let Some(l) = left.as_number() {
         l > sb as f64
     } else {
-        return Err(LuaError::RuntimeError(format!(
+        return Err(vm.error(format!(
             "attempt to compare {} with number",
             left.type_name()
         )));
@@ -684,7 +678,7 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     } else if let Some(l) = left.as_number() {
         l >= sb as f64
     } else {
-        return Err(LuaError::RuntimeError(format!(
+        return Err(vm.error(format!(
             "attempt to compare {} with number",
             left.type_name()
         )));
@@ -703,9 +697,6 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
 #[inline(always)]
 pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
-    use crate::lua_value::LuaValueKind;
-    use crate::lua_vm::LuaCallFrame;
-
     // CALL A B C: R[A], ..., R[A+C-2] := R[A](R[A+1], ..., R[A+B-1])
     // A: function register, B: arg count + 1 (0 = use top), C: return count + 1 (0 = use top)
     let a = Instruction::get_a(instr) as usize;
@@ -746,10 +737,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
         // If still not callable, error
         if !func.is_callable() {
-            return Err(LuaError::RuntimeError(format!(
-                "attempt to call a {} value",
-                func.type_name()
-            )));
+            return Err(vm.error(format!("attempt to call a {} value", func.type_name())));
         }
     }
 
@@ -837,10 +825,10 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
             // Lua: n = (*f)(L);  // 直接调用
             let result = match cfunc(vm) {
-                Ok(r) => Ok(r),
-                Err(LuaError::Yield(values)) => {
+                Ok(r) => r,
+                Err(LuaError::Yield) => {
                     vm.frames.pop();
-                    return Err(LuaError::Yield(values));
+                    return Err(LuaError::Yield);
                 }
                 Err(e) => {
                     vm.frames.pop();
@@ -848,7 +836,6 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 }
             };
             vm.frames.pop();
-            let result = result?;
 
             // === 关键改进：返回值已经在正确位置了！===
             // C函数通过vm.push()写入返回值，已经在register_stack的末尾
@@ -884,11 +871,11 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         }
         LuaValueKind::Function => {
             // OPTIMIZATION: Direct pointer access - NO hash lookup!
-            let func_ptr = func
-                .as_function_ptr()
-                .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
-            let (max_stack_size, is_vararg) = unsafe {
-                let func_borrow = (*func_ptr).borrow();
+            let Some(func_ref) = func.as_lua_function() else {
+                return Err(vm.error("not a function".to_string()));
+            };
+            let (max_stack_size, is_vararg) = {
+                let func_borrow = func_ref.borrow();
                 let size = if func_borrow.chunk.max_stack_size == 0 {
                     1
                 } else {
@@ -968,7 +955,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             }
 
             // Get code pointer from function
-            let code_ptr = unsafe { (*func_ptr).borrow().chunk.code.as_ptr() };
+            let code_ptr = func_ref.borrow().chunk.code.as_ptr();
 
             // Create and push new frame
             let new_frame = LuaCallFrame::new_lua_function(
@@ -985,10 +972,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
             Ok(())
         }
-        _ => Err(LuaError::RuntimeError(format!(
-            "attempt to call a {} value",
-            func.type_name()
-        ))),
+        _ => Err(vm.error(format!("attempt to call a {} value", func.type_name()))),
     }
 }
 
@@ -1040,11 +1024,10 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     match func.kind() {
         LuaValueKind::Function => {
             // Lua function: tail call optimization
-
-            let func_ptr = func
-                .as_function_ptr()
-                .ok_or_else(|| LuaError::RuntimeError("Invalid function pointer".to_string()))?;
-            let max_stack_size = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
+            let Some(func_ref) = func.as_lua_function() else {
+                return Err(vm.error("not a function".to_string()));
+            };
+            let max_stack_size = func_ref.borrow().chunk.max_stack_size;
 
             // CRITICAL: Before popping the frame, close all upvalues that point to it
             // This ensures that any closures created in this frame can still access
@@ -1068,11 +1051,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             }
 
             // Get code pointer from function
-            let func_ptr = func
-                .as_function_ptr()
-                .ok_or_else(|| LuaError::RuntimeError("Not a Lua function".to_string()))?;
-            let func_obj = unsafe { &*func_ptr };
-            let code_ptr = func_obj.borrow().chunk.code.as_ptr();
+            let code_ptr = func_ref.borrow().chunk.code.as_ptr();
 
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,
@@ -1100,9 +1079,9 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             // When we pop it, we return to the parent
             // result_reg is relative to parent's base
 
-            let c_func = func
-                .as_cfunction()
-                .ok_or_else(|| LuaError::RuntimeError("Invalid C function".to_string()))?;
+            let Some(c_func) = func.as_cfunction() else {
+                return Err(vm.error("not a c function".to_string()));
+            };
 
             // Create temporary C function frame
             let frame_id = vm.next_frame_id;
@@ -1158,10 +1137,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
             Ok(())
         }
-        _ => Err(LuaError::RuntimeError(format!(
-            "attempt to call a {} value",
-            func.type_name()
-        ))),
+        _ => Err(vm.error(format!("attempt to call a {} value", func.type_name()))),
     }
 }
 
@@ -1172,10 +1148,9 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
     let base_ptr = vm.current_frame().base_ptr;
     vm.close_upvalues_from(base_ptr);
 
-    let frame = vm
-        .frames
-        .pop()
-        .ok_or_else(|| LuaError::RuntimeError("RETURN0 with no frame on stack".to_string()))?;
+    let Some(frame) = vm.frames.pop() else {
+        return Err(vm.error("RETURN0 with no frame on stack".to_string()));
+    };
 
     vm.return_values.clear();
 
@@ -1209,10 +1184,9 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = vm.current_frame().base_ptr;
     vm.close_upvalues_from(base_ptr);
 
-    let frame = vm
-        .frames
-        .pop()
-        .ok_or_else(|| LuaError::RuntimeError("RETURN1 with no frame on stack".to_string()))?;
+    let Some(frame) = vm.frames.pop() else {
+        return Err(vm.error("RETURN1 with no frame on stack".to_string()));
+    };
 
     let base_ptr = frame.base_ptr;
     let result_reg = frame.get_result_reg();

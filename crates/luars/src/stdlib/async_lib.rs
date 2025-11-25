@@ -28,7 +28,7 @@ pub fn register_async_functions(vm: &mut LuaVM) {
 /// Async sleep implementation (runs in tokio)
 async fn async_sleep_impl(args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
     if args.is_empty() {
-        return Err(LuaError::RuntimeError(
+        return Err(vm.error(
             "sleep requires 1 argument (milliseconds)".to_string(),
         ));
     }
@@ -36,7 +36,7 @@ async fn async_sleep_impl(args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
     let ms = match args[0].as_number() {
         Some(n) => n as u64,
         None => {
-            return Err(LuaError::RuntimeError(
+            return Err(vm.error(
                 "sleep argument must be a number".to_string(),
             ));
         }
@@ -52,7 +52,7 @@ async fn async_sleep_impl(args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
 fn async_sleep_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // 检查是否在协程中
     let coroutine = vm.current_thread_value.clone().ok_or_else(|| {
-        LuaError::RuntimeError("async.sleep can only be called from within a coroutine".to_string())
+        vm.error("async.sleep can only be called from within a coroutine".to_string())
     })?;
 
     // 收集参数
