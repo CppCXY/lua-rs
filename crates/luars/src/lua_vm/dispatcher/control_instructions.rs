@@ -145,12 +145,13 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// JMP sJ
 /// pc += sJ
 #[inline(always)]
-pub fn exec_jmp(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_jmp(_vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let sj = Instruction::get_sj(instr);
 
-    let frame = vm.current_frame_mut();
-    // PC already incremented by dispatcher, so we add offset directly
-    frame.pc = (frame.pc as i32 + sj) as usize;
+    unsafe {
+        // PC already incremented by dispatcher, so we add offset directly
+        (*frame_ptr).pc = ((*frame_ptr).pc as i32 + sj) as usize;
+    }
 
     Ok(())
 }
@@ -574,32 +575,32 @@ pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// LTI A sB k
 /// if ((R[A] < sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_lti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-    // OPTIMIZATION: Use unsafe for unchecked register access
-    let left = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
+        // OPTIMIZATION: Direct type tag comparison
+        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+        let is_less = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+            // Fast integer path
+            (left.secondary as i64) < (sb as i64)
+        } else if let Some(l) = left.as_number() {
+            l < sb as f64
+        } else {
+            return Err(vm.error(format!(
+                "attempt to compare {} with number",
+                left.type_name()
+            )));
+        };
 
-    // OPTIMIZATION: Direct type tag comparison
-    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-    let is_less = if (left.primary & TYPE_MASK) == TAG_INTEGER {
-        // Fast integer path
-        (left.secondary as i64) < (sb as i64)
-    } else if let Some(l) = left.as_number() {
-        l < sb as f64
-    } else {
-        return Err(vm.error(format!(
-            "attempt to compare {} with number",
-            left.type_name()
-        )));
-    };
-
-    if is_less != k {
-        vm.current_frame_mut().pc += 1;
+        if is_less != k {
+            (*frame_ptr).pc += 1;
+        }
     }
 
     Ok(())
@@ -608,29 +609,30 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// LEI A sB k
 /// if ((R[A] <= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_lei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-    let left = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
+        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+        let is_less_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+            (left.secondary as i64) <= (sb as i64)
+        } else if let Some(l) = left.as_number() {
+            l <= sb as f64
+        } else {
+            return Err(vm.error(format!(
+                "attempt to compare {} with number",
+                left.type_name()
+            )));
+        };
 
-    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-    let is_less_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
-        (left.secondary as i64) <= (sb as i64)
-    } else if let Some(l) = left.as_number() {
-        l <= sb as f64
-    } else {
-        return Err(vm.error(format!(
-            "attempt to compare {} with number",
-            left.type_name()
-        )));
-    };
-
-    if is_less_equal != k {
-        vm.current_frame_mut().pc += 1;
+        if is_less_equal != k {
+            (*frame_ptr).pc += 1;
+        }
     }
 
     Ok(())
@@ -639,29 +641,30 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// GTI A sB k
 /// if ((R[A] > sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_gti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-    let left = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
+        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+        let is_greater = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+            (left.secondary as i64) > (sb as i64)
+        } else if let Some(l) = left.as_number() {
+            l > sb as f64
+        } else {
+            return Err(vm.error(format!(
+                "attempt to compare {} with number",
+                left.type_name()
+            )));
+        };
 
-    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-    let is_greater = if (left.primary & TYPE_MASK) == TAG_INTEGER {
-        (left.secondary as i64) > (sb as i64)
-    } else if let Some(l) = left.as_number() {
-        l > sb as f64
-    } else {
-        return Err(vm.error(format!(
-            "attempt to compare {} with number",
-            left.type_name()
-        )));
-    };
-
-    if is_greater != k {
-        vm.current_frame_mut().pc += 1;
+        if is_greater != k {
+            (*frame_ptr).pc += 1;
+        }
     }
 
     Ok(())
@@ -670,29 +673,30 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// GEI A sB k
 /// if ((R[A] >= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gei(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_gei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-    let left = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
+        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+        let is_greater_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+            (left.secondary as i64) >= (sb as i64)
+        } else if let Some(l) = left.as_number() {
+            l >= sb as f64
+        } else {
+            return Err(vm.error(format!(
+                "attempt to compare {} with number",
+                left.type_name()
+            )));
+        };
 
-    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-    let is_greater_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
-        (left.secondary as i64) >= (sb as i64)
-    } else if let Some(l) = left.as_number() {
-        l >= sb as f64
-    } else {
-        return Err(vm.error(format!(
-            "attempt to compare {} with number",
-            left.type_name()
-        )));
-    };
-
-    if is_greater_equal != k {
-        vm.current_frame_mut().pc += 1;
+        if is_greater_equal != k {
+            (*frame_ptr).pc += 1;
+        }
     }
 
     Ok(())

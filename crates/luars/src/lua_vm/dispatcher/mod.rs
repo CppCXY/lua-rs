@@ -94,13 +94,13 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallF
         OpCode::Le => exec_le(vm, instr),
         OpCode::EqK => exec_eqk(vm, instr),
         OpCode::EqI => exec_eqi(vm, instr),
-        OpCode::LtI => exec_lti(vm, instr),
-        OpCode::LeI => exec_lei(vm, instr),
-        OpCode::GtI => exec_gti(vm, instr),
-        OpCode::GeI => exec_gei(vm, instr),
+        OpCode::LtI => exec_lti(vm, instr, frame_ptr),
+        OpCode::LeI => exec_lei(vm, instr, frame_ptr),
+        OpCode::GtI => exec_gti(vm, instr, frame_ptr),
+        OpCode::GeI => exec_gei(vm, instr, frame_ptr),
 
         // Jump and test instructions
-        OpCode::Jmp => exec_jmp(vm, instr),
+        OpCode::Jmp => exec_jmp(vm, instr, frame_ptr),
         OpCode::Test => exec_test(vm, instr),
         OpCode::TestSet => exec_testset(vm, instr),
 

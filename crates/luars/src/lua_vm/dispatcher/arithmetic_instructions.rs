@@ -353,6 +353,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 // ============ Arithmetic Immediate Instructions ============
 
 /// ADDI: R[A] = R[B] + sC
+/// OPTIMIZATION: After successful integer add, check if next instruction is JMP and execute inline
 #[inline(always)]
 pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -367,7 +368,16 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
             let l = left.secondary as i64;
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
                 LuaValue::integer(l.wrapping_add(sc as i64));
-            (*frame_ptr).pc += 1;
+            (*frame_ptr).pc += 1; // Skip MMBINI
+            
+            // OPTIMIZATION: Check if next instruction is backward JMP (loop)
+            let next_instr = (*frame_ptr).code_ptr.add((*frame_ptr).pc).read();
+            if (next_instr & 0x7F) == 56 { // JMP opcode
+                let sj = ((next_instr >> 7) & 0x1FFFFFF) as i32 - 16777215;
+                if sj < 0 { // Backward jump = loop
+                    (*frame_ptr).pc = ((*frame_ptr).pc as i32 + 1 + sj) as usize;
+                }
+            }
             return Ok(());
         }
 

@@ -261,7 +261,6 @@ impl LuaVM {
 
     /// Main execution loop - interprets bytecode instructions
     /// Main VM execution loop - MAXIMUM PERFORMANCE
-    /// 零返回值，零分支，直接调度
     fn run(&mut self) -> LuaResult<LuaValue> {
         // CRITICAL OPTIMIZATION: Check frames.is_empty() OUTSIDE the loop
         // RETURN instruction will pop frames and check if empty
@@ -273,15 +272,12 @@ impl LuaVM {
             let instr = unsafe { (*frame_ptr).code_ptr.add((*frame_ptr).pc).read() };
             unsafe { (*frame_ptr).pc += 1; }
 
-            if let Err(e) = dispatch_instruction(self, instr, frame_ptr) {
-                match e {
-                    LuaError::Yield => return Ok(LuaValue::nil()),
-                    LuaError::Exit => {
-                        // Normal exit when all frames are popped
-                        return Ok(LuaValue::nil());
-                    }
-                    _ => return Err(e),
-                }
+            // Use match with explicit Ok branch for better branch prediction hints
+            match dispatch_instruction(self, instr, frame_ptr) {
+                Ok(()) => {}
+                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(LuaError::Yield) => return Ok(LuaValue::nil()),
+                Err(e) => return Err(e),
             }
         }
     }
