@@ -1228,20 +1228,27 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         vm.close_upvalues_from(base_ptr);
     }
 
+    // Get return value before popping frame
+    let return_value = if base_ptr + a < vm.register_stack.len() {
+        unsafe { *vm.register_stack.get_unchecked(base_ptr + a) }
+    } else {
+        LuaValue::nil()
+    };
+
     // Pop frame - we already have all info we need from frame_ptr
     unsafe { vm.frames.pop().unwrap_unchecked() };
 
-    // ULTRA-FAST PATH: Most calls have a caller, check length directly
-    if vm.frames.len() > 0 {
-        // Get return value directly - no bounds check needed
-        let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
-        
-        // Get caller frame directly
-        let caller_frame = unsafe { vm.frames.last_mut().unwrap_unchecked() };
-        
-        // Write to caller's result register - no bounds check needed
+    // CRITICAL: Always set return_values for call_function_internal compatibility
+    vm.return_values.clear();
+    vm.return_values.push(return_value);
+
+    // Check if there's a caller frame
+    if let Some(caller_frame) = vm.frames.last_mut() {
+        // Write to caller's result register
         let dest_pos = caller_frame.base_ptr + result_reg;
-        unsafe { *vm.register_stack.get_unchecked_mut(dest_pos) = return_value; }
+        if dest_pos < vm.register_stack.len() {
+            vm.register_stack[dest_pos] = return_value;
+        }
         
         // Update top
         caller_frame.top = result_reg + 1;
@@ -1249,10 +1256,6 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         Ok(())
     } else {
         // No caller - exit VM (only happens at script end)
-        vm.return_values.clear();
-        if base_ptr + a < vm.register_stack.len() {
-            vm.return_values.push(vm.register_stack[base_ptr + a]);
-        }
         Err(LuaError::Exit)
     }
 }
