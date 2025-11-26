@@ -747,7 +747,10 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Compile the code using VM's string pool
     match vm.compile(&code) {
         Ok(chunk) => {
-            let func = vm.create_function(std::rc::Rc::new(chunk), vec![]);
+            // Create upvalue for _ENV (global table)
+            let env_upvalue = LuaUpvalue::new_closed(vm.global_value);
+            let upvalues = vec![env_upvalue];
+            let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
             Ok(MultiValue::single(func))
         }
         Err(e) => {
@@ -778,7 +781,10 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Compile and execute using VM's string pool
     match vm.compile(&code) {
         Ok(chunk) => {
-            let func = vm.create_function(std::rc::Rc::new(chunk), vec![]);
+            // Create upvalue for _ENV (global table)
+            let env_upvalue = LuaUpvalue::new_closed(vm.global_value);
+            let upvalues = vec![env_upvalue];
+            let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
 
             // Call the function
             let (success, results) = vm.protected_call(func, vec![])?;

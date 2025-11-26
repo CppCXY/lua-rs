@@ -1839,7 +1839,7 @@ impl LuaVM {
                 let values = self.take_yield_values();
                 Err(self.do_yield(values))
             }
-            Err(error_msg) => {
+            Err(_) => {
                 // Real error: clean up frames and return false with error message
                 // Simply clear all open upvalues to avoid dangling references
                 self.open_upvalues.clear();
@@ -1849,8 +1849,9 @@ impl LuaVM {
                     self.frames.pop();
                 }
 
-                // Return error without traceback for now (can add later)
-                let error_str = self.create_string(&format!("{}", error_msg));
+                // Return error - the actual message is stored in vm.error_message
+                let msg = self.error_message.clone();
+                let error_str = self.create_string(&msg);
 
                 Ok((false, vec![error_str]))
             }
@@ -1877,7 +1878,7 @@ impl LuaVM {
         match result {
             Ok(values) => Ok((true, values)),
             Err(LuaError::Yield) => Err(LuaError::Yield),
-            Err(err_msg) => {
+            Err(_) => {
                 // Clean up frames created by the failed function call
                 while self.frames.len() > initial_frame_count {
                     let frame = self.frames.pop().unwrap();
@@ -1886,21 +1887,11 @@ impl LuaVM {
                 }
 
                 eprintln!("[xpcall] Calling error handler");
-                // Extract the actual error message without the "Runtime Error: " prefix
-                let (err_value, err_display) = match &err_msg {
-                    LuaError::RuntimeError => {
-                        let msg = self.get_error_message().to_string();
-                        (self.create_string(&msg), format!("Runtime Error: {}", msg))
-                    }
-                    LuaError::CompileError => {
-                        let msg = self.get_error_message().to_string();
-                        (self.create_string(&msg), format!("Compile Error: {}", msg))
-                    }
-                    _ => {
-                        let display = format!("{}", err_msg);
-                        (self.create_string(&display), display)
-                    }
-                };
+                // Get the actual error message
+                let msg = self.error_message.clone();
+                let err_value = self.create_string(&msg);
+                let err_display = format!("Runtime Error: {}", msg);
+                
                 let handler_result = self.call_function_internal(err_handler, vec![err_value]);
 
                 match handler_result {

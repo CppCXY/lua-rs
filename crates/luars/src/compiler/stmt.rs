@@ -1127,6 +1127,19 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
     // Begin scope for loop variables
     begin_scope(c);
 
+    // CRITICAL FIX: Register the iterator's hidden variables as internal locals
+    // This prevents the loop body from overwriting them with temporary registers.
+    // In Lua 5.4, for-in has 4 hidden variables: iter_func, state, control_var, and closing value
+    // We add them with special names that can't conflict with user variables.
+    add_local(c, "(for iterator)".to_string(), iter_func_reg);
+    add_local(c, "(for state)".to_string(), state_reg);
+    add_local(c, "(for control)".to_string(), control_var_reg);
+
+    // Ensure freereg is past the iterator registers
+    if c.freereg <= control_var_reg {
+        c.freereg = control_var_reg + 1;
+    }
+
     // Allocate registers for loop variables
     let mut var_regs = Vec::new();
     for var_name in &var_names {

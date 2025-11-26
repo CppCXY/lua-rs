@@ -579,18 +579,19 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 // because CONCAT consumes the right operand
                 c.freereg = result_reg + 1;
             } else {
-                // Need to arrange right to be consecutive with left
-                result_reg = left_reg;
-                let right_target = left_reg + 1;
-
-                // Allocate right_target if needed
-                while c.freereg <= right_target {
-                    alloc_register(c);
-                }
-
-                emit_move(c, right_target, right_reg);
-                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, 1, 0));
-                // Reset freereg to result_reg + 1
+                // Need to arrange operands to be consecutive
+                // CRITICAL FIX: Use fresh registers starting from freereg to avoid
+                // overwriting already allocated values (like function references)
+                let concat_base = c.freereg;
+                alloc_register(c); // for left operand copy
+                alloc_register(c); // for right operand
+                
+                emit_move(c, concat_base, left_reg);
+                emit_move(c, concat_base + 1, right_reg);
+                emit(c, Instruction::encode_abc(OpCode::Concat, concat_base, 1, 0));
+                
+                result_reg = concat_base;
+                // Reset freereg to result_reg + 1 (concat consumes right operand)
                 c.freereg = result_reg + 1;
             }
         }
@@ -1665,22 +1666,26 @@ fn compile_binary_expr_to(
                     return Ok(concat_reg);
                 }
             } else {
-                // Need to arrange into consecutive registers
-                let concat_reg = dest.unwrap_or_else(|| left_reg);
-                let right_target = concat_reg + 1;
+                // Need to arrange operands into consecutive registers
+                // CRITICAL FIX: Use fresh registers starting from freereg to avoid
+                // overwriting already allocated values (like function references)
+                let concat_reg = c.freereg;
+                alloc_register(c); // for left operand copy
+                alloc_register(c); // for right operand
 
-                while c.freereg <= right_target {
-                    alloc_register(c);
-                }
-
-                if left_reg != concat_reg {
-                    emit_move(c, concat_reg, left_reg);
-                }
-                if right_reg != right_target {
-                    emit_move(c, right_target, right_reg);
-                }
-
+                emit_move(c, concat_reg, left_reg);
+                emit_move(c, concat_reg + 1, right_reg);
                 emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
+                
+                // Reset freereg (concat consumes right operand)
+                c.freereg = concat_reg + 1;
+                
+                if let Some(d) = dest {
+                    if d != concat_reg {
+                        emit_move(c, d, concat_reg);
+                    }
+                    return Ok(d);
+                }
                 return Ok(concat_reg);
             }
         }
