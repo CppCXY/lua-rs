@@ -88,10 +88,10 @@ impl LuaVM {
     pub fn new() -> Self {
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
-            frames: Vec::new(),
-            register_stack: Vec::with_capacity(128), // Pre-allocate for initial stack
+            frames: Vec::with_capacity(64), // Pre-allocate call stack for typical recursion depth
+            register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
             gc: GC::new(),
-            return_values: Vec::new(),
+            return_values: Vec::with_capacity(16),
             open_upvalues: Vec::new(),
             to_be_closed: Vec::new(),
             next_frame_id: 0,

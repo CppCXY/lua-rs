@@ -135,12 +135,12 @@ pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallF
         OpCode::TForCall => exec_tforcall(vm, instr),
         OpCode::TForLoop => exec_tforloop(vm, instr),
 
-        // Call and return
-        OpCode::Call => exec_call(vm, instr),
+        // Call and return - pass frame_ptr for optimization
+        OpCode::Call => exec_call(vm, instr, frame_ptr),
         OpCode::TailCall => exec_tailcall(vm, instr),
         OpCode::Return => exec_return(vm, instr),
-        OpCode::Return0 => exec_return0(vm, instr),
-        OpCode::Return1 => exec_return1(vm, instr),
+        OpCode::Return0 => exec_return0(vm, instr, frame_ptr),
+        OpCode::Return1 => exec_return1(vm, instr, frame_ptr),
 
         // Extra argument
         OpCode::ExtraArg => exec_extraarg(vm, instr),

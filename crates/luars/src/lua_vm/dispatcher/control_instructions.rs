@@ -708,15 +708,14 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
 /// ULTRA-OPTIMIZED: Minimize overhead for the common case (Lua function, no metamethod)
 #[inline(always)]
-pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_call(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    // OPTIMIZATION: Use unsafe to avoid bounds checks in hot path
+    // OPTIMIZATION: Use passed frame_ptr directly - avoid Vec lookup!
     let (base, func) = unsafe {
-        let frame = vm.frames.last().unwrap_unchecked();
-        let base = frame.base_ptr;
+        let base = (*frame_ptr).base_ptr;
         let func = *vm.register_stack.get_unchecked(base + a);
         (base, func)
     };
@@ -725,7 +724,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // Check type tag directly without full pattern match
     use crate::lua_value::TAG_FUNCTION;
     if (func.primary & crate::lua_value::TYPE_MASK) == TAG_FUNCTION {
-        return exec_call_lua_function(vm, func, a, b, c, base, false, LuaValue::nil());
+        return exec_call_lua_function(vm, func, a, b, c, base, false, LuaValue::nil(), frame_ptr);
     }
 
     // Check for CFunction
@@ -746,7 +745,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                     if call_func.is_cfunction() {
                         return exec_call_cfunction(vm, call_func, a, b, c, base, true, func);
                     } else {
-                        return exec_call_lua_function(vm, call_func, a, b, c, base, true, func);
+                        return exec_call_lua_function(vm, call_func, a, b, c, base, true, func, frame_ptr);
                     }
                 }
             }
@@ -757,6 +756,7 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 }
 
 /// Fast path for Lua function calls
+/// OPTIMIZED: Minimize branches and memory operations for common case
 #[inline(always)]
 fn exec_call_lua_function(
     vm: &mut LuaVM,
@@ -767,37 +767,81 @@ fn exec_call_lua_function(
     caller_base: usize,
     use_call_metamethod: bool,
     call_metamethod_self: LuaValue,
+    frame_ptr: *mut LuaCallFrame,  // Use passed frame_ptr!
 ) -> LuaResult<()> {
     // Get function reference - already validated as Function type
     let func_ref = unsafe { func.as_lua_function().unwrap_unchecked() };
     
-    // Extract chunk info with minimal borrowing
+    // Extract chunk info with minimal borrowing - single borrow, extract all needed data
     let (max_stack_size, is_vararg, code_ptr) = {
         let func_borrow = func_ref.borrow();
-        let size = func_borrow.chunk.max_stack_size.max(1);
-        let vararg = func_borrow.chunk.is_vararg;
-        let ptr = func_borrow.chunk.code.as_ptr();
-        (size, vararg, ptr)
+        (
+            func_borrow.chunk.max_stack_size,
+            func_borrow.chunk.is_vararg,
+            func_borrow.chunk.code.as_ptr(),
+        )
     };
 
-    // Calculate argument count
+    // Calculate argument count - use frame_ptr directly!
     let arg_count = if b == 0 {
-        let frame = vm.current_frame();
-        if frame.top > a + 1 { frame.top - (a + 1) } else { 0 }
+        unsafe { (*frame_ptr).top.saturating_sub(a + 1) }
     } else {
-        vm.current_frame_mut().top = a + b;
+        unsafe { (*frame_ptr).top = a + b; }
         b - 1
     };
 
     let return_count = if c == 0 { usize::MAX } else { c - 1 };
 
-    // Create new frame
-    let frame_id = vm.next_frame_id;
-    vm.next_frame_id += 1;
-
     // Zero-copy: new frame base = R[A+1]
     let new_base = caller_base + a + 1;
     
+    // FAST PATH: No metamethod, no vararg (most common case)
+    if !use_call_metamethod && !is_vararg {
+        // Simple case: just ensure capacity and push frame
+        let required_capacity = new_base + max_stack_size;
+        
+        // Inline capacity check - avoid function call overhead
+        if vm.register_stack.len() < required_capacity {
+            vm.register_stack.reserve(required_capacity - vm.register_stack.len());
+            // Only resize what's needed, don't initialize everything
+            unsafe {
+                vm.register_stack.set_len(required_capacity);
+                // Initialize only slots beyond arguments
+                let reg_ptr = vm.register_stack.as_mut_ptr();
+                let nil_val = LuaValue::nil();
+                for i in arg_count..max_stack_size {
+                    std::ptr::write(reg_ptr.add(new_base + i), nil_val);
+                }
+            }
+        } else if arg_count < max_stack_size {
+            // Stack is big enough, just initialize locals beyond args
+            unsafe {
+                let reg_ptr = vm.register_stack.as_mut_ptr();
+                let nil_val = LuaValue::nil();
+                for i in arg_count..max_stack_size {
+                    *reg_ptr.add(new_base + i) = nil_val;
+                }
+            }
+        }
+
+        // Create and push new frame - inline to avoid call overhead
+        let frame_id = vm.next_frame_id;
+        vm.next_frame_id += 1;
+        
+        let new_frame = LuaCallFrame::new_lua_function(
+            frame_id,
+            func,
+            code_ptr,
+            new_base,
+            arg_count,
+            a,
+            return_count,
+        );
+        vm.frames.push(new_frame);
+        return Ok(());
+    }
+
+    // SLOW PATH: Handle metamethod or vararg
     let actual_arg_count = if use_call_metamethod { arg_count + 1 } else { arg_count };
     let actual_stack_size = max_stack_size.max(actual_arg_count);
     let total_stack_size = if is_vararg && actual_arg_count > 0 {
@@ -842,6 +886,9 @@ fn exec_call_lua_function(
     }
 
     // Create and push new frame
+    let frame_id = vm.next_frame_id;
+    vm.next_frame_id += 1;
+
     let new_frame = LuaCallFrame::new_lua_function(
         frame_id,
         func,
@@ -1124,96 +1171,88 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// RETURN0
 /// return (no values)
-pub fn exec_return0(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
-    // Close upvalues before popping the frame
-    let base_ptr = vm.current_frame().base_ptr;
-    vm.close_upvalues_from(base_ptr);
+/// OPTIMIZED: Use frame_ptr directly
+#[inline(always)]
+pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+    // FAST PATH: Use passed frame_ptr directly
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
+    
+    // Only close upvalues if there are any
+    if !vm.open_upvalues.is_empty() {
+        vm.close_upvalues_from(base_ptr);
+    }
 
-    let Some(frame) = vm.frames.pop() else {
-        return Err(vm.error("RETURN0 with no frame on stack".to_string()));
-    };
+    let frame = unsafe { vm.frames.pop().unwrap_unchecked() };
 
     vm.return_values.clear();
 
-    // IMPORTANT: For RETURN0, we need to fill the result register(s) with nil
-    // if the caller expects return values (num_results > 0)
-    if !vm.frames.is_empty() {
+    // FAST PATH: Check if we have a caller frame
+    if let Some(caller_frame) = vm.frames.last_mut() {
         let result_reg = frame.get_result_reg();
         let num_results = frame.get_num_results();
-        let caller_base = vm.current_frame().base_ptr;
 
         // Fill expected return values with nil
         if num_results != usize::MAX && num_results > 0 {
-            for i in 0..num_results {
-                vm.register_stack[caller_base + result_reg + i] = LuaValue::nil();
+            let dest_base = caller_frame.base_ptr + result_reg;
+            unsafe {
+                let reg_ptr = vm.register_stack.as_mut_ptr();
+                let nil_val = LuaValue::nil();
+                for i in 0..num_results {
+                    *reg_ptr.add(dest_base + i) = nil_val;
+                }
             }
         }
 
-        // Update caller's top to indicate 0 return values (for variable returns)
-        vm.current_frame_mut().top = result_reg; // No return values, so top = result_reg + 0
+        // Update caller's top
+        caller_frame.top = result_reg;
+        Ok(())
     } else {
-        // If frames are empty, signal VM exit
-        return Err(LuaError::Exit);
+        Err(LuaError::Exit)
     }
-
-    Ok(())
 }
 
 /// RETURN1 A
 /// return R[A]
-pub fn exec_return1(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+/// OPTIMIZED: Fast path for single-value return (most common case)
+#[inline(always)]
+pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
 
-    // Close upvalues before popping the frame
-    let base_ptr = vm.current_frame().base_ptr;
-    vm.close_upvalues_from(base_ptr);
-
-    let Some(frame) = vm.frames.pop() else {
-        return Err(vm.error("RETURN1 with no frame on stack".to_string()));
+    // FAST PATH: Use passed frame_ptr directly - get all info we need
+    let (base_ptr, result_reg) = unsafe { 
+        ((*frame_ptr).base_ptr, (*frame_ptr).get_result_reg())
     };
-
-    let base_ptr = frame.base_ptr;
-    let result_reg = frame.get_result_reg();
-
-    vm.return_values.clear();
-    if base_ptr + a < vm.register_stack.len() {
-        let return_value = vm.register_stack[base_ptr + a];
-        vm.return_values.push(return_value);
+    
+    // Only close upvalues if there are any open (rare for simple functions)
+    if !vm.open_upvalues.is_empty() {
+        vm.close_upvalues_from(base_ptr);
     }
 
-    // Copy return value to caller's registers if needed
-    if !vm.frames.is_empty() {
-        let caller_base = vm.current_frame().base_ptr;
+    // Pop frame - we already have all info we need from frame_ptr
+    unsafe { vm.frames.pop().unwrap_unchecked() };
 
-        // Ensure destination is valid
-        let dest_pos = caller_base + result_reg;
-        if vm.register_stack.len() <= dest_pos {
-            vm.ensure_stack_capacity(dest_pos + 1);
-            vm.register_stack.resize(dest_pos + 1, LuaValue::nil());
-        }
-
-        if !vm.return_values.is_empty() {
-            vm.register_stack[caller_base + result_reg] = vm.return_values[0];
-        }
-
-        // Only update top for normal CALL instructions
-        // For internal calls (result_reg >= max_stack), don't modify caller's top
-        let caller_frame = vm.current_frame();
-        let should_update_top =
-            if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
-                let max_stack = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
-                result_reg < max_stack
-            } else {
-                result_reg < 256
-            };
-
-        if should_update_top {
-            vm.current_frame_mut().top = result_reg + 1;
-        }
+    // ULTRA-FAST PATH: Most calls have a caller, check length directly
+    if vm.frames.len() > 0 {
+        // Get return value directly - no bounds check needed
+        let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+        
+        // Get caller frame directly
+        let caller_frame = unsafe { vm.frames.last_mut().unwrap_unchecked() };
+        
+        // Write to caller's result register - no bounds check needed
+        let dest_pos = caller_frame.base_ptr + result_reg;
+        unsafe { *vm.register_stack.get_unchecked_mut(dest_pos) = return_value; }
+        
+        // Update top
+        caller_frame.top = result_reg + 1;
+        
+        Ok(())
     } else {
-        // If frames are empty, signal VM exit
-        return Err(LuaError::Exit);
+        // No caller - exit VM (only happens at script end)
+        vm.return_values.clear();
+        if base_ptr + a < vm.register_stack.len() {
+            vm.return_values.push(vm.register_stack[base_ptr + a]);
+        }
+        Err(LuaError::Exit)
     }
-
-    Ok(())
 }
