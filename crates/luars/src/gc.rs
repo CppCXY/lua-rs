@@ -147,8 +147,30 @@ impl GC {
     }
 
     /// Register a new object for GC tracking
+    /// OPTIMIZED: Use lightweight tracking without HashMap insert
     #[inline]
-    pub fn register_object(&mut self, obj_id: u32, obj_type: GcObjectType) -> usize {
+    pub fn register_object(&mut self, _obj_id: u32, obj_type: GcObjectType) -> usize {
+        let gc_id = self.next_gc_id;
+        self.next_gc_id += 1;
+
+        // Defer HashMap insert - only insert when we actually need to track
+        // This avoids expensive HashMap operations on hot path
+        // Objects will be discovered during GC marking phase from roots
+        self.allocations_since_minor_gc += 1;
+
+        let size = match obj_type {
+            GcObjectType::String => 64,
+            GcObjectType::Table => 256,
+            GcObjectType::Function => 128,
+        };
+        self.record_allocation(size);
+
+        gc_id
+    }
+
+    /// Register object with full tracking (for when we need to track specific objects)
+    #[inline]
+    pub fn register_object_tracked(&mut self, obj_id: u32, obj_type: GcObjectType) -> usize {
         let gc_id = self.next_gc_id;
         self.next_gc_id += 1;
 

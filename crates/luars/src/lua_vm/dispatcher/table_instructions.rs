@@ -16,34 +16,39 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = frame.base_ptr;
 
     // NEWTABLE is always followed by an EXTRAARG instruction in Lua 5.4
-    // PC has already been incremented to point to EXTRAARG
-    let pc = frame.pc;
-    frame.pc += 1; // Skip the EXTRAARG instruction
+    // Get EXTRAARG and skip it
+    let extra_arg = if b == 0 {
+        let pc = frame.pc;
+        frame.pc += 1; // Skip the EXTRAARG instruction
 
-    // OPTIMIZATION: Inline EXTRAARG reading to avoid function pointer overhead
-    let extra_arg = unsafe {
-        let func_ptr = frame.get_function_ptr().unwrap_unchecked();
-        let func = &*func_ptr;
-        let func_ref = func.borrow();
-        let chunk = &func_ref.chunk;
+        // Read EXTRAARG from bytecode
+        unsafe {
+            let func_ptr = frame.get_function_ptr().unwrap_unchecked();
+            let func = &*func_ptr;
+            let func_ref = func.borrow();
+            let chunk = &func_ref.chunk;
 
-        if pc < chunk.code.len() {
-            Instruction::get_ax(chunk.code[pc])
-        } else {
-            0
+            if pc < chunk.code.len() {
+                Instruction::get_ax(chunk.code[pc])
+            } else {
+                0
+            }
         }
+    } else {
+        // No EXTRAARG needed, skip it anyway
+        frame.pc += 1;
+        0
     };
 
-    // Calculate array size hint and hash size hint
+    // Calculate array size hint (fast path: b > 0 means small table)
     let array_size = if b > 0 {
         (b - 1) as usize
     } else {
         extra_arg as usize
     };
-    let hash_size = c as usize;
 
     // Create new table with size hints
-    let table = vm.create_table(array_size, hash_size);
+    let table = vm.create_table(array_size, c as usize);
     vm.register_stack[base_ptr + a] = table;
 
     // GC checkpoint: table now safely stored in register

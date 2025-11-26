@@ -1219,30 +1219,15 @@ impl LuaVM {
     /// Create a new table in object pool
     #[inline]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let id = self.object_pool.create_table(array_size, hash_size);
+        let (id, ptr) = self.object_pool.create_table(array_size, hash_size);
 
-        // Estimate memory cost: base overhead + array + hash part
-        // Base: ~64 bytes for LuaTable struct + Rc overhead
-        // Array: array_size * 16 bytes per LuaValue
-        // Hash: hash_size * 32 bytes per Node (key+value pair)
-        let estimated_bytes = 64 + (array_size * 16) + (hash_size * 32);
-        self.gc.record_allocation(estimated_bytes);
-
-        // Register with GC for manual collection
+        // Register with GC - record_allocation is called inside register_object
         self.gc
             .register_object(id.0, crate::gc::GcObjectType::Table);
 
         // GC check MUST NOT happen here - object not yet protected!
         // Caller must call check_gc() AFTER storing value in register
 
-        // Get pointer from object pool for direct access
-        // OPTIMIZATION: Use unwrap_unchecked in release mode since we just created the table
-        let ptr = unsafe {
-            self.object_pool
-                .get_table(id)
-                .map(|t| Rc::as_ptr(t) as *const std::cell::RefCell<LuaTable>)
-                .unwrap_unchecked()
-        };
         LuaValue::table_id_ptr(id, ptr)
     }
 

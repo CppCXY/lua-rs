@@ -250,10 +250,11 @@ impl ObjectPool {
 
     /// Create a new table
     #[inline]
-    pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> TableId {
+    pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> (TableId, *const RefCell<LuaTable>) {
         let table = Rc::new(RefCell::new(LuaTable::new(array_size, hash_size)));
+        let ptr = Rc::as_ptr(&table);
         let slot_id = self.tables.insert(table);
-        TableId(slot_id)
+        (TableId(slot_id), ptr)
     }
 
     /// Get table by ID

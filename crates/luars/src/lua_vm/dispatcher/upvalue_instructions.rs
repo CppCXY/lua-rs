@@ -319,92 +319,32 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
-    let _k = Instruction::get_k(instr);
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-
     let table = vm.register_stack[base_ptr + a];
 
-    // Calculate starting index
-    let start_idx = c * 50 + 1; // LFIELDS_PER_FLUSH = 50 in Lua
+    let start_idx = c * 50; // 0-based for array indexing
+    let count = if b == 0 { frame.top - a - 1 } else { b };
 
-    let count = if b == 0 {
-        // Use all values to top of stack
-        frame.top - a - 1
-    } else {
-        b
-    };
-
-    // OPTIMIZATION: SETLIST is typically used for table initialization
-    // Batch all operations in a single borrow_mut() to minimize RefCell overhead
-    // This is safe because:
-    // 1. SETLIST is only emitted by compiler for table constructors
-    // 2. Newly created tables don't have metatables yet
-    // 3. Even if metatable exists, Lua doesn't call __newindex for array part
-
-    // Fast path: Use cached pointer (avoids ObjectPool lookup)
-    if let Some(lua_table) = table.as_lua_table() {
-        // ULTRA-OPTIMIZED: Sequential insertion from start_idx
-        let mut table_mut = lua_table.borrow_mut();
-
-        // Reserve capacity upfront to avoid reallocations
-        let expected_end_idx = (start_idx - 1 + count) as usize;
-        let current_len = table_mut.array.len();
-        if table_mut.array.capacity() < expected_end_idx && expected_end_idx > current_len {
-            table_mut.array.reserve(expected_end_idx - current_len);
+    // Fast path: direct array manipulation
+    if let Some(ptr) = table.as_table_ptr() {
+        let lua_table = unsafe { &*ptr };
+        let mut t = lua_table.borrow_mut();
+        
+        // Reserve space
+        let needed = start_idx + count;
+        if t.array.len() < needed {
+            t.array.resize(needed, crate::LuaValue::nil());
         }
-
-        // Batch process all values with proper index handling
+        
+        // Copy all values
         for i in 0..count {
-            let key_int = (start_idx + i) as i64;
-            let value = vm.register_stack[base_ptr + a + i + 1];
-
-            // Use optimized set_int which correctly handles nils and gaps
-            let idx = (key_int - 1) as usize;
-
-            if value.is_nil() {
-                // Nil values: only store if filling a gap in existing array
-                if idx < table_mut.array.len() {
-                    table_mut.array[idx] = crate::LuaValue::nil();
-                }
-                // Don't extend array for trailing nils
-            } else {
-                // Non-nil value: ensure array is large enough
-                if idx < table_mut.array.len() {
-                    table_mut.array[idx] = value;
-                } else if idx == table_mut.array.len() {
-                    // Fast append
-                    table_mut.array.push(value);
-                } else {
-                    // Gap: fill with nils then append value
-                    while table_mut.array.len() < idx {
-                        table_mut.array.push(crate::LuaValue::nil());
-                    }
-                    table_mut.array.push(value);
-                }
-            }
-        }
-        drop(table_mut); // Release borrow early
-
-        // Write barrier for GC (outside borrow scope)
-        // OPTIMIZATION: Only check for GC-relevant values
-        if let Some(table_id) = table.as_table_id() {
-            vm.gc
-                .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
-
-            // Optimized barrier: skip primitives
-            for i in 0..count {
-                let value = vm.register_stack[base_ptr + a + i + 1];
-                if !value.is_nil() && !value.is_number() && !value.is_boolean() {
-                    vm.gc.barrier_back(&value);
-                }
-            }
+            t.array[start_idx + i] = vm.register_stack[base_ptr + a + 1 + i];
         }
     } else {
-        // Slow path: fallback to table_set_with_meta
         for i in 0..count {
-            let key = LuaValue::integer((start_idx + i) as i64);
+            let key = LuaValue::integer((start_idx + i + 1) as i64);
             let value = vm.register_stack[base_ptr + a + i + 1];
             vm.table_set_with_meta(table, key, value)?;
         }
