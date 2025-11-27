@@ -12,7 +12,7 @@
 // - None = free slot (reusable via free list)
 // - Free list tracks available slots for O(1) allocation
 
-use crate::lua_value::{LuaUserdata, Chunk};
+use crate::lua_value::{LuaUserdata, Chunk, LuaThread};
 use crate::{LuaString, LuaTable, LuaValue};
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -53,6 +53,10 @@ pub struct UpvalueId(pub u32);
 #[repr(transparent)]
 pub struct UserdataId(pub u32);
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[repr(transparent)]
+pub struct ThreadId(pub u32);
+
 // ============ GC-managed Objects ============
 
 /// Table with embedded GC header
@@ -81,10 +85,54 @@ pub struct GcUpvalue {
     pub state: UpvalueState,
 }
 
+impl GcUpvalue {
+    /// Check if this upvalue points to the given frame and register
+    #[inline]
+    pub fn points_to(&self, frame_id: usize, register: usize) -> bool {
+        matches!(&self.state, UpvalueState::Open { frame_id: fid, register: reg } if *fid == frame_id && *reg == register)
+    }
+
+    /// Check if this upvalue is open (still points to stack)
+    #[inline]
+    pub fn is_open(&self) -> bool {
+        matches!(&self.state, UpvalueState::Open { .. })
+    }
+
+    /// Close this upvalue with the given value
+    #[inline]
+    pub fn close(&mut self, value: LuaValue) {
+        self.state = UpvalueState::Closed(value);
+    }
+
+    /// Get the value of a closed upvalue (returns None if still open)
+    #[inline]
+    pub fn get_closed_value(&self) -> Option<LuaValue> {
+        match &self.state {
+            UpvalueState::Closed(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Get the frame_id and register if this upvalue is open
+    #[inline]
+    pub fn get_open_location(&self) -> Option<(usize, usize)> {
+        match &self.state {
+            UpvalueState::Open { frame_id, register } => Some((*frame_id, *register)),
+            _ => None,
+        }
+    }
+}
+
 /// String with embedded GC header
 pub struct GcString {
     pub header: GcHeader,
     pub data: LuaString,
+}
+
+/// Thread (coroutine) with embedded GC header
+pub struct GcThread {
+    pub header: GcHeader,
+    pub data: LuaThread,
 }
 
 // ============ Arena Storage ============
@@ -214,6 +262,7 @@ pub struct ObjectPoolV2 {
     pub functions: Arena<GcFunction>,
     pub upvalues: Arena<GcUpvalue>,
     pub userdata: Arena<LuaUserdata>,
+    pub threads: Arena<GcThread>,
     
     // String interning table: hash -> StringId
     string_intern: HashMap<u64, StringId>,
@@ -228,6 +277,7 @@ impl ObjectPoolV2 {
             functions: Arena::with_capacity(32),
             upvalues: Arena::with_capacity(32),
             userdata: Arena::new(),
+            threads: Arena::with_capacity(8),
             string_intern: HashMap::with_capacity(256),
             max_intern_length: 64,  // Strings <= 64 bytes are interned
         }
@@ -432,6 +482,37 @@ impl ObjectPoolV2 {
         self.userdata.get_mut(id.0)
     }
 
+    // ==================== Thread Operations ====================
+
+    #[inline]
+    pub fn create_thread(&mut self, thread: LuaThread) -> ThreadId {
+        let gc_thread = GcThread {
+            header: GcHeader::default(),
+            data: thread,
+        };
+        ThreadId(self.threads.alloc(gc_thread))
+    }
+
+    #[inline(always)]
+    pub fn get_thread(&self, id: ThreadId) -> Option<&LuaThread> {
+        self.threads.get(id.0).map(|gt| &gt.data)
+    }
+
+    #[inline(always)]
+    pub fn get_thread_mut(&mut self, id: ThreadId) -> Option<&mut LuaThread> {
+        self.threads.get_mut(id.0).map(|gt| &mut gt.data)
+    }
+
+    #[inline(always)]
+    pub fn get_thread_gc(&self, id: ThreadId) -> Option<&GcThread> {
+        self.threads.get(id.0)
+    }
+
+    #[inline(always)]
+    pub fn get_thread_gc_mut(&mut self, id: ThreadId) -> Option<&mut GcThread> {
+        self.threads.get_mut(id.0)
+    }
+
     // ==================== GC Support ====================
 
     /// Clear all mark bits before GC mark phase
@@ -447,6 +528,9 @@ impl ObjectPoolV2 {
         }
         for (_, gu) in self.upvalues.iter_mut() {
             gu.header.marked = false;
+        }
+        for (_, gth) in self.threads.iter_mut() {
+            gth.header.marked = false;
         }
     }
 
@@ -469,6 +553,10 @@ impl ObjectPoolV2 {
             .filter(|(_, gu)| !gu.header.marked)
             .map(|(id, _)| id)
             .collect();
+        let threads_to_free: Vec<u32> = self.threads.iter()
+            .filter(|(_, gth)| !gth.header.marked)
+            .map(|(id, _)| id)
+            .collect();
 
         // Free collected IDs
         for id in strings_to_free {
@@ -485,6 +573,9 @@ impl ObjectPoolV2 {
         for id in upvalues_to_free {
             self.upvalues.free(id);
         }
+        for id in threads_to_free {
+            self.threads.free(id);
+        }
     }
 
     pub fn shrink_to_fit(&mut self) {
@@ -492,7 +583,40 @@ impl ObjectPoolV2 {
         self.tables.shrink_to_fit();
         self.functions.shrink_to_fit();
         self.upvalues.shrink_to_fit();
+        self.threads.shrink_to_fit();
         self.string_intern.shrink_to_fit();
+    }
+
+    // ==================== Remove Operations (for GC) ====================
+
+    #[inline]
+    pub fn remove_string(&mut self, id: StringId) {
+        self.strings.free(id.0);
+    }
+
+    #[inline]
+    pub fn remove_table(&mut self, id: TableId) {
+        self.tables.free(id.0);
+    }
+
+    #[inline]
+    pub fn remove_function(&mut self, id: FunctionId) {
+        self.functions.free(id.0);
+    }
+
+    #[inline]
+    pub fn remove_upvalue(&mut self, id: UpvalueId) {
+        self.upvalues.free(id.0);
+    }
+
+    #[inline]
+    pub fn remove_userdata(&mut self, id: UserdataId) {
+        self.userdata.free(id.0);
+    }
+
+    #[inline]
+    pub fn remove_thread(&mut self, id: ThreadId) {
+        self.threads.free(id.0);
     }
 
     // ==================== Statistics ====================
@@ -507,6 +631,8 @@ impl ObjectPoolV2 {
     pub fn upvalue_count(&self) -> usize { self.upvalues.len() }
     #[inline]
     pub fn userdata_count(&self) -> usize { self.userdata.len() }
+    #[inline]
+    pub fn thread_count(&self) -> usize { self.threads.len() }
 }
 
 impl Default for ObjectPoolV2 {

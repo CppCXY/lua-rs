@@ -401,11 +401,8 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    // Get constant from chunk
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -440,10 +437,8 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -475,12 +470,8 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    // Get constant once
-    let Some(func_ptr) = frame.get_function_ptr() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let func = unsafe { &*func_ptr };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
     let left = vm.register_stack[base_ptr + b];
@@ -531,10 +522,9 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -569,10 +559,8 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -602,10 +590,9 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -635,10 +622,9 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -817,10 +803,8 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -865,10 +849,9 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -913,10 +896,9 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(constant) = func.borrow().chunk.constants.get(c).copied() else {
+
+    // Get constant from chunk using new API
+    let Some(constant) = vm.get_frame_constant(frame, c) else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
@@ -1088,11 +1070,15 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         }
     }
 
-    // CRITICAL OPTIMIZATION: Use direct pointer instead of HashMap lookup!
-    let len = if let Some(table_ptr) = value.as_table_ptr() {
-        unsafe { (*table_ptr).borrow().len() as i64 }
-    } else if value.is_string() {
-        if let Some(s) = value.as_lua_string() {
+    // Use ObjectPool for table/string length
+    let len = if let Some(table_id) = value.as_table_id() {
+        if let Some(table) = vm.object_pool.get_table(table_id) {
+            table.len() as i64
+        } else {
+            0
+        }
+    } else if let Some(string_id) = value.as_string_id() {
+        if let Some(s) = vm.object_pool.get_string(string_id) {
             s.as_str().len() as i64
         } else {
             0
@@ -1147,16 +1133,17 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // Get the previous instruction to find the destination register
     let frame = vm.current_frame();
     let prev_pc = frame.pc - 1; // Previous instruction was the failed arithmetic op
+    let base_ptr = frame.base_ptr;
+    
     if prev_pc == 0 {
         return Err(vm.error("MMBIN: no previous instruction".to_string()));
     }
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
+    
+    let Some(prev_instr) = vm.get_frame_instruction(frame, prev_pc - 1) else {
+        return Err(vm.error("MMBIN: failed to get previous instruction".to_string()));
     };
-    let prev_instr = func.borrow().chunk.code[prev_pc - 1];
     let dest_reg = Instruction::get_a(prev_instr) as usize; // Destination register from ADD/SUB/etc
 
-    let base_ptr = frame.base_ptr;
     // A and B are the operand registers
     let ra = vm.register_stack[base_ptr + a];
     let rb = vm.register_stack[base_ptr + b];
@@ -1205,18 +1192,16 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // Get the previous instruction to find the destination register
     let frame = vm.current_frame();
     let prev_pc = frame.pc - 1; // Previous instruction was the failed arithmetic op
+    let base_ptr = frame.base_ptr;
 
     if prev_pc == 0 {
         return Err(vm.error("MMBINI: no previous instruction".to_string()));
     }
 
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
+    let Some(prev_instr) = vm.get_frame_instruction(frame, prev_pc - 1) else {
+        return Err(vm.error("MMBINI: failed to get previous instruction".to_string()));
     };
-    let prev_instr = func.borrow().chunk.code[prev_pc - 1];
     let dest_reg = Instruction::get_a(prev_instr) as usize; // Destination register from ADDI
-
-    let base_ptr = frame.base_ptr;
 
     // From compiler: create_abck(OpCode::MmBinI, left_reg, imm, TagMethod, false)
     // So: A = left_reg (operand), B = imm (immediate value encoded), C = tagmethod
@@ -1263,21 +1248,19 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // Get the previous instruction to find the destination register
     let frame = vm.current_frame();
     let prev_pc = frame.pc - 1; // Previous instruction was the failed arithmetic op
+    let base_ptr = frame.base_ptr;
 
     if prev_pc == 0 {
         return Err(vm.error("MMBINK: no previous instruction".to_string()));
     }
 
-    let Some(func) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
+    let Some(prev_instr) = vm.get_frame_instruction(frame, prev_pc - 1) else {
+        return Err(vm.error("MMBINK: failed to get previous instruction".to_string()));
     };
-    let prev_instr = func.borrow().chunk.code[prev_pc - 1];
     let dest_reg = Instruction::get_a(prev_instr) as usize; // Destination register from ADDK/SUBK/etc
 
-    let base_ptr = frame.base_ptr;
-
     let ra = vm.register_stack[base_ptr + a];
-    let Some(kb) = func.borrow().chunk.constants.get(b).copied() else {
+    let Some(kb) = vm.get_frame_constant(frame, b) else {
         return Err(vm.error(format!("Constant index out of bounds: {}", b)));
     };
 

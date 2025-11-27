@@ -5,11 +5,13 @@
 mod object_pool;
 mod object_pool_v2;
 
-// Export both object pools during migration
-pub use object_pool::{FunctionId, ObjectPool, StringId, TableId, UserdataId};
-pub use object_pool_v2::ObjectPoolV2;
+// Use ObjectPoolV2 as the main ObjectPool
+pub use object_pool_v2::{
+    ObjectPoolV2 as ObjectPool,
+    StringId, TableId, FunctionId, UpvalueId, UserdataId, ThreadId,
+    Arena, GcHeader, GcTable, GcFunction, GcUpvalue, GcString, GcThread, UpvalueState,
+};
 use crate::lua_value::LuaValue;
-use crate::{LuaFunction, LuaTable};
 use std::collections::{HashMap, HashSet};
 
 /// GC Generation
@@ -513,17 +515,17 @@ impl GC {
                 // Mark children
                 match key.0 {
                     GcObjectType::Table => {
-                        if let Some(table_ref) =
+                        if let Some(table) =
                             object_pool.get_table(TableId(key.1))
                         {
-                            self.mark_table(&table_ref.borrow(), &mut worklist);
+                            self.mark_table(table, &mut worklist);
                         }
                     }
                     GcObjectType::Function => {
-                        if let Some(func_ref) =
+                        if let Some(func) =
                             object_pool.get_function(FunctionId(key.1))
                         {
-                            self.mark_function(&func_ref.borrow(), &mut worklist);
+                            self.mark_function(func, object_pool, &mut worklist);
                         }
                     }
                     _ => {}
@@ -535,7 +537,7 @@ impl GC {
     }
 
     /// Mark table contents
-    fn mark_table(&self, table: &LuaTable, worklist: &mut Vec<LuaValue>) {
+    fn mark_table(&self, table: &crate::LuaTable, worklist: &mut Vec<LuaValue>) {
         // Mark both keys and values
         for (key, val) in table.iter_all() {
             worklist.push(key);
@@ -544,11 +546,13 @@ impl GC {
     }
 
     /// Mark function upvalues
-    fn mark_function(&self, func: &LuaFunction, worklist: &mut Vec<LuaValue>) {
-        for upval in &func.upvalues {
+    fn mark_function(&self, func: &GcFunction, object_pool: &ObjectPool, worklist: &mut Vec<LuaValue>) {
+        for upval_id in &func.upvalues {
             // Only mark closed upvalues (open ones are on the stack already)
-            if let Some(val) = upval.get_closed_value() {
-                worklist.push(val);
+            if let Some(upval) = object_pool.get_upvalue(*upval_id) {
+                if let UpvalueState::Closed(val) = &upval.state {
+                    worklist.push(*val);
+                }
             }
         }
     }
@@ -661,18 +665,16 @@ impl GC {
         }
 
         let table_id = TableId(obj_id);
-        if let Some(table_rc) = object_pool.get_table(table_id) {
-            let table = table_rc.borrow();
+        if let Some(table) = object_pool.get_table(table_id) {
             if let Some(meta_value) = table.get_metatable() {
                 if let Some(meta_id) = meta_value.as_table_id() {
-                    if let Some(meta_table_rc) = object_pool.get_table(meta_id) {
-                        let meta_table = meta_table_rc.borrow();
+                    if let Some(meta_table) = object_pool.get_table(meta_id) {
                         // Check for __gc key in metatable
                         // We need to look for the string "__gc" in the metatable
                         for (key, value) in meta_table.iter_all() {
                             if let Some(string_id) = key.as_string_id() {
-                                if let Some(string_rc) = object_pool.get_string(string_id) {
-                                    if string_rc.as_str() == "__gc" && !value.is_nil() {
+                                if let Some(string) = object_pool.get_string(string_id) {
+                                    if string.as_str() == "__gc" && !value.is_nil() {
                                         // Has __gc metamethod, add to finalize queue
                                         self.finalize_queue.push((obj_type, obj_id));
                                         return true;
@@ -700,22 +702,20 @@ impl GC {
         table_id: TableId,
         object_pool: &ObjectPool,
     ) -> Option<String> {
-        if let Some(table_rc) = object_pool.get_table(table_id) {
-            let table = table_rc.borrow();
+        if let Some(table) = object_pool.get_table(table_id) {
             if let Some(meta_value) = table.get_metatable() {
                 if let Some(meta_id) = meta_value.as_table_id() {
-                    if let Some(meta_table_rc) = object_pool.get_table(meta_id) {
-                        let meta_table = meta_table_rc.borrow();
+                    if let Some(meta_table) = object_pool.get_table(meta_id) {
                         // Look for __mode key
                         for (key, value) in meta_table.iter_all() {
                             if let Some(string_id) = key.as_string_id() {
-                                if let Some(string_rc) = object_pool.get_string(string_id) {
-                                    if string_rc.as_str() == "__mode" {
+                                if let Some(string) = object_pool.get_string(string_id) {
+                                    if string.as_str() == "__mode" {
                                         if let Some(mode_string_id) = value.as_string_id() {
-                                            if let Some(mode_string_rc) =
+                                            if let Some(mode_string) =
                                                 object_pool.get_string(mode_string_id)
                                             {
-                                                return Some(mode_string_rc.as_str().to_string());
+                                                return Some(mode_string.as_str().to_string());
                                             }
                                         }
                                     }
@@ -735,53 +735,50 @@ impl GC {
         &self,
         table_id: TableId,
         weak_mode: &str,
-        object_pool: &ObjectPool,
+        object_pool: &mut ObjectPool,
     ) {
-        if let Some(table_rc) = object_pool.get_table(table_id) {
-            let mut table = table_rc.borrow_mut();
-            let has_weak_keys = weak_mode.contains('k');
-            let has_weak_values = weak_mode.contains('v');
+        let has_weak_keys = weak_mode.contains('k');
+        let has_weak_values = weak_mode.contains('v');
 
-            if !has_weak_keys && !has_weak_values {
-                return;
-            }
+        if !has_weak_keys && !has_weak_values {
+            return;
+        }
 
-            // Collect keys to remove
-            let mut keys_to_remove = Vec::new();
-
-            for (key, value) in table.iter_all() {
-                let mut should_remove = false;
-
-                // Check if weak key was collected
-                if has_weak_keys {
-                    if let Some(key_table_id) = key.as_table_id() {
-                        if !self
-                            .objects
-                            .contains_key(&(GcObjectType::Table, key_table_id.0))
-                        {
-                            should_remove = true;
+        // First pass: collect keys to remove (immutable borrow)
+        let keys_to_remove: Vec<LuaValue> = if let Some(table) = object_pool.get_table(table_id) {
+            table.iter_all()
+                .into_iter()
+                .filter(|(key, value)| {
+                    let mut should_remove = false;
+                    
+                    // Check if weak key was collected
+                    if has_weak_keys {
+                        if let Some(key_table_id) = key.as_table_id() {
+                            if !self.objects.contains_key(&(GcObjectType::Table, key_table_id.0)) {
+                                should_remove = true;
+                            }
                         }
                     }
-                }
 
-                // Check if weak value was collected
-                if has_weak_values && !should_remove {
-                    if let Some(val_table_id) = value.as_table_id() {
-                        if !self
-                            .objects
-                            .contains_key(&(GcObjectType::Table, val_table_id.0))
-                        {
-                            should_remove = true;
+                    // Check if weak value was collected
+                    if has_weak_values && !should_remove {
+                        if let Some(val_table_id) = value.as_table_id() {
+                            if !self.objects.contains_key(&(GcObjectType::Table, val_table_id.0)) {
+                                should_remove = true;
+                            }
                         }
                     }
-                }
+                    
+                    should_remove
+                })
+                .map(|(key, _)| key)
+                .collect()
+        } else {
+            return;
+        };
 
-                if should_remove {
-                    keys_to_remove.push(key);
-                }
-            }
-
-            // Remove collected weak references (set to nil removes from table)
+        // Second pass: remove keys (mutable borrow)
+        if let Some(table) = object_pool.get_table_mut(table_id) {
             for key in keys_to_remove {
                 table.raw_set(key, LuaValue::nil());
             }

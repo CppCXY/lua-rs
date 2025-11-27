@@ -15,15 +15,21 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let Some(func_ref) = frame.get_lua_function() else {
+    // Get function using new ID-based API
+    let Some(func_id) = frame.function_value.as_function_id() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
 
-    let Some(upvalue) = func_ref.borrow().upvalues.get(b).cloned() else {
+    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("Invalid function ID".to_string()));
+    };
+
+    let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
         return Err(vm.error(format!("Invalid upvalue index: {}", b)));
     };
 
-    let value = upvalue.get_value(&vm.frames, &vm.register_stack);
+    // Get upvalue value using the helper method
+    let value = vm.read_upvalue(upvalue_id);
     vm.register_stack[base_ptr + a] = value;
 
     Ok(())
@@ -38,17 +44,23 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let Some(func_ref) = frame.get_lua_function() else {
+    // Get function using new ID-based API
+    let Some(func_id) = frame.function_value.as_function_id() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
 
-    let Some(upvalue) = func_ref.borrow().upvalues.get(b).cloned() else {
+    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("Invalid function ID".to_string()));
+    };
+
+    let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
         return Err(vm.error(format!("Invalid upvalue index: {}", b)));
     };
 
     let value = vm.register_stack[base_ptr + a];
 
-    upvalue.set_value(&mut vm.frames, &mut vm.register_stack, value);
+    // Set upvalue value using the helper method
+    vm.write_upvalue(upvalue_id, value);
 
     Ok(())
 }
@@ -71,6 +83,8 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// OPTIMIZED: Fast path for closures without upvalues
 #[inline(always)]
 pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+    use crate::gc::UpvalueId;
+    
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -78,23 +92,24 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = frame.base_ptr;
     let frame_id = frame.frame_id;
 
-    let Some(func_ref) = frame.get_lua_function() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
+    // Get current function using ID-based lookup
+    let func_id = frame.function_value.as_function_id()
+        .ok_or_else(|| vm.error("Not a Lua function".to_string()))?;
 
-    let func_borrow = func_ref.borrow();
-    let proto = match func_borrow.chunk.child_protos.get(bx) {
-        Some(p) => p.clone(),
-        None => {
-            let idx = bx;
-            drop(func_borrow);
-            return Err(vm.error(format!("Invalid prototype index: {}", idx)));
+    let func_ref = vm.object_pool.get_function(func_id);
+    let (proto, parent_upvalues) = if let Some(f) = func_ref {
+        let p = f.chunk.child_protos.get(bx).cloned();
+        if let Some(proto) = p {
+            (proto, f.upvalues.clone())
+        } else {
+            return Err(vm.error(format!("Invalid prototype index: {}", bx)));
         }
+    } else {
+        return Err(vm.error("Invalid function reference".to_string()));
     };
 
     // FAST PATH: No upvalues (most common for simple lambdas)
     if proto.upvalue_descs.is_empty() {
-        drop(func_borrow);
         let closure = vm.create_function(proto, Vec::new());
         unsafe {
             *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
@@ -105,34 +120,33 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     // Get upvalue descriptors from the prototype
     let upvalue_descs = proto.upvalue_descs.clone();
-    let parent_upvalues = func_borrow.upvalues.clone();
-    drop(func_borrow);
 
     // Create upvalues for the new closure based on descriptors
-    let mut upvalues = Vec::with_capacity(upvalue_descs.len());
-    let mut new_open_upvalues = Vec::new();
+    let mut upvalue_ids: Vec<UpvalueId> = Vec::with_capacity(upvalue_descs.len());
+    let mut new_open_upvalue_ids: Vec<UpvalueId> = Vec::new();
 
     for desc in upvalue_descs.iter() {
         if desc.is_local {
             // Upvalue refers to a register in current function
             // Check if this upvalue is already open
-            let existing = vm
-                .open_upvalues
-                .iter()
-                .find(|uv| uv.points_to(frame_id, desc.index as usize));
+            let existing = vm.open_upvalues.iter().find(|uv_id| {
+                vm.object_pool.get_upvalue(**uv_id)
+                    .map(|uv| uv.points_to(frame_id, desc.index as usize))
+                    .unwrap_or(false)
+            });
 
-            if let Some(existing_uv) = existing {
-                upvalues.push(existing_uv.clone());
+            if let Some(&existing_uv_id) = existing {
+                upvalue_ids.push(existing_uv_id);
             } else {
-                // Create new open upvalue
-                let new_uv = crate::lua_vm::LuaUpvalue::new_open(frame_id, desc.index as usize);
-                upvalues.push(new_uv.clone());
-                new_open_upvalues.push(new_uv);
+                // Create new open upvalue using ObjectPoolV2
+                let new_uv_id = vm.object_pool.create_upvalue_open(frame_id, desc.index as usize);
+                upvalue_ids.push(new_uv_id);
+                new_open_upvalue_ids.push(new_uv_id);
             }
         } else {
             // Upvalue refers to an upvalue in the enclosing function
-            if let Some(parent_uv) = parent_upvalues.get(desc.index as usize) {
-                upvalues.push(parent_uv.clone());
+            if let Some(&parent_uv_id) = parent_upvalues.get(desc.index as usize) {
+                upvalue_ids.push(parent_uv_id);
             } else {
                 return Err(vm.error(format!("Invalid upvalue index in parent: {}", desc.index)));
             }
@@ -140,9 +154,9 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     }
 
     // Add all new upvalues to the open list
-    vm.open_upvalues.extend(new_open_upvalues);
+    vm.open_upvalues.extend(new_open_upvalue_ids);
 
-    let closure = vm.create_function(proto, upvalues);
+    let closure = vm.create_function(proto, upvalue_ids);
     unsafe {
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
     }
@@ -213,8 +227,10 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     for i in 0..=b {
         let value = vm.register_stack[base_ptr + a + i];
 
-        if let Some(s) = value.as_lua_string() {
-            total_capacity += s.as_str().len();
+        if let Some(str_id) = value.as_string_id() {
+            if let Some(s) = vm.object_pool.get_string(str_id) {
+                total_capacity += s.as_str().len();
+            }
         } else if value.is_integer() {
             total_capacity += 20; // Max digits for i64
         } else if value.is_number() {
@@ -234,8 +250,10 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         for i in 0..=b {
             let value = vm.register_stack[base_ptr + a + i];
 
-            if let Some(s) = value.as_lua_string() {
-                result.push_str(s.as_str());
+            if let Some(str_id) = value.as_string_id() {
+                if let Some(s) = vm.object_pool.get_string(str_id) {
+                    result.push_str(s.as_str());
+                }
             } else if let Some(int_val) = value.as_integer() {
                 // OPTIMIZED: Direct formatting with itoa
                 result.push_str(int_buffer.format(int_val));
@@ -260,8 +278,8 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         let next_value = vm.register_stack[base_ptr + a + i];
 
         // Try direct concatenation first
-        let left_str = if let Some(s) = result_value.as_lua_string() {
-            Some(s.as_str().to_string())
+        let left_str = if let Some(str_id) = result_value.as_string_id() {
+            vm.object_pool.get_string(str_id).map(|s| s.as_str().to_string())
         } else if let Some(int_val) = result_value.as_integer() {
             Some(int_val.to_string())
         } else if let Some(float_val) = result_value.as_number() {
@@ -270,8 +288,8 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             None
         };
 
-        let right_str = if let Some(s) = next_value.as_lua_string() {
-            Some(s.as_str().to_string())
+        let right_str = if let Some(str_id) = next_value.as_string_id() {
+            vm.object_pool.get_string(str_id).map(|s| s.as_str().to_string())
         } else if let Some(int_val) = next_value.as_integer() {
             Some(int_val.to_string())
         } else if let Some(float_val) = next_value.as_number() {
@@ -349,27 +367,28 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let start_idx = c * 50; // 0-based for array indexing
     let count = if b == 0 { frame.top - a - 1 } else { b };
 
-    // Fast path: direct array manipulation
-    if let Some(ptr) = table.as_table_ptr() {
-        let lua_table = unsafe { &*ptr };
-        let mut t = lua_table.borrow_mut();
-        
-        // Reserve space
-        let needed = start_idx + count;
-        if t.array.len() < needed {
-            t.array.resize(needed, crate::LuaValue::nil());
+    // Fast path: direct array manipulation using new API
+    if let Some(table_id) = table.as_table_id() {
+        if let Some(t) = vm.object_pool.get_table_mut(table_id) {
+            // Reserve space
+            let needed = start_idx + count;
+            if t.array.len() < needed {
+                t.array.resize(needed, crate::LuaValue::nil());
+            }
+            
+            // Copy all values
+            for i in 0..count {
+                t.array[start_idx + i] = vm.register_stack[base_ptr + a + 1 + i];
+            }
+            return Ok(());
         }
-        
-        // Copy all values
-        for i in 0..count {
-            t.array[start_idx + i] = vm.register_stack[base_ptr + a + 1 + i];
-        }
-    } else {
-        for i in 0..count {
-            let key = LuaValue::integer((start_idx + i + 1) as i64);
-            let value = vm.register_stack[base_ptr + a + i + 1];
-            vm.table_set_with_meta(table, key, value)?;
-        }
+    }
+    
+    // Slow path with metamethods
+    for i in 0..count {
+        let key = LuaValue::integer((start_idx + i + 1) as i64);
+        let value = vm.register_stack[base_ptr + a + i + 1];
+        vm.table_set_with_meta(table, key, value)?;
     }
 
     Ok(())

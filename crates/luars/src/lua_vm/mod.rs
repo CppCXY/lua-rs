@@ -5,7 +5,7 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
-use crate::gc::GC;
+use crate::gc::{GC, GcFunction, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
@@ -38,8 +38,8 @@ pub struct LuaVM {
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
 
-    // Open upvalues list (for closing when frames exit)
-    pub(crate) open_upvalues: Vec<Rc<LuaUpvalue>>,
+    // Open upvalues list (for closing when frames exit) - uses UpvalueId for new architecture
+    pub(crate) open_upvalues: Vec<UpvalueId>,
 
     // To-be-closed variables stack (for __close metamethod)
     // Stores (register_index, value) pairs that need __close called when they go out of scope
@@ -55,8 +55,11 @@ pub struct LuaVM {
     #[cfg(feature = "loadlib")]
     pub(crate) ffi_state: crate::ffi::FFIState,
 
-    // Current running thread (for coroutine.running())
+    // Current running thread (for coroutine.running()) - legacy Rc-based
     pub current_thread: Option<Rc<RefCell<LuaThread>>>,
+
+    // Current running thread ID (for new ObjectPool-based architecture)
+    pub current_thread_id: Option<ThreadId>,
 
     // Current thread as LuaValue (for comparison in coroutine.running())
     pub current_thread_value: Option<LuaValue>,
@@ -99,6 +102,7 @@ impl LuaVM {
             #[cfg(feature = "loadlib")]
             ffi_state: crate::ffi::FFIState::new(),
             current_thread: None,
+            current_thread_id: None,
             current_thread_value: None,
             main_thread_value: None, // Will be initialized lazily
             string_metatable: None,
@@ -154,8 +158,8 @@ impl LuaVM {
 
         // Create upvalue for _ENV (global table)
         // Main chunks in Lua 5.4 always have _ENV as upvalue[0]
-        let env_upvalue = LuaUpvalue::new_closed(self.global_value);
-        let upvalues = vec![env_upvalue];
+        let env_upvalue_id = self.object_pool.create_upvalue_closed(self.global_value);
+        let upvalues = vec![env_upvalue_id];
 
         // Create main function in object pool with _ENV upvalue
         let main_func_value = self.create_function(chunk.clone(), upvalues);
@@ -200,23 +204,30 @@ impl LuaVM {
         self.frames.clear();
         self.open_upvalues.clear();
 
-        // Get function pointer
-        let Some(func_ptr) = func.as_function_ptr() else {
+        // Get function from object pool
+        let Some(func_id) = func.as_function_id() else {
             return Err(self.error("Not a function".to_string()));
         };
 
-        let func_obj = unsafe { &*func_ptr };
-        let func_ref = func_obj.borrow();
+        // Clone chunk and get info before borrowing self mutably
+        let (chunk, max_stack, code_ptr) = {
+            let Some(func_ref) = self.object_pool.get_function(func_id) else {
+                return Err(self.error("Invalid function ID".to_string()));
+            };
+            let chunk = func_ref.chunk.clone();
+            let max_stack = chunk.max_stack_size;
+            let code_ptr = chunk.code.as_ptr();
+            (chunk, max_stack, code_ptr)
+        };
 
         // Register chunk constants
-        self.register_chunk_constants(&func_ref.chunk);
+        self.register_chunk_constants(&chunk);
 
         // Setup stack and frame
         let frame_id = self.next_frame_id;
         self.next_frame_id += 1;
 
         let base_ptr = 0; // Start from beginning of cleared stack
-        let max_stack = func_ref.chunk.max_stack_size;
         let required_size = max_stack; // Need at least max_stack registers
 
         // Initialize stack with nil values
@@ -228,10 +239,6 @@ impl LuaVM {
                 self.register_stack[base_ptr + i] = *arg;
             }
         }
-
-        // Get code pointer before dropping func_ref
-        let code_ptr = func_ref.chunk.code.as_ptr();
-        drop(func_ref);
 
         let frame =
             LuaCallFrame::new_lua_function(frame_id, func, code_ptr, base_ptr, max_stack, 0, 0);
@@ -296,8 +303,8 @@ impl LuaVM {
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
         let key = self.create_string(name);
         if let Some(global_id) = self.global_value.as_table_id() {
-            let global = self.object_pool.get_table(global_id).unwrap();
-            global.borrow().raw_get(&key)
+            let global = self.object_pool.get_table(global_id)?;
+            global.raw_get(&key)
         } else {
             None
         }
@@ -305,8 +312,8 @@ impl LuaVM {
 
     pub fn get_global_by_lua_value(&self, key: &LuaValue) -> Option<LuaValue> {
         if let Some(global_id) = self.global_value.as_table_id() {
-            let global = self.object_pool.get_table(global_id).unwrap();
-            global.borrow().raw_get(key)
+            let global = self.object_pool.get_table(global_id)?;
+            global.raw_get(key)
         } else {
             None
         }
@@ -316,8 +323,9 @@ impl LuaVM {
         let key = self.create_string(name);
 
         if let Some(global_id) = self.global_value.as_table_id() {
-            let global = self.object_pool.get_table(global_id).unwrap();
-            global.borrow_mut().raw_set(key.clone(), value.clone());
+            if let Some(global) = self.object_pool.get_table_mut(global_id) {
+                global.raw_set(key.clone(), value.clone());
+            }
 
             // Write barrier: global table (old) may now reference new object
             self.gc
@@ -328,8 +336,9 @@ impl LuaVM {
 
     pub fn set_global_by_lua_value(&mut self, key: &LuaValue, value: LuaValue) {
         if let Some(global_id) = self.global_value.as_table_id() {
-            let global = self.object_pool.get_table(global_id).unwrap();
-            global.borrow_mut().raw_set(key.clone(), value.clone());
+            if let Some(global) = self.object_pool.get_table_mut(global_id) {
+                global.raw_set(key.clone(), value.clone());
+            }
 
             // Write barrier
             self.gc
@@ -348,9 +357,9 @@ impl LuaVM {
         let index_key = self.create_string("__index");
 
         // Get the table reference to set __index
-        if let Some(mt_ref) = self.get_table(&metatable) {
+        if let Some(mt_ref) = self.get_table_mut(&metatable) {
             // Set __index to the string library table
-            mt_ref.borrow_mut().raw_set(index_key, string_lib);
+            mt_ref.raw_set(index_key, string_lib);
         }
 
         // Store the metatable as LuaValue (contains TableId)
@@ -376,7 +385,34 @@ impl LuaVM {
 
     // ============ Coroutine Support ============
 
-    /// Create a new thread (coroutine)
+    /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
+    pub fn create_thread_value(&mut self, func: LuaValue) -> LuaValue {
+        let mut thread = LuaThread {
+            status: CoroutineStatus::Suspended,
+            frames: Vec::new(),
+            register_stack: Vec::with_capacity(256),
+            return_values: Vec::new(),
+            open_upvalues: Vec::new(),
+            next_frame_id: 0,
+            error_handler: None,
+            yield_values: Vec::new(),
+            resume_values: Vec::new(),
+            yield_call_reg: None,
+            yield_call_nret: None,
+            yield_pc: None,
+            yield_frame_id: None,
+        };
+
+        // Store the function in the thread's first register
+        thread.register_stack.push(func);
+
+        // Create thread in ObjectPool and return LuaValue
+        let thread_id = self.object_pool.create_thread(thread);
+        LuaValue::thread(thread_id)
+    }
+
+    /// Create a new thread (coroutine) - legacy version returning Rc<RefCell<>>
+    /// This is still needed for internal VM state tracking (current_thread)
     pub fn create_thread(&mut self, func: LuaValue) -> Rc<RefCell<LuaThread>> {
         let thread = LuaThread {
             status: CoroutineStatus::Suspended,
@@ -402,27 +438,24 @@ impl LuaVM {
         thread_rc
     }
 
-    /// Resume a coroutine
+    /// Resume a coroutine using ThreadId-based LuaValue
     pub fn resume_thread(
         &mut self,
         thread_val: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Extract Rc from LuaValue
-        let thread_rc = unsafe {
-            let Some(ptr) = thread_val.as_thread_ptr() else {
-                return Err(self.error("invalid thread".to_string()));
-            };
-            if ptr.is_null() {
-                return Err(self.error("invalid thread".to_string()));
-            }
-            let rc = Rc::from_raw(ptr);
-            let cloned = rc.clone();
-            std::mem::forget(rc); // Don't drop
-            cloned
+        // Get ThreadId from LuaValue
+        let Some(thread_id) = thread_val.as_thread_id() else {
+            return Err(self.error("invalid thread".to_string()));
         };
 
-        let status = thread_rc.borrow().status;
+        // Check thread status first
+        let status = {
+            let Some(thread) = self.object_pool.get_thread(thread_id) else {
+                return Err(self.error("invalid thread".to_string()));
+            };
+            thread.status
+        };
 
         match status {
             CoroutineStatus::Dead => {
@@ -447,15 +480,21 @@ impl LuaVM {
         let saved_upvalues = std::mem::take(&mut self.open_upvalues);
         let saved_frame_id = self.next_frame_id;
         let saved_thread = self.current_thread.take();
+        let saved_thread_id = self.current_thread_id.take();
 
+        // Get thread state and check if first resume
         let is_first_resume = {
-            let thread = thread_rc.borrow();
+            let Some(thread) = self.object_pool.get_thread(thread_id) else {
+                return Err(self.error("invalid thread".to_string()));
+            };
             thread.frames.is_empty()
         };
 
-        // Load thread state
+        // Load thread state into VM
         {
-            let mut thread = thread_rc.borrow_mut();
+            let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
+                return Err(self.error("invalid thread".to_string()));
+            };
             thread.status = CoroutineStatus::Running;
             self.frames = std::mem::take(&mut thread.frames);
             self.register_stack = std::mem::take(&mut thread.register_stack);
@@ -464,7 +503,7 @@ impl LuaVM {
             self.next_frame_id = thread.next_frame_id;
         }
 
-        self.current_thread = Some(thread_rc.clone());
+        self.current_thread_id = Some(thread_id);
         self.current_thread_value = Some(thread_val.clone());
 
         // Execute
@@ -488,7 +527,9 @@ impl LuaVM {
             // Resumed from yield:
             // Use saved CALL instruction info to properly store return values
             let (call_reg, call_nret) = {
-                let thread = thread_rc.borrow();
+                let Some(thread) = self.object_pool.get_thread(thread_id) else {
+                    return Err(self.error("invalid thread".to_string()));
+                };
                 (thread.yield_call_reg, thread.yield_call_nret)
             };
 
@@ -509,7 +550,8 @@ impl LuaVM {
                     if base_ptr + a + i < self.register_stack.len() && a + i < top {
                         self.register_stack[base_ptr + a + i] = value.clone();
                     }
-                } // Fill remaining expected registers with nil
+                }
+                // Fill remaining expected registers with nil
                 for i in num_returns..num_expected.min(top - a) {
                     if base_ptr + a + i < self.register_stack.len() {
                         self.register_stack[base_ptr + a + i] = LuaValue::nil();
@@ -517,8 +559,10 @@ impl LuaVM {
                 }
 
                 // Clear the saved info
-                thread_rc.borrow_mut().yield_call_reg = None;
-                thread_rc.borrow_mut().yield_call_nret = None;
+                if let Some(thread) = self.object_pool.get_thread_mut(thread_id) {
+                    thread.yield_call_reg = None;
+                    thread.yield_call_nret = None;
+                }
             }
 
             self.return_values = args;
@@ -539,7 +583,9 @@ impl LuaVM {
         // Save thread state back
         let final_result = if did_yield {
             // Thread yielded - save state and return yield values
-            let mut thread = thread_rc.borrow_mut();
+            let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
+                return Err(self.error("invalid thread".to_string()));
+            };
             thread.frames = std::mem::take(&mut self.frames);
             thread.register_stack = std::mem::take(&mut self.register_stack);
             thread.return_values = std::mem::take(&mut self.return_values);
@@ -553,7 +599,9 @@ impl LuaVM {
             Ok((true, values))
         } else {
             // Thread completed or error
-            let mut thread = thread_rc.borrow_mut();
+            let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
+                return Err(self.error("invalid thread".to_string()));
+            };
             thread.frames = std::mem::take(&mut self.frames);
             thread.register_stack = std::mem::take(&mut self.register_stack);
             thread.return_values = std::mem::take(&mut self.return_values);
@@ -585,6 +633,7 @@ impl LuaVM {
         self.open_upvalues = saved_upvalues;
         self.next_frame_id = saved_frame_id;
         self.current_thread = saved_thread;
+        self.current_thread_id = saved_thread_id;
         self.current_thread_value = None; // Clear after resume completes
 
         final_result
@@ -593,10 +642,12 @@ impl LuaVM {
     /// Yield from current coroutine
     /// Returns Err(LuaError::Yield) which will be caught by run() loop
     pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
-        if let Some(thread_rc) = &self.current_thread {
+        if let Some(thread_id) = self.current_thread_id {
             // Store yield values in the thread
-            thread_rc.borrow_mut().yield_values = values.clone();
-            thread_rc.borrow_mut().status = CoroutineStatus::Suspended;
+            if let Some(thread) = self.object_pool.get_thread_mut(thread_id) {
+                thread.yield_values = values.clone();
+                thread.status = CoroutineStatus::Suspended;
+            }
             // Return Yield "error" to unwind the call stack
             Err(self.do_yield(values))
         } else {
@@ -610,20 +661,15 @@ impl LuaVM {
     /// Only use table_get_with_meta when you explicitly need __index metamethod
     #[inline(always)]
     pub fn table_get(&self, lua_table_value: &LuaValue, key: &LuaValue) -> LuaValue {
-        // CRITICAL FAST PATH: Direct pointer access, no metatable check!
-        if let Some(ptr) = lua_table_value.as_table_ptr() {
-            let lua_table = unsafe { &*ptr };
-
-            // OPTIMIZATION: Inline the borrow and raw_get to reduce overhead
-            unsafe {
-                let table = &*lua_table.as_ptr();
-
+        // ObjectPool lookup
+        if let Some(table_id) = lua_table_value.as_table_id() {
+            if let Some(table) = self.object_pool.get_table(table_id) {
                 // Fast path for integer keys
                 if let Some(i) = key.as_integer() {
                     if i > 0 {
                         let idx = (i - 1) as usize;
                         if idx < table.array.len() {
-                            let val = table.array.get_unchecked(idx);
+                            let val = unsafe { table.array.get_unchecked(idx) };
                             if !val.is_nil() {
                                 return *val;
                             }
@@ -635,15 +681,7 @@ impl LuaVM {
                 if let Some(val) = table.get_from_hash(key) {
                     return val;
                 }
-            }
 
-            return LuaValue::nil();
-        }
-
-        // Fallback: ObjectPool lookup (rare case)
-        if let Some(table_id) = lua_table_value.as_table_id() {
-            if let Some(lua_table) = self.object_pool.get_table(table_id) {
-                let table = lua_table.borrow();
                 return table.raw_get(key).unwrap_or(LuaValue::nil());
             }
         }
@@ -674,124 +712,39 @@ impl LuaVM {
             return None;
         }
 
-        // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
-        if let Some(ptr) = lua_table_value.as_table_ptr() {
-            // SAFETY: Pointer is valid as long as table exists in ObjectPool
-            let lua_table = unsafe { &*ptr };
-
-            // First try raw get
-            let value = {
-                let table = lua_table.borrow();
-                table.raw_get(key).unwrap_or(LuaValue::nil())
-            };
-
-            if !value.is_nil() {
-                return Some(value);
-            }
-
-            // Check for __index metamethod
-            let meta_value = {
-                let table = lua_table.borrow();
-                table.get_metatable()
-            };
-
-            if let Some(mt) = meta_value
-                && let Some(meta_id) = mt.as_table_id()
-            {
-                let index_key = self.create_string("__index");
-
-                // Try cached pointer for metatable too
-                if let Some(mt_ptr) = mt.as_table_ptr() {
-                    let metatable = unsafe { &*mt_ptr };
-                    let index_value = {
-                        let mt_borrowed = metatable.borrow();
-                        mt_borrowed.raw_get(&index_key)
-                    };
-
-                    if let Some(index_val) = index_value {
-                        match index_val.kind() {
-                            LuaValueKind::Table => {
-                                return self.table_get_with_meta(&index_val, key);
-                            }
-                            LuaValueKind::CFunction | LuaValueKind::Function => {
-                                let args = vec![lua_table_value.clone(), key.clone()];
-                                match self.call_metamethod(&index_val, &args) {
-                                    Ok(result) => return result,
-                                    Err(_) => return None,
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    // Fallback to ObjectPool lookup
-                    let metatable = self.object_pool.get_table(meta_id)?;
-                    let index_value = {
-                        let mt_borrowed = metatable.borrow();
-                        mt_borrowed.raw_get(&index_key)
-                    };
-
-                    if let Some(index_val) = index_value {
-                        match index_val.kind() {
-                            LuaValueKind::Table => {
-                                return self.table_get_with_meta(&index_val, key);
-                            }
-                            LuaValueKind::CFunction | LuaValueKind::Function => {
-                                let args = vec![lua_table_value.clone(), key.clone()];
-                                match self.call_metamethod(&index_val, &args) {
-                                    Ok(result) => return result,
-                                    Err(_) => return None,
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            return None;
-        }
-
-        // Slow path: no cached pointer, use ObjectPool lookup
+        // Use ObjectPool lookup
         let Some(table_id) = lua_table_value.as_table_id() else {
             return None;
         };
 
-        let lua_table = self.object_pool.get_table(table_id)?;
-
         // First try raw get
-        let value = {
-            let table = lua_table.borrow();
-            table.raw_get(key).unwrap_or(LuaValue::nil())
+        let (value, meta_value) = {
+            let table = self.object_pool.get_table(table_id)?;
+            let val = table.raw_get(key).unwrap_or(LuaValue::nil());
+            let meta = table.get_metatable();
+            (val, meta)
         };
 
         if !value.is_nil() {
             return Some(value);
         }
 
-        // If not found, check for __index metamethod
-        let meta_value = {
-            let table = lua_table.borrow();
-            table.get_metatable()
-        };
-
+        // Check for __index metamethod
         if let Some(mt) = meta_value
             && let Some(meta_id) = mt.as_table_id()
         {
             let index_key = self.create_string("__index");
-            let metatable = self.object_pool.get_table(meta_id)?;
-
+            
             let index_value = {
-                let mt_borrowed = metatable.borrow();
-                mt_borrowed.raw_get(&index_key)
+                let metatable = self.object_pool.get_table(meta_id)?;
+                metatable.raw_get(&index_key)
             };
 
             if let Some(index_val) = index_value {
                 match index_val.kind() {
-                    // __index is a table - look up in that table
-                    LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
-
-                    // __index is a function - call it with (table, key)
+                    LuaValueKind::Table => {
+                        return self.table_get_with_meta(&index_val, key);
+                    }
                     LuaValueKind::CFunction | LuaValueKind::Function => {
                         let args = vec![lua_table_value.clone(), key.clone()];
                         match self.call_metamethod(&index_val, &args) {
@@ -818,16 +771,18 @@ impl LuaVM {
             return None;
         };
 
-        let userdata = self.object_pool.get_userdata(userdata_id)?;
-        // Check for __index metamethod
-        let metatable = userdata.borrow().get_metatable();
+        // Get metatable from userdata
+        let metatable = {
+            let userdata = self.object_pool.get_userdata(userdata_id)?;
+            userdata.get_metatable()
+        };
 
         if let Some(mt_id) = metatable.as_table_id() {
             let index_key = self.create_string("__index");
 
             let index_value = {
-                let mt_borrowed = self.object_pool.get_table(mt_id)?.borrow();
-                mt_borrowed.raw_get(&index_key)
+                let mt = self.object_pool.get_table(mt_id)?;
+                mt.raw_get(&index_key)
             };
 
             if let Some(index_val) = index_value {
@@ -856,9 +811,9 @@ impl LuaVM {
     pub fn string_get(&mut self, string_val: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
         let index_key = self.create_string("__index");
         // Check for __index metamethod in string metatable
-        if let Some(mt) = &self.string_metatable {
+        if let Some(mt) = &self.string_metatable.clone() {
             let index_value = if let Some(mt_ref) = self.get_table(mt) {
-                mt_ref.borrow().raw_get(&index_key)
+                mt_ref.raw_get(&index_key)
             } else {
                 None
             };
@@ -892,143 +847,49 @@ impl LuaVM {
         key: LuaValue,
         value: LuaValue,
     ) -> LuaResult<()> {
-        // Fast path: use cached pointer if available (ZERO ObjectPool lookup!)
-        if let Some(ptr) = lua_table_val.as_table_ptr() {
-            // SAFETY: Pointer is valid as long as table exists in ObjectPool
-            let lua_table = unsafe { &*ptr };
-
-            // OPTIMIZATION: Check metatable and key existence in single borrow
-            let (has_metatable, has_key) = {
-                let table = lua_table.borrow();
-                let has_mt = table.get_metatable().is_some();
-                // Only check key existence if there's a metatable (for __newindex)
-                let has_k = if has_mt {
-                    table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false)
-                } else {
-                    true  // Pretend key exists to skip metamethod check
-                };
-                (has_mt, has_k)
-            };
-
-            // If no metatable, or key exists, just do raw set
-            if !has_metatable || has_key {
-                lua_table.borrow_mut().raw_set(key.clone(), value.clone());
-
-                // Write barrier: table may now reference new objects
-                if let Some(table_id) = lua_table_val.as_table_id() {
-                    self.gc
-                        .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
-                    self.gc.barrier_back(&value);
-                }
-                return Ok(());
-            }
-
-            // Key doesn't exist and has metatable, check for __newindex metamethod
-            let meta_value = {
-                let table = lua_table.borrow();
-                table.get_metatable()
-            };
-
-            if let Some(mt) = meta_value
-                && let Some(table_id) = mt.as_table_id()
-            {
-                let newindex_key = self.create_string("__newindex");
-
-                // Try to use cached metatable pointer
-                let newindex_value = if let Some(mt_ptr) = mt.as_table_ptr() {
-                    let metatable = unsafe { &*mt_ptr };
-                    let mt_borrowed = metatable.borrow();
-                    mt_borrowed.raw_get(&newindex_key)
-                } else {
-                    // Fallback to ObjectPool lookup
-                    let Some(metatable) = self.object_pool.get_table(table_id) else {
-                        return Err(self.error("missing metatable".to_string()));
-                    };
-                    let mt_borrowed = metatable.borrow();
-                    mt_borrowed.raw_get(&newindex_key)
-                };
-
-                if let Some(newindex_val) = newindex_value {
-                    match newindex_val.kind() {
-                        LuaValueKind::Table => {
-                            return self.table_set_with_meta(newindex_val, key, value);
-                        }
-                        LuaValueKind::CFunction | LuaValueKind::Function => {
-                            let args = vec![lua_table_val, key, value];
-                            match self.call_metamethod(&newindex_val, &args) {
-                                Ok(_) => return Ok(()),
-                                Err(e) => return Err(e),
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // No metamethod, use raw set
-            lua_table.borrow_mut().raw_set(key.clone(), value.clone());
-
-            // Write barrier for new insertion
-            if let Some(table_id) = lua_table_val.as_table_id() {
-                self.gc
-                    .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
-                self.gc.barrier_back(&value);
-            }
-            return Ok(());
-        }
-
-        // Slow path: no cached pointer, use ObjectPool lookup
+        // Use ObjectPool lookup
         let Some(table_id) = lua_table_val.as_table_id() else {
             return Err(self.error("table_set: not a table".to_string()));
         };
 
-        let Some(lua_table) = self.object_pool.get_table(table_id) else {
-            return Err(self.error("invalid table".to_string()));
+        // Check if key already exists and get metatable info
+        let (has_key, meta_value) = {
+            let Some(table) = self.object_pool.get_table(table_id) else {
+                return Err(self.error("invalid table".to_string()));
+            };
+            let has_k = table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false);
+            let meta = table.get_metatable();
+            (has_k, meta)
         };
 
-        // Check if key already exists
-        let has_key = {
-            let table = lua_table.borrow();
-            table.raw_get(&key).map(|v| !v.is_nil()).unwrap_or(false)
-        };
-
+        // If key exists, just do raw set (no metamethod check needed)
         if has_key {
-            // Key exists, use raw set
-            lua_table.borrow_mut().raw_set(key.clone(), value.clone());
-
-            // Write barrier
-            self.gc
-                .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+            if let Some(table) = self.object_pool.get_table_mut(table_id) {
+                table.raw_set(key.clone(), value.clone());
+            }
+            self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
             self.gc.barrier_back(&value);
             return Ok(());
         }
 
         // Key doesn't exist, check for __newindex metamethod
-        let meta_value = {
-            let table = lua_table.borrow();
-            table.get_metatable()
-        };
-
         if let Some(mt) = meta_value
-            && let Some(table_id) = mt.as_table_id()
+            && let Some(mt_id) = mt.as_table_id()
         {
             let newindex_key = self.create_string("__newindex");
-            let Some(metatable) = self.object_pool.get_table(table_id) else {
-                return Err(self.error("missing metatable".to_string()));
-            };
-
+            
             let newindex_value = {
-                let mt_borrowed = metatable.borrow();
-                mt_borrowed.raw_get(&newindex_key)
+                let Some(metatable) = self.object_pool.get_table(mt_id) else {
+                    return Err(self.error("missing metatable".to_string()));
+                };
+                metatable.raw_get(&newindex_key)
             };
 
             if let Some(newindex_val) = newindex_value {
                 match newindex_val.kind() {
-                    // __newindex is a table - set in that table
                     LuaValueKind::Table => {
                         return self.table_set_with_meta(newindex_val, key, value);
                     }
-                    // __newindex is a function - call it with (table, key, value)
                     LuaValueKind::CFunction | LuaValueKind::Function => {
                         let args = vec![lua_table_val, key, value];
                         match self.call_metamethod(&newindex_val, &args) {
@@ -1041,15 +902,13 @@ impl LuaVM {
             }
         }
 
-        let Some(lua_table) = self.object_pool.get_table(table_id) else {
-            return Err(self.error("invalid table".to_string()));
-        };
-        // No metamethod or key doesn't exist, use raw set
-        lua_table.borrow_mut().raw_set(key.clone(), value.clone());
+        // No metamethod, use raw set
+        if let Some(table) = self.object_pool.get_table_mut(table_id) {
+            table.raw_set(key.clone(), value.clone());
+        }
 
         // Write barrier for new insertion
-        self.gc
-            .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+        self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
         self.gc.barrier_back(&value);
         Ok(())
     }
@@ -1073,15 +932,17 @@ impl LuaVM {
     #[allow(dead_code)]
     fn close_upvalues(&mut self, frame_id: usize) {
         // Find all open upvalues pointing to this frame
-        let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self
+        let upvalues_to_close: Vec<UpvalueId> = self
             .open_upvalues
             .iter()
-            .filter(|uv| {
+            .filter(|uv_id| {
                 if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
-                    // Check if any open upvalue points to this frame
-                    for reg_idx in 0..frame.top {
-                        if uv.points_to(frame_id, reg_idx) {
-                            return true;
+                    if let Some(uv) = self.object_pool.get_upvalue(**uv_id) {
+                        // Check if any open upvalue points to this frame
+                        for reg_idx in 0..frame.top {
+                            if uv.points_to(frame_id, reg_idx) {
+                                return true;
+                            }
                         }
                     }
                 }
@@ -1091,34 +952,109 @@ impl LuaVM {
             .collect();
 
         // Close each upvalue
-        for upvalue in upvalues_to_close.iter() {
+        for uv_id in upvalues_to_close.iter() {
             // Get the value from the stack before closing
-            let value = upvalue.get_value(&self.frames, &self.register_stack);
-            upvalue.close(value);
+            if let Some(uv) = self.object_pool.get_upvalue(*uv_id) {
+                if let Some((fid, reg)) = uv.get_open_location() {
+                    let value = self.get_upvalue_value(fid, reg);
+                    if let Some(uv_mut) = self.object_pool.get_upvalue_mut(*uv_id) {
+                        uv_mut.close(value);
+                    }
+                }
+            }
         }
 
         // Remove closed upvalues from the open list
-        self.open_upvalues.retain(|uv| uv.is_open());
+        self.open_upvalues.retain(|uv_id| {
+            self.object_pool.get_upvalue(*uv_id)
+                .map(|uv| uv.is_open())
+                .unwrap_or(false)
+        });
+    }
+
+    /// Helper: Get value from stack for an open upvalue
+    fn get_upvalue_value(&self, frame_id: usize, register: usize) -> LuaValue {
+        if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
+            let abs_idx = frame.base_ptr + register;
+            if abs_idx < self.register_stack.len() {
+                return self.register_stack[abs_idx].clone();
+            }
+        }
+        LuaValue::nil()
+    }
+
+    /// Get upvalue value by UpvalueId
+    /// For open upvalues, reads from register stack
+    /// For closed upvalues, returns the stored value
+    pub fn read_upvalue(&self, uv_id: UpvalueId) -> LuaValue {
+        if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
+            if let Some((frame_id, register)) = uv.get_open_location() {
+                // Open upvalue - read from stack
+                if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
+                    let abs_idx = frame.base_ptr + register;
+                    if abs_idx < self.register_stack.len() {
+                        return self.register_stack[abs_idx];
+                    }
+                }
+                LuaValue::nil()
+            } else if let Some(value) = uv.get_closed_value() {
+                // Closed upvalue - return stored value
+                value
+            } else {
+                LuaValue::nil()
+            }
+        } else {
+            LuaValue::nil()
+        }
+    }
+
+    /// Set upvalue value by UpvalueId
+    /// For open upvalues, writes to register stack
+    /// For closed upvalues, updates the stored value
+    pub fn write_upvalue(&mut self, uv_id: UpvalueId, value: LuaValue) {
+        if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
+            if let Some((frame_id, register)) = uv.get_open_location() {
+                // Open upvalue - write to stack
+                if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
+                    let abs_idx = frame.base_ptr + register;
+                    if abs_idx < self.register_stack.len() {
+                        self.register_stack[abs_idx] = value;
+                    }
+                }
+            } else {
+                // Closed upvalue - update stored value
+                if let Some(uv_mut) = self.object_pool.get_upvalue_mut(uv_id) {
+                    uv_mut.close(value);
+                }
+            }
+        }
     }
 
     /// Close all open upvalues at or above the given stack position
     /// Used by RETURN (k bit) and CLOSE instructions
     pub fn close_upvalues_from(&mut self, stack_pos: usize) {
-        let upvalues_to_close: Vec<Rc<LuaUpvalue>> = self
+        // Collect frame info first to avoid borrowing issues
+        let frame_info: Vec<(usize, usize, usize)> = self.frames.iter().map(|frame| {
+            let max_regs = if let Some(func_id) = frame.function_value.as_function_id() {
+                self.object_pool.get_function(func_id)
+                    .map(|f| f.chunk.max_stack_size)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            (frame.frame_id, frame.base_ptr, max_regs)
+        }).collect();
+
+        let upvalues_to_close: Vec<UpvalueId> = self
             .open_upvalues
             .iter()
-            .filter(|uv| {
-                // Check if this upvalue points to stack_pos or higher
-                // We need to find the frame that owns this upvalue
-                for frame in self.frames.iter() {
-                    // Check all possible registers in this frame
-                    // Use max_stack_size instead of top, because top might be 0 for functions
-                    // called with no arguments (but they can still have local variables)
-                    if let Some(func_ptr) = frame.function_value.as_function_ptr() {
-                        let max_regs = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
-                        for reg_idx in 0..max_regs {
-                            if uv.points_to(frame.frame_id, reg_idx) {
-                                let absolute_pos = frame.base_ptr + reg_idx;
+            .filter(|uv_id| {
+                if let Some(uv) = self.object_pool.get_upvalue(**uv_id) {
+                    // Check if this upvalue points to stack_pos or higher
+                    for (frame_id, base_ptr, max_regs) in &frame_info {
+                        for reg_idx in 0..*max_regs {
+                            if uv.points_to(*frame_id, reg_idx) {
+                                let absolute_pos = base_ptr + reg_idx;
                                 if absolute_pos >= stack_pos {
                                     return true;
                                 }
@@ -1132,13 +1068,23 @@ impl LuaVM {
             .collect();
 
         // Close each upvalue
-        for upvalue in upvalues_to_close.iter() {
-            let value = upvalue.get_value(&self.frames, &self.register_stack);
-            upvalue.close(value);
+        for uv_id in upvalues_to_close.iter() {
+            if let Some(uv) = self.object_pool.get_upvalue(*uv_id) {
+                if let Some((fid, reg)) = uv.get_open_location() {
+                    let value = self.get_upvalue_value(fid, reg);
+                    if let Some(uv_mut) = self.object_pool.get_upvalue_mut(*uv_id) {
+                        uv_mut.close(value);
+                    }
+                }
+            }
         }
 
         // Remove closed upvalues from the open list
-        self.open_upvalues.retain(|uv| uv.is_open());
+        self.open_upvalues.retain(|uv_id| {
+            self.object_pool.get_upvalue(*uv_id)
+                .map(|uv| uv.is_open())
+                .unwrap_or(false)
+        });
     }
 
     /// Call __close metamethods for to-be-closed variables >= stack_pos
@@ -1198,19 +1144,13 @@ impl LuaVM {
         // GC check MUST NOT happen here - object not yet protected!
         // Caller must call check_gc() AFTER storing value in register
 
-        // Get pointer from object pool for direct access
-        let ptr = self
-            .object_pool
-            .get_string(id)
-            .map(|s| Rc::as_ptr(s) as *const LuaString)
-            .unwrap_or(std::ptr::null());
-        LuaValue::string_id_ptr(id, ptr)
+        LuaValue::string(id)
     }
 
     /// Get string by LuaValue (resolves ID from object pool)
     pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
         if let Some(id) = value.as_string_id() {
-            self.object_pool.get_string(id).map(|rc| &**rc)
+            self.object_pool.get_string(id)
         } else {
             None
         }
@@ -1219,7 +1159,7 @@ impl LuaVM {
     /// Create a new table in object pool
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let (id, ptr) = self.object_pool.create_table(array_size, hash_size);
+        let id = self.object_pool.create_table(array_size, hash_size);
 
         // Register with GC - ultra-lightweight, just update debt
         self.gc
@@ -1228,13 +1168,22 @@ impl LuaVM {
         // GC check MUST NOT happen here - object not yet protected!
         // Caller must call check_gc() AFTER storing value in register
 
-        LuaValue::table_id_ptr(id, ptr)
+        LuaValue::table(id)
     }
 
     /// Get table by LuaValue (resolves ID from object pool)
-    pub fn get_table(&self, value: &LuaValue) -> Option<&std::cell::RefCell<LuaTable>> {
+    pub fn get_table(&self, value: &LuaValue) -> Option<&LuaTable> {
         if let Some(id) = value.as_table_id() {
-            self.object_pool.get_table(id).map(|rc| &**rc)
+            self.object_pool.get_table(id)
+        } else {
+            None
+        }
+    }
+
+    /// Get mutable table by LuaValue
+    pub fn get_table_mut(&mut self, value: &LuaValue) -> Option<&mut LuaTable> {
+        if let Some(id) = value.as_table_id() {
+            self.object_pool.get_table_mut(id)
         } else {
             None
         }
@@ -1242,15 +1191,15 @@ impl LuaVM {
 
     /// Helper: Set table field via raw_set
     pub fn table_set_raw(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) {
-        if let Some(table_ref) = self.get_table(table) {
-            table_ref.borrow_mut().raw_set(key, value);
+        if let Some(table_ref) = self.get_table_mut(table) {
+            table_ref.raw_set(key, value);
         }
     }
 
     /// Helper: Get table field via raw_get
     pub fn table_get_raw(&self, table: &LuaValue, key: &LuaValue) -> LuaValue {
         if let Some(table_ref) = self.get_table(table) {
-            table_ref.borrow().raw_get(key).unwrap_or(LuaValue::nil())
+            table_ref.raw_get(key).unwrap_or(LuaValue::nil())
         } else {
             LuaValue::nil()
         }
@@ -1258,8 +1207,8 @@ impl LuaVM {
 
     /// Helper: Set table metatable
     pub fn table_set_metatable(&mut self, table: &LuaValue, metatable: Option<LuaValue>) {
-        if let Some(table_ref) = self.get_table(table) {
-            table_ref.borrow_mut().set_metatable(metatable);
+        if let Some(table_ref) = self.get_table_mut(table) {
+            table_ref.set_metatable(metatable);
         }
     }
 
@@ -1268,7 +1217,7 @@ impl LuaVM {
         match value.kind() {
             LuaValueKind::Table => {
                 if let Some(table_ref) = self.get_table(value) {
-                    table_ref.borrow().get_metatable()
+                    table_ref.get_metatable()
                 } else {
                     None
                 }
@@ -1276,7 +1225,7 @@ impl LuaVM {
             LuaValueKind::Userdata => {
                 if let Some(id) = value.as_userdata_id() {
                     self.object_pool.get_userdata(id).and_then(|ud| {
-                        let mt = ud.borrow().get_metatable();
+                        let mt = ud.get_metatable();
                         if mt.is_nil() { None } else { Some(mt) }
                     })
                 } else {
@@ -1291,22 +1240,28 @@ impl LuaVM {
     /// Create new userdata in object pool
     pub fn create_userdata(&mut self, data: crate::lua_value::LuaUserdata) -> LuaValue {
         let id = self.object_pool.create_userdata(data);
-        // Get pointer from object pool for direct access
-        let ptr = self
-            .object_pool
-            .get_userdata(id)
-            .map(|u| Rc::as_ptr(u) as *const std::cell::RefCell<crate::lua_value::LuaUserdata>)
-            .unwrap_or(std::ptr::null());
-        LuaValue::userdata_id_ptr(id, ptr)
+        LuaValue::userdata(id)
     }
 
     /// Get userdata by LuaValue (resolves ID from object pool)
     pub fn get_userdata(
         &self,
         value: &LuaValue,
-    ) -> Option<&std::cell::RefCell<crate::lua_value::LuaUserdata>> {
+    ) -> Option<&crate::lua_value::LuaUserdata> {
         if let Some(id) = value.as_userdata_id() {
-            self.object_pool.get_userdata(id).map(|rc| &**rc)
+            self.object_pool.get_userdata(id)
+        } else {
+            None
+        }
+    }
+
+    /// Get mutable userdata by LuaValue
+    pub fn get_userdata_mut(
+        &mut self,
+        value: &LuaValue,
+    ) -> Option<&mut crate::lua_value::LuaUserdata> {
+        if let Some(id) = value.as_userdata_id() {
+            self.object_pool.get_userdata_mut(id)
         } else {
             None
         }
@@ -1314,20 +1269,28 @@ impl LuaVM {
 
     /// Create a function in object pool
     #[inline(always)]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<Rc<LuaUpvalue>>) -> LuaValue {
-        let func = LuaFunction { chunk, upvalues };
-        let (id, ptr) = self.object_pool.create_function_with_ptr(func);
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
+        let id = self.object_pool.create_function(chunk, upvalue_ids);
 
         // Register with GC - ultra-lightweight
         self.gc.register_object(id.0, crate::gc::GcObjectType::Function);
 
-        LuaValue::function_id_ptr(id, ptr)
+        LuaValue::function(id)
     }
 
     /// Get function by LuaValue (resolves ID from object pool)
-    pub fn get_function(&self, value: &LuaValue) -> Option<&std::rc::Rc<RefCell<LuaFunction>>> {
+    pub fn get_function(&self, value: &LuaValue) -> Option<&GcFunction> {
         if let Some(id) = value.as_function_id() {
             self.object_pool.get_function(id)
+        } else {
+            None
+        }
+    }
+
+    /// Get mutable function by LuaValue
+    pub fn get_function_mut(&mut self, value: &LuaValue) -> Option<&mut GcFunction> {
+        if let Some(id) = value.as_function_id() {
+            self.object_pool.get_function_mut(id)
         } else {
             None
         }
@@ -1339,21 +1302,38 @@ impl LuaVM {
     fn get_current_chunk(&self) -> Result<std::rc::Rc<Chunk>, String> {
         let frame = self.current_frame();
         if let Some(func_ref) = self.get_function(&frame.function_value) {
-            Ok(func_ref.borrow().chunk.clone())
+            Ok(func_ref.chunk.clone())
         } else {
             Err("Invalid function in current frame".to_string())
         }
     }
 
+    /// Get constant from current frame's function
+    /// This is a hot-path helper for instructions that need to load constants
+    #[inline]
+    pub fn get_frame_constant(&self, frame: &LuaCallFrame, index: usize) -> Option<LuaValue> {
+        let func_id = frame.function_value.as_function_id()?;
+        let func_ref = self.object_pool.get_function(func_id)?;
+        func_ref.chunk.constants.get(index).copied()
+    }
+
+    /// Get instruction from current frame's function code
+    /// This is needed for MMBIN/MMBINI/MMBINK which need to read the previous instruction
+    #[inline]
+    pub fn get_frame_instruction(&self, frame: &LuaCallFrame, index: usize) -> Option<u32> {
+        let func_id = frame.function_value.as_function_id()?;
+        let func_ref = self.object_pool.get_function(func_id)?;
+        func_ref.chunk.code.get(index).copied()
+    }
+
     /// Helper: Get upvalue from current frame's function
     #[inline]
     #[allow(dead_code)]
-    fn get_current_upvalue(&self, index: usize) -> Result<std::rc::Rc<LuaUpvalue>, String> {
+    fn get_current_upvalue_id(&self, index: usize) -> Result<UpvalueId, String> {
         let frame = self.current_frame();
         if let Some(func_ref) = self.get_function(&frame.function_value) {
-            let func = func_ref.borrow();
-            if index < func.upvalues.len() {
-                Ok(func.upvalues[index].clone())
+            if index < func_ref.upvalues.len() {
+                Ok(func_ref.upvalues[index])
             } else {
                 Err(format!("Invalid upvalue index: {}", index))
             }
@@ -1421,9 +1401,11 @@ impl LuaVM {
         }
 
         // 6. Open upvalues - these point to stack locations that must stay alive
-        for upval in &self.open_upvalues {
-            if let Some(val) = upval.get_closed_value() {
-                roots.push(val);
+        for upval_id in &self.open_upvalues {
+            if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
+                if let Some(val) = uv.get_closed_value() {
+                    roots.push(val);
+                }
             }
         }
 
@@ -1447,7 +1429,7 @@ impl LuaVM {
                         // Extract child chunk before recursion to avoid borrow conflicts
                         let child_chunk =
                             if let Some(func_ref) = self.object_pool.get_function(func_id) {
-                                Some(func_ref.borrow().chunk.clone())
+                                Some(func_ref.chunk.clone())
                             } else {
                                 None
                             };
@@ -1485,9 +1467,11 @@ impl LuaVM {
         }
 
         // Add open upvalues as roots (only closed ones that have values)
-        for upvalue in &self.open_upvalues {
-            if let Some(value) = upvalue.get_closed_value() {
-                roots.push(value);
+        for upvalue_id in &self.open_upvalues {
+            if let Some(uv) = self.object_pool.get_upvalue(*upvalue_id) {
+                if let Some(value) = uv.get_closed_value() {
+                    roots.push(value);
+                }
             }
         }
 
@@ -1569,8 +1553,8 @@ impl LuaVM {
             LuaValueKind::Table => {
                 if let Some(table_id) = value.as_table_id() {
                     let metatable = {
-                        let table = self.object_pool.get_table(table_id).expect("invalid table");
-                        table.borrow().get_metatable()
+                        let table = self.object_pool.get_table(table_id)?;
+                        table.get_metatable()
                     };
                     if let Some(metatable) = metatable {
                         let key = self.create_string(event);
@@ -1585,9 +1569,9 @@ impl LuaVM {
             LuaValueKind::String => {
                 let key = self.create_string(event);
                 // All strings share a metatable
-                if let Some(mt) = &self.string_metatable {
+                if let Some(mt) = &self.string_metatable.clone() {
                     if let Some(mt_ref) = self.get_table(mt) {
-                        mt_ref.borrow().raw_get(&key)
+                        mt_ref.raw_get(&key)
                     } else {
                         None
                     }
@@ -1646,10 +1630,14 @@ impl LuaVM {
     ) -> LuaResult<bool> {
         match metamethod.kind() {
             LuaValueKind::Function => {
-                let Some(func_ref) = metamethod.as_lua_function() else {
+                let Some(func_id) = metamethod.as_function_id() else {
                     return Err(self.error("Invalid function ID".to_string()));
                 };
-                let max_stack_size = func_ref.borrow().chunk.max_stack_size;
+                let Some(func_ref) = self.object_pool.get_function(func_id) else {
+                    return Err(self.error("Invalid function".to_string()));
+                };
+                let max_stack_size = func_ref.chunk.max_stack_size;
+                let code_ptr = func_ref.chunk.code.as_ptr();
 
                 // Save current state
                 let frame_id = self.next_frame_id;
@@ -1665,9 +1653,6 @@ impl LuaVM {
                         self.register_stack[new_base + i] = *arg;
                     }
                 }
-
-                // Get code pointer from metamethod function
-                let code_ptr = func_ref.borrow().chunk.code.as_ptr();
 
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
@@ -1764,7 +1749,36 @@ impl LuaVM {
                 Err(self.error("`__tostring` metamethod did not return a string".to_string()))
             }
         } else {
-            Ok(value.to_string_repr())
+            // Format value without using deprecated method
+            Ok(self.format_value(value))
+        }
+    }
+
+    /// Format a value as a string (for display purposes)
+    fn format_value(&self, value: &LuaValue) -> String {
+        match value.kind() {
+            LuaValueKind::Nil => "nil".to_string(),
+            LuaValueKind::Boolean => if value.as_bool().unwrap_or(false) { "true" } else { "false" }.to_string(),
+            LuaValueKind::Integer => value.as_integer().map(|i| i.to_string()).unwrap_or_default(),
+            LuaValueKind::Float => value.as_number().map(|n| n.to_string()).unwrap_or_default(),
+            LuaValueKind::String => {
+                if let Some(s) = self.get_string(value) {
+                    s.as_str().to_string()
+                } else {
+                    "string".to_string()
+                }
+            }
+            LuaValueKind::Table => {
+                if let Some(id) = value.as_table_id() {
+                    format!("table: {:p}", id.0 as *const ())
+                } else {
+                    "table".to_string()
+                }
+            }
+            LuaValueKind::Function => "function".to_string(),
+            LuaValueKind::CFunction => "function".to_string(),
+            LuaValueKind::Userdata => "userdata".to_string(),
+            LuaValueKind::Thread => "thread".to_string(),
         }
     }
 
@@ -1776,8 +1790,7 @@ impl LuaVM {
         for frame in self.frames.iter().rev() {
             // Dynamically resolve chunk for debug info
             let (source, line) = if let Some(func_ref) = self.get_function(&frame.function_value) {
-                let func = func_ref.borrow();
-                let chunk = &func.chunk;
+                let chunk = &func_ref.chunk;
 
                 let source_str = chunk.source_name.as_deref().unwrap_or("[?]");
 
@@ -1913,8 +1926,10 @@ impl LuaVM {
                 let new_base = if let Some(current_frame) = self.frames.last() {
                     let caller_base = current_frame.base_ptr;
                     let caller_max_stack =
-                        if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
-                            unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                        if let Some(func_id) = current_frame.function_value.as_function_id() {
+                            self.object_pool.get_function(func_id)
+                                .map(|f| f.chunk.max_stack_size)
+                                .unwrap_or(256)
                         } else {
                             256
                         };
@@ -1933,31 +1948,27 @@ impl LuaVM {
                 }
 
                 // Create dummy function and add to object pool
-                let dummy_func = LuaFunction {
-                    chunk: Rc::new(Chunk {
-                        code: Vec::new(),
-                        constants: Vec::new(),
-                        locals: Vec::new(),
-                        upvalue_count: 0,
-                        param_count: 0,
-                        is_vararg: false,
-                        max_stack_size: stack_size,
-                        child_protos: Vec::new(),
-                        upvalue_descs: Vec::new(),
-                        source_name: Some("[direct_call]".to_string()),
-                        line_info: Vec::new(),
-                    }),
-                    upvalues: Vec::new(),
-                };
-                let dummy_func_id = self.object_pool.create_function(dummy_func);
+                let dummy_chunk = Rc::new(Chunk {
+                    code: Vec::new(),
+                    constants: Vec::new(),
+                    locals: Vec::new(),
+                    upvalue_count: 0,
+                    param_count: 0,
+                    is_vararg: false,
+                    max_stack_size: stack_size,
+                    child_protos: Vec::new(),
+                    upvalue_descs: Vec::new(),
+                    source_name: Some("[direct_call]".to_string()),
+                    line_info: Vec::new(),
+                });
+                let dummy_func_id = self.object_pool.create_function(dummy_chunk.clone(), Vec::new());
                 let dummy_func_value = LuaValue::function_id(dummy_func_id);
 
                 // Use new_base as result_reg (same as caller_base + caller_max_stack)
                 let safe_result_reg = new_base;
 
                 // Create empty code for dummy frame
-                let empty_code: Vec<u32> = vec![];
-                let code_ptr = empty_code.as_ptr();
+                let code_ptr = dummy_chunk.code.as_ptr();
 
                 let temp_frame = LuaCallFrame::new_lua_function(
                     frame_id,
@@ -1988,15 +1999,17 @@ impl LuaVM {
                 Ok(result.all_values())
             }
             LuaValueKind::Function => {
-                let Some(lua_func_ref) = func.as_lua_function() else {
+                let Some(func_id) = func.as_function_id() else {
                     return Err(self.error("Invalid function reference".to_string()));
                 };
 
-                // Get max_stack_size before entering the execution loop
-                let max_stack_size = {
-                    let size = lua_func_ref.borrow().chunk.max_stack_size;
-                    // Ensure at least 1 register for function body
-                    if size == 0 { 1 } else { size }
+                // Get function info from object pool
+                let (max_stack_size, code_ptr) = {
+                    let Some(func_ref) = self.object_pool.get_function(func_id) else {
+                        return Err(self.error("Invalid function".to_string()));
+                    };
+                    let size = if func_ref.chunk.max_stack_size == 0 { 1 } else { func_ref.chunk.max_stack_size };
+                    (size, func_ref.chunk.code.as_ptr())
                 };
 
                 // For Lua function, use similar logic to call_metamethod
@@ -2007,8 +2020,10 @@ impl LuaVM {
                 let new_base = if let Some(current_frame) = self.frames.last() {
                     let caller_base = current_frame.base_ptr;
                     let caller_max_stack =
-                        if let Some(func_ptr) = current_frame.function_value.as_function_ptr() {
-                            unsafe { (*func_ptr).borrow().chunk.max_stack_size }
+                        if let Some(caller_func_id) = current_frame.function_value.as_function_id() {
+                            self.object_pool.get_function(caller_func_id)
+                                .map(|f| f.chunk.max_stack_size)
+                                .unwrap_or(256)
                         } else {
                             256
                         };
@@ -2033,8 +2048,6 @@ impl LuaVM {
                 // Use caller's max_stack as result_reg (safe write position)
                 let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
 
-                // Get code pointer from function
-                let code_ptr = lua_func_ref.borrow().chunk.code.as_ptr();
                 let new_frame = LuaCallFrame::new_lua_function(
                     frame_id,
                     func,
@@ -2061,7 +2074,7 @@ impl LuaVM {
 
                     // Dynamically resolve chunk
                     let chunk = if let Some(func_ref) = self.get_function(&function_value) {
-                        func_ref.borrow().chunk.clone()
+                        func_ref.chunk.clone()
                     } else {
                         break Err(self.error("Invalid function in frame".to_string()));
                     };

@@ -265,12 +265,16 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             vm.register_stack[base_ptr + a + 4] = state;
             vm.register_stack[base_ptr + a + 5] = control;
 
-            // OPTIMIZATION: Use direct pointer access instead of hash lookup
-            let Some(func_ref) = func.as_lua_function() else {
+            // Use new ID-based API to get function
+            let Some(func_id) = func.as_function_id() else {
                 return Err(vm.error("Not a Lua function".to_string()));
             };
+            let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+                return Err(vm.error("Invalid function ID".to_string()));
+            };
 
-            let max_stack_size = func_ref.borrow().chunk.max_stack_size;
+            let max_stack_size = func_ref.chunk.max_stack_size;
+            let code_ptr = func_ref.chunk.code.as_ptr();
 
             let frame_id = vm.next_frame_id;
             vm.next_frame_id += 1;
@@ -286,9 +290,6 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             // Copy arguments
             vm.register_stack[call_base] = state;
             vm.register_stack[call_base + 1] = control;
-
-            // Get code pointer from function
-            let code_ptr = func_ref.borrow().chunk.code.as_ptr();
 
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,

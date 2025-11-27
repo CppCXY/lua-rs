@@ -24,8 +24,14 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let sep_value = get_arg(vm, 2);
     let sep = match sep_value {
         Some(v) => {
-            if let Some(s) = v.as_lua_string() {
-                s.as_str().to_string()
+            if let Some(string_id) = v.as_string_id() {
+                if let Some(s) = vm.object_pool.get_string(string_id) {
+                    s.as_str().to_string()
+                } else {
+                    return Err(
+                        vm.error("bad argument #2 to 'table.concat' (string expected)".to_string())
+                    );
+                }
             } else {
                 return Err(
                     vm.error("bad argument #2 to 'table.concat' (string expected)".to_string())
@@ -35,13 +41,15 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         None => "".to_string(),
     };
 
-    let Some(table_ref) = table_val.as_lua_table() else {
+    let Some(table_id) = table_val.as_table_id() else {
         return Err(vm.error("Invalid table".to_string()));
     };
     let i = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(1);
     
     let (len, parts) = {
-        let table_borrowed = table_ref.borrow();
+        let Some(table_borrowed) = vm.object_pool.get_table(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
         let len = table_borrowed.len();
         let j = get_arg(vm, 4)
             .and_then(|v| v.as_integer())
@@ -53,8 +61,15 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let mut parts = Vec::new();
             for idx in i..=j {
                 if let Some(value) = table_borrowed.array.get(idx as usize - 1) {
-                    if let Some(s) = value.as_lua_string() {
-                        parts.push(s.as_str().to_string());
+                    if let Some(string_id) = value.as_string_id() {
+                        if let Some(s) = vm.object_pool.get_string(string_id) {
+                            parts.push(s.as_str().to_string());
+                        } else {
+                            return Err(vm.error(format!(
+                                "bad value at index {} in 'table.concat' (string expected)",
+                                idx
+                            )));
+                        }
                     } else {
                         return Err(vm.error(format!(
                             "bad value at index {} in 'table.concat' (string expected)",
@@ -81,17 +96,24 @@ fn table_insert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 1, "table.insert")?;
     let argc = arg_count(vm);
 
-    // CRITICAL: Use direct pointer to avoid HashMap lookup per insert!
-    let Some(table_ref) = table_val.as_lua_table() else {
+    let Some(table_id) = table_val.as_table_id() else {
         return Err(vm.error("Invalid table".to_string()));
     };
 
-    let len = table_ref.borrow().len();
+    let len = {
+        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        table_ref.len()
+    };
 
     if argc == 2 {
         // table.insert(list, value) - append at end
         let value = require_arg(vm, 2, "table.insert")?;
-        match table_ref.borrow_mut().insert_array_at(len, value) {
+        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        match table_ref.insert_array_at(len, value) {
             Ok(_) => {}
             Err(e) => {
                 return Err(vm.error(format!("error inserting into table: {}", e)));
@@ -112,10 +134,10 @@ fn table_insert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 "bad argument #2 to 'table.insert' (position out of bounds)"
             )));
         }
-        match table_ref
-            .borrow_mut()
-            .insert_array_at(pos as usize - 1, value)
-        {
+        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        match table_ref.insert_array_at(pos as usize - 1, value) {
             Ok(_) => {}
             Err(e) => {
                 return Err(vm.error(format!("error inserting into table: {}", e)));
@@ -132,12 +154,16 @@ fn table_insert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn table_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 1, "table.remove")?;
 
-    // CRITICAL: Use direct pointer to avoid HashMap lookup
-    let Some(table_ref) = table_val.as_lua_table() else {
+    let Some(table_id) = table_val.as_table_id() else {
         return Err(vm.error("Invalid table".to_string()));
     };
 
-    let len = table_ref.borrow().len();
+    let len = {
+        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        table_ref.len()
+    };
 
     if len == 0 {
         return Ok(MultiValue::single(LuaValue::nil()));
@@ -153,7 +179,10 @@ fn table_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         )));
     }
 
-    let removed = match table_ref.borrow_mut().remove_array_at(pos as usize - 1) {
+    let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+        return Err(vm.error("Invalid table".to_string()));
+    };
+    let removed = match table_ref.remove_array_at(pos as usize - 1) {
         Ok(val) => val,
         Err(e) => return Err(vm.error(format!("error removing from table: {}", e))),
     };
@@ -179,24 +208,28 @@ fn table_move(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Copy elements
     let mut values = Vec::new();
     {
-        let Some(src_ref) = src_val.as_lua_table() else {
+        let Some(src_id) = src_val.as_table_id() else {
             return Err(vm.error("Invalid source table".to_string()));
         };
-        let src_ref_mut = src_ref.borrow_mut();
+        let Some(src_ref) = vm.object_pool.get_table(src_id) else {
+            return Err(vm.error("Invalid source table".to_string()));
+        };
 
         for i in f..=e {
-            let val = src_ref_mut.get_int(i).unwrap_or(LuaValue::nil());
+            let val = src_ref.get_int(i).unwrap_or(LuaValue::nil());
             values.push(val);
         }
     }
 
     {
-        let Some(dst_ref) = dst_value.as_lua_table() else {
+        let Some(dst_id) = dst_value.as_table_id() else {
             return Err(vm.error("Invalid destination table".to_string()));
         };
-        let mut dst_ref_mut = dst_ref.borrow_mut();
+        let Some(dst_ref) = vm.object_pool.get_table_mut(dst_id) else {
+            return Err(vm.error("Invalid destination table".to_string()));
+        };
         for (offset, val) in values.into_iter().enumerate() {
-            dst_ref_mut.set_int(t + offset as i64, val);
+            dst_ref.set_int(t + offset as i64, val);
         }
     }
 
@@ -209,10 +242,12 @@ fn table_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table = vm.create_table(args.len(), 1);
     // Set 'n' field
     let n_key = vm.create_string("n");
-    let Some(table_ref) = table.as_lua_table() else {
+    let Some(table_id) = table.as_table_id() else {
         return Err(vm.error("Invalid table".to_string()));
     };
-    let mut table_ref = table_ref.borrow_mut();
+    let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+        return Err(vm.error("Invalid table".to_string()));
+    };
 
     for (i, arg) in args.iter().enumerate() {
         table_ref.set_int(i as i64 + 1, arg.clone());
@@ -225,10 +260,12 @@ fn table_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// table.unpack(list [, i [, j]]) - Unpack table into values
 fn table_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 1, "table.unpack")?;
-    let Some(table_ref) = table_val.as_lua_table() else {
+    let Some(table_id) = table_val.as_table_id() else {
         return Err(vm.error("Invalid table".to_string()));
     };
-    let table_ref = table_ref.borrow();
+    let Some(table_ref) = vm.object_pool.get_table(table_id) else {
+        return Err(vm.error("Invalid table".to_string()));
+    };
     let len = table_ref.len();
 
     let i = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
@@ -251,35 +288,55 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let table_val = require_arg(vm, 1, "table.sort")?;
     let comp = get_arg(vm, 2);
 
-    let Some(table_ref) = table_val.as_lua_table() else {
+    let Some(table_id) = table_val.as_table_id() else {
         return Err(vm.error("Invalid table".to_string()));
     };
-    // Get array length and extract values
-    let len = table_ref.borrow().len();
+    
+    // Get array length
+    let len = {
+        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        table_ref.len()
+    };
 
     if len <= 1 {
         return Ok(MultiValue::empty());
     }
 
-    // Get mutable borrow to sort in place
-    let mut table_mut = table_ref.borrow_mut();
+    // Check if array is empty
+    let is_empty = {
+        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        table_ref.array.is_empty()
+    };
     
-    if table_mut.array.is_empty() {
+    if is_empty {
         return Ok(MultiValue::empty());
     }
 
     // If no comparison function, use default ordering
     if comp.is_none() || comp.as_ref().map(|v| v.is_nil()).unwrap_or(true) {
-        table_mut.array.sort();
+        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        table_ref.array.sort();
         return Ok(MultiValue::empty());
     }
 
-    drop(table_mut); // Release borrow for custom comparison
     let comp_func = comp.unwrap();
 
-    // Custom comparison - need to re-borrow for each comparison
-    let mut table_mut = table_ref.borrow_mut();
-    table_mut.array.sort_by(|a, b| {
+    // For custom comparison, we need to extract array, sort it externally, then put it back
+    let mut arr = {
+        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        std::mem::take(&mut table_ref.array)
+    };
+
+    // Custom comparison using VM's call function
+    arr.sort_by(|a, b| {
         // Call comparison function: comp(a, b) should return true if a < b
         let args = vec![a.clone(), b.clone()];
         match vm.call_function_internal(comp_func.clone(), args) {
@@ -307,6 +364,14 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             Err(_) => std::cmp::Ordering::Equal, // On error, treat as equal
         }
     });
+
+    // Put the sorted array back
+    {
+        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+            return Err(vm.error("Invalid table".to_string()));
+        };
+        table_ref.array = arr;
+    }
 
     Ok(MultiValue::empty())
 }

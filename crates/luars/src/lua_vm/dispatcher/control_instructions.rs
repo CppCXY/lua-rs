@@ -526,10 +526,14 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
 
-    let Some(func) = frame.get_lua_function() else {
+    // Get function using new ID-based API
+    let Some(func_id) = frame.function_value.as_function_id() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
-    let Some(constant) = func.borrow().chunk.constants.get(b).copied() else {
+    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("Invalid function ID".to_string()));
+    };
+    let Some(constant) = func_ref.chunk.constants.get(b).copied() else {
         return Err(vm.error(format!("Invalid constant index: {}", b)));
     };
 
@@ -734,9 +738,9 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 
     // Slow path: Check for __call metamethod
     if func.kind() == LuaValueKind::Table {
-        let metatable_opt = func
-            .as_lua_table()
-            .and_then(|table_ref| table_ref.borrow().get_metatable());
+        let metatable_opt = func.as_table_id().and_then(|table_id| {
+            vm.object_pool.get_table(table_id).and_then(|t| t.get_metatable())
+        });
 
         if let Some(metatable) = metatable_opt {
             let call_key = vm.create_string("__call");
@@ -769,18 +773,21 @@ fn exec_call_lua_function(
     call_metamethod_self: LuaValue,
     frame_ptr: *mut LuaCallFrame,  // Use passed frame_ptr!
 ) -> LuaResult<()> {
-    // Get function reference - already validated as Function type
-    let func_ref = unsafe { func.as_lua_function().unwrap_unchecked() };
-    
-    // Extract chunk info with minimal borrowing - single borrow, extract all needed data
-    let (max_stack_size, is_vararg, code_ptr) = {
-        let func_borrow = func_ref.borrow();
-        (
-            func_borrow.chunk.max_stack_size,
-            func_borrow.chunk.is_vararg,
-            func_borrow.chunk.code.as_ptr(),
-        )
+    // Get function ID and lookup in ObjectPool
+    let Some(func_id) = func.as_function_id() else {
+        return Err(vm.error("Invalid function".to_string()));
     };
+    
+    // Extract chunk info from ObjectPool
+    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("Invalid function ID".to_string()));
+    };
+    
+    let (max_stack_size, is_vararg, code_ptr) = (
+        func_ref.chunk.max_stack_size,
+        func_ref.chunk.is_vararg,
+        func_ref.chunk.code.as_ptr(),
+    );
 
     // Calculate argument count - use frame_ptr directly!
     let arg_count = if b == 0 {
@@ -1052,10 +1059,14 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     match func.kind() {
         LuaValueKind::Function => {
             // Lua function: tail call optimization
-            let Some(func_ref) = func.as_lua_function() else {
+            let Some(func_id) = func.as_function_id() else {
                 return Err(vm.error("not a function".to_string()));
             };
-            let max_stack_size = func_ref.borrow().chunk.max_stack_size;
+            let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+                return Err(vm.error("Invalid function ID".to_string()));
+            };
+            let max_stack_size = func_ref.chunk.max_stack_size;
+            let code_ptr = func_ref.chunk.code.as_ptr();
 
             // CRITICAL: Before popping the frame, close all upvalues that point to it
             // This ensures that any closures created in this frame can still access
@@ -1077,9 +1088,6 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             for (i, arg) in args.iter().enumerate() {
                 vm.register_stack[old_base + i] = *arg;
             }
-
-            // Get code pointer from function
-            let code_ptr = func_ref.borrow().chunk.code.as_ptr();
 
             let new_frame = LuaCallFrame::new_lua_function(
                 frame_id,

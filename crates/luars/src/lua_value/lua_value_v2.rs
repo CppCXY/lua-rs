@@ -1,4 +1,4 @@
-// LuaValue V2 - Simplified design without pointer caching
+// LuaValue - Simplified design without pointer caching
 // 
 // Design principles:
 // 1. No pointer caching - Arena/Vec may relocate data
@@ -20,7 +20,7 @@
 // └──────────────────────────────────────────────────┘
 
 use crate::lua_value::CFunction;
-use crate::object_pool_v2::{StringId, TableId, FunctionId, UpvalueId, UserdataId};
+use crate::gc::{StringId, TableId, FunctionId, UpvalueId, UserdataId};
 
 // Type tags (high 16 bits of tag field)
 pub const TAG_NIL: u64       = 0x0000_0000_0000_0000;
@@ -39,18 +39,18 @@ pub const TAG_THREAD: u64    = 0x000B_0000_0000_0000;
 pub const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
 pub const ID_MASK: u64  = 0x0000_0000_FFFF_FFFF;
 
-/// Simplified LuaValue - no pointer caching
+/// LuaValue - no pointer caching, all GC objects accessed via ID
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct LuaValueV2 {
+pub struct LuaValue {
     tag: u64,   // type tag (high 16 bits) + object ID (low 32 bits)
     data: u64,  // i64/f64/cfunc pointer (for inline types)
 }
 
 // ============ Type enum for pattern matching ============
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LuaTypeV2 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LuaValueKind {
     Nil,
     Boolean,
     Integer,
@@ -63,7 +63,7 @@ pub enum LuaTypeV2 {
     Thread,
 }
 
-impl LuaValueV2 {
+impl LuaValue {
     // ============ Constructors ============
 
     #[inline(always)]
@@ -93,6 +93,12 @@ impl LuaValueV2 {
             tag: TAG_FLOAT,
             data: f.to_bits(),
         }
+    }
+
+    /// Alias for float()
+    #[inline(always)]
+    pub fn number(n: f64) -> Self {
+        Self::float(n)
     }
 
     #[inline(always)]
@@ -146,19 +152,19 @@ impl LuaValueV2 {
     // ============ Type checking ============
 
     #[inline(always)]
-    pub fn get_type(&self) -> LuaTypeV2 {
+    pub fn kind(&self) -> LuaValueKind {
         match self.tag & TAG_MASK {
-            TAG_NIL => LuaTypeV2::Nil,
-            TAG_FALSE | TAG_TRUE => LuaTypeV2::Boolean,
-            TAG_INTEGER => LuaTypeV2::Integer,
-            TAG_FLOAT => LuaTypeV2::Float,
-            TAG_STRING => LuaTypeV2::String,
-            TAG_TABLE => LuaTypeV2::Table,
-            TAG_FUNCTION => LuaTypeV2::Function,
-            TAG_CFUNCTION => LuaTypeV2::CFunction,
-            TAG_USERDATA => LuaTypeV2::Userdata,
-            TAG_THREAD => LuaTypeV2::Thread,
-            _ => LuaTypeV2::Nil,
+            TAG_NIL => LuaValueKind::Nil,
+            TAG_FALSE | TAG_TRUE => LuaValueKind::Boolean,
+            TAG_INTEGER => LuaValueKind::Integer,
+            TAG_FLOAT => LuaValueKind::Float,
+            TAG_STRING => LuaValueKind::String,
+            TAG_TABLE => LuaValueKind::Table,
+            TAG_FUNCTION => LuaValueKind::Function,
+            TAG_CFUNCTION => LuaValueKind::CFunction,
+            TAG_USERDATA => LuaValueKind::Userdata,
+            TAG_THREAD => LuaValueKind::Thread,
+            _ => LuaValueKind::Nil,
         }
     }
 
@@ -212,6 +218,21 @@ impl LuaValueV2 {
         (self.tag & TAG_MASK) == TAG_CFUNCTION
     }
 
+    #[inline(always)]
+    pub fn is_userdata(&self) -> bool {
+        (self.tag & TAG_MASK) == TAG_USERDATA
+    }
+
+    #[inline(always)]
+    pub fn is_thread(&self) -> bool {
+        (self.tag & TAG_MASK) == TAG_THREAD
+    }
+
+    #[inline(always)]
+    pub fn is_callable(&self) -> bool {
+        self.is_function() || self.is_cfunction()
+    }
+
     // ============ Value extraction ============
 
     #[inline(always)]
@@ -223,10 +244,24 @@ impl LuaValueV2 {
         }
     }
 
+    /// Alias for as_boolean
+    #[inline(always)]
+    pub fn as_bool(&self) -> Option<bool> {
+        self.as_boolean()
+    }
+
     #[inline(always)]
     pub fn as_integer(&self) -> Option<i64> {
         if (self.tag & TAG_MASK) == TAG_INTEGER {
             Some(self.data as i64)
+        } else if (self.tag & TAG_MASK) == TAG_FLOAT {
+            // Lua 5.4 semantics: floats with zero fraction are integers
+            let f = f64::from_bits(self.data);
+            if f.fract() == 0.0 && f.is_finite() {
+                Some(f as i64)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -236,6 +271,8 @@ impl LuaValueV2 {
     pub fn as_float(&self) -> Option<f64> {
         if (self.tag & TAG_MASK) == TAG_FLOAT {
             Some(f64::from_bits(self.data))
+        } else if (self.tag & TAG_MASK) == TAG_INTEGER {
+            Some(self.data as i64 as f64)
         } else {
             None
         }
@@ -346,44 +383,120 @@ impl LuaValueV2 {
             self.tag == other.tag && self.data == other.data
         }
     }
+
+    // ============ Type name ============
+
+    pub fn type_name(&self) -> &'static str {
+        match self.kind() {
+            LuaValueKind::Nil => "nil",
+            LuaValueKind::Boolean => "boolean",
+            LuaValueKind::Integer => "number",
+            LuaValueKind::Float => "number",
+            LuaValueKind::String => "string",
+            LuaValueKind::Table => "table",
+            LuaValueKind::Function => "function",
+            LuaValueKind::CFunction => "function",
+            LuaValueKind::Userdata => "userdata",
+            LuaValueKind::Thread => "thread",
+        }
+    }
 }
 
-impl Default for LuaValueV2 {
+impl Default for LuaValue {
     fn default() -> Self {
         Self::nil()
     }
 }
 
-impl std::fmt::Debug for LuaValueV2 {
+impl std::fmt::Debug for LuaValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.get_type() {
-            LuaTypeV2::Nil => write!(f, "nil"),
-            LuaTypeV2::Boolean => write!(f, "{}", self.tag == TAG_TRUE),
-            LuaTypeV2::Integer => write!(f, "{}", self.data as i64),
-            LuaTypeV2::Float => write!(f, "{}", f64::from_bits(self.data)),
-            LuaTypeV2::String => write!(f, "string({})", (self.tag & ID_MASK)),
-            LuaTypeV2::Table => write!(f, "table({})", (self.tag & ID_MASK)),
-            LuaTypeV2::Function => write!(f, "function({})", (self.tag & ID_MASK)),
-            LuaTypeV2::CFunction => write!(f, "cfunction({:#x})", self.data),
-            LuaTypeV2::Userdata => write!(f, "userdata({})", (self.tag & ID_MASK)),
-            LuaTypeV2::Thread => write!(f, "thread({})", (self.tag & ID_MASK)),
+        match self.kind() {
+            LuaValueKind::Nil => write!(f, "nil"),
+            LuaValueKind::Boolean => write!(f, "{}", self.tag == TAG_TRUE),
+            LuaValueKind::Integer => write!(f, "{}", self.data as i64),
+            LuaValueKind::Float => write!(f, "{}", f64::from_bits(self.data)),
+            LuaValueKind::String => write!(f, "string({})", (self.tag & ID_MASK)),
+            LuaValueKind::Table => write!(f, "table({})", (self.tag & ID_MASK)),
+            LuaValueKind::Function => write!(f, "function({})", (self.tag & ID_MASK)),
+            LuaValueKind::CFunction => write!(f, "cfunction({:#x})", self.data),
+            LuaValueKind::Userdata => write!(f, "userdata({})", (self.tag & ID_MASK)),
+            LuaValueKind::Thread => write!(f, "thread({})", (self.tag & ID_MASK)),
         }
     }
 }
 
-impl PartialEq for LuaValueV2 {
+impl std::fmt::Display for LuaValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind() {
+            LuaValueKind::Nil => write!(f, "nil"),
+            LuaValueKind::Boolean => write!(f, "{}", self.tag == TAG_TRUE),
+            LuaValueKind::Integer => write!(f, "{}", self.data as i64),
+            LuaValueKind::Float => {
+                let n = f64::from_bits(self.data);
+                if n.floor() == n && n.abs() < 1e14 {
+                    write!(f, "{:.0}", n)
+                } else {
+                    write!(f, "{}", n)
+                }
+            }
+            LuaValueKind::String => write!(f, "string({})", (self.tag & ID_MASK)),
+            LuaValueKind::Table => write!(f, "table: {:x}", (self.tag & ID_MASK)),
+            LuaValueKind::Function => write!(f, "function: {:x}", (self.tag & ID_MASK)),
+            LuaValueKind::CFunction => write!(f, "function: {:x}", self.data),
+            LuaValueKind::Userdata => write!(f, "userdata: {:x}", (self.tag & ID_MASK)),
+            LuaValueKind::Thread => write!(f, "thread: {:x}", (self.tag & ID_MASK)),
+        }
+    }
+}
+
+impl PartialEq for LuaValue {
     fn eq(&self, other: &Self) -> bool {
         self.raw_equal(other)
     }
 }
 
-impl Eq for LuaValueV2 {}
+impl Eq for LuaValue {}
 
-impl std::hash::Hash for LuaValueV2 {
+impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Hash both tag and data
         self.tag.hash(state);
         self.data.hash(state);
+    }
+}
+
+impl PartialOrd for LuaValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+        let kind_a = self.kind();
+        let kind_b = other.kind();
+
+        match kind_a.cmp(&kind_b) {
+            Ordering::Equal => match kind_a {
+                LuaValueKind::Nil => Some(Ordering::Equal),
+                LuaValueKind::Boolean => self.as_boolean().partial_cmp(&other.as_boolean()),
+                LuaValueKind::Integer => self.as_integer().partial_cmp(&other.as_integer()),
+                LuaValueKind::Float => self.as_float().partial_cmp(&other.as_float()),
+                LuaValueKind::String => {
+                    // Compare by ID for now (proper string comparison needs ObjectPool)
+                    let id_a = (self.tag & ID_MASK) as u32;
+                    let id_b = (other.tag & ID_MASK) as u32;
+                    id_a.partial_cmp(&id_b)
+                }
+                _ => {
+                    let id_a = (self.tag & ID_MASK) as u32;
+                    let id_b = (other.tag & ID_MASK) as u32;
+                    id_a.partial_cmp(&id_b)
+                }
+            },
+            ord => Some(ord),
+        }
+    }
+}
+
+impl Ord for LuaValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
     }
 }
 
@@ -393,20 +506,20 @@ mod tests {
 
     #[test]
     fn test_size() {
-        assert_eq!(std::mem::size_of::<LuaValueV2>(), 16);
+        assert_eq!(std::mem::size_of::<LuaValue>(), 16);
     }
 
     #[test]
     fn test_nil() {
-        let v = LuaValueV2::nil();
+        let v = LuaValue::nil();
         assert!(v.is_nil());
         assert!(v.is_falsy());
     }
 
     #[test]
     fn test_boolean() {
-        let t = LuaValueV2::boolean(true);
-        let f = LuaValueV2::boolean(false);
+        let t = LuaValue::boolean(true);
+        let f = LuaValue::boolean(false);
         
         assert!(t.is_boolean());
         assert!(f.is_boolean());
@@ -418,23 +531,23 @@ mod tests {
 
     #[test]
     fn test_integer() {
-        let v = LuaValueV2::integer(42);
+        let v = LuaValue::integer(42);
         assert!(v.is_integer());
         assert!(v.is_number());
         assert_eq!(v.as_integer(), Some(42));
         
         // Test negative
-        let neg = LuaValueV2::integer(-100);
+        let neg = LuaValue::integer(-100);
         assert_eq!(neg.as_integer(), Some(-100));
         
         // Test i64 max
-        let max = LuaValueV2::integer(i64::MAX);
+        let max = LuaValue::integer(i64::MAX);
         assert_eq!(max.as_integer(), Some(i64::MAX));
     }
 
     #[test]
     fn test_float() {
-        let v = LuaValueV2::float(3.14);
+        let v = LuaValue::float(3.14);
         assert!(v.is_float());
         assert!(v.is_number());
         assert!((v.as_float().unwrap() - 3.14).abs() < f64::EPSILON);
@@ -442,17 +555,17 @@ mod tests {
 
     #[test]
     fn test_table_id() {
-        let v = LuaValueV2::table(TableId(123));
+        let v = LuaValue::table(TableId(123));
         assert!(v.is_table());
         assert_eq!(v.as_table_id(), Some(TableId(123)));
     }
 
     #[test]
     fn test_equality() {
-        assert_eq!(LuaValueV2::nil(), LuaValueV2::nil());
-        assert_eq!(LuaValueV2::integer(42), LuaValueV2::integer(42));
-        assert_ne!(LuaValueV2::integer(42), LuaValueV2::integer(43));
-        assert_eq!(LuaValueV2::table(TableId(1)), LuaValueV2::table(TableId(1)));
-        assert_ne!(LuaValueV2::table(TableId(1)), LuaValueV2::table(TableId(2)));
+        assert_eq!(LuaValue::nil(), LuaValue::nil());
+        assert_eq!(LuaValue::integer(42), LuaValue::integer(42));
+        assert_ne!(LuaValue::integer(42), LuaValue::integer(43));
+        assert_eq!(LuaValue::table(TableId(1)), LuaValue::table(TableId(1)));
+        assert_ne!(LuaValue::table(TableId(1)), LuaValue::table(TableId(2)));
     }
 }

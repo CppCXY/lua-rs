@@ -1,5 +1,5 @@
-use crate::{LuaValue, lua_value::LuaUpvalue, lua_vm::LuaCallFrame};
-use std::rc::Rc;
+use crate::{LuaValue, lua_vm::LuaCallFrame};
+use crate::gc::UpvalueId;
 
 /// Lua Thread (coroutine)
 /// Each coroutine has its own call stack and register stack, independent from the main VM
@@ -16,8 +16,8 @@ pub struct LuaThread {
     /// Return values from function calls
     pub return_values: Vec<LuaValue>,
 
-    /// Open upvalues list (for closing when frames exit)
-    pub open_upvalues: Vec<Rc<LuaUpvalue>>,
+    /// Open upvalues list (for closing when frames exit) - uses UpvalueId for new architecture
+    pub open_upvalues: Vec<UpvalueId>,
 
     /// Next frame ID (for tracking frames in this coroutine)
     pub next_frame_id: usize,

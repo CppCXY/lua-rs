@@ -1,5 +1,5 @@
-// Lua 5.4 compatible value representation with NaN-Boxing
-// 16 bytes, 3-6x faster than enum, full int64 support
+// Lua 5.4 compatible value representation
+// 16 bytes, no pointer caching, all GC objects accessed via ID
 mod lua_table;
 mod lua_thread;
 mod lua_value;
@@ -18,9 +18,12 @@ use std::rc::Rc;
 pub use lua_table::LuaTable;
 pub use lua_thread::*;
 pub use lua_value::{
-    LuaValue, LuaValueKind, NAN_BASE, TAG_BOOLEAN, TAG_CFUNCTION, TAG_FLOAT, TAG_FUNCTION,
-    TAG_INTEGER, TAG_NIL, TAG_STRING, TAG_TABLE, TAG_USERDATA, TYPE_MASK, VALUE_FALSE, VALUE_NIL,
-    VALUE_TRUE,
+    LuaValue, LuaValueKind,
+    TAG_NIL, TAG_FALSE, TAG_TRUE, TAG_INTEGER, TAG_FLOAT, TAG_STRING,
+    TAG_TABLE, TAG_FUNCTION, TAG_CFUNCTION, TAG_USERDATA, TAG_UPVALUE, TAG_THREAD,
+    TAG_MASK, ID_MASK,
+    // Compatibility aliases
+    TYPE_MASK, TAG_BOOLEAN, VALUE_NIL, VALUE_TRUE, VALUE_FALSE, NAN_BASE,
 };
 
 /// Multi-return values from Lua functions
