@@ -35,12 +35,15 @@ impl<T> SlotVec<T> {
     }
 
     /// O(1) insertion - reuse free slot or append new slot
-    #[inline]
+    #[inline(always)]
     fn insert(&mut self, value: T) -> u32 {
         self.count += 1;
 
         if let Some(free_id) = self.free_list.pop() {
-            self.slots[free_id as usize] = Some(value);
+            // SAFETY: free_id came from our own free_list, always valid
+            unsafe {
+                *self.slots.get_unchecked_mut(free_id as usize) = Some(value);
+            }
             free_id
         } else {
             let id = self.slots.len() as u32;
@@ -50,7 +53,7 @@ impl<T> SlotVec<T> {
     }
 
     /// O(1) lookup - direct array indexing
-    #[inline]
+    #[inline(always)]
     fn get(&self, id: u32) -> Option<&T> {
         self.slots.get(id as usize).and_then(|slot| slot.as_ref())
     }
@@ -249,7 +252,7 @@ impl ObjectPool {
     // ============ Table Operations ============
 
     /// Create a new table
-    #[inline]
+    #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> (TableId, *const RefCell<LuaTable>) {
         let table = Rc::new(RefCell::new(LuaTable::new(array_size, hash_size)));
         let ptr = Rc::as_ptr(&table);
@@ -295,10 +298,19 @@ impl ObjectPool {
 
     // ============ Function Operations ============
 
-    /// Create a new function
+    /// Create a new function (returns ID only)
     pub fn create_function(&mut self, func: LuaFunction) -> FunctionId {
         let slot_id = self.functions.insert(Rc::new(RefCell::new(func)));
         FunctionId(slot_id)
+    }
+
+    /// Create a new function (returns ID + pointer for fast access)
+    #[inline(always)]
+    pub fn create_function_with_ptr(&mut self, func: LuaFunction) -> (FunctionId, *const RefCell<LuaFunction>) {
+        let rc = Rc::new(RefCell::new(func));
+        let ptr = Rc::as_ptr(&rc);
+        let slot_id = self.functions.insert(rc);
+        (FunctionId(slot_id), ptr)
     }
 
     /// Get function by ID

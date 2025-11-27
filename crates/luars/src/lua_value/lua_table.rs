@@ -51,7 +51,18 @@ pub struct LuaTable {
 
 impl LuaTable {
     /// Create an empty table
+    #[inline(always)]
     pub fn new(array_size: usize, hash_size: usize) -> Self {
+        // FAST PATH: Most common case is empty table
+        if array_size == 0 && hash_size == 0 {
+            return LuaTable {
+                array: Vec::new(),
+                nodes: Vec::new(),
+                hash_size: 0,
+                metatable: None,
+            };
+        }
+
         // Hash size must be power of 2 for fast modulo using & (size-1)
         let actual_hash_size = if hash_size > 0 {
             hash_size.next_power_of_two()

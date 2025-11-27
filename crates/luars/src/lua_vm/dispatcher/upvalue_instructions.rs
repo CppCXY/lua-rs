@@ -68,50 +68,70 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// CLOSURE A Bx
 /// R[A] := closure(KPROTO[Bx])
+/// OPTIMIZED: Fast path for closures without upvalues
+#[inline(always)]
 pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
+    let frame_id = frame.frame_id;
 
     let Some(func_ref) = frame.get_lua_function() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
 
-    let Some(proto) = func_ref.borrow().chunk.child_protos.get(bx).cloned() else {
-        return Err(vm.error(format!("Invalid prototype index: {}", bx)));
+    let func_borrow = func_ref.borrow();
+    let proto = match func_borrow.chunk.child_protos.get(bx) {
+        Some(p) => p.clone(),
+        None => {
+            let idx = bx;
+            drop(func_borrow);
+            return Err(vm.error(format!("Invalid prototype index: {}", idx)));
+        }
     };
+
+    // FAST PATH: No upvalues (most common for simple lambdas)
+    if proto.upvalue_descs.is_empty() {
+        drop(func_borrow);
+        let closure = vm.create_function(proto, Vec::new());
+        unsafe {
+            *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
+        }
+        vm.check_gc();
+        return Ok(());
+    }
 
     // Get upvalue descriptors from the prototype
     let upvalue_descs = proto.upvalue_descs.clone();
+    let parent_upvalues = func_borrow.upvalues.clone();
+    drop(func_borrow);
 
     // Create upvalues for the new closure based on descriptors
-    let mut upvalues = Vec::new();
+    let mut upvalues = Vec::with_capacity(upvalue_descs.len());
     let mut new_open_upvalues = Vec::new();
 
     for desc in upvalue_descs.iter() {
         if desc.is_local {
             // Upvalue refers to a register in current function
-
             // Check if this upvalue is already open
-            let existing_index = vm
+            let existing = vm
                 .open_upvalues
                 .iter()
-                .position(|uv| uv.points_to(frame.frame_id, desc.index as usize));
+                .find(|uv| uv.points_to(frame_id, desc.index as usize));
 
-            if let Some(idx) = existing_index {
-                upvalues.push(vm.open_upvalues[idx].clone());
+            if let Some(existing_uv) = existing {
+                upvalues.push(existing_uv.clone());
             } else {
                 // Create new open upvalue
-                let new_uv =
-                    crate::lua_vm::LuaUpvalue::new_open(frame.frame_id, desc.index as usize);
+                let new_uv = crate::lua_vm::LuaUpvalue::new_open(frame_id, desc.index as usize);
                 upvalues.push(new_uv.clone());
                 new_open_upvalues.push(new_uv);
             }
         } else {
             // Upvalue refers to an upvalue in the enclosing function
-            if let Some(parent_uv) = func_ref.borrow().upvalues.get(desc.index as usize) {
+            if let Some(parent_uv) = parent_upvalues.get(desc.index as usize) {
                 upvalues.push(parent_uv.clone());
             } else {
                 return Err(vm.error(format!("Invalid upvalue index in parent: {}", desc.index)));
@@ -123,7 +143,9 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     vm.open_upvalues.extend(new_open_upvalues);
 
     let closure = vm.create_function(proto, upvalues);
-    vm.register_stack[base_ptr + a] = closure;
+    unsafe {
+        *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
+    }
 
     // GC checkpoint: closure now safely stored in register
     vm.check_gc();

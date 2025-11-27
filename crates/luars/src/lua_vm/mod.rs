@@ -1217,11 +1217,11 @@ impl LuaVM {
     }
 
     /// Create a new table in object pool
-    #[inline]
+    #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let (id, ptr) = self.object_pool.create_table(array_size, hash_size);
 
-        // Register with GC - record_allocation is called inside register_object
+        // Register with GC - ultra-lightweight, just update debt
         self.gc
             .register_object(id.0, crate::gc::GcObjectType::Table);
 
@@ -1313,16 +1313,14 @@ impl LuaVM {
     }
 
     /// Create a function in object pool
+    #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<Rc<LuaUpvalue>>) -> LuaValue {
         let func = LuaFunction { chunk, upvalues };
-        let id = self.object_pool.create_function(func);
-        // Get Rc pointer from object pool - \u73b0\u5728\u6307\u9488\u7a33\u5b9a\u4e86!
-        // Rc \u7684\u5185\u90e8\u6570\u636e\u4e0d\u4f1a\u56e0\u4e3a HashMap rehash \u800c\u79fb\u52a8
-        let ptr = self
-            .object_pool
-            .get_function(id)
-            .map(|rc| rc.as_ref() as *const RefCell<LuaFunction>)
-            .unwrap_or(std::ptr::null());
+        let (id, ptr) = self.object_pool.create_function_with_ptr(func);
+
+        // Register with GC - ultra-lightweight
+        self.gc.register_object(id.0, crate::gc::GcObjectType::Function);
+
         LuaValue::function_id_ptr(id, ptr)
     }
 

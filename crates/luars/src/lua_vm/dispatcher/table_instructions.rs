@@ -6,7 +6,8 @@ use crate::lua_vm::{Instruction, LuaResult, LuaVM};
 
 /// NEWTABLE A B C k
 /// R[A] := {} (size = B,C)
-#[inline]
+/// OPTIMIZED: Fast path for common empty/small table case
+#[inline(always)]
 pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr);
@@ -16,40 +17,36 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = frame.base_ptr;
 
     // NEWTABLE is always followed by an EXTRAARG instruction in Lua 5.4
-    // Get EXTRAARG and skip it
-    let extra_arg = if b == 0 {
-        let pc = frame.pc;
-        frame.pc += 1; // Skip the EXTRAARG instruction
+    // Skip EXTRAARG unconditionally (even if not used)
+    frame.pc += 1;
 
-        // Read EXTRAARG from bytecode
+    // Calculate array size hint
+    let array_size = if b > 0 {
+        // FAST PATH: Small table, no EXTRAARG needed
+        (b - 1) as usize
+    } else {
+        // Need to read EXTRAARG for large arrays
+        let pc = frame.pc - 1; // We already incremented pc
         unsafe {
             let func_ptr = frame.get_function_ptr().unwrap_unchecked();
             let func = &*func_ptr;
             let func_ref = func.borrow();
             let chunk = &func_ref.chunk;
-
             if pc < chunk.code.len() {
-                Instruction::get_ax(chunk.code[pc])
+                Instruction::get_ax(chunk.code[pc]) as usize
             } else {
                 0
             }
         }
-    } else {
-        // No EXTRAARG needed, skip it anyway
-        frame.pc += 1;
-        0
-    };
-
-    // Calculate array size hint (fast path: b > 0 means small table)
-    let array_size = if b > 0 {
-        (b - 1) as usize
-    } else {
-        extra_arg as usize
     };
 
     // Create new table with size hints
     let table = vm.create_table(array_size, c as usize);
-    vm.register_stack[base_ptr + a] = table;
+    
+    // Store in register - use unchecked for speed
+    unsafe {
+        *vm.register_stack.get_unchecked_mut(base_ptr + a) = table;
+    }
 
     // GC checkpoint: table now safely stored in register
     vm.check_gc();
