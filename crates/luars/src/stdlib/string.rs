@@ -214,7 +214,9 @@ fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
     let reversed = {
         let Some(s) = vm.object_pool.get_string(string_id) else {
-            return Err(vm.error("bad argument #1 to 'string.reverse' (string expected)".to_string()));
+            return Err(
+                vm.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
+            );
         };
         s.as_str().chars().rev().collect::<String>()
     };
@@ -275,7 +277,9 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Copy the format string to avoid holding a borrow on vm throughout the loop
     let format = {
         let Some(format_str) = vm.object_pool.get_string(string_id) else {
-            return Err(vm.error("bad argument #1 to 'string.format' (string expected)".to_string()));
+            return Err(
+                vm.error("bad argument #1 to 'string.format' (string expected)".to_string())
+            );
         };
         format_str.as_str().to_string()
     };
@@ -583,7 +587,9 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
                         // Check if string first using ObjectPool
                         let maybe_string = if let Some(str_id) = val.as_string_id() {
-                            vm.object_pool.get_string(str_id).map(|s| s.as_str().to_string())
+                            vm.object_pool
+                                .get_string(str_id)
+                                .map(|s| s.as_str().to_string())
                         } else {
                             None
                         };
@@ -845,10 +851,14 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         // String replacement with capture substitution
         let repl_str = {
             let Some(repl_id) = arg2.as_string_id() else {
-                return Err(vm.error("bad argument #3 to 'string.gsub' (string expected)".to_string()));
+                return Err(
+                    vm.error("bad argument #3 to 'string.gsub' (string expected)".to_string())
+                );
             };
             let Some(repl) = vm.object_pool.get_string(repl_id) else {
-                return Err(vm.error("bad argument #3 to 'string.gsub' (string expected)".to_string()));
+                return Err(
+                    vm.error("bad argument #3 to 'string.gsub' (string expected)".to_string())
+                );
             };
             repl.as_str().to_string()
         };
@@ -1067,30 +1077,30 @@ fn gmatch_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let Some(table_id) = state_table_value.as_table_id() else {
         return Err(vm.error("gmatch iterator: state is not a table".to_string()));
     };
-    
+
     // Extract all values from table first
     let (s_str, pattern_str_owned, position) = {
         let Some(state_ref) = vm.object_pool.get_table(table_id) else {
             return Err(vm.error("gmatch iterator: state is not a table".to_string()));
         };
-        
+
         let Some(s_val) = state_ref.get_int(1) else {
             return Err(vm.error("gmatch iterator: string not found in state".to_string()));
         };
         let Some(s_id) = s_val.as_string_id() else {
             return Err(vm.error("gmatch iterator: string invalid".to_string()));
         };
-        
+
         let Some(pattern_val) = state_ref.get_int(2) else {
             return Err(vm.error("gmatch iterator: pattern not found in state".to_string()));
         };
         let Some(pattern_id) = pattern_val.as_string_id() else {
             return Err(vm.error("gmatch iterator: pattern invalid".to_string()));
         };
-        
+
         let position_value = state_ref.get_int(3).unwrap_or(LuaValue::integer(0));
         let position = position_value.as_integer().unwrap_or(0) as usize;
-        
+
         // Get string contents
         let Some(s_obj) = vm.object_pool.get_string(s_id) else {
             return Err(vm.error("gmatch iterator: string invalid".to_string()));
@@ -1098,8 +1108,12 @@ fn gmatch_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let Some(pattern_obj) = vm.object_pool.get_string(pattern_id) else {
             return Err(vm.error("gmatch iterator: pattern invalid".to_string()));
         };
-        
-        (s_obj.as_str().to_string(), pattern_obj.as_str().to_string(), position)
+
+        (
+            s_obj.as_str().to_string(),
+            pattern_obj.as_str().to_string(),
+            position,
+        )
     };
 
     // Parse pattern
@@ -1270,10 +1284,14 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 }
                 let s_str = {
                     let Some(s_id) = values[value_idx].as_string_id() else {
-                        return Err(vm.error("bad argument to 'string.pack' (string expected)".to_string()));
+                        return Err(
+                            vm.error("bad argument to 'string.pack' (string expected)".to_string())
+                        );
                     };
                     let Some(s) = vm.object_pool.get_string(s_id) else {
-                        return Err(vm.error("bad argument to 'string.pack' (string expected)".to_string()));
+                        return Err(
+                            vm.error("bad argument to 'string.pack' (string expected)".to_string())
+                        );
                     };
                     s.as_str().to_string()
                 };
@@ -1301,10 +1319,14 @@ fn string_pack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 }
                 let s_str = {
                     let Some(s_id) = values[value_idx].as_string_id() else {
-                        return Err(vm.error("bad argument to 'string.pack' (string expected)".to_string()));
+                        return Err(
+                            vm.error("bad argument to 'string.pack' (string expected)".to_string())
+                        );
                     };
                     let Some(s) = vm.object_pool.get_string(s_id) else {
-                        return Err(vm.error("bad argument to 'string.pack' (string expected)".to_string()));
+                        return Err(
+                            vm.error("bad argument to 'string.pack' (string expected)".to_string())
+                        );
                     };
                     s.as_str().to_string()
                 };
@@ -1339,11 +1361,13 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
     let fmt_str = {
         let Some(fmt) = vm.object_pool.get_string(fmt_id) else {
-            return Err(vm.error("bad argument #1 to 'string.packsize' (string expected)".to_string()));
+            return Err(
+                vm.error("bad argument #1 to 'string.packsize' (string expected)".to_string())
+            );
         };
         fmt.as_str().to_string()
     };
-    
+
     let mut size = 0usize;
     let mut chars = fmt_str.chars();
 
@@ -1390,7 +1414,9 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
     let fmt_str = {
         let Some(fmt) = vm.object_pool.get_string(fmt_id) else {
-            return Err(vm.error("bad argument #1 to 'string.unpack' (string expected)".to_string()));
+            return Err(
+                vm.error("bad argument #1 to 'string.unpack' (string expected)".to_string())
+            );
         };
         fmt.as_str().to_string()
     };
@@ -1401,7 +1427,9 @@ fn string_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
     let s_str = {
         let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(vm.error("bad argument #2 to 'string.unpack' (string expected)".to_string()));
+            return Err(
+                vm.error("bad argument #2 to 'string.unpack' (string expected)".to_string())
+            );
         };
         s.as_str().to_string()
     };

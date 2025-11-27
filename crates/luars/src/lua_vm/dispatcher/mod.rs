@@ -22,11 +22,15 @@ use super::{Instruction, LuaCallFrame, LuaResult, LuaVM, OpCode};
 ///
 /// **ZERO RETURN VALUE** - Instructions directly mutate VM state
 /// This function executes a single instruction with NO abstraction overhead.
-/// 
+///
 /// OPTIMIZATION: frame_ptr is passed in to avoid repeated Vec lookups
 /// The frame_ptr must be valid and point to the current frame
 #[inline(always)]
-pub fn dispatch_instruction(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn dispatch_instruction(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+) -> LuaResult<()> {
     let opcode = Instruction::get_opcode(instr);
 
     match opcode {

@@ -21,6 +21,19 @@ use emmylua_parser::{
 };
 
 //======================================================================================
+// Helper functions
+//======================================================================================
+
+/// Check if an expression is a vararg (...) literal
+fn is_vararg_expr(expr: &LuaExpr) -> bool {
+    if let LuaExpr::LiteralExpr(lit) = expr {
+        matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_)))
+    } else {
+        false
+    }
+}
+
+//======================================================================================
 // NEW API: ExpDesc-based expression compilation (Lua 5.4 compatible)
 //======================================================================================
 
@@ -585,11 +598,14 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
                 let concat_base = c.freereg;
                 alloc_register(c); // for left operand copy
                 alloc_register(c); // for right operand
-                
+
                 emit_move(c, concat_base, left_reg);
                 emit_move(c, concat_base + 1, right_reg);
-                emit(c, Instruction::encode_abc(OpCode::Concat, concat_base, 1, 0));
-                
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Concat, concat_base, 1, 0),
+                );
+
                 result_reg = concat_base;
                 // Reset freereg to result_reg + 1 (concat consumes right operand)
                 c.freereg = result_reg + 1;
@@ -1676,10 +1692,10 @@ fn compile_binary_expr_to(
                 emit_move(c, concat_reg, left_reg);
                 emit_move(c, concat_reg + 1, right_reg);
                 emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
-                
+
                 // Reset freereg (concat consumes right operand)
                 c.freereg = concat_reg + 1;
-                
+
                 if let Some(d) = dest {
                     if d != concat_reg {
                         emit_move(c, d, concat_reg);
@@ -2618,8 +2634,7 @@ fn compile_table_expr_to(
         if field.is_value_field() {
             // Check if it's a simple value (not ... or call as last element)
             if let Some(value_expr) = field.get_value_expr() {
-                let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
-                    if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
+                let is_dots = is_vararg_expr(&value_expr);
                 let is_call = matches!(&value_expr, LuaExpr::CallExpr(_));
                 let is_last = i == fields.len() - 1;
 
@@ -2684,8 +2699,7 @@ fn compile_table_expr_to(
         if field.is_value_field() {
             // Array element or special case (vararg/call at end)
             if let Some(value_expr) = field.get_value_expr() {
-                let is_dots = matches!(&value_expr, LuaExpr::LiteralExpr(lit) 
-                    if matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_))));
+                let is_dots = is_vararg_expr(&value_expr);
                 let is_call = matches!(&value_expr, LuaExpr::CallExpr(_));
 
                 if is_last_field && is_dots {

@@ -17,6 +17,15 @@ use emmylua_parser::{
     LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
 };
 
+/// Check if an expression is a vararg (...) literal
+fn is_vararg_expr(expr: &LuaExpr) -> bool {
+    if let LuaExpr::LiteralExpr(lit) = expr {
+        matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_)))
+    } else {
+        false
+    }
+}
+
 /// Check if a block contains only a single unconditional jump statement (break/return only)
 /// Note: goto is NOT optimized by luac, so we don't include it here
 #[allow(dead_code)]
@@ -641,11 +650,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 
     // Check if last expression is varargs (...) or function call - these can return multiple values
     let last_is_multret = if let Some(last_expr) = exprs.last() {
-        matches!(last_expr, LuaExpr::CallExpr(_))
-            || matches!(last_expr, LuaExpr::LiteralExpr(lit) if matches!(
-                lit.get_literal(),
-                Some(emmylua_parser::LuaLiteralToken::Dots(_))
-            ))
+        matches!(last_expr, LuaExpr::CallExpr(_)) || is_vararg_expr(last_expr)
     } else {
         false
     };

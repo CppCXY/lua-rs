@@ -45,7 +45,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     // Create new table with size hints
     let table = vm.create_table(array_size, c as usize);
-    
+
     // Store in register - use unchecked for speed
     unsafe {
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = table;
@@ -139,7 +139,7 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     if let Some(table_id) = table.as_table_id() {
         if let Some(lua_table) = vm.object_pool.get_table(table_id) {
             let key = LuaValue::integer(c as i64);
-            
+
             // Try raw_get which checks both array and hash parts
             if let Some(val) = lua_table.raw_get(&key) {
                 if !val.is_nil() {
@@ -147,7 +147,7 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                     return Ok(());
                 }
             }
-            
+
             // Key not found - check if no metatable to skip metamethod handling
             if lua_table.get_metatable().is_none() {
                 vm.register_stack[base_ptr + a] = LuaValue::nil();
@@ -200,19 +200,22 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // FAST PATH: Direct table access without metamethod check for common case
     if let Some(table_id) = table_value.as_table_id() {
         // Quick check: no metatable means no __newindex to worry about
-        let has_metatable = vm.object_pool.get_table(table_id)
+        let has_metatable = vm
+            .object_pool
+            .get_table(table_id)
             .map(|t| t.get_metatable().is_some())
             .unwrap_or(false);
-        
+
         if !has_metatable {
             // Ultra-fast path: direct set without any metamethod checks
             if let Some(lua_table) = vm.object_pool.get_table_mut(table_id) {
                 lua_table.raw_set(key_value.clone(), set_value.clone());
             }
-            
+
             // GC barrier - only for collectable values (like Lua)
             if crate::gc::GC::is_collectable(&set_value) {
-                vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                vm.gc
+                    .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
                 vm.gc.barrier_back(&set_value);
             }
             return Ok(());
@@ -253,7 +256,7 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                     return Ok(());
                 }
             }
-            
+
             // Check if no metatable - can return nil directly
             if table_ref.get_metatable().is_none() {
                 vm.register_stack[base_ptr + a] = LuaValue::nil();
@@ -315,10 +318,11 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             if table_ref.get_metatable().is_none() {
                 // Ultra-fast path: direct set without any metamethod checks
                 table_ref.raw_set(key_value.clone(), set_value.clone());
-                
+
                 // GC barrier - only for collectable values
                 if crate::gc::GC::is_collectable(&set_value) {
-                    vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                    vm.gc
+                        .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
                     vm.gc.barrier_back(&set_value);
                 }
                 return Ok(());
@@ -374,7 +378,7 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                     return Ok(());
                 }
             }
-            
+
             // Check if no metatable - can return nil directly
             if table_ref.get_metatable().is_none() {
                 vm.register_stack[base_ptr + a] = LuaValue::nil();
@@ -443,10 +447,11 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             if table_ref.get_metatable().is_none() {
                 // Ultra-fast path: direct set without any metamethod checks
                 table_ref.raw_set(key_value.clone(), set_value.clone());
-                
+
                 // GC barrier - only for collectable values
                 if crate::gc::GC::is_collectable(&set_value) {
-                    vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                    vm.gc
+                        .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
                     vm.gc.barrier_back(&set_value);
                 }
                 return Ok(());

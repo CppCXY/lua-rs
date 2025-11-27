@@ -143,7 +143,7 @@ fn utf8_codes(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let state_table = vm.create_table(2, 0);
     let string_key = LuaValue::integer(1);
     let position_key = LuaValue::integer(2);
-    
+
     // Use ObjectPool for table access
     if let Some(table_id) = state_table.as_table_id() {
         if let Some(table) = vm.object_pool.get_table_mut(table_id) {
@@ -169,34 +169,34 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let Some(table_id) = t_value.as_table_id() else {
         return Err(vm.error("utf8.codes iterator: invalid state".to_string()));
     };
-    
+
     // Extract string and position from state table
     let (s_str, pos) = {
         let Some(table) = vm.object_pool.get_table(table_id) else {
             return Err(vm.error("utf8.codes iterator: invalid state".to_string()));
         };
-        
+
         let Some(s_val) = table.get_int(string_key) else {
             return Err(vm.error("utf8.codes iterator: string not found".to_string()));
         };
-        
+
         let Some(s_id) = s_val.as_string_id() else {
             return Err(vm.error("utf8.codes iterator: invalid string".to_string()));
         };
-        
+
         let pos = table
             .get_int(position_key)
             .and_then(|v| v.as_integer())
             .unwrap_or(0) as usize;
-        
+
         // Get string content
         let Some(lua_str) = vm.object_pool.get_string(s_id) else {
             return Err(vm.error("utf8.codes iterator: invalid string".to_string()));
         };
-        
+
         (lua_str.as_str().to_string(), pos)
     };
-    
+
     let bytes = s_str.as_bytes();
     if pos >= bytes.len() {
         return Ok(MultiValue::single(LuaValue::nil()));
@@ -233,7 +233,9 @@ fn utf8_codepoint(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
     let s_str = {
         let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(vm.error("bad argument #1 to 'utf8.codepoint' (string expected)".to_string()));
+            return Err(
+                vm.error("bad argument #1 to 'utf8.codepoint' (string expected)".to_string())
+            );
         };
         s.as_str().to_string()
     };
@@ -288,11 +290,7 @@ fn utf8_offset(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
     let i = get_arg(vm, 3)
         .and_then(|v| v.as_integer())
-        .unwrap_or(if n >= 0 {
-            1
-        } else {
-            (s_str.len() + 1) as i64
-        }) as usize;
+        .unwrap_or(if n >= 0 { 1 } else { (s_str.len() + 1) as i64 }) as usize;
 
     let bytes = s_str.as_bytes();
     let start_byte = if i > 0 { i - 1 } else { 0 };

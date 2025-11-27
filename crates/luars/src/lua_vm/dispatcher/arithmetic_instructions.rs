@@ -369,12 +369,14 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
                 LuaValue::integer(l.wrapping_add(sc as i64));
             (*frame_ptr).pc += 1; // Skip MMBINI
-            
+
             // OPTIMIZATION: Check if next instruction is backward JMP (loop)
             let next_instr = (*frame_ptr).code_ptr.add((*frame_ptr).pc).read();
-            if (next_instr & 0x7F) == 56 { // JMP opcode
+            if (next_instr & 0x7F) == 56 {
+                // JMP opcode
                 let sj = ((next_instr >> 7) & 0x1FFFFFF) as i32 - 16777215;
-                if sj < 0 { // Backward jump = loop
+                if sj < 0 {
+                    // Backward jump = loop
                     (*frame_ptr).pc = ((*frame_ptr).pc as i32 + 1 + sj) as usize;
                 }
             }
@@ -1134,11 +1136,11 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame();
     let prev_pc = frame.pc - 1; // Previous instruction was the failed arithmetic op
     let base_ptr = frame.base_ptr;
-    
+
     if prev_pc == 0 {
         return Err(vm.error("MMBIN: no previous instruction".to_string()));
     }
-    
+
     let Some(prev_instr) = vm.get_frame_instruction(frame, prev_pc - 1) else {
         return Err(vm.error("MMBIN: failed to get previous instruction".to_string()));
     };

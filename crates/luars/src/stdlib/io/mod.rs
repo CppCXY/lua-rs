@@ -1,7 +1,7 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 
-use crate::lib_registry::{get_arg, get_args, require_arg, LibraryModule};
+use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::{LuaResult, LuaVM};
 use std::io::{self, BufRead, Write};

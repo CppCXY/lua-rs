@@ -1,5 +1,5 @@
 // Object Pool V2 - High-performance single-threaded design
-// 
+//
 // Key Design Principles:
 // 1. LuaValueV2 stores type tag + object ID (no pointers - Vec may relocate)
 // 2. All GC objects accessed via ID lookup in Arena
@@ -12,7 +12,7 @@
 // - None = free slot (reusable via free list)
 // - Free list tracks available slots for O(1) allocation
 
-use crate::lua_value::{LuaUserdata, Chunk, LuaThread};
+use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{LuaString, LuaTable, LuaValue};
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -26,7 +26,7 @@ use std::rc::Rc;
 #[repr(C)]
 pub struct GcHeader {
     pub marked: bool,
-    pub age: u8,   // For generational GC
+    pub age: u8, // For generational GC
 }
 
 // ============ Object IDs ============
@@ -69,7 +69,7 @@ pub struct GcTable {
 pub struct GcFunction {
     pub header: GcHeader,
     pub chunk: Rc<Chunk>,
-    pub upvalues: Vec<UpvalueId>,  // Upvalue IDs, not Rc
+    pub upvalues: Vec<UpvalueId>, // Upvalue IDs, not Rc
 }
 
 /// Upvalue state
@@ -169,7 +169,7 @@ impl<T> Arena<T> {
     #[inline]
     pub fn alloc(&mut self, value: T) -> u32 {
         self.count += 1;
-        
+
         if let Some(free_id) = self.free_list.pop() {
             // Reuse a free slot
             self.storage[free_id as usize] = Some(value);
@@ -191,7 +191,9 @@ impl<T> Arena<T> {
     /// Get mutable reference by ID
     #[inline(always)]
     pub fn get_mut(&mut self, id: u32) -> Option<&mut T> {
-        self.storage.get_mut(id as usize).and_then(|opt| opt.as_mut())
+        self.storage
+            .get_mut(id as usize)
+            .and_then(|opt| opt.as_mut())
     }
 
     /// Free a slot (mark for reuse)
@@ -209,7 +211,10 @@ impl<T> Arena<T> {
     /// Check if a slot is occupied
     #[inline(always)]
     pub fn is_valid(&self, id: u32) -> bool {
-        self.storage.get(id as usize).map(|opt| opt.is_some()).unwrap_or(false)
+        self.storage
+            .get(id as usize)
+            .map(|opt| opt.is_some())
+            .unwrap_or(false)
     }
 
     /// Current number of live objects
@@ -220,16 +225,18 @@ impl<T> Arena<T> {
 
     /// Iterate over all live objects
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
-        self.storage.iter().enumerate().filter_map(|(i, opt)| {
-            opt.as_ref().map(|v| (i as u32, v))
-        })
+        self.storage
+            .iter()
+            .enumerate()
+            .filter_map(|(i, opt)| opt.as_ref().map(|v| (i as u32, v)))
     }
 
     /// Iterate over all live objects mutably
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
-        self.storage.iter_mut().enumerate().filter_map(|(i, opt)| {
-            opt.as_mut().map(|v| (i as u32, v))
-        })
+        self.storage
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, opt)| opt.as_mut().map(|v| (i as u32, v)))
     }
 
     /// Shrink internal storage
@@ -263,7 +270,7 @@ pub struct ObjectPoolV2 {
     pub upvalues: Arena<GcUpvalue>,
     pub userdata: Arena<LuaUserdata>,
     pub threads: Arena<GcThread>,
-    
+
     // String interning table: hash -> StringId
     string_intern: HashMap<u64, StringId>,
     max_intern_length: usize,
@@ -279,7 +286,7 @@ impl ObjectPoolV2 {
             userdata: Arena::new(),
             threads: Arena::with_capacity(8),
             string_intern: HashMap::with_capacity(256),
-            max_intern_length: 64,  // Strings <= 64 bytes are interned
+            max_intern_length: 64, // Strings <= 64 bytes are interned
         }
     }
 
@@ -537,23 +544,33 @@ impl ObjectPoolV2 {
     /// Sweep phase: free all unmarked objects
     pub fn sweep(&mut self) {
         // Collect IDs to free (can't free while iterating)
-        let strings_to_free: Vec<u32> = self.strings.iter()
+        let strings_to_free: Vec<u32> = self
+            .strings
+            .iter()
             .filter(|(_, gs)| !gs.header.marked)
             .map(|(id, _)| id)
             .collect();
-        let tables_to_free: Vec<u32> = self.tables.iter()
+        let tables_to_free: Vec<u32> = self
+            .tables
+            .iter()
             .filter(|(_, gt)| !gt.header.marked)
             .map(|(id, _)| id)
             .collect();
-        let functions_to_free: Vec<u32> = self.functions.iter()
+        let functions_to_free: Vec<u32> = self
+            .functions
+            .iter()
             .filter(|(_, gf)| !gf.header.marked)
             .map(|(id, _)| id)
             .collect();
-        let upvalues_to_free: Vec<u32> = self.upvalues.iter()
+        let upvalues_to_free: Vec<u32> = self
+            .upvalues
+            .iter()
             .filter(|(_, gu)| !gu.header.marked)
             .map(|(id, _)| id)
             .collect();
-        let threads_to_free: Vec<u32> = self.threads.iter()
+        let threads_to_free: Vec<u32> = self
+            .threads
+            .iter()
             .filter(|(_, gth)| !gth.header.marked)
             .map(|(id, _)| id)
             .collect();
@@ -622,17 +639,29 @@ impl ObjectPoolV2 {
     // ==================== Statistics ====================
 
     #[inline]
-    pub fn string_count(&self) -> usize { self.strings.len() }
+    pub fn string_count(&self) -> usize {
+        self.strings.len()
+    }
     #[inline]
-    pub fn table_count(&self) -> usize { self.tables.len() }
+    pub fn table_count(&self) -> usize {
+        self.tables.len()
+    }
     #[inline]
-    pub fn function_count(&self) -> usize { self.functions.len() }
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
+    }
     #[inline]
-    pub fn upvalue_count(&self) -> usize { self.upvalues.len() }
+    pub fn upvalue_count(&self) -> usize {
+        self.upvalues.len()
+    }
     #[inline]
-    pub fn userdata_count(&self) -> usize { self.userdata.len() }
+    pub fn userdata_count(&self) -> usize {
+        self.userdata.len()
+    }
     #[inline]
-    pub fn thread_count(&self) -> usize { self.threads.len() }
+    pub fn thread_count(&self) -> usize {
+        self.threads.len()
+    }
 }
 
 impl Default for ObjectPoolV2 {
@@ -648,17 +677,17 @@ mod tests {
     #[test]
     fn test_arena_basic() {
         let mut arena: Arena<i32> = Arena::new();
-        
+
         let id1 = arena.alloc(42);
         let id2 = arena.alloc(100);
-        
+
         assert_eq!(arena.get(id1).copied(), Some(42));
         assert_eq!(arena.get(id2).copied(), Some(100));
-        
+
         // Free id1
         arena.free(id1);
         assert!(!arena.is_valid(id1));
-        
+
         // Allocate should reuse id1's slot
         let id3 = arena.alloc(200);
         assert_eq!(id3, id1);
@@ -668,15 +697,15 @@ mod tests {
     #[test]
     fn test_arena_iteration() {
         let mut arena: Arena<i32> = Arena::new();
-        
+
         arena.alloc(1);
         arena.alloc(2);
         let id3 = arena.alloc(3);
         arena.alloc(4);
-        
+
         // Free middle element
         arena.free(id3);
-        
+
         // Should iterate over 3 elements (1, 2, 4)
         let values: Vec<i32> = arena.iter().map(|(_, v)| *v).collect();
         assert_eq!(values, vec![1, 2, 4]);
@@ -685,16 +714,16 @@ mod tests {
     #[test]
     fn test_string_interning() {
         let mut pool = ObjectPoolV2::new();
-        
+
         let id1 = pool.create_string("hello");
         let id2 = pool.create_string("hello");
-        
+
         // Same string should return same ID
         assert_eq!(id1, id2);
-        
+
         let id3 = pool.create_string("world");
         assert_ne!(id1, id3);
-        
+
         // Verify content
         assert_eq!(pool.get_string_str(id1), Some("hello"));
         assert_eq!(pool.get_string_str(id3), Some("world"));
@@ -703,17 +732,20 @@ mod tests {
     #[test]
     fn test_table_operations() {
         let mut pool = ObjectPoolV2::new();
-        
+
         let tid = pool.create_table(4, 4);
-        
+
         // Modify table
         if let Some(table) = pool.get_table_mut(tid) {
             table.raw_set(LuaValue::integer(1), LuaValue::integer(42));
         }
-        
+
         // Read back
         if let Some(table) = pool.get_table(tid) {
-            assert_eq!(table.raw_get(&LuaValue::integer(1)), Some(LuaValue::integer(42)));
+            assert_eq!(
+                table.raw_get(&LuaValue::integer(1)),
+                Some(LuaValue::integer(42))
+            );
         }
     }
 

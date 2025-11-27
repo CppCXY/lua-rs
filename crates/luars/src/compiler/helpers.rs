@@ -409,7 +409,13 @@ pub fn emit_set_global(c: &mut Compiler, name: &str, src_reg: u32) {
     // k=false means C is a register index (not constant)
     emit(
         c,
-        Instruction::create_abck(OpCode::SetTabUp, env_index as u32, const_idx, src_reg, false),
+        Instruction::create_abck(
+            OpCode::SetTabUp,
+            env_index as u32,
+            const_idx,
+            src_reg,
+            false,
+        ),
     );
 }
 

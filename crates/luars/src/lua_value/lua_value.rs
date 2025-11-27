@@ -1,5 +1,5 @@
 // LuaValue - Simplified design without pointer caching
-// 
+//
 // Design principles:
 // 1. No pointer caching - Arena/Vec may relocate data
 // 2. All GC objects accessed via ID + ObjectPool lookup
@@ -19,39 +19,39 @@
 // │   - GC objects: unused (ID is in tag)            │
 // └──────────────────────────────────────────────────┘
 
+use crate::gc::{FunctionId, StringId, TableId, ThreadId, UpvalueId, UserdataId};
 use crate::lua_value::CFunction;
-use crate::gc::{StringId, TableId, FunctionId, UpvalueId, UserdataId, ThreadId};
 
 // Type tags (high 16 bits of tag field)
-pub const TAG_NIL: u64       = 0x0000_0000_0000_0000;
-pub const TAG_FALSE: u64     = 0x0001_0000_0000_0000;
-pub const TAG_TRUE: u64      = 0x0002_0000_0000_0000;
-pub const TAG_INTEGER: u64   = 0x0003_0000_0000_0000;
-pub const TAG_FLOAT: u64     = 0x0004_0000_0000_0000;
-pub const TAG_STRING: u64    = 0x0005_0000_0000_0000;
-pub const TAG_TABLE: u64     = 0x0006_0000_0000_0000;
-pub const TAG_FUNCTION: u64  = 0x0007_0000_0000_0000;
+pub const TAG_NIL: u64 = 0x0000_0000_0000_0000;
+pub const TAG_FALSE: u64 = 0x0001_0000_0000_0000;
+pub const TAG_TRUE: u64 = 0x0002_0000_0000_0000;
+pub const TAG_INTEGER: u64 = 0x0003_0000_0000_0000;
+pub const TAG_FLOAT: u64 = 0x0004_0000_0000_0000;
+pub const TAG_STRING: u64 = 0x0005_0000_0000_0000;
+pub const TAG_TABLE: u64 = 0x0006_0000_0000_0000;
+pub const TAG_FUNCTION: u64 = 0x0007_0000_0000_0000;
 pub const TAG_CFUNCTION: u64 = 0x0008_0000_0000_0000;
-pub const TAG_USERDATA: u64  = 0x0009_0000_0000_0000;
-pub const TAG_UPVALUE: u64   = 0x000A_0000_0000_0000;
-pub const TAG_THREAD: u64    = 0x000B_0000_0000_0000;
+pub const TAG_USERDATA: u64 = 0x0009_0000_0000_0000;
+pub const TAG_UPVALUE: u64 = 0x000A_0000_0000_0000;
+pub const TAG_THREAD: u64 = 0x000B_0000_0000_0000;
 
 pub const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
-pub const ID_MASK: u64  = 0x0000_0000_FFFF_FFFF;
+pub const ID_MASK: u64 = 0x0000_0000_FFFF_FFFF;
 
 // Compatibility constants (aliases)
 pub const TYPE_MASK: u64 = TAG_MASK;
-pub const TAG_BOOLEAN: u64 = TAG_TRUE;  // Use TAG_TRUE or TAG_FALSE
+pub const TAG_BOOLEAN: u64 = TAG_TRUE; // Use TAG_TRUE or TAG_FALSE
 pub const VALUE_NIL: u64 = TAG_NIL;
 pub const VALUE_TRUE: u64 = TAG_TRUE;
 pub const VALUE_FALSE: u64 = TAG_FALSE;
-pub const NAN_BASE: u64 = TAG_INTEGER;  // Not really used in new design
+pub const NAN_BASE: u64 = TAG_INTEGER; // Not really used in new design
 
 /// LuaValue - no pointer caching, all GC objects accessed via ID
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct LuaValue {
-    pub(crate) primary: u64,   // tag: type tag (high 16 bits) + object ID (low 32 bits)
+    pub(crate) primary: u64, // tag: type tag (high 16 bits) + object ID (low 32 bits)
     pub(crate) secondary: u64, // data: i64/f64/cfunc pointer (for inline types)
 }
 
@@ -76,7 +76,10 @@ impl LuaValue {
 
     #[inline(always)]
     pub const fn nil() -> Self {
-        Self { primary: TAG_NIL, secondary: 0 }
+        Self {
+            primary: TAG_NIL,
+            secondary: 0,
+        }
     }
 
     #[inline(always)]
@@ -409,7 +412,7 @@ impl LuaValue {
         if (self.primary & TAG_MASK) == TAG_FLOAT && (other.primary & TAG_MASK) == TAG_FLOAT {
             let a = f64::from_bits(self.secondary);
             let b = f64::from_bits(other.secondary);
-            a == b  // This handles NaN correctly
+            a == b // This handles NaN correctly
         } else {
             self.primary == other.primary && self.secondary == other.secondary
         }
@@ -563,7 +566,7 @@ mod tests {
     fn test_boolean() {
         let t = LuaValue::boolean(true);
         let f = LuaValue::boolean(false);
-        
+
         assert!(t.is_boolean());
         assert!(f.is_boolean());
         assert_eq!(t.as_boolean(), Some(true));
@@ -578,11 +581,11 @@ mod tests {
         assert!(v.is_integer());
         assert!(v.is_number());
         assert_eq!(v.as_integer(), Some(42));
-        
+
         // Test negative
         let neg = LuaValue::integer(-100);
         assert_eq!(neg.as_integer(), Some(-100));
-        
+
         // Test i64 max
         let max = LuaValue::integer(i64::MAX);
         assert_eq!(max.as_integer(), Some(i64::MAX));

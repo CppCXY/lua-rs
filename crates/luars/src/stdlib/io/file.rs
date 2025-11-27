@@ -250,17 +250,11 @@ fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                                 vm.create_string(&s)
                             }
                             Err(e) => {
-                                return Err(vm.error(format!(
-                                    "read error: {}",
-                                    e
-                                )));
+                                return Err(vm.error(format!("read error: {}", e)));
                             }
                         }
                     } else {
-                        return Err(vm.error(format!(
-                            "invalid format: {}",
-                            format
-                        )));
+                        return Err(vm.error(format!("invalid format: {}", format)));
                     }
                 }
             };
@@ -295,33 +289,25 @@ fn file_write(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         if let Some(s) = vm.get_string(val) {
                             s.as_str().to_string()
                         } else {
-                            return Err(vm.error(
-                                "write expects strings or numbers",
-                            ));
+                            return Err(vm.error("write expects strings or numbers"));
                         }
                     }
                     LuaValueKind::Integer => {
                         if let Some(n) = val.as_integer() {
                             n.to_string()
                         } else {
-                            return Err(vm.error(
-                                "write expects strings or numbers",
-                            ));
+                            return Err(vm.error("write expects strings or numbers"));
                         }
                     }
                     LuaValueKind::Float => {
                         if let Some(n) = val.as_float() {
                             n.to_string()
                         } else {
-                            return Err(vm.error(
-                                "write expects strings or numbers",
-                            ));
+                            return Err(vm.error("write expects strings or numbers"));
                         }
                     }
                     _ => {
-                        return Err(vm.error(
-                            "write expects strings or numbers",
-                        ));
+                        return Err(vm.error("write expects strings or numbers"));
                     }
                 };
 
@@ -441,19 +427,14 @@ fn file_seek(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 "cur" => std::io::SeekFrom::Current(offset),
                 "end" => std::io::SeekFrom::End(offset),
                 _ => {
-                    return Err(vm.error(format!(
-                        "invalid whence: {}",
-                        whence
-                    )));
+                    return Err(vm.error(format!("invalid whence: {}", whence)));
                 }
             };
 
             let pos = match &mut lua_file.inner {
                 FileInner::Read(reader) => reader.seek(seek_from),
                 FileInner::Write(_) => {
-                    return Err(vm.error(
-                        "cannot seek on write-only file",
-                    ));
+                    return Err(vm.error("cannot seek on write-only file"));
                 }
                 FileInner::ReadWrite(file) => file.seek(seek_from),
                 FileInner::Closed => {

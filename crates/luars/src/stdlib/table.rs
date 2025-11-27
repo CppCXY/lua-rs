@@ -45,7 +45,7 @@ fn table_concat(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("Invalid table".to_string()));
     };
     let i = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(1);
-    
+
     let (len, parts) = {
         let Some(table_borrowed) = vm.object_pool.get_table(table_id) else {
             return Err(vm.error("Invalid table".to_string()));
@@ -291,7 +291,7 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let Some(table_id) = table_val.as_table_id() else {
         return Err(vm.error("Invalid table".to_string()));
     };
-    
+
     // Get array length
     let len = {
         let Some(table_ref) = vm.object_pool.get_table(table_id) else {
@@ -311,7 +311,7 @@ fn table_sort(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         };
         table_ref.array.is_empty()
     };
-    
+
     if is_empty {
         return Ok(MultiValue::empty());
     }

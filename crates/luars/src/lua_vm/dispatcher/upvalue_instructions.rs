@@ -84,7 +84,7 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 #[inline(always)]
 pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     use crate::gc::UpvalueId;
-    
+
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
@@ -93,7 +93,9 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame_id = frame.frame_id;
 
     // Get current function using ID-based lookup
-    let func_id = frame.function_value.as_function_id()
+    let func_id = frame
+        .function_value
+        .as_function_id()
         .ok_or_else(|| vm.error("Not a Lua function".to_string()))?;
 
     let func_ref = vm.object_pool.get_function(func_id);
@@ -130,7 +132,8 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             // Upvalue refers to a register in current function
             // Check if this upvalue is already open
             let existing = vm.open_upvalues.iter().find(|uv_id| {
-                vm.object_pool.get_upvalue(**uv_id)
+                vm.object_pool
+                    .get_upvalue(**uv_id)
                     .map(|uv| uv.points_to(frame_id, desc.index as usize))
                     .unwrap_or(false)
             });
@@ -139,7 +142,9 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 upvalue_ids.push(existing_uv_id);
             } else {
                 // Create new open upvalue using ObjectPoolV2
-                let new_uv_id = vm.object_pool.create_upvalue_open(frame_id, desc.index as usize);
+                let new_uv_id = vm
+                    .object_pool
+                    .create_upvalue_open(frame_id, desc.index as usize);
                 upvalue_ids.push(new_uv_id);
                 new_open_upvalue_ids.push(new_uv_id);
             }
@@ -279,7 +284,9 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
         // Try direct concatenation first
         let left_str = if let Some(str_id) = result_value.as_string_id() {
-            vm.object_pool.get_string(str_id).map(|s| s.as_str().to_string())
+            vm.object_pool
+                .get_string(str_id)
+                .map(|s| s.as_str().to_string())
         } else if let Some(int_val) = result_value.as_integer() {
             Some(int_val.to_string())
         } else if let Some(float_val) = result_value.as_number() {
@@ -289,7 +296,9 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         };
 
         let right_str = if let Some(str_id) = next_value.as_string_id() {
-            vm.object_pool.get_string(str_id).map(|s| s.as_str().to_string())
+            vm.object_pool
+                .get_string(str_id)
+                .map(|s| s.as_str().to_string())
         } else if let Some(int_val) = next_value.as_integer() {
             Some(int_val.to_string())
         } else if let Some(float_val) = next_value.as_number() {
@@ -375,7 +384,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             if t.array.len() < needed {
                 t.array.resize(needed, crate::LuaValue::nil());
             }
-            
+
             // Copy all values
             for i in 0..count {
                 t.array[start_idx + i] = vm.register_stack[base_ptr + a + 1 + i];
@@ -383,7 +392,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             return Ok(());
         }
     }
-    
+
     // Slow path with metamethods
     for i in 0..count {
         let key = LuaValue::integer((start_idx + i + 1) as i64);

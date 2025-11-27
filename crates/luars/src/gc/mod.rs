@@ -5,12 +5,11 @@
 mod object_pool;
 
 // Use ObjectPoolV2 as the main ObjectPool
-pub use object_pool::{
-    ObjectPoolV2 as ObjectPool,
-    StringId, TableId, FunctionId, UpvalueId, UserdataId, ThreadId,
-    Arena, GcHeader, GcTable, GcFunction, GcUpvalue, GcString, GcThread, UpvalueState,
-};
 use crate::lua_value::LuaValue;
+pub use object_pool::{
+    Arena, FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue,
+    ObjectPoolV2 as ObjectPool, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
+};
 use std::collections::{HashMap, HashSet};
 
 /// GC Generation
@@ -269,11 +268,7 @@ impl GC {
 
     /// Perform garbage collection (chooses minor or major)
     /// Takes root set (stack, globals, etc.) and marks reachable objects
-    pub fn collect(
-        &mut self,
-        roots: &[LuaValue],
-        object_pool: &mut ObjectPool,
-    ) -> usize {
+    pub fn collect(&mut self, roots: &[LuaValue], object_pool: &mut ObjectPool) -> usize {
         // For public API, determine which to run based on state
         if self.minor_gc_count >= 10 {
             self.major_collect_internal(roots, object_pool)
@@ -514,16 +509,12 @@ impl GC {
                 // Mark children
                 match key.0 {
                     GcObjectType::Table => {
-                        if let Some(table) =
-                            object_pool.get_table(TableId(key.1))
-                        {
+                        if let Some(table) = object_pool.get_table(TableId(key.1)) {
                             self.mark_table(table, &mut worklist);
                         }
                     }
                     GcObjectType::Function => {
-                        if let Some(func) =
-                            object_pool.get_function(FunctionId(key.1))
-                        {
+                        if let Some(func) = object_pool.get_function(FunctionId(key.1)) {
                             self.mark_function(func, object_pool, &mut worklist);
                         }
                     }
@@ -545,7 +536,12 @@ impl GC {
     }
 
     /// Mark function upvalues
-    fn mark_function(&self, func: &GcFunction, object_pool: &ObjectPool, worklist: &mut Vec<LuaValue>) {
+    fn mark_function(
+        &self,
+        func: &GcFunction,
+        object_pool: &ObjectPool,
+        worklist: &mut Vec<LuaValue>,
+    ) {
         for upval_id in &func.upvalues {
             // Only mark closed upvalues (open ones are on the stack already)
             if let Some(upval) = object_pool.get_upvalue(*upval_id) {
@@ -594,7 +590,7 @@ impl GC {
             }
         }
     }
-    
+
     /// Check if a value is collectable (needs GC barrier)
     #[inline(always)]
     pub fn is_collectable(value: &LuaValue) -> bool {
@@ -696,11 +692,7 @@ impl GC {
 
     /// Check if table has weak mode (__mode metamethod)
     /// Returns: None if no weak mode, Some("k") for weak keys, Some("v") for weak values, Some("kv") for both
-    pub fn get_weak_mode(
-        &self,
-        table_id: TableId,
-        object_pool: &ObjectPool,
-    ) -> Option<String> {
+    pub fn get_weak_mode(&self, table_id: TableId, object_pool: &ObjectPool) -> Option<String> {
         if let Some(table) = object_pool.get_table(table_id) {
             if let Some(meta_value) = table.get_metatable() {
                 if let Some(meta_id) = meta_value.as_table_id() {
@@ -745,15 +737,19 @@ impl GC {
 
         // First pass: collect keys to remove (immutable borrow)
         let keys_to_remove: Vec<LuaValue> = if let Some(table) = object_pool.get_table(table_id) {
-            table.iter_all()
+            table
+                .iter_all()
                 .into_iter()
                 .filter(|(key, value)| {
                     let mut should_remove = false;
-                    
+
                     // Check if weak key was collected
                     if has_weak_keys {
                         if let Some(key_table_id) = key.as_table_id() {
-                            if !self.objects.contains_key(&(GcObjectType::Table, key_table_id.0)) {
+                            if !self
+                                .objects
+                                .contains_key(&(GcObjectType::Table, key_table_id.0))
+                            {
                                 should_remove = true;
                             }
                         }
@@ -762,12 +758,15 @@ impl GC {
                     // Check if weak value was collected
                     if has_weak_values && !should_remove {
                         if let Some(val_table_id) = value.as_table_id() {
-                            if !self.objects.contains_key(&(GcObjectType::Table, val_table_id.0)) {
+                            if !self
+                                .objects
+                                .contains_key(&(GcObjectType::Table, val_table_id.0))
+                            {
                                 should_remove = true;
                             }
                         }
                     }
-                    
+
                     should_remove
                 })
                 .map(|(key, _)| key)

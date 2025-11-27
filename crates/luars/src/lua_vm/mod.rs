@@ -13,7 +13,7 @@ use crate::lua_value::{
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
-use crate::{lib_registry, Compiler, ObjectPool};
+use crate::{Compiler, ObjectPool, lib_registry};
 use dispatcher::dispatch_instruction;
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
@@ -274,9 +274,12 @@ impl LuaVM {
         loop {
             // ULTRA-FAST PATH: Direct unsafe access, no bounds checks
             // Get frame_ptr ONCE and pass to dispatch to avoid repeated Vec lookups
-            let frame_ptr = unsafe { self.frames.last_mut().unwrap_unchecked() as *mut LuaCallFrame };
+            let frame_ptr =
+                unsafe { self.frames.last_mut().unwrap_unchecked() as *mut LuaCallFrame };
             let instr = unsafe { (*frame_ptr).code_ptr.add((*frame_ptr).pc).read() };
-            unsafe { (*frame_ptr).pc += 1; }
+            unsafe {
+                (*frame_ptr).pc += 1;
+            }
 
             // Use match with explicit Ok branch for better branch prediction hints
             match dispatch_instruction(self, instr, frame_ptr) {
@@ -733,7 +736,7 @@ impl LuaVM {
             && let Some(meta_id) = mt.as_table_id()
         {
             let index_key = self.create_string("__index");
-            
+
             let index_value = {
                 let metatable = self.object_pool.get_table(meta_id)?;
                 metatable.raw_get(&index_key)
@@ -866,7 +869,8 @@ impl LuaVM {
             if let Some(table) = self.object_pool.get_table_mut(table_id) {
                 table.raw_set(key.clone(), value.clone());
             }
-            self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+            self.gc
+                .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
             self.gc.barrier_back(&value);
             return Ok(());
         }
@@ -876,7 +880,7 @@ impl LuaVM {
             && let Some(mt_id) = mt.as_table_id()
         {
             let newindex_key = self.create_string("__newindex");
-            
+
             let newindex_value = {
                 let Some(metatable) = self.object_pool.get_table(mt_id) else {
                     return Err(self.error("missing metatable".to_string()));
@@ -907,7 +911,8 @@ impl LuaVM {
         }
 
         // Write barrier for new insertion
-        self.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+        self.gc
+            .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
         self.gc.barrier_back(&value);
         Ok(())
     }
@@ -965,7 +970,8 @@ impl LuaVM {
 
         // Remove closed upvalues from the open list
         self.open_upvalues.retain(|uv_id| {
-            self.object_pool.get_upvalue(*uv_id)
+            self.object_pool
+                .get_upvalue(*uv_id)
                 .map(|uv| uv.is_open())
                 .unwrap_or(false)
         });
@@ -1033,16 +1039,21 @@ impl LuaVM {
     /// Used by RETURN (k bit) and CLOSE instructions
     pub fn close_upvalues_from(&mut self, stack_pos: usize) {
         // Collect frame info first to avoid borrowing issues
-        let frame_info: Vec<(usize, usize, usize)> = self.frames.iter().map(|frame| {
-            let max_regs = if let Some(func_id) = frame.function_value.as_function_id() {
-                self.object_pool.get_function(func_id)
-                    .map(|f| f.chunk.max_stack_size)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            (frame.frame_id, frame.base_ptr, max_regs)
-        }).collect();
+        let frame_info: Vec<(usize, usize, usize)> = self
+            .frames
+            .iter()
+            .map(|frame| {
+                let max_regs = if let Some(func_id) = frame.function_value.as_function_id() {
+                    self.object_pool
+                        .get_function(func_id)
+                        .map(|f| f.chunk.max_stack_size)
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                (frame.frame_id, frame.base_ptr, max_regs)
+            })
+            .collect();
 
         let upvalues_to_close: Vec<UpvalueId> = self
             .open_upvalues
@@ -1080,7 +1091,8 @@ impl LuaVM {
 
         // Remove closed upvalues from the open list
         self.open_upvalues.retain(|uv_id| {
-            self.object_pool.get_upvalue(*uv_id)
+            self.object_pool
+                .get_upvalue(*uv_id)
                 .map(|uv| uv.is_open())
                 .unwrap_or(false)
         });
@@ -1243,10 +1255,7 @@ impl LuaVM {
     }
 
     /// Get userdata by LuaValue (resolves ID from object pool)
-    pub fn get_userdata(
-        &self,
-        value: &LuaValue,
-    ) -> Option<&crate::lua_value::LuaUserdata> {
+    pub fn get_userdata(&self, value: &LuaValue) -> Option<&crate::lua_value::LuaUserdata> {
         if let Some(id) = value.as_userdata_id() {
             self.object_pool.get_userdata(id)
         } else {
@@ -1272,7 +1281,8 @@ impl LuaVM {
         let id = self.object_pool.create_function(chunk, upvalue_ids);
 
         // Register with GC - ultra-lightweight
-        self.gc.register_object(id.0, crate::gc::GcObjectType::Function);
+        self.gc
+            .register_object(id.0, crate::gc::GcObjectType::Function);
 
         LuaValue::function(id)
     }
@@ -1292,6 +1302,79 @@ impl LuaVM {
             self.object_pool.get_function_mut(id)
         } else {
             None
+        }
+    }
+
+    //==========================================================================
+    // Value conversion helpers (for WASM and external APIs)
+    //==========================================================================
+
+    /// Convert a LuaValue to its string representation (without metamethods)
+    /// This properly resolves GC objects through the object pool
+    pub fn value_to_string_raw(&self, value: &LuaValue) -> String {
+        if value.is_nil() {
+            "nil".to_string()
+        } else if let Some(b) = value.as_bool() {
+            b.to_string()
+        } else if let Some(i) = value.as_integer() {
+            i.to_string()
+        } else if let Some(n) = value.as_number() {
+            // Format float to match Lua output
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{:.1}", n)
+            } else {
+                n.to_string()
+            }
+        } else if let Some(lua_str) = self.get_string(value) {
+            lua_str.as_str().to_string()
+        } else if value.is_table() {
+            if let Some(id) = value.as_table_id() {
+                format!("table: 0x{:x}", id.0)
+            } else {
+                "table".to_string()
+            }
+        } else if value.is_function() {
+            if let Some(id) = value.as_function_id() {
+                format!("function: 0x{:x}", id.0)
+            } else {
+                "function".to_string()
+            }
+        } else if value.is_cfunction() {
+            "function".to_string()
+        } else if value.is_thread() {
+            if let Some(id) = value.as_thread_id() {
+                format!("thread: 0x{:x}", id.0)
+            } else {
+                "thread".to_string()
+            }
+        } else if value.is_userdata() {
+            if let Some(id) = value.as_userdata_id() {
+                format!("userdata: 0x{:x}", id.0)
+            } else {
+                "userdata".to_string()
+            }
+        } else {
+            format!("{:?}", value)
+        }
+    }
+
+    /// Get the string content of a LuaValue if it is a string
+    /// Returns None if the value is not a string
+    pub fn value_as_string(&self, value: &LuaValue) -> Option<String> {
+        self.get_string(value).map(|s| s.as_str().to_string())
+    }
+
+    /// Get the type name of a LuaValue
+    pub fn value_type_name(&self, value: &LuaValue) -> &'static str {
+        match value.kind() {
+            LuaValueKind::Nil => "nil",
+            LuaValueKind::Boolean => "boolean",
+            LuaValueKind::Integer | LuaValueKind::Float => "number",
+            LuaValueKind::String => "string",
+            LuaValueKind::Table => "table",
+            LuaValueKind::Function | LuaValueKind::CFunction => "function",
+            LuaValueKind::Thread => "thread",
+            LuaValueKind::Userdata => "userdata",
         }
     }
 
@@ -1757,8 +1840,16 @@ impl LuaVM {
     fn format_value(&self, value: &LuaValue) -> String {
         match value.kind() {
             LuaValueKind::Nil => "nil".to_string(),
-            LuaValueKind::Boolean => if value.as_bool().unwrap_or(false) { "true" } else { "false" }.to_string(),
-            LuaValueKind::Integer => value.as_integer().map(|i| i.to_string()).unwrap_or_default(),
+            LuaValueKind::Boolean => if value.as_bool().unwrap_or(false) {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+            LuaValueKind::Integer => value
+                .as_integer()
+                .map(|i| i.to_string())
+                .unwrap_or_default(),
             LuaValueKind::Float => value.as_number().map(|n| n.to_string()).unwrap_or_default(),
             LuaValueKind::String => {
                 if let Some(s) = self.get_string(value) {
@@ -1886,7 +1977,7 @@ impl LuaVM {
                 let msg = self.error_message.clone();
                 let err_value = self.create_string(&msg);
                 let err_display = format!("Runtime Error: {}", msg);
-                
+
                 let handler_result = self.call_function_internal(err_handler, vec![err_value]);
 
                 match handler_result {
@@ -1926,7 +2017,8 @@ impl LuaVM {
                     let caller_base = current_frame.base_ptr;
                     let caller_max_stack =
                         if let Some(func_id) = current_frame.function_value.as_function_id() {
-                            self.object_pool.get_function(func_id)
+                            self.object_pool
+                                .get_function(func_id)
                                 .map(|f| f.chunk.max_stack_size)
                                 .unwrap_or(256)
                         } else {
@@ -1960,7 +2052,9 @@ impl LuaVM {
                     source_name: Some("[direct_call]".to_string()),
                     line_info: Vec::new(),
                 });
-                let dummy_func_id = self.object_pool.create_function(dummy_chunk.clone(), Vec::new());
+                let dummy_func_id = self
+                    .object_pool
+                    .create_function(dummy_chunk.clone(), Vec::new());
                 let dummy_func_value = LuaValue::function_id(dummy_func_id);
 
                 // Use new_base as result_reg (same as caller_base + caller_max_stack)
@@ -2007,7 +2101,11 @@ impl LuaVM {
                     let Some(func_ref) = self.object_pool.get_function(func_id) else {
                         return Err(self.error("Invalid function".to_string()));
                     };
-                    let size = if func_ref.chunk.max_stack_size == 0 { 1 } else { func_ref.chunk.max_stack_size };
+                    let size = if func_ref.chunk.max_stack_size == 0 {
+                        1
+                    } else {
+                        func_ref.chunk.max_stack_size
+                    };
                     (size, func_ref.chunk.code.as_ptr())
                 };
 
@@ -2018,14 +2116,16 @@ impl LuaVM {
                 // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
                 let new_base = if let Some(current_frame) = self.frames.last() {
                     let caller_base = current_frame.base_ptr;
-                    let caller_max_stack =
-                        if let Some(caller_func_id) = current_frame.function_value.as_function_id() {
-                            self.object_pool.get_function(caller_func_id)
-                                .map(|f| f.chunk.max_stack_size)
-                                .unwrap_or(256)
-                        } else {
-                            256
-                        };
+                    let caller_max_stack = if let Some(caller_func_id) =
+                        current_frame.function_value.as_function_id()
+                    {
+                        self.object_pool
+                            .get_function(caller_func_id)
+                            .map(|f| f.chunk.max_stack_size)
+                            .unwrap_or(256)
+                    } else {
+                        256
+                    };
                     caller_base + caller_max_stack
                 } else {
                     0

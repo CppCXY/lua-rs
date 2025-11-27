@@ -1,5 +1,5 @@
-use crate::gc::UpvalueId;
 use crate::LuaValue;
+use crate::gc::UpvalueId;
 
 /// Lua Thread (coroutine)
 /// Each coroutine has its own call stack and register stack, independent from the main VM
@@ -49,7 +49,8 @@ pub struct LuaThread {
     pub yield_call_nret: Option<usize>,
 }
 
-impl LuaThread {    /// Check if this coroutine can be resumed
+impl LuaThread {
+    /// Check if this coroutine can be resumed
     pub fn can_resume(&self) -> bool {
         matches!(self.status, CoroutineStatus::Suspended)
     }

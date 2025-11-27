@@ -84,7 +84,9 @@ fn lua_assert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let message = get_arg(vm, 2)
             .and_then(|v| {
                 v.as_string_id().and_then(|id| {
-                    vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                    vm.object_pool
+                        .get_string(id)
+                        .map(|s| s.as_str().to_string())
                 })
             })
             .unwrap_or_else(|| "assertion failed!".to_string());
@@ -98,10 +100,7 @@ fn lua_assert(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// error(message) - Raise an error
 fn lua_error(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let message = get_arg(vm, 1)
-        .map(|v| {
-            vm.value_to_string(&v)
-                .unwrap_or_else(|_| "?".to_string())
-        })
+        .map(|v| vm.value_to_string(&v).unwrap_or_else(|_| "?".to_string()))
         .unwrap_or_else(|| "error".to_string());
 
     // Return error message directly for now
@@ -570,7 +569,9 @@ fn lua_collectgarbage(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let opt = get_arg(vm, 1)
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
-                vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                vm.object_pool
+                    .get_string(id)
+                    .map(|s| s.as_str().to_string())
             })
         })
         .unwrap_or_else(|| "collect".to_string());
@@ -630,7 +631,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 None
             }
         };
-        
+
         if let Some(module_val) = module_val {
             if !module_val.is_nil() {
                 // Module already loaded - return it
@@ -645,7 +646,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Try each searcher in package.searchers
     let mut error_messages = Vec::new();
     let key = vm.create_string("searchers");
-    
+
     // Get searchers table
     let searchers_values = {
         let Some(package_id) = package_table.as_table_id() else {
@@ -655,14 +656,14 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             return Err(vm.error("Invalid package table".to_string()));
         };
         let searchers_val = package_ref.raw_get(&key).unwrap_or(LuaValue::nil());
-        
+
         let Some(searchers_id) = searchers_val.as_table_id() else {
             return Err(vm.error("package.searchers is not a table".to_string()));
         };
         let Some(searchers_table) = vm.object_pool.get_table(searchers_id) else {
             return Err(vm.error("package.searchers is not a table".to_string()));
         };
-        
+
         // Collect all searchers upfront
         let mut values = Vec::new();
         let mut i = 1;
@@ -687,7 +688,9 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .first()
                 .and_then(|v| {
                     v.as_string_id().and_then(|id| {
-                        vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                        vm.object_pool
+                            .get_string(id)
+                            .map(|s| s.as_str().to_string())
                     })
                 })
                 .unwrap_or_else(|| "unknown error in searcher".to_string());
@@ -715,7 +718,9 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         .first()
                         .and_then(|v| {
                             v.as_string_id().and_then(|id| {
-                                vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                                vm.object_pool
+                                    .get_string(id)
+                                    .map(|s| s.as_str().to_string())
                             })
                         })
                         .unwrap_or_else(|| "unknown error".to_string());
@@ -787,7 +792,9 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let _chunkname = get_arg(vm, 2)
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
-                vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                vm.object_pool
+                    .get_string(id)
+                    .map(|s| s.as_str().to_string())
             })
         })
         .unwrap_or_else(|| "=(load)".to_string());
@@ -796,7 +803,9 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let _mode = get_arg(vm, 3)
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
-                vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                vm.object_pool
+                    .get_string(id)
+                    .map(|s| s.as_str().to_string())
             })
         })
         .unwrap_or_else(|| "bt".to_string());
@@ -844,8 +853,7 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let code = match std::fs::read_to_string(&filename_str) {
         Ok(c) => c,
         Err(e) => {
-            let err_msg =
-                vm.create_string(&format!("cannot open {}: {}", filename_str, e));
+            let err_msg = vm.create_string(&format!("cannot open {}: {}", filename_str, e));
             return Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]));
         }
     };
@@ -870,7 +878,9 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let filename = get_arg(vm, 1).and_then(|v| {
         v.as_string_id().and_then(|id| {
-            vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+            vm.object_pool
+                .get_string(id)
+                .map(|s| s.as_str().to_string())
         })
     });
 
@@ -905,7 +915,9 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     .first()
                     .and_then(|v| {
                         v.as_string_id().and_then(|id| {
-                            vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                            vm.object_pool
+                                .get_string(id)
+                                .map(|s| s.as_str().to_string())
                         })
                     })
                     .unwrap_or_else(|| "unknown error".to_string());

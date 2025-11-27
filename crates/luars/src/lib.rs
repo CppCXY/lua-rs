@@ -18,10 +18,10 @@ pub mod stdlib;
 pub use compiler::Compiler;
 #[cfg(feature = "loadlib")]
 pub use ffi::FFIState;
+pub use gc::*;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
 pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
-pub use gc::*;
 use std::rc::Rc;
 
 /// Main entry point for executing Lua code

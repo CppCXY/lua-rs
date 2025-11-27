@@ -60,7 +60,7 @@ fn create_config_string(vm: &mut LuaVM) -> LuaValue {
 // Create package.searchers table with 4 standard searchers
 fn create_searchers_table(vm: &mut LuaVM) -> LuaValue {
     let searchers = vm.create_table(4, 0);
-    
+
     // Use new API: get_table_mut for mutable access
     if let Some(table_id) = searchers.as_table_id() {
         if let Some(searchers_ref) = vm.object_pool.get_table_mut(table_id) {
@@ -94,7 +94,7 @@ fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let Some(package_id) = package_table.as_table_id() else {
         return Err(vm.error("Invalid package table".to_string()));
     };
-    
+
     let preload_key = vm.create_string("preload");
     let preload_val = {
         let Some(pkg_table) = vm.object_pool.get_table(package_id) else {
@@ -106,12 +106,14 @@ fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let Some(preload_id) = preload_val.as_table_id() else {
         return Err(vm.error("package.preload is not a table".to_string()));
     };
-    
+
     let loader = {
         let Some(preload_table) = vm.object_pool.get_table(preload_id) else {
             return Err(vm.error("package.preload is not a table".to_string()));
         };
-        preload_table.raw_get(&modname_val).unwrap_or(LuaValue::nil())
+        preload_table
+            .raw_get(&modname_val)
+            .unwrap_or(LuaValue::nil())
     };
 
     if loader.is_nil() {
@@ -195,7 +197,7 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         };
         s.as_str().to_string()
     };
-    
+
     // Read the file
     let source = match std::fs::read_to_string(&filepath_str) {
         Ok(s) => s,
@@ -221,8 +223,7 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             .unwrap_or_else(|| "unknown error".to_string());
         return Err(vm.error(format!(
             "error loading module '{}': {}",
-            filepath_str,
-            error_msg
+            filepath_str, error_msg
         )));
     }
 
