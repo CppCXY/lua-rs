@@ -102,7 +102,7 @@ impl<T> SlotVec<T> {
 }
 
 /// Object IDs - u32 is enough for most use cases (4 billion objects)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct StringId(pub u32);
 
 impl StringId {
@@ -115,7 +115,7 @@ impl StringId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct TableId(pub u32);
 
 impl TableId {
@@ -128,7 +128,7 @@ impl TableId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct UserdataId(pub u32);
 
 impl UserdataId {
@@ -141,7 +141,7 @@ impl UserdataId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct FunctionId(pub u32);
 
 impl FunctionId {

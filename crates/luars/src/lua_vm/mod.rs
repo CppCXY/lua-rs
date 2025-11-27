@@ -14,7 +14,7 @@ use crate::lua_value::{
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
-use crate::{Compiler, ObjectPool, lib_registry};
+use crate::{lib_registry, Compiler, ObjectPool};
 use dispatcher::dispatch_instruction;
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;

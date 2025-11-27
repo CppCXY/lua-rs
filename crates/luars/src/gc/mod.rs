@@ -2,7 +2,12 @@
 // Implements 2-generation GC with mark-sweep algorithm
 // Young generation: frequently collected, most objects die young
 // Old generation: rarely collected, long-lived objects
+mod object_pool;
+mod object_pool_v2;
 
+// Export both object pools during migration
+pub use object_pool::{FunctionId, ObjectPool, StringId, TableId, UserdataId};
+pub use object_pool_v2::ObjectPoolV2;
 use crate::lua_value::LuaValue;
 use crate::{LuaFunction, LuaTable};
 use std::collections::{HashMap, HashSet};
@@ -223,7 +228,7 @@ impl GC {
     }
 
     /// Perform one step of GC work (like luaC_step in Lua 5.4)
-    pub fn step(&mut self, roots: &[LuaValue], object_pool: &mut crate::object_pool::ObjectPool) {
+    pub fn step(&mut self, roots: &[LuaValue], object_pool: &mut ObjectPool) {
         if !self.should_collect() {
             return;
         }
@@ -266,7 +271,7 @@ impl GC {
     pub fn collect(
         &mut self,
         roots: &[LuaValue],
-        object_pool: &mut crate::object_pool::ObjectPool,
+        object_pool: &mut ObjectPool,
     ) -> usize {
         // For public API, determine which to run based on state
         if self.minor_gc_count >= 10 {
@@ -280,7 +285,7 @@ impl GC {
     fn minor_collect_internal(
         &mut self,
         roots: &[LuaValue],
-        object_pool: &mut crate::object_pool::ObjectPool,
+        object_pool: &mut ObjectPool,
     ) -> usize {
         self.collection_count += 1;
         self.stats.minor_collections += 1;
@@ -324,15 +329,15 @@ impl GC {
                     collected += 1;
                     match obj_type {
                         GcObjectType::String => {
-                            let string_id = crate::object_pool::StringId(obj_id);
+                            let string_id = StringId(obj_id);
                             object_pool.remove_string(string_id);
                         }
                         GcObjectType::Table => {
-                            let table_id = crate::object_pool::TableId(obj_id);
+                            let table_id = TableId(obj_id);
                             object_pool.remove_table(table_id);
                         }
                         GcObjectType::Function => {
-                            let func_id = crate::object_pool::FunctionId(obj_id);
+                            let func_id = FunctionId(obj_id);
                             object_pool.remove_function(func_id);
                         }
                     }
@@ -357,7 +362,7 @@ impl GC {
             .objects
             .iter()
             .filter(|((obj_type, _), _)| *obj_type == GcObjectType::Table)
-            .map(|((_, obj_id), _)| crate::object_pool::TableId(*obj_id))
+            .map(|((_, obj_id), _)| TableId(*obj_id))
             .collect();
 
         for table_id in all_tables {
@@ -390,7 +395,7 @@ impl GC {
     fn major_collect_internal(
         &mut self,
         roots: &[LuaValue],
-        object_pool: &mut crate::object_pool::ObjectPool,
+        object_pool: &mut ObjectPool,
     ) -> usize {
         self.collection_count += 1;
         self.stats.major_collections += 1;
@@ -414,15 +419,15 @@ impl GC {
                 // Remove from object pool!
                 match obj_type {
                     GcObjectType::String => {
-                        let string_id = crate::object_pool::StringId(obj_id);
+                        let string_id = StringId(obj_id);
                         object_pool.remove_string(string_id);
                     }
                     GcObjectType::Table => {
-                        let table_id = crate::object_pool::TableId(obj_id);
+                        let table_id = TableId(obj_id);
                         object_pool.remove_table(table_id);
                     }
                     GcObjectType::Function => {
-                        let func_id = crate::object_pool::FunctionId(obj_id);
+                        let func_id = FunctionId(obj_id);
                         object_pool.remove_function(func_id);
                     }
                 }
@@ -446,7 +451,7 @@ impl GC {
             .objects
             .iter()
             .filter(|((obj_type, _), _)| *obj_type == GcObjectType::Table)
-            .map(|((_, obj_id), _)| crate::object_pool::TableId(*obj_id))
+            .map(|((_, obj_id), _)| TableId(*obj_id))
             .collect();
 
         for table_id in all_tables {
@@ -473,7 +478,7 @@ impl GC {
     fn mark(
         &mut self,
         roots: &[LuaValue],
-        object_pool: &crate::object_pool::ObjectPool,
+        object_pool: &ObjectPool,
     ) -> HashSet<(GcObjectType, u32)> {
         let mut marked = HashSet::new();
         let mut worklist: Vec<LuaValue> = roots.to_vec();
@@ -509,14 +514,14 @@ impl GC {
                 match key.0 {
                     GcObjectType::Table => {
                         if let Some(table_ref) =
-                            object_pool.get_table(crate::object_pool::TableId(key.1))
+                            object_pool.get_table(TableId(key.1))
                         {
                             self.mark_table(&table_ref.borrow(), &mut worklist);
                         }
                     }
                     GcObjectType::Function => {
                         if let Some(func_ref) =
-                            object_pool.get_function(crate::object_pool::FunctionId(key.1))
+                            object_pool.get_function(FunctionId(key.1))
                         {
                             self.mark_function(&func_ref.borrow(), &mut worklist);
                         }
@@ -649,13 +654,13 @@ impl GC {
         &mut self,
         obj_type: GcObjectType,
         obj_id: u32,
-        object_pool: &crate::object_pool::ObjectPool,
+        object_pool: &ObjectPool,
     ) -> bool {
         if obj_type != GcObjectType::Table {
             return false; // Only tables can have metatables with __gc
         }
 
-        let table_id = crate::object_pool::TableId(obj_id);
+        let table_id = TableId(obj_id);
         if let Some(table_rc) = object_pool.get_table(table_id) {
             let table = table_rc.borrow();
             if let Some(meta_value) = table.get_metatable() {
@@ -692,8 +697,8 @@ impl GC {
     /// Returns: None if no weak mode, Some("k") for weak keys, Some("v") for weak values, Some("kv") for both
     pub fn get_weak_mode(
         &self,
-        table_id: crate::object_pool::TableId,
-        object_pool: &crate::object_pool::ObjectPool,
+        table_id: TableId,
+        object_pool: &ObjectPool,
     ) -> Option<String> {
         if let Some(table_rc) = object_pool.get_table(table_id) {
             let table = table_rc.borrow();
@@ -728,9 +733,9 @@ impl GC {
     /// This removes entries where the key or value was collected
     pub fn clear_weak_entries(
         &self,
-        table_id: crate::object_pool::TableId,
+        table_id: TableId,
         weak_mode: &str,
-        object_pool: &crate::object_pool::ObjectPool,
+        object_pool: &ObjectPool,
     ) {
         if let Some(table_rc) = object_pool.get_table(table_id) {
             let mut table = table_rc.borrow_mut();

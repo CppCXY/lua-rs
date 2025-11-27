@@ -1,3 +1,4 @@
+use crate::FunctionId;
 use crate::LuaFunction;
 use crate::LuaValue;
 use std::cell::RefCell;
@@ -130,7 +131,7 @@ impl LuaCallFrame {
 
     /// 获取 FunctionId (需要时才调用)
     #[inline(always)]
-    pub fn get_function_id(&self) -> Option<crate::object_pool::FunctionId> {
+    pub fn get_function_id(&self) -> Option<FunctionId> {
         self.function_value.as_function_id()
     }
 
