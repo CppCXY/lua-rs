@@ -18,7 +18,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = vm.current_frame().base_ptr;
     vm.close_upvalues_from(base_ptr);
 
-    let Some(frame) = vm.frames.pop() else {
+    let Some(frame) = vm.pop_frame() else {
         return Err(vm.error("RETURN with no frame on stack".to_string()));
     };
 
@@ -36,7 +36,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // === 零拷贝返回值优化 ===
     // 关键：返回值需要写回 caller 的 R[result_reg]
     // 而不是写到 caller 的栈顶
-    if !vm.frames.is_empty() {
+    if !vm.frames_is_empty() {
         let caller_frame = vm.current_frame();
         let caller_base = caller_frame.base_ptr;
 
@@ -127,7 +127,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     // CRITICAL: If frames are now empty, we're done - return control to caller
     // This prevents run() loop from trying to access empty frame
-    if vm.frames.is_empty() {
+    if vm.frames_is_empty() {
         // Save return values before exiting
         vm.return_values.clear();
         for i in 0..return_count {
@@ -840,12 +840,9 @@ fn exec_call_lua_function(
             }
         }
 
-        // Create and push new frame - inline to avoid call overhead
-        let frame_id = vm.next_frame_id;
-        vm.next_frame_id += 1;
-
+        // Create and push new frame - use frames.len() as frame_id to avoid counter
         let new_frame = LuaCallFrame::new_lua_function(
-            frame_id,
+            vm.frames.len(),  // Use len as frame_id
             func,
             code_ptr,
             new_base,
@@ -853,7 +850,7 @@ fn exec_call_lua_function(
             a,
             return_count,
         );
-        vm.frames.push(new_frame);
+        vm.push_frame(new_frame);
         return Ok(());
     }
 
@@ -919,7 +916,7 @@ fn exec_call_lua_function(
         return_count,
     );
 
-    vm.frames.push(new_frame);
+    vm.push_frame(new_frame);
     Ok(())
 }
 
@@ -987,21 +984,21 @@ fn exec_call_cfunction(
         actual_arg_count + 1,
     );
 
-    vm.frames.push(temp_frame);
+    vm.push_frame(temp_frame);
 
     // Call C function
     let result = match cfunc(vm) {
         Ok(r) => r,
         Err(LuaError::Yield) => {
-            vm.frames.pop();
+            vm.pop_frame_discard();
             return Err(LuaError::Yield);
         }
         Err(e) => {
-            vm.frames.pop();
+            vm.pop_frame_discard();
             return Err(e);
         }
     };
-    vm.frames.pop();
+    vm.pop_frame_discard();
 
     // Copy return values
     let values = result.all_values();
@@ -1097,7 +1094,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             // Pop current frame (tail call optimization)
             let old_base = base; // Already extracted
             // return_count already extracted
-            vm.frames.pop();
+            vm.pop_frame_discard();
 
             // Create new frame at same location
             let frame_id = vm.next_frame_id;
@@ -1119,7 +1116,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 result_reg, // result_reg from the CALLER (not 0!)
                 return_count,
             );
-            vm.frames.push(new_frame);
+            vm.push_frame(new_frame);
 
             Ok(())
         }
@@ -1157,16 +1154,16 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 LuaCallFrame::new_c_function(frame_id, function_value, pc, call_base, args_len + 1);
 
             // Push temp frame and call C function
-            vm.frames.push(temp_frame);
+            vm.push_frame(temp_frame);
             let result = c_func(vm)?;
-            vm.frames.pop(); // Pop temp frame
+            vm.pop_frame_discard(); // Pop temp frame
 
             // NOW pop the tail-calling function's frame
-            vm.frames.pop();
+            vm.pop_frame_discard();
 
             // Write return values to PARENT frame
             // CRITICAL: result_reg is relative to PARENT's base_ptr!
-            if !vm.frames.is_empty() {
+            if !vm.frames_is_empty() {
                 let parent_base = vm.current_frame().base_ptr;
                 let vals = result.all_values();
                 let count = if return_count == usize::MAX {
@@ -1203,26 +1200,32 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// OPTIMIZED: Use frame_ptr directly
 #[inline(always)]
 pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
-    // FAST PATH: Use passed frame_ptr directly
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
+    // FAST PATH: Use passed frame_ptr directly - get all info BEFORE popping
+    let (base_ptr, result_reg, num_results) = unsafe {
+        (
+            (*frame_ptr).base_ptr,
+            (*frame_ptr).get_result_reg(),
+            (*frame_ptr).get_num_results(),
+        )
+    };
 
     // Only close upvalues if there are any
     if !vm.open_upvalues.is_empty() {
         vm.close_upvalues_from(base_ptr);
     }
 
-    let frame = unsafe { vm.frames.pop().unwrap_unchecked() };
+    vm.pop_frame_discard();
 
     vm.return_values.clear();
 
     // FAST PATH: Check if we have a caller frame
-    if let Some(caller_frame) = vm.frames.last_mut() {
-        let result_reg = frame.get_result_reg();
-        let num_results = frame.get_num_results();
+    if !vm.frames_is_empty() {
+        // Get caller's base_ptr first without holding borrow
+        let caller_base = vm.current_frame().base_ptr;
 
         // Fill expected return values with nil
         if num_results != usize::MAX && num_results > 0 {
-            let dest_base = caller_frame.base_ptr + result_reg;
+            let dest_base = caller_base + result_reg;
             unsafe {
                 let reg_ptr = vm.register_stack.as_mut_ptr();
                 let nil_val = LuaValue::nil();
@@ -1233,7 +1236,7 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr: *mut LuaCallFrame) -
         }
 
         // Update caller's top
-        caller_frame.top = result_reg;
+        vm.current_frame_mut().top = result_reg;
         Ok(())
     } else {
         Err(LuaError::Exit)
@@ -1263,22 +1266,25 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
     };
 
     // Pop frame - we already have all info we need from frame_ptr
-    unsafe { vm.frames.pop().unwrap_unchecked() };
+    vm.pop_frame_discard();
 
     // CRITICAL: Always set return_values for call_function_internal compatibility
     vm.return_values.clear();
     vm.return_values.push(return_value);
 
     // Check if there's a caller frame
-    if let Some(caller_frame) = vm.frames.last_mut() {
+    if !vm.frames_is_empty() {
+        // Get caller's base_ptr first without holding mutable borrow
+        let caller_base = vm.current_frame().base_ptr;
+        let dest_pos = caller_base + result_reg;
+        
         // Write to caller's result register
-        let dest_pos = caller_frame.base_ptr + result_reg;
         if dest_pos < vm.register_stack.len() {
             vm.register_stack[dest_pos] = return_value;
         }
 
         // Update top
-        caller_frame.top = result_reg + 1;
+        vm.current_frame_mut().top = result_reg + 1;
 
         Ok(())
     } else {

@@ -244,9 +244,9 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 3, // func + 2 args
             );
 
-            vm.frames.push(temp_frame);
+            vm.push_frame(temp_frame);
             let result = cfunc(vm)?;
-            vm.frames.pop();
+            vm.pop_frame_discard();
 
             // Store results starting at R[A+3]
             let values = result.all_values();
@@ -301,7 +301,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                 c + 1, // expecting c+1 results
             );
 
-            vm.frames.push(new_frame);
+            vm.push_frame(new_frame);
             // Execution will continue in the new frame
         }
         _ => {

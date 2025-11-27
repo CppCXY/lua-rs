@@ -27,6 +27,9 @@ pub struct LuaVM {
 
     // Call stack
     pub frames: Vec<LuaCallFrame>,
+    
+    // Current frame index (avoids last_mut() overhead in hot loop)
+    pub(crate) frame_count: usize,
 
     // Global register stack (unified stack architecture, like Lua 5.4)
     pub register_stack: Vec<LuaValue>,
@@ -91,6 +94,7 @@ impl LuaVM {
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
             frames: Vec::with_capacity(64), // Pre-allocate call stack for typical recursion depth
+            frame_count: 0,
             register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
             gc: GC::new(),
             return_values: Vec::with_capacity(16),
@@ -184,7 +188,7 @@ impl LuaVM {
             0,
         );
 
-        self.frames.push(frame);
+        self.push_frame(frame);
 
         // Execute
         let result = self.run()?;
@@ -192,6 +196,7 @@ impl LuaVM {
         // Clean up - clear stack used by this execution
         self.register_stack.clear();
         self.open_upvalues.clear();
+        self.frame_count = 0;
 
         Ok(result)
     }
@@ -201,6 +206,7 @@ impl LuaVM {
         // Clear previous state
         self.register_stack.clear();
         self.frames.clear();
+        self.frame_count = 0;
         self.open_upvalues.clear();
 
         // Get function from object pool
@@ -242,10 +248,13 @@ impl LuaVM {
         let frame =
             LuaCallFrame::new_lua_function(frame_id, func, code_ptr, base_ptr, max_stack, 0, 0);
 
-        self.frames.push(frame);
+        self.push_frame(frame);
 
         // Execute
         let result = self.run()?;
+        
+        // Clean up
+        self.frame_count = 0;
 
         Ok(result)
     }
@@ -266,24 +275,32 @@ impl LuaVM {
     }
 
     /// Main execution loop - interprets bytecode instructions
-    /// Main VM execution loop - MAXIMUM PERFORMANCE
+    /// Lua 5.4 style: CALL pushes frame, RETURN pops frame, loop continues
+    /// No recursion - pure state machine
     fn run(&mut self) -> LuaResult<LuaValue> {
-        // CRITICAL OPTIMIZATION: Check frames.is_empty() OUTSIDE the loop
-        // RETURN instruction will pop frames and check if empty
-        // This removes 100M+ unnecessary checks for tight loops
-        loop {
-            // ULTRA-FAST PATH: Direct unsafe access, no bounds checks
-            // Get frame_ptr ONCE and pass to dispatch to avoid repeated Vec lookups
-            let frame_ptr =
-                unsafe { self.frames.last_mut().unwrap_unchecked() as *mut LuaCallFrame };
+        // Pre-calculate frames pointer for direct indexing
+        // This avoids last_mut() overhead in the hot loop
+        
+        'mainloop: loop {
+            // CRITICAL: Use frame_count for direct indexing instead of last_mut()
+            // frame_count is updated by CALL (increment) and RETURN (decrement)
+            let frame_idx = self.frame_count - 1;
+            
+            // SAFETY: frame_count > 0 is guaranteed when we're in the loop
+            // CALL instruction ensures frame_count is incremented before pushing
+            // RETURN instruction sets frame_count = 0 when stack is empty and returns Exit
+            let frame_ptr = unsafe { 
+                self.frames.as_mut_ptr().add(frame_idx)
+            };
+            
             let instr = unsafe { (*frame_ptr).code_ptr.add((*frame_ptr).pc).read() };
             unsafe {
                 (*frame_ptr).pc += 1;
             }
 
-            // Use match with explicit Ok branch for better branch prediction hints
+            // Dispatch instruction
             match dispatch_instruction(self, instr, frame_ptr) {
-                Ok(()) => {}
+                Ok(()) => continue 'mainloop,
                 Err(LuaError::Exit) => return Ok(LuaValue::nil()),
                 Err(LuaError::Yield) => return Ok(LuaValue::nil()),
                 Err(e) => return Err(e),
@@ -291,15 +308,47 @@ impl LuaVM {
         }
     }
 
+    // ============ Frame Management (Lua 5.4 style) ============
+    
+    /// Push a new frame onto the call stack
+    /// Updates frame_count to maintain sync with frames Vec
+    #[inline(always)]
+    pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) {
+        self.frames.push(frame);
+        self.frame_count = self.frames.len();
+    }
+    
+    /// Pop the current frame from the call stack
+    /// Returns the popped frame, updates frame_count
+    #[inline(always)]
+    pub(crate) fn pop_frame(&mut self) -> Option<LuaCallFrame> {
+        let frame = self.frames.pop();
+        self.frame_count = self.frames.len();
+        frame
+    }
+    
+    /// Pop frame without returning it (slightly faster)
+    #[inline(always)]
+    pub(crate) fn pop_frame_discard(&mut self) {
+        self.frames.pop();
+        self.frame_count = self.frames.len();
+    }
+    
+    /// Check if call stack is empty
+    #[inline(always)]
+    pub(crate) fn frames_is_empty(&self) -> bool {
+        self.frame_count == 0
+    }
+
     // Helper methods
     #[inline(always)]
     pub(crate) fn current_frame(&self) -> &LuaCallFrame {
-        unsafe { self.frames.last().unwrap_unchecked() }
+        unsafe { self.frames.get_unchecked(self.frame_count - 1) }
     }
 
     #[inline(always)]
     pub(crate) fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
-        unsafe { self.frames.last_mut().unwrap_unchecked() }
+        unsafe { self.frames.get_unchecked_mut(self.frame_count - 1) }
     }
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
@@ -477,6 +526,8 @@ impl LuaVM {
 
         // Save current VM state
         let saved_frames = std::mem::take(&mut self.frames);
+        let saved_frame_count = self.frame_count;
+        self.frame_count = 0;  // frames is now empty
         let saved_stack = std::mem::take(&mut self.register_stack);
         let saved_returns = std::mem::take(&mut self.return_values);
         let saved_upvalues = std::mem::take(&mut self.open_upvalues);
@@ -499,6 +550,7 @@ impl LuaVM {
             };
             thread.status = CoroutineStatus::Running;
             self.frames = std::mem::take(&mut thread.frames);
+            self.frame_count = self.frames.len();  // CRITICAL: sync frame_count
             self.register_stack = std::mem::take(&mut thread.register_stack);
             self.return_values = std::mem::take(&mut thread.return_values);
             self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
@@ -575,7 +627,7 @@ impl LuaVM {
 
         // Check if thread yielded by examining the result
         let did_yield = match &result {
-            Ok(_) if !self.frames.is_empty() => {
+            Ok(_) if !self.frames_is_empty() => {
                 // If frames are not empty after execution, it means we yielded
                 true
             }
@@ -589,6 +641,7 @@ impl LuaVM {
                 return Err(self.error("invalid thread".to_string()));
             };
             thread.frames = std::mem::take(&mut self.frames);
+            self.frame_count = 0;  // frames is now empty
             thread.register_stack = std::mem::take(&mut self.register_stack);
             thread.return_values = std::mem::take(&mut self.return_values);
             thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
@@ -605,6 +658,7 @@ impl LuaVM {
                 return Err(self.error("invalid thread".to_string()));
             };
             thread.frames = std::mem::take(&mut self.frames);
+            self.frame_count = 0;  // frames is now empty
             thread.register_stack = std::mem::take(&mut self.register_stack);
             thread.return_values = std::mem::take(&mut self.return_values);
             thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
@@ -630,6 +684,7 @@ impl LuaVM {
 
         // Restore VM state
         self.frames = saved_frames;
+        self.frame_count = saved_frame_count;  // CRITICAL: restore frame_count
         self.register_stack = saved_stack;
         self.return_values = saved_returns;
         self.open_upvalues = saved_upvalues;
@@ -1746,13 +1801,13 @@ impl LuaVM {
                     1, // expect 1 result
                 );
 
-                self.frames.push(temp_frame);
+                self.push_frame(temp_frame);
 
                 // Execute the metamethod
                 let result = self.run()?;
 
                 // Store result in the target register
-                if !self.frames.is_empty() {
+                if !self.frames_is_empty() {
                     let frame = self.current_frame();
                     let base_ptr = frame.base_ptr;
                     self.set_register(base_ptr, result_reg, result);
@@ -1780,13 +1835,13 @@ impl LuaVM {
                     frame_id, metamethod, parent_pc, new_base, arg_count,
                 );
 
-                self.frames.push(temp_frame);
+                self.push_frame(temp_frame);
 
                 // Call the CFunction
                 let multi_result = cf(self)?;
 
                 // Pop temporary frame
-                self.frames.pop();
+                self.pop_frame_discard();
 
                 // Store result
                 let values = multi_result.all_values();
@@ -1932,7 +1987,7 @@ impl LuaVM {
 
                 // Now pop the frames
                 while self.frames.len() > initial_frame_count {
-                    self.frames.pop();
+                    self.pop_frame_discard();
                 }
 
                 // Return error - the actual message is stored in vm.error_message
@@ -1967,7 +2022,7 @@ impl LuaVM {
             Err(_) => {
                 // Clean up frames created by the failed function call
                 while self.frames.len() > initial_frame_count {
-                    let frame = self.frames.pop().unwrap();
+                    let frame = self.pop_frame().unwrap();
                     // Close upvalues belonging to this frame
                     self.close_upvalues_from(frame.base_ptr);
                 }
@@ -2073,7 +2128,7 @@ impl LuaVM {
                     usize::MAX,
                 );
 
-                self.frames.push(temp_frame);
+                self.push_frame(temp_frame);
 
                 // Call CFunction - ensure frame is always popped even on error
                 let result = match cfunc(self) {
@@ -2082,12 +2137,12 @@ impl LuaVM {
                         return Err(LuaError::Yield);
                     }
                     Err(e) => {
-                        self.frames.pop();
+                        self.pop_frame_discard();
                         return Err(e);
                     }
                 };
 
-                self.frames.pop();
+                self.pop_frame_discard();
 
                 Ok(result.all_values())
             }
@@ -2158,7 +2213,7 @@ impl LuaVM {
                 );
 
                 let initial_frame_count = self.frames.len();
-                self.frames.push(new_frame);
+                self.push_frame(new_frame);
 
                 // Execute instructions until frame returns
                 let exec_result: LuaResult<()> = loop {
@@ -2180,7 +2235,7 @@ impl LuaVM {
 
                     if pc >= chunk.code.len() {
                         // End of code
-                        self.frames.pop();
+                        self.pop_frame_discard();
                         break Ok(());
                     }
 
