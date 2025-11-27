@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
-use crate::lua_value::{LuaUpvalue, LuaValue, LuaValueKind, MultiValue};
+use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_basic_lib() -> LibraryModule {

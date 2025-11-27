@@ -1,7 +1,4 @@
-use crate::FunctionId;
-use crate::LuaFunction;
 use crate::LuaValue;
-use std::cell::RefCell;
 
 /// ULTRA-OPTIMIZED LuaCallFrame - 仿照原生 Lua 的 CallInfo 设计
 ///
@@ -92,19 +89,11 @@ impl LuaCallFrame {
         }
     }
 
-    /// 零开销获取函数指针 - 直接从 LuaValue.secondary 读取!
+    /// 获取函数 ID - 用于 ObjectPool 查找
     #[inline(always)]
-    pub fn get_function_ptr(&self) -> Option<*const RefCell<LuaFunction>> {
+    pub fn get_function_id(&self) -> Option<crate::gc::FunctionId> {
         if self.is_lua() {
-            self.function_value.as_function_ptr()
-        } else {
-            None
-        }
-    }
-
-    pub fn get_lua_function(&self) -> Option<&RefCell<LuaFunction>> {
-        if self.is_lua() {
-            self.function_value.as_lua_function()
+            self.function_value.as_function_id()
         } else {
             None
         }
@@ -130,10 +119,11 @@ impl LuaCallFrame {
     }
 
     /// 获取 FunctionId (需要时才调用)
-    #[inline(always)]
-    pub fn get_function_id(&self) -> Option<FunctionId> {
-        self.function_value.as_function_id()
-    }
+    // Note: already defined above, this is a duplicate - keeping the earlier definition
+    // #[inline(always)]
+    // pub fn get_function_id(&self) -> Option<FunctionId> {
+    //     self.function_value.as_function_id()
+    // }
 
     // === 类型转换辅助方法（零开销内联）===
 

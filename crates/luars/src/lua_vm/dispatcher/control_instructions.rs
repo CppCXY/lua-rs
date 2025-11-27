@@ -103,14 +103,16 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         // 零拷贝设计：callee 的栈空间可能与 caller 重叠
         // 需要保留 caller 需要的部分
         let caller_frame = vm.current_frame();
-        if let Some(func_ptr) = caller_frame.function_value.as_function_ptr() {
-            let caller_max_stack = unsafe { (*func_ptr).borrow().chunk.max_stack_size };
-            let caller_end = caller_frame.base_ptr + caller_max_stack;
+        if let Some(func_id) = caller_frame.function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                let caller_max_stack = func_ref.chunk.max_stack_size;
+                let caller_end = caller_frame.base_ptr + caller_max_stack;
 
-            // 保留返回值所需的空间
-            let needed_end = dest_end.max(caller_end);
-            if vm.register_stack.len() > needed_end {
-                vm.register_stack.truncate(needed_end);
+                // 保留返回值所需的空间
+                let needed_end = dest_end.max(caller_end);
+                if vm.register_stack.len() > needed_end {
+                    vm.register_stack.truncate(needed_end);
+                }
             }
         }
     }

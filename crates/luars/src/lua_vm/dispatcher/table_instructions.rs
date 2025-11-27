@@ -136,23 +136,23 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let table = vm.register_stack[base_ptr + b];
 
     // FAST PATH: Direct access for tables without metatable
-    if let Some(ptr) = table.as_table_ptr() {
-        let lua_table = unsafe { &*ptr };
-        let borrowed = lua_table.borrow();
-        let key = LuaValue::integer(c as i64);
-        
-        // Try raw_get which checks both array and hash parts
-        if let Some(val) = borrowed.raw_get(&key) {
-            if !val.is_nil() {
-                vm.register_stack[base_ptr + a] = val;
+    if let Some(table_id) = table.as_table_id() {
+        if let Some(lua_table) = vm.object_pool.get_table(table_id) {
+            let key = LuaValue::integer(c as i64);
+            
+            // Try raw_get which checks both array and hash parts
+            if let Some(val) = lua_table.raw_get(&key) {
+                if !val.is_nil() {
+                    vm.register_stack[base_ptr + a] = val;
+                    return Ok(());
+                }
+            }
+            
+            // Key not found - check if no metatable to skip metamethod handling
+            if lua_table.get_metatable().is_none() {
+                vm.register_stack[base_ptr + a] = LuaValue::nil();
                 return Ok(());
             }
-        }
-        
-        // Key not found - check if no metatable to skip metamethod handling
-        if borrowed.get_metatable().is_none() {
-            vm.register_stack[base_ptr + a] = LuaValue::nil();
-            return Ok(());
         }
     }
 
@@ -198,22 +198,22 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     // FAST PATH: Direct table access without metamethod check for common case
-    if let Some(ptr) = table_value.as_table_ptr() {
-        let lua_table = unsafe { &*ptr };
-        
+    if let Some(table_id) = table_value.as_table_id() {
         // Quick check: no metatable means no __newindex to worry about
-        let has_metatable = lua_table.borrow().get_metatable().is_some();
+        let has_metatable = vm.object_pool.get_table(table_id)
+            .map(|t| t.get_metatable().is_some())
+            .unwrap_or(false);
         
         if !has_metatable {
             // Ultra-fast path: direct set without any metamethod checks
-            lua_table.borrow_mut().raw_set(key_value.clone(), set_value.clone());
+            if let Some(lua_table) = vm.object_pool.get_table_mut(table_id) {
+                lua_table.raw_set(key_value.clone(), set_value.clone());
+            }
             
             // GC barrier - only for collectable values (like Lua)
             if crate::gc::GC::is_collectable(&set_value) {
-                if let Some(table_id) = table_value.as_table_id() {
-                    vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
-                    vm.gc.barrier_back(&set_value);
-                }
+                vm.gc.barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                vm.gc.barrier_back(&set_value);
             }
             return Ok(());
         }

@@ -1,5 +1,5 @@
-use crate::{LuaValue, lua_vm::LuaCallFrame};
 use crate::gc::UpvalueId;
+use crate::LuaValue;
 
 /// Lua Thread (coroutine)
 /// Each coroutine has its own call stack and register stack, independent from the main VM
@@ -8,7 +8,7 @@ pub struct LuaThread {
     pub status: CoroutineStatus,
 
     /// Independent call stack for this coroutine
-    pub frames: Vec<LuaCallFrame>,
+    pub frames: Vec<crate::lua_vm::LuaCallFrame>,
 
     /// Independent register stack for this coroutine
     pub register_stack: Vec<LuaValue>,
@@ -49,55 +49,7 @@ pub struct LuaThread {
     pub yield_call_nret: Option<usize>,
 }
 
-impl LuaThread {
-    /// Create a new suspended coroutine with a function to execute
-    pub fn new(function: LuaValue, max_stack_size: usize) -> Self {
-        let mut thread = LuaThread {
-            status: CoroutineStatus::Suspended,
-            frames: Vec::new(),
-            register_stack: Vec::with_capacity(max_stack_size.max(256)),
-            return_values: Vec::new(),
-            open_upvalues: Vec::new(),
-            next_frame_id: 0,
-            error_handler: None,
-            yield_values: Vec::new(),
-            resume_values: Vec::new(),
-            yield_pc: None,
-            yield_frame_id: None,
-            yield_call_reg: None,
-            yield_call_nret: None,
-        };
-
-        // Create initial stack space
-        thread
-            .register_stack
-            .resize(max_stack_size, LuaValue::nil());
-
-        // Get code pointer from function
-        let func_ptr = function
-            .as_function_ptr()
-            .expect("Thread function must be a Lua function");
-        let func_obj = unsafe { &*func_ptr };
-        let code_ptr = func_obj.borrow().chunk.code.as_ptr();
-
-        // Create initial call frame for the function
-        let frame = LuaCallFrame::new_lua_function(
-            0,        // frame_id
-            function, // function to execute
-            code_ptr, // code pointer
-            0,        // base_ptr
-            max_stack_size,
-            0, // result_reg
-            0, // num_results (will be set by caller)
-        );
-
-        thread.frames.push(frame);
-        thread.next_frame_id = 1;
-
-        thread
-    }
-
-    /// Check if this coroutine can be resumed
+impl LuaThread {    /// Check if this coroutine can be resumed
     pub fn can_resume(&self) -> bool {
         matches!(self.status, CoroutineStatus::Suspended)
     }

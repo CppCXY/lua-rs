@@ -9,8 +9,7 @@ use crate::gc::{GC, GcFunction, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
-    Chunk, CoroutineStatus, LuaFunction, LuaString, LuaTable, LuaThread, LuaUpvalue, LuaValue,
-    LuaValueKind,
+    Chunk, CoroutineStatus, LuaString, LuaTable, LuaThread, LuaValue, LuaValueKind,
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;

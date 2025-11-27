@@ -117,11 +117,9 @@ fn lua_value_to_string(value: &LuaValue) -> String {
     } else if let Some(n) = value.as_number() {
         n.to_string()
     } else if value.is_string() {
-        if let Some(s) = value.as_lua_string() {
-            s.as_str().to_string()
-        } else {
-            "[string]".to_string()
-        }
+        // Note: Without access to VM's object_pool, we can't resolve string content
+        // This is a limitation - WASM wrapper should use VM methods for string conversion
+        "[string]".to_string()
     } else if value.is_table() {
         "table".to_string()
     } else if value.is_function() || value.is_cfunction() {
@@ -144,11 +142,8 @@ fn lua_value_to_js(value: &LuaValue) -> Result<JsValue, JsValue> {
     } else if let Some(n) = value.as_number() {
         Ok(JsValue::from_f64(n))
     } else if value.is_string() {
-        if let Some(s) = value.as_lua_string() {
-            Ok(JsValue::from_str(s.as_str()))
-        } else {
-            Ok(JsValue::from_str("[string]"))
-        }
+        // Note: Without access to VM's object_pool, we can't resolve string content
+        Ok(JsValue::from_str("[string]"))
     } else if value.is_table() {
         // For tables, we'll convert to a simple object representation
         Ok(JsValue::from_str("[Lua Table]"))

@@ -915,7 +915,8 @@ fn gsub_with_function(
                     if !success {
                         let error_msg = results
                             .first()
-                            .and_then(|v| v.as_lua_string())
+                            .and_then(|v| v.as_string_id())
+                            .and_then(|id| vm.object_pool.get_string(id))
                             .map(|s| s.as_str().to_string())
                             .unwrap_or_else(|| "unknown error".to_string());
                         return Err(vm.error(error_msg));
@@ -926,8 +927,10 @@ fn gsub_with_function(
 
                     if replacement.is_string() {
                         // Use the returned string
-                        if let Some(repl_str) = replacement.as_lua_string() {
-                            result.push_str(repl_str.as_str());
+                        if let Some(repl_id) = replacement.as_string_id() {
+                            if let Some(repl_str) = vm.object_pool.get_string(repl_id) {
+                                result.push_str(repl_str.as_str());
+                            }
                         }
                     } else if !replacement.is_nil() && !replacement.is_boolean() {
                         // Convert to string (numbers, etc)
@@ -994,8 +997,10 @@ fn gsub_with_table(
 
             if replacement.is_string() {
                 // Use the value from table
-                if let Some(repl_str) = replacement.as_lua_string() {
-                    result.push_str(repl_str.as_str());
+                if let Some(repl_id) = replacement.as_string_id() {
+                    if let Some(repl_str) = vm.object_pool.get_string(repl_id) {
+                        result.push_str(repl_str.as_str());
+                    }
                 }
             } else if !replacement.is_nil() && !replacement.is_boolean() {
                 // Convert to string

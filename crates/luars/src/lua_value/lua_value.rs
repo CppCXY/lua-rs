@@ -432,105 +432,16 @@ impl LuaValue {
         }
     }
 
-    // ============ DEPRECATED: Compatibility methods ============
-    // These methods exist for migration purposes only.
-    // They will panic or return None - use ObjectPool instead!
-
-    #[deprecated(note = "Use as_function_id() and ObjectPool instead")]
-    #[inline(always)]
-    pub fn as_function_ptr(&self) -> Option<*const std::cell::RefCell<crate::lua_value::LuaFunction>> {
-        // In new architecture, pointers are not cached
-        // Return None - caller should use as_function_id() + ObjectPool
-        None
-    }
-
-    #[deprecated(note = "Use as_table_id() and ObjectPool instead")]
-    #[inline(always)]
-    pub fn as_table_ptr(&self) -> Option<*const std::cell::RefCell<crate::lua_value::LuaTable>> {
-        None
-    }
-
-    #[deprecated(note = "Use as_string_id() and ObjectPool instead")]
-    #[inline(always)]
-    pub fn as_lua_string(&self) -> Option<&crate::lua_value::LuaString> {
-        None
-    }
-
-    #[deprecated(note = "Use as_table_id() and ObjectPool instead")]
-    #[inline(always)]
-    pub fn as_lua_table(&self) -> Option<&std::cell::RefCell<crate::lua_value::LuaTable>> {
-        None
-    }
-
-    #[deprecated(note = "Use as_function_id() and ObjectPool instead")]
-    #[inline(always)]
-    pub fn as_lua_function(&self) -> Option<&std::cell::RefCell<crate::lua_value::LuaFunction>> {
-        None
-    }
-
-    #[deprecated(note = "Use as_string_id() and ObjectPool instead")]
-    #[inline(always)]
-    pub fn to_str(&self) -> Option<&str> {
-        None
-    }
-
-    #[deprecated(note = "Use LuaValue::string(StringId) instead")]
-    #[inline(always)]
-    pub fn string_id_ptr(_id: StringId, _ptr: *const crate::lua_value::LuaString) -> Self {
-        panic!("string_id_ptr is deprecated - use LuaValue::string(StringId) instead")
-    }
-
-    #[deprecated(note = "Use LuaValue::table(TableId) instead")]
-    #[inline(always)]
-    pub fn table_id_ptr(_id: TableId, _ptr: *const std::cell::RefCell<crate::lua_value::LuaTable>) -> Self {
-        panic!("table_id_ptr is deprecated - use LuaValue::table(TableId) instead")
-    }
-
-    #[deprecated(note = "Use LuaValue::function(FunctionId) instead")]
-    #[inline(always)]
-    pub fn function_id_ptr(_id: FunctionId, _ptr: *const std::cell::RefCell<crate::lua_value::LuaFunction>) -> Self {
-        panic!("function_id_ptr is deprecated - use LuaValue::function(FunctionId) instead")
-    }
-
-    #[deprecated(note = "Use LuaValue::userdata(UserdataId) instead")]
-    #[inline(always)]
-    pub fn userdata_id_ptr(_id: UserdataId, _ptr: *const std::cell::RefCell<crate::lua_value::LuaUserdata>) -> Self {
-        panic!("userdata_id_ptr is deprecated - use LuaValue::userdata(UserdataId) instead")
-    }
-
-    /// Raw primary value access (for compatibility)
+    /// Raw primary value access (for advanced use cases)
     #[inline(always)]
     pub fn primary(&self) -> u64 {
         self.primary
     }
 
-    /// Raw secondary value access (for compatibility)
+    /// Raw secondary value access (for advanced use cases)
     #[inline(always)]
     pub fn secondary(&self) -> u64 {
         self.secondary
-    }
-
-    #[deprecated(note = "Use ObjectPool to convert value to string")]
-    pub fn to_string_repr(&self) -> String {
-        format!("{:?}", self)
-    }
-
-    #[deprecated(note = "Use as_string_id() and ObjectPool instead")]
-    #[inline(always)]
-    pub unsafe fn as_string(&self) -> Option<&crate::lua_value::LuaString> {
-        None
-    }
-
-    #[deprecated(note = "Use new coroutine architecture")]
-    #[inline(always)]
-    pub fn thread_ptr(_ptr: *const std::cell::RefCell<crate::lua_value::LuaThread>) -> Self {
-        panic!("thread_ptr is deprecated")
-    }
-
-    #[deprecated(note = "Use new coroutine architecture")]
-    #[inline(always)]
-    pub unsafe fn as_thread_ptr(&self) -> Option<*const std::cell::RefCell<crate::lua_value::LuaThread>> {
-        None
     }
 }
 

@@ -3,10 +3,9 @@
 // Young generation: frequently collected, most objects die young
 // Old generation: rarely collected, long-lived objects
 mod object_pool;
-mod object_pool_v2;
 
 // Use ObjectPoolV2 as the main ObjectPool
-pub use object_pool_v2::{
+pub use object_pool::{
     ObjectPoolV2 as ObjectPool,
     StringId, TableId, FunctionId, UpvalueId, UserdataId, ThreadId,
     Arena, GcHeader, GcTable, GcFunction, GcUpvalue, GcString, GcThread, UpvalueState,
