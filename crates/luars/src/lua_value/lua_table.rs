@@ -51,7 +51,18 @@ pub struct LuaTable {
 
 impl LuaTable {
     /// Create an empty table
+    #[inline(always)]
     pub fn new(array_size: usize, hash_size: usize) -> Self {
+        // FAST PATH: Most common case is empty table
+        if array_size == 0 && hash_size == 0 {
+            return LuaTable {
+                array: Vec::new(),
+                nodes: Vec::new(),
+                hash_size: 0,
+                metatable: None,
+            };
+        }
+
         // Hash size must be power of 2 for fast modulo using & (size-1)
         let actual_hash_size = if hash_size > 0 {
             hash_size.next_power_of_two()
@@ -85,7 +96,7 @@ impl LuaTable {
         // Use XOR of both words for good distribution
         // This is faster than type-checking and works for all value types
         let raw = key.primary ^ key.secondary;
-        
+
         // Simple but effective mixing (from FxHash)
         let hash = raw.wrapping_mul(0x517cc1b727220a95);
 
@@ -100,10 +111,10 @@ impl LuaTable {
         if size == 0 {
             return None;
         }
-        
+
         let mut idx = Self::hash_key(key, size);
         let start_idx = idx;
-        
+
         // Fast path: check first slot (no collision case - most common)
         let node = unsafe { self.nodes.get_unchecked(idx) };
         if node.is_empty() {
@@ -112,15 +123,15 @@ impl LuaTable {
         if node.key == *key {
             return Some(idx);
         }
-        
+
         // Collision path: linear probe
         loop {
             idx = (idx + 1) & (size - 1);
-            
+
             if idx == start_idx {
                 return None;
             }
-            
+
             let node = unsafe { self.nodes.get_unchecked(idx) };
             if node.is_empty() {
                 return None;
@@ -158,9 +169,9 @@ impl LuaTable {
     fn insert_node_simple(&mut self, key: LuaValue, value: LuaValue) {
         let size = self.nodes.len();
         debug_assert!(size > 0, "insert_node_simple called with empty nodes");
-        
+
         let mut idx = Self::hash_key(&key, size);
-        
+
         // Fast path: first slot is empty (common case)
         let node = unsafe { self.nodes.get_unchecked(idx) };
         if node.is_empty() {
@@ -172,7 +183,7 @@ impl LuaTable {
             self.nodes[idx].value = value;
             return;
         }
-        
+
         // Collision path
         let start_idx = idx;
         loop {

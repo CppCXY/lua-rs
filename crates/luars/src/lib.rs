@@ -14,17 +14,14 @@ pub mod lua_async;
 pub mod lua_pattern;
 pub mod lua_value;
 pub mod lua_vm;
-pub mod object_pool;
 pub mod stdlib;
-
 pub use compiler::Compiler;
 #[cfg(feature = "loadlib")]
 pub use ffi::FFIState;
-pub use gc::GC;
+pub use gc::*;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
 pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
-pub use object_pool::*;
 use std::rc::Rc;
 
 /// Main entry point for executing Lua code

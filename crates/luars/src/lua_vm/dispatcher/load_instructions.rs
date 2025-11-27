@@ -15,12 +15,14 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let base_ptr = frame.base_ptr;
     let top = frame.top;
 
-    // Get max_stack_size from the function
-    let max_stack_size = if let Some(func_ref) = frame.function_value.as_lua_function() {
-        func_ref.borrow().chunk.max_stack_size
-    } else {
+    // Get max_stack_size from the function using new ObjectPool API
+    let Some(func_id) = frame.function_value.as_function_id() else {
         return Err(vm.error("Invalid function in VARARGPREP".to_string()));
     };
+    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("Invalid function ID in VARARGPREP".to_string()));
+    };
+    let max_stack_size = func_ref.chunk.max_stack_size;
 
     // Arguments were placed starting at base_ptr by CALL instruction
     // Fixed parameters are at base_ptr + 0 to base_ptr + a - 1
@@ -137,18 +139,21 @@ pub fn exec_loadk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let bx = Instruction::get_bx(instr) as usize;
 
     let frame = vm.current_frame();
-    let Some(func_ref) = frame.get_lua_function() else {
+    let base_ptr = frame.base_ptr;
+    let Some(func_id) = frame.function_value.as_function_id() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
 
-    let len = func_ref.borrow().chunk.constants.len();
+    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("Invalid function ID".to_string()));
+    };
+
+    let len = func_ref.chunk.constants.len();
     if bx >= len {
         return Err(vm.error(format!("Constant index out of bounds: {} >= {}", bx, len)));
     }
 
-    let constant = func_ref.borrow().chunk.constants[bx];
-    let base_ptr = frame.base_ptr;
-
+    let constant = func_ref.chunk.constants[bx];
     vm.register_stack[base_ptr + a] = constant;
 
     Ok(())
@@ -163,20 +168,25 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     let frame = vm.current_frame_mut();
     let pc = frame.pc;
     frame.pc += 1; // Skip the extra arg instruction
+    let func_id = frame.function_value.as_function_id();
+    let base_ptr = frame.base_ptr;
 
-    let Some(func_ref) = frame.get_lua_function() else {
+    let Some(func_id) = func_id else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
 
-    let code_len = func_ref.borrow().chunk.code.len();
+    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("Invalid function ID".to_string()));
+    };
 
+    let code_len = func_ref.chunk.code.len();
     if pc >= code_len {
         return Err(vm.error("Missing EXTRAARG for LOADKX".to_string()));
     }
 
-    let extra_instr = func_ref.borrow().chunk.code[pc];
+    let extra_instr = func_ref.chunk.code[pc];
     let bx = Instruction::get_ax(extra_instr) as usize;
-    let const_len = func_ref.borrow().chunk.constants.len();
+    let const_len = func_ref.chunk.constants.len();
     if bx >= const_len {
         return Err(vm.error(format!(
             "Constant index out of bounds: {} >= {}",
@@ -184,9 +194,7 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         )));
     }
 
-    let constant = func_ref.borrow().chunk.constants[bx];
-    let base_ptr = vm.current_frame().base_ptr;
-
+    let constant = func_ref.chunk.constants[bx];
     vm.register_stack[base_ptr + a] = constant;
 
     Ok(())

@@ -1,9 +1,9 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 
-use crate::lib_registry::{LibraryModule, get_args};
+use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::{LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{LuaResult, LuaVM};
 use std::io::{self, BufRead, Write};
 
 mod file;
@@ -26,16 +26,12 @@ fn io_write(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let args = get_args(vm);
 
     for arg in args {
-        unsafe {
-            if let Some(s) = arg.as_string() {
-                print!("{}", s.as_str());
-            } else if let Some(n) = arg.as_number() {
-                print!("{}", n);
-            } else {
-                return Err(LuaError::RuntimeError(
-                    "bad argument to 'write' (string or number expected)".to_string(),
-                ));
-            }
+        if let Some(s) = vm.get_string(&arg) {
+            print!("{}", s.as_str());
+        } else if let Some(n) = arg.as_number() {
+            print!("{}", n);
+        } else {
+            return Err(vm.error("bad argument to 'write' (string or number expected)"));
         }
     }
 
@@ -44,14 +40,14 @@ fn io_write(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// io.read([format]) - Read from stdin
 fn io_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let format = crate::lib_registry::get_arg(vm, 0);
+    let format = get_arg(vm, 1);
 
     let stdin = io::stdin();
     let mut handle = stdin.lock();
 
     // Default to "*l" (read line)
     let format_str = format
-        .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "*l".to_string());
 
     match format_str.as_str() {
@@ -70,7 +66,7 @@ fn io_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     }
                     Ok(MultiValue::single(vm.create_string(&line)))
                 }
-                Err(e) => Err(LuaError::RuntimeError(format!("read error: {}", e))),
+                Err(e) => Err(vm.error(format!("read error: {}", e))),
             }
         }
         "*a" => {
@@ -78,7 +74,7 @@ fn io_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let mut content = String::new();
             match io::Read::read_to_string(&mut handle, &mut content) {
                 Ok(_) => Ok(MultiValue::single(vm.create_string(&content))),
-                Err(e) => Err(LuaError::RuntimeError(format!("read error: {}", e))),
+                Err(e) => Err(vm.error(format!("read error: {}", e))),
             }
         }
         "*n" => {
@@ -96,7 +92,7 @@ fn io_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         Ok(MultiValue::single(LuaValue::nil()))
                     }
                 }
-                Err(e) => Err(LuaError::RuntimeError(format!("read error: {}", e))),
+                Err(e) => Err(vm.error(format!("read error: {}", e))),
             }
         }
         _ => {
@@ -111,10 +107,10 @@ fn io_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                             vm.create_string(&String::from_utf8_lossy(&buffer)),
                         ))
                     }
-                    Err(e) => Err(LuaError::RuntimeError(format!("read error: {}", e))),
+                    Err(e) => Err(vm.error(format!("read error: {}", e))),
                 }
             } else {
-                Err(LuaError::RuntimeError(format!(
+                Err(vm.error(format!(
                     "bad argument to 'read' (invalid format '{}')",
                     format_str
                 )))
@@ -131,24 +127,23 @@ fn io_flush(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// io.open(filename [, mode]) - Open a file
 fn io_open(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    use crate::lib_registry::{get_arg, require_arg};
-
     let filename_val = require_arg(vm, 1, "io.open")?;
-    let filename = filename_val.as_lua_string().ok_or_else(|| {
-        LuaError::RuntimeError("bad argument #1 to 'io.open' (string expected)".to_string())
-    })?;
+    let filename_str = match vm.get_string(&filename_val) {
+        Some(s) => s.as_str().to_string(),
+        None => return Err(vm.error("bad argument #1 to 'io.open' (string expected)")),
+    };
 
-    let mode_str = get_arg(vm, 1)
-        .and_then(|v| v.as_lua_string().map(|s| s.as_str().to_string()))
+    let mode_str = get_arg(vm, 2)
+        .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "r".to_string());
     let mode = mode_str.as_str();
 
     let file_result = match mode {
-        "r" => LuaFile::open_read(filename.as_str()),
-        "w" => LuaFile::open_write(filename.as_str()),
-        "a" => LuaFile::open_append(filename.as_str()),
-        "r+" | "w+" | "a+" => LuaFile::open_readwrite(filename.as_str()),
-        _ => return Err(LuaError::RuntimeError(format!("invalid mode: {}", mode))),
+        "r" => LuaFile::open_read(&filename_str),
+        "w" => LuaFile::open_write(&filename_str),
+        "a" => LuaFile::open_append(&filename_str),
+        "r+" | "w+" | "a+" => LuaFile::open_readwrite(&filename_str),
+        _ => return Err(vm.error(format!("invalid mode: {}", mode))),
     };
 
     match file_result {
@@ -163,7 +158,7 @@ fn io_open(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             // Set metatable
             if let Some(ud_id) = userdata.as_userdata_id() {
                 if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
-                    ud.borrow_mut().set_metatable(file_mt);
+                    ud.set_metatable(file_mt);
                 }
             }
 
@@ -180,25 +175,19 @@ fn io_open(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// io.lines([filename]) - Return iterator for lines
-fn io_lines(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn io_lines(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub: would need to return an iterator function
-    Err(LuaError::RuntimeError(
-        "io.lines not yet implemented".to_string(),
-    ))
+    Err(vm.error("io.lines not yet implemented"))
 }
 
 /// io.input([file]) - Set or get default input file
-fn io_input(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn io_input(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub: would need file handle support
-    Err(LuaError::RuntimeError(
-        "io.input not yet implemented".to_string(),
-    ))
+    Err(vm.error("io.input not yet implemented"))
 }
 
 /// io.output([file]) - Set or get default output file
-fn io_output(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn io_output(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub: would need file handle support
-    Err(LuaError::RuntimeError(
-        "io.output not yet implemented".to_string(),
-    ))
+    Err(vm.error("io.output not yet implemented"))
 }

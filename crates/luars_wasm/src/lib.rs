@@ -34,7 +34,7 @@ impl LuaWasm {
         let mut vm = self.vm.borrow_mut();
 
         match vm.execute_string(code) {
-            Ok(result) => Ok(lua_value_to_string(&result)),
+            Ok(result) => Ok(vm.value_to_string_raw(&result)),
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
         }
     }
@@ -44,7 +44,7 @@ impl LuaWasm {
     pub fn set_global(&self, name: &str, value: JsValue) -> Result<(), JsValue> {
         let mut vm = self.vm.borrow_mut();
         let lua_value =
-            js_value_to_lua(&value).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+            js_value_to_lua(&mut vm, &value).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         vm.set_global(name, lua_value);
         Ok(())
     }
@@ -54,7 +54,7 @@ impl LuaWasm {
     pub fn get_global(&self, name: &str) -> Result<JsValue, JsValue> {
         let mut vm = self.vm.borrow_mut();
         if let Some(lua_value) = vm.get_global(name) {
-            lua_value_to_js(&lua_value)
+            lua_value_to_js(&vm, &lua_value)
         } else {
             Ok(JsValue::NULL)
         }
@@ -68,7 +68,7 @@ impl LuaWasm {
 
         match vm.compile(&code) {
             Ok(chunk) => match vm.execute(Rc::new(chunk)) {
-                Ok(value) => lua_value_to_js(&value),
+                Ok(value) => lua_value_to_js(&vm, &value),
                 Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
             },
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
@@ -106,35 +106,8 @@ impl LuaWasm {
     }
 }
 
-/// Convert Lua value to string representation
-fn lua_value_to_string(value: &LuaValue) -> String {
-    if value.is_nil() {
-        "nil".to_string()
-    } else if let Some(b) = value.as_bool() {
-        b.to_string()
-    } else if let Some(i) = value.as_integer() {
-        i.to_string()
-    } else if let Some(n) = value.as_number() {
-        n.to_string()
-    } else if value.is_string() {
-        if let Some(s) = value.as_lua_string() {
-            s.as_str().to_string()
-        } else {
-            "[string]".to_string()
-        }
-    } else if value.is_table() {
-        "table".to_string()
-    } else if value.is_function() || value.is_cfunction() {
-        "function".to_string()
-    } else if value.is_thread() {
-        "thread".to_string()
-    } else {
-        format!("{:?}", value)
-    }
-}
-
 /// Convert Lua value to JavaScript value
-fn lua_value_to_js(value: &LuaValue) -> Result<JsValue, JsValue> {
+fn lua_value_to_js(vm: &LuaVM, value: &LuaValue) -> Result<JsValue, JsValue> {
     if value.is_nil() {
         Ok(JsValue::NULL)
     } else if let Some(b) = value.as_bool() {
@@ -144,14 +117,15 @@ fn lua_value_to_js(value: &LuaValue) -> Result<JsValue, JsValue> {
     } else if let Some(n) = value.as_number() {
         Ok(JsValue::from_f64(n))
     } else if value.is_string() {
-        if let Some(s) = value.as_lua_string() {
-            Ok(JsValue::from_str(s.as_str()))
+        // Use VM's value_as_string to properly resolve the string
+        if let Some(s) = vm.value_as_string(value) {
+            Ok(JsValue::from_str(&s))
         } else {
-            Ok(JsValue::from_str("[string]"))
+            Ok(JsValue::from_str("[invalid string]"))
         }
     } else if value.is_table() {
         // For tables, we'll convert to a simple object representation
-        Ok(JsValue::from_str("[Lua Table]"))
+        Ok(JsValue::from_str(&vm.value_to_string_raw(value)))
     } else if value.is_function() || value.is_cfunction() {
         Ok(JsValue::from_str("[Lua Function]"))
     } else if value.is_thread() {
@@ -162,7 +136,7 @@ fn lua_value_to_js(value: &LuaValue) -> Result<JsValue, JsValue> {
 }
 
 /// Convert JavaScript value to Lua value
-fn js_value_to_lua(value: &JsValue) -> Result<LuaValue, luars::lua_vm::LuaError> {
+fn js_value_to_lua(vm: &mut LuaVM, value: &JsValue) -> Result<LuaValue, luars::lua_vm::LuaError> {
     if value.is_null() || value.is_undefined() {
         Ok(LuaValue::nil())
     } else if let Some(b) = value.as_bool() {
@@ -173,12 +147,11 @@ fn js_value_to_lua(value: &JsValue) -> Result<LuaValue, luars::lua_vm::LuaError>
         } else {
             Ok(LuaValue::number(n))
         }
-    } else if let Some(_s) = value.as_string() {
-        // String values - for now just return nil
-        // We would need access to the VM's string pool to properly create strings
-        Ok(LuaValue::nil())
+    } else if let Some(s) = value.as_string() {
+        // Use VM's create_string to properly create a string in the object pool
+        Ok(vm.create_string(&s))
     } else {
-        // For complex objects
+        // For complex objects, return nil
         Ok(LuaValue::nil())
     }
 }
