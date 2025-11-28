@@ -7,9 +7,12 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
 /// VARARGPREP A
 /// Prepare stack for vararg function
 /// A is the number of fixed parameters
+///
+/// This instruction moves vararg arguments to a safe location after max_stack_size,
+/// so they won't be overwritten by local variable operations.
 #[inline(always)]
 pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
-    let a = Instruction::get_a(instr) as usize;
+    let a = Instruction::get_a(instr) as usize; // number of fixed params
 
     let frame_idx = vm.frames.len() - 1;
     let frame = &vm.frames[frame_idx];
@@ -28,24 +31,38 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame)
     // Arguments were placed starting at base_ptr by CALL instruction
     // Fixed parameters are at base_ptr + 0 to base_ptr + a - 1
     // Extra arguments (varargs) are at base_ptr + a to base_ptr + top - 1
-    // We need to move the varargs to base_ptr + max_stack_size
+    // We need to move the varargs to base_ptr + max_stack_size to protect them
+    // from being overwritten by local variable operations
 
     if top > a {
         let vararg_count = top - a;
         let vararg_dest = base_ptr + max_stack_size;
 
         // Ensure we have enough space for the varargs
-        vm.ensure_stack_capacity(vararg_dest + vararg_count);
+        let required_size = vararg_dest + vararg_count;
+        vm.ensure_stack_capacity(required_size);
 
         // Move varargs from base_ptr + a to base_ptr + max_stack_size
-        for i in 0..vararg_count {
-            vm.register_stack[vararg_dest + i] = vm.register_stack[base_ptr + a + i].clone();
+        // Copy in reverse order in case source and destination overlap
+        for i in (0..vararg_count).rev() {
+            vm.register_stack[vararg_dest + i] = vm.register_stack[base_ptr + a + i];
         }
 
+        // Set vararg info in frame
         vm.frames[frame_idx].set_vararg(vararg_dest, vararg_count);
     } else {
+        // No varargs passed
         vm.frames[frame_idx].set_vararg(base_ptr + max_stack_size, 0);
     }
+
+    // Initialize local variables (registers from 0 to max_stack_size) with nil
+    // But preserve fixed parameters (0..a)
+    for i in a..max_stack_size {
+        if base_ptr + i < vm.register_stack.len() {
+            vm.register_stack[base_ptr + i] = LuaValue::nil();
+        }
+    }
+
     let _ = frame_ptr; // Unused but kept for API consistency
 }
 

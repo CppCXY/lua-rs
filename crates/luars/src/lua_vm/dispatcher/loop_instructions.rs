@@ -43,25 +43,25 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
             *reg_base.add(3) = LuaValue::integer(init_i);
 
             // Calculate loop count using i64 arithmetic (avoid i128!)
-            // Lua 5.4 style: use saturating arithmetic to avoid overflow
+            // Lua 5.4 style: count = floor((limit - init) / step) + 1 if will execute
             let count: u64 = if step_i > 0 {
                 // Ascending loop
-                if limit_i < init_i {
-                    0
+                if init_i > limit_i {
+                    0  // Won't execute at all
                 } else {
-                    // (limit - init) / step, using unsigned division
-                    let diff = (limit_i as u64).wrapping_sub(init_i as u64);
-                    diff / (step_i as u64)
+                    // (limit - init) / step + 1, using unsigned division
+                    let diff = (limit_i - init_i) as u64;
+                    diff / (step_i as u64) + 1
                 }
             } else {
-                // Descending loop
+                // Descending loop (step < 0)
                 if init_i < limit_i {
-                    0
+                    0  // Won't execute at all
                 } else {
-                    // (init - limit) / (-step)
-                    let diff = (init_i as u64).wrapping_sub(limit_i as u64);
-                    let neg_step = (-(step_i as i64)) as u64;
-                    diff / neg_step
+                    // (init - limit) / (-step) + 1
+                    let diff = (init_i - limit_i) as u64;
+                    let neg_step = (-step_i) as u64;
+                    diff / neg_step + 1
                 }
             };
 
@@ -69,8 +69,11 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
                 // Skip the entire loop body and FORLOOP
                 (*frame_ptr).pc += bx;
             } else {
-                // Store count in R[A+1] (replacing limit)
-                *reg_base.add(1) = LuaValue::integer(count as i64);
+                // Store count-1 in R[A+1] (we'll execute count times, counter starts at count-1)
+                // because we already set R[A+3] = init for the first iteration
+                *reg_base.add(1) = LuaValue::integer((count - 1) as i64);
+                // Set R[A] = init (internal index starts at init)
+                *reg_base = LuaValue::integer(init_i);
             }
         } else {
             // Float loop - convert to f64
@@ -246,7 +249,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let (base_ptr, func_value, current_pc) = unsafe {
+    let (base_ptr, _func_value, _current_pc) = unsafe {
         ((*frame_ptr).base_ptr, (*frame_ptr).function_value, (*frame_ptr).pc)
     };
 
@@ -263,22 +266,16 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
                 return Err(vm.error("Invalid CFunction".to_string()));
             };
 
-            // Create temporary frame for the call
-            let frame_id = vm.next_frame_id;
-            vm.next_frame_id += 1;
-
             // Set up call stack: func, state, control
             let call_base = base_ptr + a + 3;
             vm.register_stack[call_base] = func;
             vm.register_stack[call_base + 1] = state;
             vm.register_stack[call_base + 2] = control;
 
+            // Create temporary frame for the call
             let temp_frame = LuaCallFrame::new_c_function(
-                frame_id,
-                func_value,
-                current_pc,
                 call_base,
-                3, // func + 2 args
+                3, // func + 2 args (top)
             );
 
             vm.push_frame(temp_frame);
@@ -313,9 +310,6 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             let max_stack_size = func_ref.chunk.max_stack_size;
             let code_ptr = func_ref.chunk.code.as_ptr();
 
-            let frame_id = vm.next_frame_id;
-            vm.next_frame_id += 1;
-
             let call_base = vm.register_stack.len();
             vm.ensure_stack_capacity(call_base + max_stack_size);
 
@@ -328,14 +322,15 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             vm.register_stack[call_base] = state;
             vm.register_stack[call_base + 1] = control;
 
+            // Create new frame with correct nresults type
+            let nresults = (c + 1) as i16;
             let new_frame = LuaCallFrame::new_lua_function(
-                frame_id,
                 func,
                 code_ptr,
                 call_base,
-                max_stack_size,
-                a + 3, // result goes to R[A+3]
-                c + 1, // expecting c+1 results
+                max_stack_size,  // top = max_stack_size (we initialized this many registers)
+                a + 3,           // result goes to R[A+3]
+                nresults,        // expecting c+1 results
             );
 
             vm.push_frame(new_frame);

@@ -460,7 +460,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             OpCode::Vararg => {
-                exec_vararg(vm, instr, frame_ptr);
+                if let Err(e) = exec_vararg(vm, instr, frame_ptr) {
+                    return Err(e);
+                }
                 continue 'mainloop;
             }
             OpCode::SetList => {

@@ -129,17 +129,23 @@ pub struct LuaUpvalue {
 #[derive(Debug)]
 enum UpvalueState {
     Open {
-        frame_id: usize, // Which call frame owns this variable
-        register: usize, // Register index in that frame
+        stack_index: usize, // Absolute index in register_stack
     },
     Closed(LuaValue), // Value moved to heap after frame exits
 }
 
 impl LuaUpvalue {
-    /// Create an open upvalue pointing to a stack location
-    pub fn new_open(frame_id: usize, register: usize) -> Rc<Self> {
+    /// Create an open upvalue pointing to a stack location (absolute index)
+    pub fn new_open(stack_index: usize) -> Rc<Self> {
         Rc::new(LuaUpvalue {
-            value: RefCell::new(UpvalueState::Open { frame_id, register }),
+            value: RefCell::new(UpvalueState::Open { stack_index }),
+        })
+    }
+
+    /// Create an open upvalue with frame base + register (computes absolute index)
+    pub fn new_open_relative(base_ptr: usize, register: usize) -> Rc<Self> {
+        Rc::new(LuaUpvalue {
+            value: RefCell::new(UpvalueState::Open { stack_index: base_ptr + register }),
         })
     }
 
@@ -155,14 +161,19 @@ impl LuaUpvalue {
         matches!(*self.value.borrow(), UpvalueState::Open { .. })
     }
 
-    /// Check if this upvalue points to a specific stack location
-    pub fn points_to(&self, frame_id: usize, register: usize) -> bool {
+    /// Check if this upvalue points to a specific stack location (absolute index)
+    pub fn points_to_index(&self, index: usize) -> bool {
         match *self.value.borrow() {
-            UpvalueState::Open {
-                frame_id: fid,
-                register: reg,
-            } => fid == frame_id && reg == register,
+            UpvalueState::Open { stack_index } => stack_index == index,
             _ => false,
+        }
+    }
+
+    /// Get the stack index if open (for comparison during close)
+    pub fn get_stack_index(&self) -> Option<usize> {
+        match *self.value.borrow() {
+            UpvalueState::Open { stack_index } => Some(stack_index),
+            _ => None,
         }
     }
 
@@ -174,56 +185,39 @@ impl LuaUpvalue {
         }
     }
 
-    /// Get the value (requires VM to read from stack if open)
+    /// Get the value (requires register_stack if open)
     pub fn get_value(
         &self,
-        frames: &[crate::lua_vm::LuaCallFrame],
         register_stack: &[LuaValue],
     ) -> LuaValue {
         let state = self.value.borrow();
         match *state {
-            UpvalueState::Open { frame_id, register } => {
-                // Release the borrow before accessing frames
-                drop(state);
-                // Find the frame and read the register from global stack
-                if let Some(frame) = frames.iter().find(|f| f.frame_id == frame_id) {
-                    // Don't check against frame.top, as it might be 0 for functions called with no args
-                    // Instead, just validate the absolute index is within the stack
-                    let index = frame.base_ptr + register;
-                    if index < register_stack.len() {
-                        return register_stack[index];
-                    }
+            UpvalueState::Open { stack_index } => {
+                if stack_index < register_stack.len() {
+                    register_stack[stack_index]
+                } else {
+                    LuaValue::nil()
                 }
-                LuaValue::nil()
             }
             UpvalueState::Closed(ref val) => val.clone(),
         }
     }
 
-    /// Set the value (requires VM to write to stack if open)
+    /// Set the value (requires register_stack if open)
     pub fn set_value(
         &self,
-        frames: &mut [crate::lua_vm::LuaCallFrame],
         register_stack: &mut [LuaValue],
         value: LuaValue,
     ) {
         let state = self.value.borrow();
         match *state {
-            UpvalueState::Open { frame_id, register } => {
-                // Release the borrow before accessing frames
+            UpvalueState::Open { stack_index } => {
                 drop(state);
-                // Find the frame and write the register to global stack
-                if let Some(frame) = frames.iter_mut().find(|f| f.frame_id == frame_id) {
-                    // Don't check against frame.top, as it might be 0 for functions called with no args
-                    // Instead, just validate the absolute index is within the stack
-                    let index = frame.base_ptr + register;
-                    if index < register_stack.len() {
-                        register_stack[index] = value;
-                    }
+                if stack_index < register_stack.len() {
+                    register_stack[stack_index] = value;
                 }
             }
             UpvalueState::Closed(_) => {
-                // Release the borrow before mut borrow
                 drop(state);
                 *self.value.borrow_mut() = UpvalueState::Closed(value);
             }
@@ -242,7 +236,6 @@ impl LuaUpvalue {
     /// Returns None if the upvalue is open
     #[inline(always)]
     pub fn try_get_closed(&self) -> Option<LuaValue> {
-        // Use try_borrow to avoid panics
         if let Ok(state) = self.value.try_borrow() {
             match *state {
                 UpvalueState::Closed(ref val) => Some(*val),
@@ -257,8 +250,8 @@ impl LuaUpvalue {
 impl fmt::Debug for LuaUpvalue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self.value.borrow() {
-            UpvalueState::Open { frame_id, register } => {
-                write!(f, "Upvalue::Open(frame={}, reg={})", frame_id, register)
+            UpvalueState::Open { stack_index } => {
+                write!(f, "Upvalue::Open(idx={})", stack_index)
             }
             UpvalueState::Closed(ref val) => {
                 write!(f, "Upvalue::Closed({:?})", val)

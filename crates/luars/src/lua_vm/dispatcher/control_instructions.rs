@@ -836,15 +836,16 @@ fn exec_call_lua_function(
             }
         }
 
-        // Create and push new frame - use frames.len() as frame_id to avoid counter
+        // Create and push new frame
+        // nresults: return_count as i16, use LUA_MULTRET for usize::MAX
+        let nresults = if return_count == usize::MAX { -1i16 } else { return_count as i16 };
         let new_frame = LuaCallFrame::new_lua_function(
-            vm.frames.len(),  // Use len as frame_id
             func,
             code_ptr,
             new_base,
-            arg_count,
-            a,
-            return_count,
+            arg_count,  // top = number of arguments
+            a,          // result_reg
+            nresults,
         );
         vm.push_frame(new_frame);
         // Update frame_ptr to point to new frame
@@ -901,17 +902,14 @@ fn exec_call_lua_function(
     }
 
     // Create and push new frame
-    let frame_id = vm.next_frame_id;
-    vm.next_frame_id += 1;
-
+    let nresults = if return_count == usize::MAX { -1i16 } else { return_count as i16 };
     let new_frame = LuaCallFrame::new_lua_function(
-        frame_id,
         func,
         code_ptr,
         new_base,
-        actual_arg_count,
-        a,
-        return_count,
+        actual_arg_count,  // top = number of arguments
+        a,                 // result_reg
+        nresults,
     );
 
     vm.push_frame(new_frame);
@@ -951,9 +949,6 @@ fn exec_call_cfunction(
 
     let return_count = if c == 0 { usize::MAX } else { c - 1 };
 
-    let frame_id = vm.next_frame_id;
-    vm.next_frame_id += 1;
-
     let call_base = base + a;
 
     // Handle __call metamethod
@@ -979,9 +974,6 @@ fn exec_call_cfunction(
 
     // Push C function frame
     let temp_frame = LuaCallFrame::new_c_function(
-        frame_id,
-        vm.current_frame().function_value,
-        vm.current_frame().pc,
         call_base,
         actual_arg_count + 1,
     );
@@ -1053,7 +1045,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCal
     let b = Instruction::get_b(instr) as usize;
 
     // Extract all frame information we'll need BEFORE taking mutable references
-    let (base, return_count, result_reg, function_value, pc) = {
+    let (base, return_count, result_reg, _function_value, _pc) = {
         let frame = vm.frames.last().unwrap();
         (
             frame.base_ptr,
@@ -1111,10 +1103,6 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCal
             // return_count already extracted
             vm.pop_frame_discard();
 
-            // Create new frame at same location
-            let frame_id = vm.next_frame_id;
-            vm.next_frame_id += 1;
-
             vm.ensure_stack_capacity(old_base + max_stack_size);
 
             // Copy arguments to frame base
@@ -1122,14 +1110,15 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCal
                 vm.register_stack[old_base + i] = *arg;
             }
 
+            // Create new frame at same location
+            let nresults = if return_count == usize::MAX { -1i16 } else { return_count as i16 };
             let new_frame = LuaCallFrame::new_lua_function(
-                frame_id,
                 func,
                 code_ptr,
                 old_base,
                 arg_count,  // top = number of arguments passed
                 result_reg, // result_reg from the CALLER (not 0!)
-                return_count,
+                nresults,
             );
             vm.push_frame(new_frame);
 
@@ -1155,10 +1144,6 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCal
                 return Err(vm.error("not a c function".to_string()));
             };
 
-            // Create temporary C function frame
-            let frame_id = vm.next_frame_id;
-            vm.next_frame_id += 1;
-
             // Set up arguments in a temporary stack space
             let call_base = vm.register_stack.len();
             vm.ensure_stack_capacity(call_base + args_len + 1);
@@ -1168,8 +1153,8 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCal
                 vm.register_stack[call_base + 1 + i] = *arg;
             }
 
-            let temp_frame =
-                LuaCallFrame::new_c_function(frame_id, function_value, pc, call_base, args_len + 1);
+            // Create temporary C function frame
+            let temp_frame = LuaCallFrame::new_c_function(call_base, args_len + 1);
 
             // Push temp frame and call C function
             vm.push_frame(temp_frame);

@@ -78,8 +78,8 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let (base_ptr, frame_id, func_value) = unsafe {
-        ((*frame_ptr).base_ptr, (*frame_ptr).frame_id, (*frame_ptr).function_value)
+    let (base_ptr, func_value) = unsafe {
+        ((*frame_ptr).base_ptr, (*frame_ptr).function_value)
     };
 
     // Get current function using ID-based lookup
@@ -119,21 +119,22 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
     for desc in upvalue_descs.iter() {
         if desc.is_local {
             // Upvalue refers to a register in current function
+            // Calculate absolute stack index for this upvalue
+            let stack_index = base_ptr + desc.index as usize;
+            
             // Check if this upvalue is already open
             let existing = vm.open_upvalues.iter().find(|uv_id| {
                 vm.object_pool
                     .get_upvalue(**uv_id)
-                    .map(|uv| uv.points_to(frame_id, desc.index as usize))
+                    .map(|uv| uv.points_to_index(stack_index))
                     .unwrap_or(false)
             });
 
             if let Some(&existing_uv_id) = existing {
                 upvalue_ids.push(existing_uv_id);
             } else {
-                // Create new open upvalue using ObjectPoolV2
-                let new_uv_id = vm
-                    .object_pool
-                    .create_upvalue_open(frame_id, desc.index as usize);
+                // Create new open upvalue using absolute stack index
+                let new_uv_id = vm.object_pool.create_upvalue_open(stack_index);
                 upvalue_ids.push(new_uv_id);
                 new_open_upvalue_ids.push(new_uv_id);
             }
@@ -163,14 +164,17 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 
 /// VARARG A C
 /// R[A], R[A+1], ..., R[A+C-2] = vararg
+///
+/// Vararg arguments are stored at frame.vararg_start (set by VARARGPREP).
+/// This instruction copies them to the target registers.
 #[inline(always)]
-pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     let (base_ptr, vararg_start, vararg_count, top) = unsafe {
         let frame = &*frame_ptr;
-        (frame.base_ptr, frame.vararg_start, frame.get_vararg_count(), frame.top)
+        (frame.base_ptr, frame.get_vararg_start(), frame.get_vararg_count(), frame.top)
     };
 
     if c == 0 {
@@ -199,6 +203,8 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
             vm.register_stack[base_ptr + a + i] = value;
         }
     }
+
+    Ok(())
 }
 
 /// CONCAT A B

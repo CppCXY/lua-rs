@@ -71,10 +71,10 @@ pub struct GcFunction {
     pub upvalues: Vec<UpvalueId>, // Upvalue IDs, not Rc
 }
 
-/// Upvalue state
+/// Upvalue state - uses absolute stack index like Lua C implementation
 #[derive(Debug, Clone)]
 pub enum UpvalueState {
-    Open { frame_id: usize, register: usize },
+    Open { stack_index: usize },
     Closed(LuaValue),
 }
 
@@ -85,10 +85,10 @@ pub struct GcUpvalue {
 }
 
 impl GcUpvalue {
-    /// Check if this upvalue points to the given frame and register
+    /// Check if this upvalue points to the given absolute stack index
     #[inline]
-    pub fn points_to(&self, frame_id: usize, register: usize) -> bool {
-        matches!(&self.state, UpvalueState::Open { frame_id: fid, register: reg } if *fid == frame_id && *reg == register)
+    pub fn points_to_index(&self, index: usize) -> bool {
+        matches!(&self.state, UpvalueState::Open { stack_index } if *stack_index == index)
     }
 
     /// Check if this upvalue is open (still points to stack)
@@ -112,11 +112,11 @@ impl GcUpvalue {
         }
     }
 
-    /// Get the frame_id and register if this upvalue is open
+    /// Get the absolute stack index if this upvalue is open
     #[inline]
-    pub fn get_open_location(&self) -> Option<(usize, usize)> {
+    pub fn get_stack_index(&self) -> Option<usize> {
         match &self.state {
-            UpvalueState::Open { frame_id, register } => Some((*frame_id, *register)),
+            UpvalueState::Open { stack_index } => Some(*stack_index),
             _ => None,
         }
     }
@@ -652,10 +652,10 @@ impl ObjectPoolV2 {
     // ==================== Upvalue Operations ====================
 
     #[inline]
-    pub fn create_upvalue_open(&mut self, frame_id: usize, register: usize) -> UpvalueId {
+    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
-            state: UpvalueState::Open { frame_id, register },
+            state: UpvalueState::Open { stack_index },
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
     }
