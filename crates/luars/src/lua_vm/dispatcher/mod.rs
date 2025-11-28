@@ -132,8 +132,8 @@ pub fn dispatch_instruction(
         OpCode::SetList => exec_setlist(vm, instr),
         OpCode::Tbc => exec_tbc(vm, instr),
 
-        // Loop operations - use frame_ptr for FORLOOP hot path
-        OpCode::ForPrep => exec_forprep(vm, instr),
+        // Loop operations - use frame_ptr for hot paths
+        OpCode::ForPrep => exec_forprep(vm, instr, frame_ptr),
         OpCode::ForLoop => exec_forloop(vm, instr, frame_ptr),
         OpCode::TForPrep => exec_tforprep(vm, instr),
         OpCode::TForCall => exec_tforcall(vm, instr),
