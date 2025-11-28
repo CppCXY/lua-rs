@@ -3,98 +3,87 @@
 /// These instructions handle upvalues, closures, and variable captures.
 use crate::{
     LuaValue,
-    lua_vm::{Instruction, LuaResult, LuaVM},
+    lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
 };
 
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
-pub fn exec_getupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
-    // Get function using new ID-based API
-    let Some(func_id) = frame.function_value.as_function_id() else {
-        return Err(vm.error("Not a Lua function".to_string()));
+    // Get function using ID-based lookup
+    let Some(func_id) = func_value.as_function_id() else {
+        return;
     };
-
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
+        return;
     };
-
     let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
-        return Err(vm.error(format!("Invalid upvalue index: {}", b)));
+        return;
     };
 
     // Get upvalue value using the helper method
     let value = vm.read_upvalue(upvalue_id);
     vm.register_stack[base_ptr + a] = value;
-
-    Ok(())
 }
 
 /// SETUPVAL A B
 /// UpValue[B] := R[A]
-pub fn exec_setupval(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
-    // Get function using new ID-based API
-    let Some(func_id) = frame.function_value.as_function_id() else {
-        return Err(vm.error("Not a Lua function".to_string()));
+    // Get function using ID-based lookup
+    let Some(func_id) = func_value.as_function_id() else {
+        return;
     };
-
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
+        return;
     };
-
     let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
-        return Err(vm.error(format!("Invalid upvalue index: {}", b)));
+        return;
     };
 
     let value = vm.register_stack[base_ptr + a];
 
     // Set upvalue value using the helper method
     vm.write_upvalue(upvalue_id, value);
-
-    Ok(())
 }
 
 /// CLOSE A
 /// close all upvalues >= R[A]
-pub fn exec_close(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_close(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
     let close_from = base_ptr + a;
 
     vm.close_upvalues_from(close_from);
-
-    Ok(())
 }
 
 /// CLOSURE A Bx
 /// R[A] := closure(KPROTO[Bx])
 /// OPTIMIZED: Fast path for closures without upvalues
 #[inline(always)]
-pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     use crate::gc::UpvalueId;
 
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    let frame_id = frame.frame_id;
+    let (base_ptr, frame_id, func_value) = unsafe {
+        ((*frame_ptr).base_ptr, (*frame_ptr).frame_id, (*frame_ptr).function_value)
+    };
 
     // Get current function using ID-based lookup
-    let func_id = frame
-        .function_value
+    let func_id = func_value
         .as_function_id()
         .ok_or_else(|| vm.error("Not a Lua function".to_string()))?;
 
@@ -174,20 +163,21 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// VARARG A C
 /// R[A], R[A+1], ..., R[A+C-2] = vararg
-pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    let vararg_start = frame.vararg_start;
-    let vararg_count = frame.get_vararg_count();
+    let (base_ptr, vararg_start, vararg_count, top) = unsafe {
+        let frame = &*frame_ptr;
+        (frame.base_ptr, frame.vararg_start, frame.get_vararg_count(), frame.top)
+    };
 
     if c == 0 {
         // Variable number of results - copy all varargs
         // Update frame top to accommodate all varargs
         let new_top = a + vararg_count;
-        vm.current_frame_mut().top = new_top.max(frame.top);
+        unsafe { (*frame_ptr).top = new_top.max(top); }
 
         for i in 0..vararg_count {
             let value = if vararg_start + i < vm.register_stack.len() {
@@ -209,19 +199,17 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             vm.register_stack[base_ptr + a + i] = value;
         }
     }
-
-    Ok(())
 }
 
 /// CONCAT A B
 /// R[A] := R[A].. ... ..R[A+B]
 /// OPTIMIZED: Pre-allocation for string/number combinations
-pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
 
     // ULTRA-OPTIMIZED: Build result string directly without intermediate allocations
     // Estimate total capacity and format numbers inline with itoa
@@ -364,17 +352,17 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// SETLIST A B C k
 /// R[A][C+i] := R[A+i], 1 <= i <= B
-pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let (base_ptr, top) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).top) };
     let table = vm.register_stack[base_ptr + a];
 
     let start_idx = c * 50; // 0-based for array indexing
-    let count = if b == 0 { frame.top - a - 1 } else { b };
+    let count = if b == 0 { top - a - 1 } else { b };
 
     // Fast path: direct array manipulation using new API
     if let Some(table_id) = table.as_table_id() {
@@ -389,7 +377,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             for i in 0..count {
                 t.array[start_idx + i] = vm.register_stack[base_ptr + a + 1 + i];
             }
-            return Ok(());
+            return;
         }
     }
 
@@ -397,19 +385,17 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     for i in 0..count {
         let key = LuaValue::integer((start_idx + i + 1) as i64);
         let value = vm.register_stack[base_ptr + a + i + 1];
-        vm.table_set_with_meta(table, key, value)?;
+        let _ = vm.table_set_with_meta(table, key, value);
     }
-
-    Ok(())
 }
 
 /// TBC A
 /// mark variable A as to-be-closed
 /// This marks a variable to have its __close metamethod called when it goes out of scope
-pub fn exec_tbc(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_tbc(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
     let reg_idx = base_ptr + a;
 
     // Get the value to be marked as to-be-closed
@@ -418,6 +404,4 @@ pub fn exec_tbc(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     // Add to to_be_closed stack (will be processed in LIFO order)
     // Store absolute register index for later closing
     vm.to_be_closed.push((reg_idx, value));
-
-    Ok(())
 }

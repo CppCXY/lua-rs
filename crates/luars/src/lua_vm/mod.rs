@@ -14,7 +14,6 @@ use crate::lua_value::{
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::{Compiler, ObjectPool, lib_registry};
-use dispatcher::dispatch_instruction;
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -278,34 +277,8 @@ impl LuaVM {
     /// Lua 5.4 style: CALL pushes frame, RETURN pops frame, loop continues
     /// No recursion - pure state machine
     fn run(&mut self) -> LuaResult<LuaValue> {
-        // Pre-calculate frames pointer for direct indexing
-        // This avoids last_mut() overhead in the hot loop
-        
-        'mainloop: loop {
-            // CRITICAL: Use frame_count for direct indexing instead of last_mut()
-            // frame_count is updated by CALL (increment) and RETURN (decrement)
-            let frame_idx = self.frame_count - 1;
-            
-            // SAFETY: frame_count > 0 is guaranteed when we're in the loop
-            // CALL instruction ensures frame_count is incremented before pushing
-            // RETURN instruction sets frame_count = 0 when stack is empty and returns Exit
-            let frame_ptr = unsafe { 
-                self.frames.as_mut_ptr().add(frame_idx)
-            };
-            
-            let instr = unsafe { (*frame_ptr).code_ptr.add((*frame_ptr).pc).read() };
-            unsafe {
-                (*frame_ptr).pc += 1;
-            }
-
-            // Dispatch instruction
-            match dispatch_instruction(self, instr, frame_ptr) {
-                Ok(()) => continue 'mainloop,
-                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
-                Err(LuaError::Yield) => return Ok(LuaValue::nil()),
-                Err(e) => return Err(e),
-            }
-        }
+        // Delegate to the optimized dispatcher loop
+        dispatcher::luavm_execute(self)
     }
 
     // ============ Frame Management (Lua 5.4 style) ============
@@ -2215,37 +2188,196 @@ impl LuaVM {
                 let initial_frame_count = self.frames.len();
                 self.push_frame(new_frame);
 
-                // Execute instructions until frame returns
+                // Execute using a bounded loop that stops when frame count returns to initial
                 let exec_result: LuaResult<()> = loop {
+                    // Check if we've returned to our starting frame count
                     if self.frames.len() <= initial_frame_count {
-                        // Frame has been popped (function returned)
+                        // Frame was popped - function has returned
                         break Ok(());
                     }
 
-                    let frame_idx = self.frames.len() - 1;
+                    // Safety check for empty frames
+                    if self.frame_count == 0 {
+                        break Ok(());
+                    }
+
+                    // Get current frame info
+                    let frame_idx = self.frame_count - 1;
                     let pc = self.frames[frame_idx].pc;
-                    let function_value = self.frames[frame_idx].function_value;
+                    let code_ptr = self.frames[frame_idx].code_ptr;
 
-                    // Dynamically resolve chunk
-                    let chunk = if let Some(func_ref) = self.get_function(&function_value) {
-                        func_ref.chunk.clone()
-                    } else {
-                        break Err(self.error("Invalid function in frame".to_string()));
-                    };
-
-                    if pc >= chunk.code.len() {
-                        // End of code
-                        self.pop_frame_discard();
-                        break Ok(());
-                    }
-
-                    let instr = chunk.code[pc];
+                    // Fetch instruction
+                    let instr = unsafe { code_ptr.add(pc).read() };
                     self.frames[frame_idx].pc += 1;
 
-                    // Dispatch instruction (zero-return-value design)
-                    // Get frame_ptr for optimization
-                    let frame_ptr = &mut self.frames[frame_idx] as *mut LuaCallFrame;
-                    if let Err(e) = dispatch_instruction(self, instr, frame_ptr) {
+                    // Execute using the dispatcher but with a local frame_ptr
+                    let mut frame_ptr = unsafe { self.frames.as_mut_ptr().add(frame_idx) };
+                    
+                    // We need to call the dispatcher's instruction handlers directly
+                    // But this is complex because they expect frame_ptr_ptr for some instructions
+                    // Let's use a simpler approach: call the actual execute function
+                    use crate::lua_vm::dispatcher::*;
+                    use crate::lua_vm::OpCode;
+                    
+                    let opcode = crate::lua_vm::Instruction::get_opcode(instr);
+                    
+                    let result: LuaResult<()> = match opcode {
+                        // Load instructions (never fail)
+                        OpCode::Move => { exec_move(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadI => { exec_loadi(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadNil => { exec_loadnil(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadFalse => { exec_loadfalse(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadTrue => { exec_loadtrue(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LFalseSkip => { exec_lfalseskip(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadF => { exec_loadf(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadK => { exec_loadk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadKX => { exec_loadkx(self, instr, frame_ptr); Ok(()) }
+                        OpCode::VarargPrep => { exec_varargprep(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Arithmetic
+                        OpCode::Add => { exec_add(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Sub => { exec_sub(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Mul => { exec_mul(self, instr, frame_ptr); Ok(()) }
+                        OpCode::AddI => { exec_addi(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Div => { exec_div(self, instr, frame_ptr); Ok(()) }
+                        OpCode::IDiv => { exec_idiv(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Mod => { exec_mod(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Pow => { exec_pow(self, instr, frame_ptr); Ok(()) }
+                        OpCode::AddK => { exec_addk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::SubK => { exec_subk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::MulK => { exec_mulk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::ModK => { exec_modk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::PowK => { exec_powk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::DivK => { exec_divk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::IDivK => { exec_idivk(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Bitwise
+                        OpCode::BAnd => { exec_band(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BOr => { exec_bor(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BXor => { exec_bxor(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Shl => { exec_shl(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Shr => { exec_shr(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BAndK => { exec_bandk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BOrK => { exec_bork(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BXorK => { exec_bxork(self, instr, frame_ptr); Ok(()) }
+                        OpCode::ShrI => { exec_shri(self, instr, frame_ptr); Ok(()) }
+                        OpCode::ShlI => { exec_shli(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BNot => { exec_bnot(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Not => { exec_not(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Metamethod stubs
+                        OpCode::MmBin => { exec_mmbin(self, instr, frame_ptr); Ok(()) }
+                        OpCode::MmBinI => { exec_mmbini(self, instr, frame_ptr); Ok(()) }
+                        OpCode::MmBinK => { exec_mmbink(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Comparisons
+                        OpCode::LtI => exec_lti(self, instr, frame_ptr),
+                        OpCode::LeI => exec_lei(self, instr, frame_ptr),
+                        OpCode::GtI => exec_gti(self, instr, frame_ptr),
+                        OpCode::GeI => exec_gei(self, instr, frame_ptr),
+                        OpCode::EqI => { exec_eqi(self, instr, frame_ptr); Ok(()) }
+                        OpCode::EqK => exec_eqk(self, instr, frame_ptr),
+                        
+                        // Control flow
+                        OpCode::Jmp => { exec_jmp(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Test => { exec_test(self, instr, frame_ptr); Ok(()) }
+                        OpCode::TestSet => { exec_testset(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Loops
+                        OpCode::ForPrep => exec_forprep(self, instr, frame_ptr),
+                        OpCode::ForLoop => exec_forloop(self, instr, frame_ptr),
+                        OpCode::TForPrep => { exec_tforprep(self, instr, frame_ptr); Ok(()) }
+                        OpCode::TForLoop => { exec_tforloop(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Upvalues
+                        OpCode::GetUpval => { exec_getupval(self, instr, frame_ptr); Ok(()) }
+                        OpCode::SetUpval => { exec_setupval(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Extra arg (no-op)
+                        OpCode::ExtraArg => Ok(()),
+                        
+                        // Return - check Exit specially
+                        OpCode::Return0 => {
+                            match exec_return0(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    // Check if we returned to initial frame count
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        OpCode::Return1 => {
+                            match exec_return1(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        OpCode::Return => {
+                            match exec_return(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        
+                        // Calls
+                        OpCode::Call => exec_call(self, instr, &mut frame_ptr),
+                        OpCode::TailCall => {
+                            match exec_tailcall(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        
+                        // Tables
+                        OpCode::NewTable => { exec_newtable(self, instr, frame_ptr); Ok(()) }
+                        OpCode::GetTable => exec_gettable(self, instr, frame_ptr),
+                        OpCode::SetTable => exec_settable(self, instr, frame_ptr),
+                        OpCode::GetI => exec_geti(self, instr, frame_ptr),
+                        OpCode::SetI => exec_seti(self, instr, frame_ptr),
+                        OpCode::GetField => exec_getfield(self, instr, frame_ptr),
+                        OpCode::SetField => exec_setfield(self, instr, frame_ptr),
+                        OpCode::GetTabUp => exec_gettabup(self, instr, frame_ptr),
+                        OpCode::SetTabUp => exec_settabup(self, instr, frame_ptr),
+                        OpCode::Self_ => exec_self(self, instr, frame_ptr),
+                        
+                        // Other
+                        OpCode::Unm => exec_unm(self, instr, frame_ptr),
+                        OpCode::Len => exec_len(self, instr, frame_ptr),
+                        OpCode::Concat => exec_concat(self, instr, frame_ptr),
+                        OpCode::Eq => exec_eq(self, instr, frame_ptr),
+                        OpCode::Lt => exec_lt(self, instr, frame_ptr),
+                        OpCode::Le => exec_le(self, instr, frame_ptr),
+                        OpCode::TForCall => exec_tforcall(self, instr, frame_ptr),
+                        OpCode::Closure => exec_closure(self, instr, frame_ptr),
+                        OpCode::Vararg => { exec_vararg(self, instr, frame_ptr); Ok(()) }
+                        OpCode::SetList => { exec_setlist(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Close => { exec_close(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Tbc => { exec_tbc(self, instr, frame_ptr); Ok(()) }
+                    };
+                    
+                    if let Err(e) = result {
                         break Err(e);
                     }
                 };
@@ -2257,7 +2389,13 @@ impl LuaVM {
                         self.return_values.clear();
                         Ok(result)
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        // Error occurred - pop frames back to initial
+                        while self.frames.len() > initial_frame_count {
+                            self.pop_frame_discard();
+                        }
+                        Err(e)
+                    }
                 }
             }
             _ => Err(self.error("attempt to call a non-function value".to_string())),

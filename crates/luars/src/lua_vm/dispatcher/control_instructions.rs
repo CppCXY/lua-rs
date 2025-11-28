@@ -8,14 +8,14 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM};
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
 #[inline(always)]
-pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_return(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     // let _c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
     // Close upvalues before popping the frame
-    let base_ptr = vm.current_frame().base_ptr;
+    let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr };
     vm.close_upvalues_from(base_ptr);
 
     let Some(frame) = vm.pop_frame() else {
@@ -139,6 +139,9 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         return Err(LuaError::Exit);
     }
 
+    // Update frame_ptr to point to new current frame
+    *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+
     Ok(())
 }
 
@@ -147,15 +150,13 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// JMP sJ
 /// pc += sJ
 #[inline(always)]
-pub fn exec_jmp(_vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_jmp(_vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let sj = Instruction::get_sj(instr);
 
     unsafe {
         // PC already incremented by dispatcher, so we add offset directly
         (*frame_ptr).pc = ((*frame_ptr).pc as i32 + sj) as usize;
     }
-
-    Ok(())
 }
 
 // ============ Test Instructions ============
@@ -164,13 +165,13 @@ pub fn exec_jmp(_vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 /// if (not R[A] == k) then pc++
 /// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[inline(always)]
-pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_test(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
-
     unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+
         // OPTIMIZATION: Direct unsafe access and type tag comparison
         let value = *vm.register_stack.as_ptr().add(base_ptr + a);
 
@@ -182,25 +183,23 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
         // If (not value) == k, skip next instruction
         if !is_truthy == k {
-            vm.current_frame_mut().pc += 1;
+            (*frame_ptr).pc += 1;
         }
     }
-
-    Ok(())
 }
 
 /// TESTSET A B k
 /// if (not R[B] == k) then R[A] := R[B] else pc++
 /// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[inline(always)]
-pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_testset(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
-
     unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+
         // OPTIMIZATION: Direct unsafe access
         let reg_ptr = vm.register_stack.as_ptr().add(base_ptr);
         let value = *reg_ptr.add(b);
@@ -213,11 +212,9 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         if is_truthy == k {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
         } else {
-            vm.current_frame_mut().pc += 1;
+            (*frame_ptr).pc += 1;
         }
     }
-
-    Ok(())
 }
 
 // ============ Comparison Instructions ============
@@ -226,12 +223,12 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// if ((R[A] == R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Fast path for common types (integers, floats, strings)
 #[inline(always)]
-pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_eq(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {
@@ -292,7 +289,7 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     // If (left == right) != k, skip next instruction
     if is_equal != k {
-        vm.current_frame_mut().pc += 1;
+        unsafe { (*frame_ptr).pc += 1; }
     }
 
     Ok(())
@@ -302,12 +299,12 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// if ((R[A] < R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Inline integer/float comparison, minimal type checks
 #[inline(always)]
-pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
 
     // OPTIMIZATION: Use unsafe for unchecked register access (hot path)
     let (left, right) = unsafe {
@@ -354,7 +351,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                     if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                         let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                         if is_less_result != k {
-                            vm.current_frame_mut().pc += 1;
+                            unsafe { (*frame_ptr).pc += 1; }
                         }
                         return Ok(());
                     }
@@ -371,7 +368,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                             let is_less_result =
                                 !result.is_nil() && result.as_bool().unwrap_or(true);
                             if is_less_result != k {
-                                vm.current_frame_mut().pc += 1;
+                                unsafe { (*frame_ptr).pc += 1; }
                             }
                             return Ok(());
                         }
@@ -392,7 +389,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     if is_less != k {
-        vm.current_frame_mut().pc += 1;
+        unsafe { (*frame_ptr).pc += 1; }
     }
 
     Ok(())
@@ -401,12 +398,12 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// LE A B k
 /// if ((R[A] <= R[B]) ~= k) then pc++
 #[inline(always)]
-pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {
@@ -435,7 +432,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                     if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                         let is_le_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                         if is_le_result != k {
-                            vm.current_frame_mut().pc += 1;
+                            unsafe { (*frame_ptr).pc += 1; }
                         }
                         return Ok(());
                     }
@@ -451,7 +448,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                         if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                             let is_le_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                             if is_le_result != k {
-                                vm.current_frame_mut().pc += 1;
+                                unsafe { (*frame_ptr).pc += 1; }
                             }
                             return Ok(());
                         }
@@ -472,7 +469,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                             let is_gt_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                             let is_le_result = !is_gt_result; // a <= b is !(b < a)
                             if is_le_result != k {
-                                vm.current_frame_mut().pc += 1;
+                                unsafe { (*frame_ptr).pc += 1; }
                             }
                             return Ok(());
                         }
@@ -490,7 +487,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
                                     !result.is_nil() && result.as_bool().unwrap_or(true);
                                 let is_le_result = !is_gt_result;
                                 if is_le_result != k {
-                                    vm.current_frame_mut().pc += 1;
+                                    unsafe { (*frame_ptr).pc += 1; }
                                 }
                                 return Ok(());
                             }
@@ -512,7 +509,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     };
 
     if is_less_or_equal != k {
-        vm.current_frame_mut().pc += 1;
+        unsafe { (*frame_ptr).pc += 1; }
     }
 
     Ok(())
@@ -520,16 +517,16 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// EQK A B k
 /// if ((R[A] == K[B]) ~= k) then pc++
-pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_eqk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
     // Get function using new ID-based API
-    let Some(func_id) = frame.function_value.as_function_id() else {
+    let Some(func_id) = func_value.as_function_id() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
@@ -539,12 +536,12 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
         return Err(vm.error(format!("Invalid constant index: {}", b)));
     };
 
-    let left = vm.register_stack[base_ptr + a];
+    let left = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
 
     let is_equal = left == constant;
 
     if is_equal != k {
-        vm.current_frame_mut().pc += 1;
+        unsafe { (*frame_ptr).pc += 1; }
     }
 
     Ok(())
@@ -553,29 +550,28 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// EQI A sB k
 /// if ((R[A] == sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_eqi(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_eqi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
-    let base_ptr = vm.current_frame().base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-    let left = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
+        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+        let is_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+            (left.secondary as i64) == (sb as i64)
+        } else if let Some(l) = left.as_number() {
+            l == sb as f64
+        } else {
+            false
+        };
 
-    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-    let is_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
-        (left.secondary as i64) == (sb as i64)
-    } else if let Some(l) = left.as_number() {
-        l == sb as f64
-    } else {
-        false
-    };
-
-    if is_equal != k {
-        vm.current_frame_mut().pc += 1;
+        if is_equal != k {
+            (*frame_ptr).pc += 1;
+        }
     }
-
-    Ok(())
 }
 
 /// LTI A sB k
@@ -714,14 +710,14 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
 /// ULTRA-OPTIMIZED: Minimize overhead for the common case (Lua function, no metamethod)
 #[inline(always)]
-pub fn exec_call(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_call(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     // OPTIMIZATION: Use passed frame_ptr directly - avoid Vec lookup!
     let (base, func) = unsafe {
-        let base = (*frame_ptr).base_ptr;
+        let base = (**frame_ptr_ptr).base_ptr;
         let func = *vm.register_stack.get_unchecked(base + a);
         (base, func)
     };
@@ -730,12 +726,12 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
     // Check type tag directly without full pattern match
     use crate::lua_value::TAG_FUNCTION;
     if (func.primary & crate::lua_value::TYPE_MASK) == TAG_FUNCTION {
-        return exec_call_lua_function(vm, func, a, b, c, base, false, LuaValue::nil(), frame_ptr);
+        return exec_call_lua_function(vm, func, a, b, c, base, false, LuaValue::nil(), frame_ptr_ptr);
     }
 
     // Check for CFunction
     if func.is_cfunction() {
-        return exec_call_cfunction(vm, func, a, b, c, base, false, LuaValue::nil());
+        return exec_call_cfunction(vm, func, a, b, c, base, false, LuaValue::nil(), frame_ptr_ptr);
     }
 
     // Slow path: Check for __call metamethod
@@ -751,10 +747,10 @@ pub fn exec_call(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
             if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
                 if call_func.is_callable() {
                     if call_func.is_cfunction() {
-                        return exec_call_cfunction(vm, call_func, a, b, c, base, true, func);
+                        return exec_call_cfunction(vm, call_func, a, b, c, base, true, func, frame_ptr_ptr);
                     } else {
                         return exec_call_lua_function(
-                            vm, call_func, a, b, c, base, true, func, frame_ptr,
+                            vm, call_func, a, b, c, base, true, func, frame_ptr_ptr,
                         );
                     }
                 }
@@ -777,7 +773,7 @@ fn exec_call_lua_function(
     caller_base: usize,
     use_call_metamethod: bool,
     call_metamethod_self: LuaValue,
-    frame_ptr: *mut LuaCallFrame, // Use passed frame_ptr!
+    frame_ptr_ptr: &mut *mut LuaCallFrame, // Use passed frame_ptr!
 ) -> LuaResult<()> {
     // Get function ID and lookup in ObjectPool
     let Some(func_id) = func.as_function_id() else {
@@ -797,10 +793,10 @@ fn exec_call_lua_function(
 
     // Calculate argument count - use frame_ptr directly!
     let arg_count = if b == 0 {
-        unsafe { (*frame_ptr).top.saturating_sub(a + 1) }
+        unsafe { (**frame_ptr_ptr).top.saturating_sub(a + 1) }
     } else {
         unsafe {
-            (*frame_ptr).top = a + b;
+            (**frame_ptr_ptr).top = a + b;
         }
         b - 1
     };
@@ -851,6 +847,8 @@ fn exec_call_lua_function(
             return_count,
         );
         vm.push_frame(new_frame);
+        // Update frame_ptr to point to new frame
+        *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
         return Ok(());
     }
 
@@ -917,10 +915,13 @@ fn exec_call_lua_function(
     );
 
     vm.push_frame(new_frame);
+    // Update frame_ptr to point to new frame
+    *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
     Ok(())
 }
 
 /// Fast path for C function calls
+/// Note: Must update frame_ptr_ptr after return because C functions may recursively call Lua
 #[inline(always)]
 fn exec_call_cfunction(
     vm: &mut LuaVM,
@@ -931,6 +932,7 @@ fn exec_call_cfunction(
     base: usize,
     use_call_metamethod: bool,
     call_metamethod_self: LuaValue,
+    frame_ptr_ptr: &mut *mut LuaCallFrame,
 ) -> LuaResult<()> {
     let cfunc = unsafe { func.as_cfunction().unwrap_unchecked() };
 
@@ -991,14 +993,27 @@ fn exec_call_cfunction(
         Ok(r) => r,
         Err(LuaError::Yield) => {
             vm.pop_frame_discard();
+            // Update frame_ptr after pop (safely check for empty frames)
+            if vm.frame_count > 0 {
+                *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+            }
             return Err(LuaError::Yield);
         }
         Err(e) => {
             vm.pop_frame_discard();
+            // Update frame_ptr after pop (safely check for empty frames)
+            if vm.frame_count > 0 {
+                *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+            }
             return Err(e);
         }
     };
     vm.pop_frame_discard();
+    // CRITICAL: Update frame_ptr after C function call returns
+    // The C function may have called Lua code which could have reallocated the frames Vec
+    if vm.frame_count > 0 {
+        *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+    }
 
     // Copy return values
     let values = result.all_values();
@@ -1031,7 +1046,7 @@ fn exec_call_cfunction(
 
 /// TAILCALL A B C k
 /// return R[A](R[A+1], ... ,R[A+B-1])
-pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCallFrame) -> LuaResult<()> {
     // TAILCALL A B C: return R[A](R[A+1], ..., R[A+B-1])
     // Reuse current frame (tail call optimization)
     let a = Instruction::get_a(instr) as usize;
@@ -1118,6 +1133,9 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             );
             vm.push_frame(new_frame);
 
+            // Update frame_ptr to point to new frame
+            *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+
             Ok(())
         }
         LuaValueKind::CFunction => {
@@ -1155,6 +1173,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
             // Push temp frame and call C function
             vm.push_frame(temp_frame);
+            // Note: We don't update frame_ptr_ptr here since this is a temporary frame
             let result = c_func(vm)?;
             vm.pop_frame_discard(); // Pop temp frame
 
@@ -1164,6 +1183,9 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
             // Write return values to PARENT frame
             // CRITICAL: result_reg is relative to PARENT's base_ptr!
             if !vm.frames_is_empty() {
+                // Update frame_ptr to point to parent frame
+                *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+
                 let parent_base = vm.current_frame().base_ptr;
                 let vals = result.all_values();
                 let count = if return_count == usize::MAX {
@@ -1199,13 +1221,13 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// return (no values)
 /// OPTIMIZED: Use frame_ptr directly
 #[inline(always)]
-pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr_ptr: &mut *mut LuaCallFrame) -> LuaResult<()> {
     // FAST PATH: Use passed frame_ptr directly - get all info BEFORE popping
     let (base_ptr, result_reg, num_results) = unsafe {
         (
-            (*frame_ptr).base_ptr,
-            (*frame_ptr).get_result_reg(),
-            (*frame_ptr).get_num_results(),
+            (**frame_ptr_ptr).base_ptr,
+            (**frame_ptr_ptr).get_result_reg(),
+            (**frame_ptr_ptr).get_num_results(),
         )
     };
 
@@ -1220,8 +1242,11 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr: *mut LuaCallFrame) -
 
     // FAST PATH: Check if we have a caller frame
     if !vm.frames_is_empty() {
-        // Get caller's base_ptr first without holding borrow
-        let caller_base = vm.current_frame().base_ptr;
+        // Update frame_ptr to point to caller frame
+        *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+
+        // Get caller's base_ptr
+        let caller_base = unsafe { (**frame_ptr_ptr).base_ptr };
 
         // Fill expected return values with nil
         if num_results != usize::MAX && num_results > 0 {
@@ -1236,7 +1261,7 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr: *mut LuaCallFrame) -
         }
 
         // Update caller's top
-        vm.current_frame_mut().top = result_reg;
+        unsafe { (**frame_ptr_ptr).top = result_reg; }
         Ok(())
     } else {
         Err(LuaError::Exit)
@@ -1247,11 +1272,11 @@ pub fn exec_return0(vm: &mut LuaVM, _instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// return R[A]
 /// OPTIMIZED: Fast path for single-value return (most common case)
 #[inline(always)]
-pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
 
     // FAST PATH: Use passed frame_ptr directly - get all info we need
-    let (base_ptr, result_reg) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).get_result_reg()) };
+    let (base_ptr, result_reg) = unsafe { ((**frame_ptr_ptr).base_ptr, (**frame_ptr_ptr).get_result_reg()) };
 
     // Only close upvalues if there are any open (rare for simple functions)
     if !vm.open_upvalues.is_empty() {
@@ -1274,8 +1299,11 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 
     // Check if there's a caller frame
     if !vm.frames_is_empty() {
-        // Get caller's base_ptr first without holding mutable borrow
-        let caller_base = vm.current_frame().base_ptr;
+        // Update frame_ptr to point to caller frame
+        *frame_ptr_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 1) };
+
+        // Get caller's base_ptr
+        let caller_base = unsafe { (**frame_ptr_ptr).base_ptr };
         let dest_pos = caller_base + result_reg;
         
         // Write to caller's result register
@@ -1284,7 +1312,7 @@ pub fn exec_return1(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         }
 
         // Update top
-        vm.current_frame_mut().top = result_reg + 1;
+        unsafe { (**frame_ptr_ptr).top = result_reg + 1; }
 
         Ok(())
     } else {

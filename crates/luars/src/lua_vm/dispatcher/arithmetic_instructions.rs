@@ -10,7 +10,7 @@ use crate::{
 /// ADD: R[A] = R[B] + R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior - always write both fields
 #[inline(always)]
-pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -29,7 +29,7 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             let result = (left.secondary as i64).wrapping_add(right.secondary as i64);
             *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
             (*frame_ptr).pc += 1;  // Skip MMBIN
-            return Ok(());
+            return;
         }
 
         // Slow path: Float operations
@@ -43,19 +43,18 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
             LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
         } else {
-            return Ok(());
+            return;
         };
 
         *reg_base.add(a) = result;
         (*frame_ptr).pc += 1;
-        Ok(())
     }
 }
 
 /// SUB: R[A] = R[B] - R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
-pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -72,7 +71,7 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             let result = (left.secondary as i64).wrapping_sub(right.secondary as i64);
             *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
             (*frame_ptr).pc += 1;
-            return Ok(());
+            return;
         }
 
         let left_tag = left.primary & TYPE_MASK;
@@ -85,19 +84,18 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
             LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
         } else {
-            return Ok(());
+            return;
         };
 
         *reg_base.add(a) = result;
         (*frame_ptr).pc += 1;
-        Ok(())
     }
 }
 
 /// MUL: R[A] = R[B] * R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
-pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -114,7 +112,7 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             let result = (left.secondary as i64).wrapping_mul(right.secondary as i64);
             *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
             (*frame_ptr).pc += 1;
-            return Ok(());
+            return;
         }
 
         let left_tag = left.primary & TYPE_MASK;
@@ -127,19 +125,18 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
             LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
         } else {
-            return Ok(());
+            return;
         };
 
         *reg_base.add(a) = result;
         (*frame_ptr).pc += 1;
-        Ok(())
     }
 }
 
 /// DIV: R[A] = R[B] / R[C]
 /// Division always returns float in Lua
 #[inline(always)]
-pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -158,7 +155,7 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         } else if left_tag == TAG_FLOAT {
             f64::from_bits(left.secondary)
         } else {
-            return Ok(());
+            return;
         };
 
         let r_float = if right_tag == TAG_INTEGER {
@@ -166,18 +163,17 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         } else if right_tag == TAG_FLOAT {
             f64::from_bits(right.secondary)
         } else {
-            return Ok(());
+            return;
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
         (*frame_ptr).pc += 1;
-        Ok(())
     }
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
 #[inline(always)]
-pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -193,7 +189,7 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
         let result = if combined_tags == TAG_INTEGER {
             let r = right.secondary as i64;
             if r == 0 {
-                return Err(vm.error("attempt to divide by zero".to_string()));
+                return; // Division by zero - let MMBIN handle
             }
             let l = left.secondary as i64;
             LuaValue::integer(l.div_euclid(r))
@@ -206,7 +202,7 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
             } else if left_tag == TAG_FLOAT {
                 f64::from_bits(left.secondary)
             } else {
-                return Ok(());
+                return;
             };
 
             let r_float = if right_tag == TAG_INTEGER {
@@ -214,7 +210,7 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
             } else if right_tag == TAG_FLOAT {
                 f64::from_bits(right.secondary)
             } else {
-                return Ok(());
+                return;
             };
 
             LuaValue::number((l_float / r_float).floor())
@@ -222,13 +218,12 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
         (*frame_ptr).pc += 1;
-        Ok(())
     }
 }
 
 /// MOD: R[A] = R[B] % R[C]
 #[inline(always)]
-pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -244,7 +239,7 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         let result = if combined_tags == TAG_INTEGER {
             let r = right.secondary as i64;
             if r == 0 {
-                return Err(vm.error("attempt to perform 'n%0'".to_string()));
+                return; // Mod by zero - let MMBIN handle
             }
             let l = left.secondary as i64;
             LuaValue::integer(l.rem_euclid(r))
@@ -257,7 +252,7 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             } else if left_tag == TAG_FLOAT {
                 f64::from_bits(left.secondary)
             } else {
-                return Ok(());
+                return;
             };
 
             let r_float = if right_tag == TAG_INTEGER {
@@ -265,7 +260,7 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             } else if right_tag == TAG_FLOAT {
                 f64::from_bits(right.secondary)
             } else {
-                return Ok(());
+                return;
             };
 
             let result = l_float - (l_float / r_float).floor() * r_float;
@@ -274,13 +269,12 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
         (*frame_ptr).pc += 1;
-        Ok(())
     }
 }
 
 /// POW: R[A] = R[B] ^ R[C]
 #[inline(always)]
-pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -292,27 +286,25 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
         let l_float = match left.as_number() {
             Some(n) => n,
-            None => return Ok(()),
+            None => return,
         };
         let r_float = match right.as_number() {
             Some(n) => n,
-            None => return Ok(()),
+            None => return,
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
         (*frame_ptr).pc += 1;
-        Ok(())
     }
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
-pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
     let value = vm.register_stack[base_ptr + b];
 
     let result = if let Some(i) = value.as_integer() {
@@ -352,7 +344,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 /// ADDI: R[A] = R[B] + sC
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
-pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let sc = Instruction::get_sc(instr);
@@ -377,680 +369,545 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
                     (*frame_ptr).pc = ((*frame_ptr).pc as i32 + 1 + sj) as usize;
                 }
             }
-            return Ok(());
+            return;
         }
 
         if left.primary == TAG_FLOAT {
             let l = f64::from_bits(left.secondary);
             *reg_base.add(a) = LuaValue::float(l + sc as f64);
             (*frame_ptr).pc += 1;
-            return Ok(());
+            return;
         }
-
-        Ok(())
     }
 }
 
 /// ADDK: R[A] = R[B] + K[C]
-pub fn exec_addk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        // Get constant
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
+        // Try integer operation
+        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+            let l = left.secondary as i64;
+            let r = constant.secondary as i64;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.wrapping_add(r));
+            (*frame_ptr).pc += 1;
+            return;
+        }
 
-    // Try integer operation
-    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
-        // Integer operation with wraparound, skip fallback
-        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_add(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
+        // Try float operation
+        if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l + r);
+            (*frame_ptr).pc += 1;
+        }
     }
-
-    // Try float operation
-    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-        // Float operation succeeded, skip fallback
-        vm.register_stack[base_ptr + a] = LuaValue::number(l + r);
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
-    }
-
-    // Not numbers, fallthrough to MMBIN
-    Ok(())
 }
 
 /// SUBK: R[A] = R[B] - K[C]
-pub fn exec_subk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
+        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+            let l = left.secondary as i64;
+            let r = constant.secondary as i64;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.wrapping_sub(r));
+            (*frame_ptr).pc += 1;
+            return;
+        }
 
-    // Try integer operation
-    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
-        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_sub(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
+        if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l - r);
+            (*frame_ptr).pc += 1;
+        }
     }
-
-    // Try float operation
-    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-        vm.register_stack[base_ptr + a] = LuaValue::number(l - r);
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
-    }
-    Ok(())
 }
 
 /// MULK: R[A] = R[B] * K[C]
 #[inline(always)]
-pub fn exec_mulk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
-    let left = vm.register_stack[base_ptr + b];
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    // Fast path: Direct type tag check (avoid method call overhead)
+        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+            let l = left.secondary as i64;
+            let r = constant.secondary as i64;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.wrapping_mul(r));
+            (*frame_ptr).pc += 1;
+            return;
+        }
 
-    // Check if both are integers
-    if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
-        let l = left.secondary as i64;
-        let r = constant.secondary as i64;
-        vm.register_stack[base_ptr + a] = LuaValue::integer(l.wrapping_mul(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(());
+        if left.primary == TAG_FLOAT || constant.primary == TAG_FLOAT {
+            let l = if left.primary == TAG_FLOAT {
+                f64::from_bits(left.secondary)
+            } else if left.primary == TAG_INTEGER {
+                left.secondary as i64 as f64
+            } else { return; };
+
+            let r = if constant.primary == TAG_FLOAT {
+                f64::from_bits(constant.secondary)
+            } else if constant.primary == TAG_INTEGER {
+                constant.secondary as i64 as f64
+            } else { return; };
+
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(l * r);
+            (*frame_ptr).pc += 1;
+        }
     }
-
-    // Check if at least one is float (covers float*float, float*int, int*float)
-    if left.primary == TAG_FLOAT || constant.primary == TAG_FLOAT {
-        // Convert to float
-        let l = if left.primary == TAG_FLOAT {
-            f64::from_bits(left.secondary)
-        } else if left.primary == TAG_INTEGER {
-            left.secondary as i64 as f64
-        } else {
-            return Ok(()); // Not a number
-        };
-
-        let r = if constant.primary == TAG_FLOAT {
-            f64::from_bits(constant.secondary)
-        } else if constant.primary == TAG_INTEGER {
-            constant.secondary as i64 as f64
-        } else {
-            return Ok(()); // Not a number
-        };
-
-        vm.register_stack[base_ptr + a] = LuaValue::float(l * r);
-        vm.current_frame_mut().pc += 1;
-        return Ok(());
-    }
-
-    Ok(())
 }
 
 /// MODK: R[A] = R[B] % K[C]
-pub fn exec_modk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
-
-    // Try integer operation
-    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
-        if r == 0 {
-            return Err(vm.error("attempt to perform 'n%0'".to_string()));
+        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+            let r = constant.secondary as i64;
+            if r == 0 { return; }
+            let l = left.secondary as i64;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.rem_euclid(r));
+            (*frame_ptr).pc += 1;
+            return;
         }
-        vm.register_stack[base_ptr + a] = LuaValue::integer(l.rem_euclid(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
-    }
 
-    // Try float operation
-    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-        let result = l - (l / r).floor() * r;
-        vm.register_stack[base_ptr + a] = LuaValue::number(result);
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
+        if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+            let result = l - (l / r).floor() * r;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(result);
+            (*frame_ptr).pc += 1;
+        }
     }
-    Ok(())
 }
 
 /// POWK: R[A] = R[B] ^ K[C]
-pub fn exec_powk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
+        let l_float = match left.as_number() { Some(n) => n, None => return };
+        let r_float = match constant.as_number() { Some(n) => n, None => return };
 
-    // Try float operation
-    let l_float = match left.as_number() {
-        Some(n) => n,
-        None => return Ok(()), // Let MMBINK handle
-    };
-    let r_float = match constant.as_number() {
-        Some(n) => n,
-        None => return Ok(()), // Let MMBINK handle
-    };
-
-    let result = LuaValue::number(l_float.powf(r_float));
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(()) // Skip MMBIN fallback
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
+        (*frame_ptr).pc += 1;
+    }
 }
 
 /// DIVK: R[A] = R[B] / K[C]
-pub fn exec_divk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
+        let l_float = match left.as_number() { Some(n) => n, None => return };
+        let r_float = match constant.as_number() { Some(n) => n, None => return };
 
-    // Try to perform the operation; if not possible, let MMBINK handle it
-    let l_float = match left.as_number() {
-        Some(n) => n,
-        None => return Ok(()), // Let MMBINK handle
-    };
-    let r_float = match constant.as_number() {
-        Some(n) => n,
-        None => return Ok(()), // Let MMBINK handle
-    };
-
-    let result = LuaValue::number(l_float / r_float);
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
+        (*frame_ptr).pc += 1;
+    }
 }
 
 /// IDIVK: R[A] = R[B] // K[C]
-pub fn exec_idivk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
-
-    // Try integer operation
-    if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
-        if r == 0 {
-            return Err(vm.error("attempt to divide by zero".to_string()));
+        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+            let r = constant.secondary as i64;
+            if r == 0 { return; }
+            let l = left.secondary as i64;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.div_euclid(r));
+            (*frame_ptr).pc += 1;
+            return;
         }
-        vm.register_stack[base_ptr + a] = LuaValue::integer(l.div_euclid(r));
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
-    }
 
-    // Try float operation
-    if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-        vm.register_stack[base_ptr + a] = LuaValue::number((l / r).floor());
-        vm.current_frame_mut().pc += 1;
-        return Ok(()); // Skip MMBIN fallback
+        if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number((l / r).floor());
+            (*frame_ptr).pc += 1;
+        }
     }
-    Ok(())
 }
 
 // ============ Bitwise Operations ============
 
 /// BAND: R[A] = R[B] & R[C]
-pub fn exec_band(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_band(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
-
-    let l_int = match left.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-    let r_int = match right.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-
-    let result = LuaValue::integer(l_int & r_int);
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
+            (*frame_ptr).pc += 1;
+        }
+    }
 }
 
 /// BOR: R[A] = R[B] | R[C]
-pub fn exec_bor(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_bor(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
-
-    let l_int = match left.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-    let r_int = match right.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-
-    let result = LuaValue::integer(l_int | r_int);
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
+            (*frame_ptr).pc += 1;
+        }
+    }
 }
 
 /// BXOR: R[A] = R[B] ~ R[C]
-pub fn exec_bxor(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_bxor(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
-
-    let l_int = match left.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-    let r_int = match right.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-
-    let result = LuaValue::integer(l_int ^ r_int);
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
+            (*frame_ptr).pc += 1;
+        }
+    }
 }
 
 /// SHL: R[A] = R[B] << R[C]
-pub fn exec_shl(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_shl(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
-
-    let Some(l_int) = left.as_integer() else {
-        return Ok(());
-    };
-    let Some(r_int) = right.as_integer() else {
-        return Ok(());
-    };
-
-    let result = if r_int >= 0 {
-        LuaValue::integer(l_int << (r_int & 63))
-    } else {
-        LuaValue::integer(l_int >> ((-r_int) & 63))
-    };
-
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            let result = if r >= 0 {
+                LuaValue::integer(l << (r & 63))
+            } else {
+                LuaValue::integer(l >> ((-r) & 63))
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            (*frame_ptr).pc += 1;
+        }
+    }
 }
 
 /// SHR: R[A] = R[B] >> R[C]
-pub fn exec_shr(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_shr(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
-    let left = vm.register_stack[base_ptr + b];
-    let right = vm.register_stack[base_ptr + c];
-
-    let l_int = match left.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-    let r_int = match right.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBIN handle
-    };
-
-    let result = if r_int >= 0 {
-        LuaValue::integer(l_int >> (r_int & 63))
-    } else {
-        LuaValue::integer(l_int << ((-r_int) & 63))
-    };
-
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
+            let result = if r >= 0 {
+                LuaValue::integer(l >> (r & 63))
+            } else {
+                LuaValue::integer(l << ((-r) & 63))
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            (*frame_ptr).pc += 1;
+        }
+    }
 }
 
 /// BANDK: R[A] = R[B] & K[C]
-pub fn exec_bandk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
+        let l_int = left.as_integer().or_else(|| {
+            left.as_number().and_then(|f| {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+            })
+        });
+        let r_int = constant.as_integer().or_else(|| {
+            constant.as_number().and_then(|f| {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+            })
+        });
 
-    // Try to get integer from left operand (may convert from float)
-    let l_int = if let Some(i) = left.as_integer() {
-        i
-    } else if let Some(f) = left.as_number() {
-        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-            f as i64
-        } else {
-            return Ok(());
+        if let (Some(l), Some(r)) = (l_int, r_int) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
+            (*frame_ptr).pc += 1;
         }
-    } else {
-        return Ok(());
-    };
-
-    // Try to get integer from constant
-    let r_int = if let Some(i) = constant.as_integer() {
-        i
-    } else if let Some(f) = constant.as_number() {
-        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-            f as i64
-        } else {
-            return Ok(());
-        }
-    } else {
-        return Ok(());
-    };
-
-    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int & r_int);
-    vm.current_frame_mut().pc += 1;
-    Ok(()) // Skip MMBIN fallback
+    }
 }
 
 /// BORK: R[A] = R[B] | K[C]
-pub fn exec_bork(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
+        let l_int = left.as_integer().or_else(|| {
+            left.as_number().and_then(|f| {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+            })
+        });
+        let r_int = constant.as_integer().or_else(|| {
+            constant.as_number().and_then(|f| {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+            })
+        });
 
-    // Try to get integer from left operand (may convert from float)
-    let l_int = if let Some(i) = left.as_integer() {
-        i
-    } else if let Some(f) = left.as_number() {
-        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-            f as i64
-        } else {
-            return Ok(());
+        if let (Some(l), Some(r)) = (l_int, r_int) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
+            (*frame_ptr).pc += 1;
         }
-    } else {
-        return Ok(());
-    };
-
-    // Try to get integer from constant
-    let r_int = if let Some(i) = constant.as_integer() {
-        i
-    } else if let Some(f) = constant.as_number() {
-        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-            f as i64
-        } else {
-            return Ok(());
-        }
-    } else {
-        return Ok(());
-    };
-
-    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int | r_int);
-    vm.current_frame_mut().pc += 1;
-    Ok(()) // Skip MMBIN fallback
+    }
 }
 
 /// BXORK: R[A] = R[B] ~ K[C]
-pub fn exec_bxork(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_bxork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    // Get constant from chunk using new API
-    let Some(constant) = vm.get_frame_constant(frame, c) else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
+        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
+            } else { return; }
+        } else { return; };
 
-    let left = vm.register_stack[base_ptr + b];
+        let l_int = left.as_integer().or_else(|| {
+            left.as_number().and_then(|f| {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+            })
+        });
+        let r_int = constant.as_integer().or_else(|| {
+            constant.as_number().and_then(|f| {
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+            })
+        });
 
-    // Try to get integer from left operand (may convert from float)
-    let l_int = if let Some(i) = left.as_integer() {
-        i
-    } else if let Some(f) = left.as_number() {
-        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-            f as i64
-        } else {
-            return Ok(());
+        if let (Some(l), Some(r)) = (l_int, r_int) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
+            (*frame_ptr).pc += 1;
         }
-    } else {
-        return Ok(());
-    };
-
-    // Try to get integer from constant
-    let r_int = if let Some(i) = constant.as_integer() {
-        i
-    } else if let Some(f) = constant.as_number() {
-        if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-            f as i64
-        } else {
-            return Ok(());
-        }
-    } else {
-        return Ok(());
-    };
-
-    vm.register_stack[base_ptr + a] = LuaValue::integer(l_int ^ r_int);
-    vm.current_frame_mut().pc += 1;
-    Ok(()) // Skip MMBIN fallback
+    }
 }
 
 /// SHRI: R[A] = R[B] >> sC
-pub fn exec_shri(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_shri(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let sc = Instruction::get_sc(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    let left = vm.register_stack[base_ptr + b];
-
-    let l_int = match left.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBINI handle metamethod
-    };
-
-    let result = if sc >= 0 {
-        LuaValue::integer(l_int >> (sc & 63))
-    } else {
-        LuaValue::integer(l_int << ((-sc) & 63))
-    };
-
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        if let Some(l) = left.as_integer() {
+            let result = if sc >= 0 {
+                LuaValue::integer(l >> (sc & 63))
+            } else {
+                LuaValue::integer(l << ((-sc) & 63))
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            (*frame_ptr).pc += 1;
+        }
+    }
 }
 
 /// SHLI: R[A] = sC << R[B]
-pub fn exec_shli(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_shli(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let sc = Instruction::get_sc(instr);
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let right = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    let right = vm.register_stack[base_ptr + b];
-
-    let r_int = match right.as_integer() {
-        Some(i) => i,
-        None => return Ok(()), // Let MMBINI handle metamethod
-    };
-
-    let result = if r_int >= 0 {
-        LuaValue::integer((sc as i64) << (r_int & 63))
-    } else {
-        LuaValue::integer((sc as i64) >> ((-r_int) & 63))
-    };
-
-    vm.register_stack[base_ptr + a] = result;
-    vm.current_frame_mut().pc += 1;
-    Ok(())
+        if let Some(r) = right.as_integer() {
+            let result = if r >= 0 {
+                LuaValue::integer((sc as i64) << (r & 63))
+            } else {
+                LuaValue::integer((sc as i64) >> ((-r) & 63))
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            (*frame_ptr).pc += 1;
+        }
+    }
 }
 
 /// BNOT: R[A] = ~R[B]
-pub fn exec_bnot(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let value = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-    let value = vm.register_stack[base_ptr + b];
-
-    let result = if let Some(int_val) = value.as_integer() {
-        LuaValue::integer(!int_val)
-    } else {
-        // Try metamethod
-        let mm_key = vm.create_string("__bnot");
-        if let Some(mt) = vm.table_get_metatable(&value) {
-            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
-                if !metamethod.is_nil() {
-                    let result = vm
-                        .call_metamethod(&metamethod, &[value])?
-                        .unwrap_or(LuaValue::nil());
-                    vm.register_stack[base_ptr + a] = result;
-                    return Ok(());
-                }
-            }
+        if let Some(int_val) = value.as_integer() {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(!int_val);
         }
-        return Err(vm.error(format!(
-            "attempt to perform bitwise operation on {}",
-            value.type_name()
-        )));
-    };
-
-    vm.register_stack[base_ptr + a] = result;
-    Ok(())
+        // If not integer, MMBIN will handle it
+    }
 }
 
 /// NOT: R[A] = not R[B]
-pub fn exec_not(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_not(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-
-    let value = vm.register_stack[base_ptr + b];
-    // In Lua, only nil and false are falsy; everything else is truthy
-    // NOT returns true if value is nil or false, otherwise returns false
-    let is_falsy = value.is_nil() || matches!(value.as_bool(), Some(false));
-    let result = LuaValue::boolean(is_falsy);
-
-    vm.register_stack[base_ptr + a] = result;
-    Ok(())
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let value = *vm.register_stack.as_ptr().add(base_ptr + b);
+        
+        // In Lua, only nil and false are falsy
+        use crate::lua_value::{TAG_NIL, VALUE_FALSE};
+        let is_falsy = value.primary == TAG_NIL || value.primary == VALUE_FALSE;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
+    }
 }
 
 /// LEN: R[A] = #R[B]
 #[inline(always)]
-pub fn exec_len(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
     let value = vm.register_stack[base_ptr + b];
 
     // Check for __len metamethod first (for tables)
@@ -1123,178 +980,126 @@ fn get_binop_metamethod(tm: u8) -> &'static str {
 }
 
 /// MmBin: Metamethod binary operation (register, register)
-pub fn exec_mmbin(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize; // operand 1
-    let b = Instruction::get_b(instr) as usize; // operand 2
-    let c = Instruction::get_c(instr) as usize; // C is the TagMethod index
-    // k bit is unused for MMBIN
+#[inline(always)]
+pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let c = Instruction::get_c(instr) as usize;
 
-    // Get the previous instruction to find the destination register
-    let frame = vm.current_frame();
-    let prev_pc = frame.pc - 1; // Previous instruction was the failed arithmetic op
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let prev_pc = (*frame_ptr).pc - 1;
 
-    if prev_pc == 0 {
-        return Err(vm.error("MMBIN: no previous instruction".to_string()));
+        if prev_pc == 0 { return; }
+
+        // Get previous instruction to find destination register
+        let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
+        let dest_reg = Instruction::get_a(prev_instr) as usize;
+
+        let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let rb = *vm.register_stack.as_ptr().add(base_ptr + b);
+
+        let metamethod_name = get_binop_metamethod(c as u8);
+        let mm_key = vm.create_string(metamethod_name);
+
+        let metamethod = if let Some(mt) = vm.table_get_metatable(&ra) {
+            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+        } else if let Some(mt) = vm.table_get_metatable(&rb) {
+            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+        } else {
+            LuaValue::nil()
+        };
+
+        if !metamethod.is_nil() {
+            if let Ok(Some(result)) = vm.call_metamethod(&metamethod, &[ra, rb]) {
+                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
+            }
+        }
+        // If no metamethod, leave the instruction result as-is (error will be caught elsewhere)
     }
-
-    let Some(prev_instr) = vm.get_frame_instruction(frame, prev_pc - 1) else {
-        return Err(vm.error("MMBIN: failed to get previous instruction".to_string()));
-    };
-    let dest_reg = Instruction::get_a(prev_instr) as usize; // Destination register from ADD/SUB/etc
-
-    // A and B are the operand registers
-    let ra = vm.register_stack[base_ptr + a];
-    let rb = vm.register_stack[base_ptr + b];
-
-    // C is the metamethod index (TagMethod enum value)
-    let metamethod_name = get_binop_metamethod(c as u8);
-    let mm_key = vm.create_string(metamethod_name);
-
-    // Try to get metamethod from first operand's metatable
-    let metamethod = if let Some(mt) = vm.table_get_metatable(&ra) {
-        vm.table_get_with_meta(&mt, &mm_key)
-            .unwrap_or(LuaValue::nil())
-    } else if let Some(mt) = vm.table_get_metatable(&rb) {
-        vm.table_get_with_meta(&mt, &mm_key)
-            .unwrap_or(LuaValue::nil())
-    } else {
-        LuaValue::nil()
-    };
-
-    if metamethod.is_nil() {
-        return Err(vm.error(format!(
-            "attempt to perform arithmetic on {} and {}",
-            ra.type_name(),
-            rb.type_name()
-        )));
-    }
-
-    // Call metamethod
-    let args = vec![ra, rb];
-    let result = vm
-        .call_metamethod(&metamethod, &args)?
-        .unwrap_or(LuaValue::nil());
-    // Store result in the destination register from the previous instruction
-    vm.register_stack[base_ptr + dest_reg] = result;
-
-    Ok(())
 }
 
 /// MmBinI: Metamethod binary operation (register, immediate)
-pub fn exec_mmbini(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr); // Signed immediate value (as in ADDI)
+    let sb = Instruction::get_sb(instr);
     let c = Instruction::get_c(instr);
     let k = Instruction::get_k(instr);
 
-    // Get the previous instruction to find the destination register
-    let frame = vm.current_frame();
-    let prev_pc = frame.pc - 1; // Previous instruction was the failed arithmetic op
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let prev_pc = (*frame_ptr).pc - 1;
 
-    if prev_pc == 0 {
-        return Err(vm.error("MMBINI: no previous instruction".to_string()));
+        if prev_pc == 0 { return; }
+
+        let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
+        let dest_reg = Instruction::get_a(prev_instr) as usize;
+
+        let rb = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let rc = LuaValue::integer(sb as i64);
+
+        let metamethod_name = get_binop_metamethod(c as u8);
+        let mm_key = vm.create_string(metamethod_name);
+
+        let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
+            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+        } else {
+            LuaValue::nil()
+        };
+
+        if !metamethod.is_nil() {
+            let args = if k { vec![rc, rb] } else { vec![rb, rc] };
+            if let Ok(Some(result)) = vm.call_metamethod(&metamethod, &args) {
+                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
+            }
+        }
     }
-
-    let Some(prev_instr) = vm.get_frame_instruction(frame, prev_pc - 1) else {
-        return Err(vm.error("MMBINI: failed to get previous instruction".to_string()));
-    };
-    let dest_reg = Instruction::get_a(prev_instr) as usize; // Destination register from ADDI
-
-    // From compiler: create_abck(OpCode::MmBinI, left_reg, imm, TagMethod, false)
-    // So: A = left_reg (operand), B = imm (immediate value encoded), C = tagmethod
-
-    let rb = vm.register_stack[base_ptr + a]; // A contains the operand register content
-    let rc = LuaValue::integer(sb as i64); // B field contains the immediate value
-
-    let metamethod_name = get_binop_metamethod(c as u8);
-    let mm_key = vm.create_string(metamethod_name);
-
-    // Try to get metamethod from operand's metatable
-    let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
-        vm.table_get_with_meta(&mt, &mm_key)
-            .unwrap_or(LuaValue::nil())
-    } else {
-        LuaValue::nil()
-    };
-
-    if metamethod.is_nil() {
-        return Err(vm.error(format!(
-            "attempt to perform arithmetic on {} and {}",
-            rb.type_name(),
-            rc.type_name()
-        )));
-    }
-
-    // Call metamethod
-    let args = if k { vec![rc, rb] } else { vec![rb, rc] };
-    let result = vm
-        .call_metamethod(&metamethod, &args)?
-        .unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + dest_reg] = result;
-
-    Ok(())
 }
 
 /// MmBinK: Metamethod binary operation (register, constant)
-pub fn exec_mmbink(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize; // C is the TagMethod
-    let k = Instruction::get_k(instr); // k is the flip flag
+    let c = Instruction::get_c(instr) as usize;
+    let k = Instruction::get_k(instr);
 
-    // Get the previous instruction to find the destination register
-    let frame = vm.current_frame();
-    let prev_pc = frame.pc - 1; // Previous instruction was the failed arithmetic op
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let prev_pc = (*frame_ptr).pc - 1;
 
-    if prev_pc == 0 {
-        return Err(vm.error("MMBINK: no previous instruction".to_string()));
+        if prev_pc == 0 { return; }
+
+        let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
+        let dest_reg = Instruction::get_a(prev_instr) as usize;
+
+        let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
+
+        // Get constant
+        let kb = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
+            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
+                if let Some(&val) = func_ref.chunk.constants.get(b) { val } else { return; }
+            } else { return; }
+        } else { return; };
+
+        let metamethod_name = get_binop_metamethod(c as u8);
+        let mm_key = vm.create_string(metamethod_name);
+
+        let (left, right) = if !k { (ra, kb) } else { (kb, ra) };
+
+        let metamethod = if let Some(mt) = vm.table_get_metatable(&left) {
+            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+        } else if let Some(mt) = vm.table_get_metatable(&right) {
+            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+        } else {
+            LuaValue::nil()
+        };
+
+        if !metamethod.is_nil() {
+            if let Ok(Some(result)) = vm.call_metamethod(&metamethod, &[left, right]) {
+                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
+            }
+        }
     }
-
-    let Some(prev_instr) = vm.get_frame_instruction(frame, prev_pc - 1) else {
-        return Err(vm.error("MMBINK: failed to get previous instruction".to_string()));
-    };
-    let dest_reg = Instruction::get_a(prev_instr) as usize; // Destination register from ADDK/SUBK/etc
-
-    let ra = vm.register_stack[base_ptr + a];
-    let Some(kb) = vm.get_frame_constant(frame, b) else {
-        return Err(vm.error(format!("Constant index out of bounds: {}", b)));
-    };
-
-    // C is the TagMethod, not a constant index
-    let metamethod_name = get_binop_metamethod(c as u8);
-    let mm_key = vm.create_string(metamethod_name);
-
-    // k is flip flag: if k==false then (ra, kb), if k==true then (kb, ra)
-    let (left, right) = if !k { (ra, kb) } else { (kb, ra) };
-
-    // Try to get metamethod from operands' metatables
-    let metamethod = if let Some(mt) = vm.table_get_metatable(&left) {
-        vm.table_get_with_meta(&mt, &mm_key)
-            .unwrap_or(LuaValue::nil())
-    } else if let Some(mt) = vm.table_get_metatable(&right) {
-        vm.table_get_with_meta(&mt, &mm_key)
-            .unwrap_or(LuaValue::nil())
-    } else {
-        LuaValue::nil()
-    };
-
-    if metamethod.is_nil() {
-        return Err(vm.error(format!(
-            "attempt to perform arithmetic on {} and {}",
-            left.type_name(),
-            right.type_name()
-        )));
-    }
-
-    // Call metamethod
-    let args = vec![left, right];
-    let result = vm
-        .call_metamethod(&metamethod, &args)?
-        .unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + dest_reg] = result;
-
-    Ok(())
 }

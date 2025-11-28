@@ -7,6 +7,8 @@ use crate::{
     lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
 };
 
+// Re-export LuaCallFrame for use with frame_ptr
+
 /// FORPREP A Bx
 /// Prepare numeric for loop: R[A]-=R[A+2]; R[A+3]=R[A]; if (skip) pc+=Bx+1
 /// OPTIMIZED: Uses frame_ptr directly, no i128, unsafe register access
@@ -219,32 +221,34 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 /// TFORPREP A Bx
 /// create upvalue for R[A + 3]; pc+=Bx
 /// In Lua 5.4, this creates a to-be-closed variable for the state
-pub fn exec_tforprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
 
-    // In Lua 5.4, R[A+3] is the to-be-closed variable for the state
-    // For now, we just copy the state value to ensure it's preserved
-    let state = vm.register_stack[base_ptr + a + 1];
-    vm.register_stack[base_ptr + a + 3] = state;
+        // In Lua 5.4, R[A+3] is the to-be-closed variable for the state
+        // For now, we just copy the state value to ensure it's preserved
+        let state = vm.register_stack[base_ptr + a + 1];
+        vm.register_stack[base_ptr + a + 3] = state;
 
-    // Jump to loop start
-    vm.current_frame_mut().pc += bx;
-
-    Ok(())
+        // Jump to loop start
+        (*frame_ptr).pc += bx;
+    }
 }
 
 /// TFORCALL A C
 /// R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);
-pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let (base_ptr, func_value, current_pc) = unsafe {
+        ((*frame_ptr).base_ptr, (*frame_ptr).function_value, (*frame_ptr).pc)
+    };
 
     // Get iterator function and state
     let func = vm.register_stack[base_ptr + a];
@@ -271,8 +275,8 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
             let temp_frame = LuaCallFrame::new_c_function(
                 frame_id,
-                vm.current_frame().function_value,
-                vm.current_frame().pc,
+                func_value,
+                current_pc,
                 call_base,
                 3, // func + 2 args
             );
@@ -347,20 +351,19 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
 /// TFORLOOP A Bx
 /// if R[A+1] ~= nil then { R[A]=R[A+1]; pc -= Bx }
-pub fn exec_tforloop(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_tforloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let value = vm.register_stack[base_ptr + a + 1];
 
-    let value = vm.register_stack[base_ptr + a + 1];
-
-    if !value.is_nil() {
-        // Continue loop
-        vm.register_stack[base_ptr + a] = value;
-        vm.current_frame_mut().pc -= bx;
+        if !value.is_nil() {
+            // Continue loop
+            vm.register_stack[base_ptr + a] = value;
+            (*frame_ptr).pc -= bx;
+        }
     }
-
-    Ok(())
 }

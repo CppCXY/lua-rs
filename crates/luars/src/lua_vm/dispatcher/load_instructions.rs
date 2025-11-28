@@ -2,12 +2,13 @@
 ///
 /// These instructions handle loading constants and moving values between registers.
 use crate::LuaValue;
-use crate::lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM};
+use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
 
 /// VARARGPREP A
 /// Prepare stack for vararg function
 /// A is the number of fixed parameters
-pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
 
     let frame_idx = vm.frames.len() - 1;
@@ -17,10 +18,10 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 
     // Get max_stack_size from the function using new ObjectPool API
     let Some(func_id) = frame.function_value.as_function_id() else {
-        return Err(vm.error("Invalid function in VARARGPREP".to_string()));
+        return; // Invalid function - should not happen
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID in VARARGPREP".to_string()));
+        return; // Invalid function ID - should not happen
     };
     let max_stack_size = func_ref.chunk.max_stack_size;
 
@@ -45,68 +46,68 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
     } else {
         vm.frames[frame_idx].set_vararg(base_ptr + max_stack_size, 0);
     }
-
-    Ok(())
+    let _ = frame_ptr; // Unused but kept for API consistency
 }
 
 /// LOADNIL A B
 /// R[A], R[A+1], ..., R[A+B] := nil
-pub fn exec_loadnil(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_loadnil(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
 
-    for i in 0..=b {
-        vm.register_stack[base_ptr + a + i] = LuaValue::nil();
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let nil_val = LuaValue::nil();
+        let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
+        for i in 0..=b {
+            *reg_ptr.add(a + i) = nil_val;
+        }
     }
-
-    Ok(())
 }
 
 /// LOADFALSE A
 /// R[A] := false
-pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
 
-    vm.register_stack[base_ptr + a] = LuaValue::boolean(false);
-
-    Ok(())
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
+    }
 }
 
 /// LFALSESKIP A
 /// R[A] := false; pc++
-pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
 
-    vm.register_stack[base_ptr + a] = LuaValue::boolean(false);
-
-    // Skip next instruction
-    vm.current_frame_mut().pc += 1;
-
-    Ok(())
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
+        // Skip next instruction
+        (*frame_ptr).pc += 1;
+    }
 }
 
 /// LOADTRUE A
 /// R[A] := true
-pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
 
-    vm.register_stack[base_ptr + a] = LuaValue::boolean(true);
-
-    Ok(())
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(true);
+    }
 }
 
 /// LOADI A sBx
 /// R[A] := sBx (signed integer)
 #[inline(always)]
-pub fn exec_loadi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_loadi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
 
@@ -114,103 +115,71 @@ pub fn exec_loadi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> L
         let base_ptr = (*frame_ptr).base_ptr;
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
     }
-
-    Ok(())
 }
 
 /// LOADF A sBx
 /// R[A] := (lua_Number)sBx
-pub fn exec_loadf(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_loadf(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
 
-    vm.register_stack[base_ptr + a] = LuaValue::number(sbx as f64);
-
-    Ok(())
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(sbx as f64);
+    }
 }
 
 /// LOADK A Bx
 /// R[A] := K[Bx]
 #[inline(always)]
-pub fn exec_loadk(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+pub fn exec_loadk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    let Some(func_id) = frame.function_value.as_function_id() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
-    };
-
-    let len = func_ref.chunk.constants.len();
-    if bx >= len {
-        return Err(vm.error(format!("Constant index out of bounds: {} >= {}", bx, len)));
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+        let func_id = (*frame_ptr).function_value.as_function_id();
+        
+        if let Some(fid) = func_id {
+            if let Some(func_ref) = vm.object_pool.get_function(fid) {
+                if let Some(&constant) = func_ref.chunk.constants.get(bx) {
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                }
+            }
+        }
     }
-
-    let constant = func_ref.chunk.constants[bx];
-    vm.register_stack[base_ptr + a] = constant;
-
-    Ok(())
 }
 
 /// LOADKX A
 /// R[A] := K[extra arg]
-pub fn exec_loadkx(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
+#[inline(always)]
+pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
 
-    // Next instruction contains the constant index
-    let frame = vm.current_frame_mut();
-    let pc = frame.pc;
-    frame.pc += 1; // Skip the extra arg instruction
-    let func_id = frame.function_value.as_function_id();
-    let base_ptr = frame.base_ptr;
+    unsafe {
+        let pc = (*frame_ptr).pc;
+        (*frame_ptr).pc += 1; // Skip the extra arg instruction
+        let base_ptr = (*frame_ptr).base_ptr;
+        let func_id = (*frame_ptr).function_value.as_function_id();
 
-    let Some(func_id) = func_id else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
-    };
-
-    let code_len = func_ref.chunk.code.len();
-    if pc >= code_len {
-        return Err(vm.error("Missing EXTRAARG for LOADKX".to_string()));
+        if let Some(fid) = func_id {
+            if let Some(func_ref) = vm.object_pool.get_function(fid) {
+                if let Some(&extra_instr) = func_ref.chunk.code.get(pc) {
+                    let bx = Instruction::get_ax(extra_instr) as usize;
+                    if let Some(&constant) = func_ref.chunk.constants.get(bx) {
+                        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                    }
+                }
+            }
+        }
     }
-
-    let extra_instr = func_ref.chunk.code[pc];
-    let bx = Instruction::get_ax(extra_instr) as usize;
-    let const_len = func_ref.chunk.constants.len();
-    if bx >= const_len {
-        return Err(vm.error(format!(
-            "Constant index out of bounds: {} >= {}",
-            bx, const_len
-        )));
-    }
-
-    let constant = func_ref.chunk.constants[bx];
-    vm.register_stack[base_ptr + a] = constant;
-
-    Ok(())
-}
-
-/// ExtraArg: Extra argument for LOADKX and other instructions
-pub fn exec_extraarg(vm: &mut LuaVM, _instr: u32) -> LuaResult<()> {
-    // EXTRAARG is consumed by the preceding instruction (like LOADKX)
-    // It should never be executed directly
-    Err(vm.error("EXTRAARG should not be executed directly".to_string()))
 }
 
 /// MOVE A B
 /// R[A] := R[B]
 #[inline(always)]
-pub fn exec_move(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_move(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -219,6 +188,4 @@ pub fn exec_move(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
         let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
         *reg_ptr.add(a) = *reg_ptr.add(b);
     }
-
-    Ok(())
 }
