@@ -595,7 +595,17 @@ impl LuaVM {
             self.return_values = args;
 
             // Continue execution from where it yielded
-            self.run().map(|_| self.return_values.clone())
+            match self.run() {
+                Ok(_) => {
+                    // Normal completion - return the stored return values
+                    Ok(self.return_values.clone())
+                }
+                Err(LuaError::Yield) => {
+                    // Yield happened - this is expected, get the yield values
+                    Ok(self.take_yield_values())
+                }
+                Err(e) => Err(e),
+            }
         };
 
         // Check if thread yielded by examining the result
@@ -2262,7 +2272,7 @@ impl LuaVM {
                         OpCode::BXorK => { exec_bxork(self, instr, frame_ptr); Ok(()) }
                         OpCode::ShrI => { exec_shri(self, instr, frame_ptr); Ok(()) }
                         OpCode::ShlI => { exec_shli(self, instr, frame_ptr); Ok(()) }
-                        OpCode::BNot => { exec_bnot(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BNot => exec_bnot(self, instr, frame_ptr),
                         OpCode::Not => { exec_not(self, instr, frame_ptr); Ok(()) }
                         
                         // Metamethod stubs
@@ -2388,6 +2398,11 @@ impl LuaVM {
                         let result = self.return_values.clone();
                         self.return_values.clear();
                         Ok(result)
+                    }
+                    Err(LuaError::Yield) => {
+                        // Yield - DON'T pop frames, just return the yield error
+                        // The frames need to stay for resume
+                        Err(LuaError::Yield)
                     }
                     Err(e) => {
                         // Error occurred - pop frames back to initial

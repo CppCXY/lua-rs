@@ -869,19 +869,36 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
 /// BNOT: R[A] = ~R[B]
 #[inline(always)]
-pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
-        let value = *vm.register_stack.as_ptr().add(base_ptr + b);
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
+    let value = vm.register_stack[base_ptr + b];
 
-        if let Some(int_val) = value.as_integer() {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(!int_val);
-        }
-        // If not integer, MMBIN will handle it
+    if let Some(int_val) = value.as_integer() {
+        vm.register_stack[base_ptr + a] = LuaValue::integer(!int_val);
+        return Ok(());
     }
+
+    // Try metamethod for non-integer values
+    let mm_key = vm.create_string("__bnot");
+    if let Some(mt) = vm.table_get_metatable(&value) {
+        if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+            if !metamethod.is_nil() {
+                let result = vm
+                    .call_metamethod(&metamethod, &[value])?
+                    .unwrap_or(LuaValue::nil());
+                vm.register_stack[base_ptr + a] = result;
+                return Ok(());
+            }
+        }
+    }
+
+    Err(vm.error(format!(
+        "attempt to perform bitwise operation on {}",
+        value.type_name()
+    )))
 }
 
 /// NOT: R[A] = not R[B]

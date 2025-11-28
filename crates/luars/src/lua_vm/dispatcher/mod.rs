@@ -195,7 +195,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             OpCode::BNot => {
-                exec_bnot(vm, instr, frame_ptr);
+                if let Err(e) = exec_bnot(vm, instr, frame_ptr) {
+                    return Err(e);
+                }
                 continue 'mainloop;
             }
             
