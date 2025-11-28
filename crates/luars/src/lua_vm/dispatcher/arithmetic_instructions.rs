@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// ADD: R[A] = R[B] + R[C]
-/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
+/// OPTIMIZED: Matches Lua C's setivalue behavior - always write both fields
 #[inline(always)]
 pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -21,24 +21,18 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // OPTIMIZATION: Combined type check
+        // Combined type check - if result is 0, both are integers
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
-        // Fast path: Both integers - minimal writes
         if combined_tags == TAG_INTEGER {
+            // Fast path: Both integers - like Lua's setivalue, write both fields
             let result = (left.secondary as i64).wrapping_add(right.secondary as i64);
-            let dest = reg_base.add(a);
-            // Only write secondary if dest already has integer tag, else write both
-            if (*dest).primary == TAG_INTEGER {
-                (*dest).secondary = result as u64;
-            } else {
-                *dest = LuaValue::integer(result);
-            }
-            (*frame_ptr).pc += 1;
+            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
+            (*frame_ptr).pc += 1;  // Skip MMBIN
             return Ok(());
         }
 
-        // Slow path: Check individual types
+        // Slow path: Float operations
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
@@ -59,7 +53,7 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 }
 
 /// SUB: R[A] = R[B] - R[C]
-/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
+/// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
 pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -76,12 +70,7 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
         if combined_tags == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_sub(right.secondary as i64);
-            let dest = reg_base.add(a);
-            if (*dest).primary == TAG_INTEGER {
-                (*dest).secondary = result as u64;
-            } else {
-                *dest = LuaValue::integer(result);
-            }
+            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
             (*frame_ptr).pc += 1;
             return Ok(());
         }
@@ -106,7 +95,7 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 }
 
 /// MUL: R[A] = R[B] * R[C]
-/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
+/// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
 pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -123,12 +112,7 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
         if combined_tags == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_mul(right.secondary as i64);
-            let dest = reg_base.add(a);
-            if (*dest).primary == TAG_INTEGER {
-                (*dest).secondary = result as u64;
-            } else {
-                *dest = LuaValue::integer(result);
-            }
+            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
             (*frame_ptr).pc += 1;
             return Ok(());
         }
@@ -366,7 +350,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 // ============ Arithmetic Immediate Instructions ============
 
 /// ADDI: R[A] = R[B] + sC
-/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
+/// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
 pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -380,13 +364,7 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 
         if left.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_add(sc as i64);
-            let dest = reg_base.add(a);
-            // Only write secondary if dest is already integer (same register reuse)
-            if (*dest).primary == TAG_INTEGER {
-                (*dest).secondary = result as u64;
-            } else {
-                *dest = LuaValue::integer(result);
-            }
+            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
             (*frame_ptr).pc += 1; // Skip MMBINI
 
             // OPTIMIZATION: Check if next instruction is backward JMP (loop)
