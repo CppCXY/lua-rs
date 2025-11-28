@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// ADD: R[A] = R[B] + R[C]
-/// ULTRA-OPTIMIZED: Uses pre-fetched frame_ptr to avoid Vec lookups
+/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
 #[inline(always)]
 pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -17,18 +17,23 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
         // OPTIMIZATION: Combined type check
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
-        // Fast path: Both integers (single branch!)
+        // Fast path: Both integers - minimal writes
         if combined_tags == TAG_INTEGER {
-            let result =
-                LuaValue::integer((left.secondary as i64).wrapping_add(right.secondary as i64));
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            let result = (left.secondary as i64).wrapping_add(right.secondary as i64);
+            let dest = reg_base.add(a);
+            // Only write secondary if dest already has integer tag, else write both
+            if (*dest).primary == TAG_INTEGER {
+                (*dest).secondary = result as u64;
+            } else {
+                *dest = LuaValue::integer(result);
+            }
             (*frame_ptr).pc += 1;
             return Ok(());
         }
@@ -47,14 +52,14 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             return Ok(());
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        *reg_base.add(a) = result;
         (*frame_ptr).pc += 1;
         Ok(())
     }
 }
 
 /// SUB: R[A] = R[B] - R[C]
-/// ULTRA-OPTIMIZED: Uses pre-fetched frame_ptr
+/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
 #[inline(always)]
 pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -63,16 +68,20 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
         if combined_tags == TAG_INTEGER {
-            let result =
-                LuaValue::integer((left.secondary as i64).wrapping_sub(right.secondary as i64));
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            let result = (left.secondary as i64).wrapping_sub(right.secondary as i64);
+            let dest = reg_base.add(a);
+            if (*dest).primary == TAG_INTEGER {
+                (*dest).secondary = result as u64;
+            } else {
+                *dest = LuaValue::integer(result);
+            }
             (*frame_ptr).pc += 1;
             return Ok(());
         }
@@ -90,14 +99,14 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             return Ok(());
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        *reg_base.add(a) = result;
         (*frame_ptr).pc += 1;
         Ok(())
     }
 }
 
 /// MUL: R[A] = R[B] * R[C]
-/// ULTRA-OPTIMIZED: Uses pre-fetched frame_ptr
+/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
 #[inline(always)]
 pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -106,16 +115,20 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
         if combined_tags == TAG_INTEGER {
-            let result =
-                LuaValue::integer((left.secondary as i64).wrapping_mul(right.secondary as i64));
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            let result = (left.secondary as i64).wrapping_mul(right.secondary as i64);
+            let dest = reg_base.add(a);
+            if (*dest).primary == TAG_INTEGER {
+                (*dest).secondary = result as u64;
+            } else {
+                *dest = LuaValue::integer(result);
+            }
             (*frame_ptr).pc += 1;
             return Ok(());
         }
@@ -133,7 +146,7 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
             return Ok(());
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        *reg_base.add(a) = result;
         (*frame_ptr).pc += 1;
         Ok(())
     }
@@ -353,7 +366,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32) -> LuaResult<()> {
 // ============ Arithmetic Immediate Instructions ============
 
 /// ADDI: R[A] = R[B] + sC
-/// OPTIMIZATION: After successful integer add, check if next instruction is JMP and execute inline
+/// ULTRA-OPTIMIZED: Minimal memory writes for integer fast path
 #[inline(always)]
 pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -362,12 +375,18 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
 
         if left.primary == TAG_INTEGER {
-            let l = left.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
-                LuaValue::integer(l.wrapping_add(sc as i64));
+            let result = (left.secondary as i64).wrapping_add(sc as i64);
+            let dest = reg_base.add(a);
+            // Only write secondary if dest is already integer (same register reuse)
+            if (*dest).primary == TAG_INTEGER {
+                (*dest).secondary = result as u64;
+            } else {
+                *dest = LuaValue::integer(result);
+            }
             (*frame_ptr).pc += 1; // Skip MMBINI
 
             // OPTIMIZATION: Check if next instruction is backward JMP (loop)
@@ -385,7 +404,7 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 
         if left.primary == TAG_FLOAT {
             let l = f64::from_bits(left.secondary);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(l + sc as f64);
+            *reg_base.add(a) = LuaValue::float(l + sc as f64);
             (*frame_ptr).pc += 1;
             return Ok(());
         }
