@@ -1,6 +1,6 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
-mod dispatcher;
+mod execute;
 mod lua_call_frame;
 mod lua_error;
 mod opcode;
@@ -271,7 +271,7 @@ impl LuaVM {
     /// No recursion - pure state machine
     fn run(&mut self) -> LuaResult<LuaValue> {
         // Delegate to the optimized dispatcher loop
-        dispatcher::luavm_execute(self)
+        execute::luavm_execute(self)
     }
 
     // ============ Frame Management (Lua 5.4 style) ============
@@ -2139,7 +2139,7 @@ impl LuaVM {
                     // We need to call the dispatcher's instruction handlers directly
                     // But this is complex because they expect frame_ptr_ptr for some instructions
                     // Let's use a simpler approach: call the actual execute function
-                    use crate::lua_vm::dispatcher::*;
+                    use crate::lua_vm::execute::*;
                     use crate::lua_vm::OpCode;
                     
                     let opcode = crate::lua_vm::Instruction::get_opcode(instr);
@@ -2189,9 +2189,9 @@ impl LuaVM {
                         OpCode::Not => { exec_not(self, instr, frame_ptr); Ok(()) }
                         
                         // Metamethod stubs
-                        OpCode::MmBin => { exec_mmbin(self, instr, frame_ptr); Ok(()) }
-                        OpCode::MmBinI => { exec_mmbini(self, instr, frame_ptr); Ok(()) }
-                        OpCode::MmBinK => { exec_mmbink(self, instr, frame_ptr); Ok(()) }
+                        OpCode::MmBin => { exec_mmbin(self, instr, frame_ptr)?; Ok(()) }
+                        OpCode::MmBinI => { exec_mmbini(self, instr, frame_ptr)?; Ok(()) }
+                        OpCode::MmBinK => { exec_mmbink(self, instr, frame_ptr)?; Ok(()) }
                         
                         // Comparisons
                         OpCode::LtI => exec_lti(self, instr, frame_ptr),
@@ -2202,7 +2202,7 @@ impl LuaVM {
                         OpCode::EqK => exec_eqk(self, instr, frame_ptr),
                         
                         // Control flow
-                        OpCode::Jmp => { exec_jmp(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Jmp => { exec_jmp(instr, frame_ptr); Ok(()) }
                         OpCode::Test => { exec_test(self, instr, frame_ptr); Ok(()) }
                         OpCode::TestSet => { exec_testset(self, instr, frame_ptr); Ok(()) }
                         

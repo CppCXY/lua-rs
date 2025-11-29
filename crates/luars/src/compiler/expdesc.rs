@@ -230,11 +230,6 @@ impl ExpDesc {
         matches!(self.kind, ExpKind::VCall | ExpKind::VVararg)
     }
 
-    /// Check if expression has a fixed register
-    pub fn has_fixed_reg(&self) -> bool {
-        self.kind == ExpKind::VNonReloc || self.kind == ExpKind::VLocal
-    }
-
     /// Get the register number if expression is in a register
     pub fn get_register(&self) -> Option<u32> {
         match self.kind {
