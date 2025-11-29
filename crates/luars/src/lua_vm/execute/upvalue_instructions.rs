@@ -15,20 +15,14 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
     let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
-    // Get function using ID-based lookup
-    let Some(func_id) = func_value.as_function_id() else {
-        return;
-    };
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return;
-    };
-    let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
-        return;
-    };
+    // OPTIMIZED: Use unchecked access since we know the function is valid
+    let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
+    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+    let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
 
-    // Get upvalue value using the helper method
+    // Get upvalue value
     let value = vm.read_upvalue(upvalue_id);
-    vm.register_stack[base_ptr + a] = value;
+    unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = value; }
 }
 
 /// SETUPVAL A B
@@ -40,18 +34,12 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
     let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
-    // Get function using ID-based lookup
-    let Some(func_id) = func_value.as_function_id() else {
-        return;
-    };
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return;
-    };
-    let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
-        return;
-    };
+    // OPTIMIZED: Use unchecked access since we know the function is valid
+    let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
+    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+    let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
 
-    let value = vm.register_stack[base_ptr + a];
+    let value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
 
     // Set upvalue value using the helper method
     vm.write_upvalue(upvalue_id, value);

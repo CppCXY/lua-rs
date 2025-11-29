@@ -2250,8 +2250,31 @@ pub fn compile_call_expr_with_returns_and_dest(
                 new_reg
             }
         } else {
-            // No return values needed - can reuse temp_func_reg
-            temp_func_reg
+            // num_returns == 0: Statement context, no return values needed
+            // BUT we still need to ensure arguments don't overwrite local variables!
+            // Arguments will go to temp_func_reg + 1, temp_func_reg + 2, etc.
+            // If these overlap with local variables (< nactvar), we must relocate!
+            let nactvar = c.nactvar as u32;
+            let args_would_start_at = temp_func_reg + 1;
+            
+            if args_would_start_at < nactvar || temp_func_reg < nactvar {
+                // Arguments would overwrite local variables!
+                // Move function to a safe register (at or after nactvar)
+                let new_reg = if c.freereg < nactvar {
+                    c.freereg = nactvar;
+                    alloc_register(c)
+                } else {
+                    alloc_register(c)
+                };
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
+                );
+                new_reg
+            } else {
+                // Safe - neither function nor arguments overlap with locals
+                temp_func_reg
+            }
         };
 
         func_reg

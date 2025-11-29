@@ -277,10 +277,21 @@ impl LuaVM {
     // ============ Frame Management (Lua 5.4 style) ============
     
     /// Push a new frame onto the call stack
-    /// Updates frame_count to maintain sync with frames Vec
+    /// OPTIMIZED: Use unsafe when capacity is available (common case with pre-allocated stack)
     #[inline(always)]
     pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) {
-        self.frames.push(frame);
+        let len = self.frames.len();
+        if len < self.frames.capacity() {
+            // Fast path: we have capacity, write directly without bounds check
+            unsafe {
+                let ptr = self.frames.as_mut_ptr().add(len);
+                std::ptr::write(ptr, frame);
+                self.frames.set_len(len + 1);
+            }
+        } else {
+            // Slow path: need to grow
+            self.frames.push(frame);
+        }
         self.frame_count = self.frames.len();
     }
     
@@ -1036,6 +1047,22 @@ impl LuaVM {
             }
         } else {
             LuaValue::nil()
+        }
+    }
+
+    /// Fast path for reading upvalue - no bounds checking
+    /// SAFETY: uv_id must be valid, and if open, stack_idx must be valid
+    #[inline(always)]
+    pub unsafe fn read_upvalue_unchecked(&self, uv_id: UpvalueId) -> LuaValue {
+        unsafe {
+            let uv = self.object_pool.get_upvalue_unchecked(uv_id);
+            if let Some(stack_idx) = uv.get_stack_index() {
+                // Open upvalue - read directly from stack
+                *self.register_stack.get_unchecked(stack_idx)
+            } else {
+                // Closed upvalue - return stored value
+                uv.get_closed_value().unwrap_unchecked()
+            }
         }
     }
 

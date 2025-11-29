@@ -51,7 +51,7 @@ pub const CIST_TAIL: u8 = 1 << 3;      // 尾调用
 pub const LUA_MULTRET: i16 = -1;
 
 impl LuaCallFrame {
-    #[inline]
+    #[inline(always)]
     pub fn new_lua_function(
         function_value: LuaValue,
         code_ptr: *const u32,
@@ -75,7 +75,7 @@ impl LuaCallFrame {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn new_c_function(base_ptr: usize, top: usize) -> Self {
         LuaCallFrame {
             function_value: LuaValue::nil(),

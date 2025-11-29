@@ -187,6 +187,13 @@ impl<T> Arena<T> {
         self.storage.get(id as usize).and_then(|opt| opt.as_ref())
     }
 
+    /// Get reference by ID without bounds checking (caller must ensure validity)
+    /// SAFETY: id must be a valid index returned from alloc() and not freed
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, id: u32) -> &T {
+        unsafe { self.storage.get_unchecked(id as usize).as_ref().unwrap_unchecked() }
+    }
+
     /// Get mutable reference by ID
     #[inline(always)]
     pub fn get_mut(&mut self, id: u32) -> Option<&mut T> {
@@ -644,6 +651,13 @@ impl ObjectPoolV2 {
         self.functions.get(id.0)
     }
 
+    /// Get function without bounds checking (caller must ensure validity)
+    /// SAFETY: id must be a valid FunctionId from create_function
+    #[inline(always)]
+    pub unsafe fn get_function_unchecked(&self, id: FunctionId) -> &GcFunction {
+        unsafe { self.functions.get_unchecked(id.0) }
+    }
+
     #[inline(always)]
     pub fn get_function_mut(&mut self, id: FunctionId) -> Option<&mut GcFunction> {
         self.functions.get_mut(id.0)
@@ -672,6 +686,13 @@ impl ObjectPoolV2 {
     #[inline(always)]
     pub fn get_upvalue(&self, id: UpvalueId) -> Option<&GcUpvalue> {
         self.upvalues.get(id.0)
+    }
+
+    /// Get upvalue without bounds checking
+    /// SAFETY: id must be a valid UpvalueId
+    #[inline(always)]
+    pub unsafe fn get_upvalue_unchecked(&self, id: UpvalueId) -> &GcUpvalue {
+        unsafe { self.upvalues.get_unchecked(id.0) }
     }
 
     #[inline(always)]
