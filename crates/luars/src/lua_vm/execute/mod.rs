@@ -230,27 +230,19 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             
             // ============ Comparisons (never fail for basic types) ============
             OpCode::LtI => {
-                if let Err(e) = exec_lti(vm, instr, frame_ptr) {
-                    return Err(e);
-                }
+                exec_lti(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
             OpCode::LeI => {
-                if let Err(e) = exec_lei(vm, instr, frame_ptr) {
-                    return Err(e);
-                }
+                exec_lei(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
             OpCode::GtI => {
-                if let Err(e) = exec_gti(vm, instr, frame_ptr) {
-                    return Err(e);
-                }
+                exec_gti(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
             OpCode::GeI => {
-                if let Err(e) = exec_gei(vm, instr, frame_ptr) {
-                    return Err(e);
-                }
+                exec_gei(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
             OpCode::EqI => {

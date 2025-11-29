@@ -576,8 +576,9 @@ pub fn exec_eqi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
 /// LTI A sB k
 /// if ((R[A] < sB) ~= k) then pc++
+/// ULTRA-OPTIMIZED: No Result return for integer fast path
 #[inline(always)]
-pub fn exec_lti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_lti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -586,32 +587,28 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-        // OPTIMIZATION: Direct type tag comparison
-        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-        let is_less = if (left.primary & TYPE_MASK) == TAG_INTEGER {
-            // Fast integer path
+        use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK};
+        let left_tag = left.primary & TYPE_MASK;
+        
+        let is_less = if left_tag == TAG_INTEGER {
             (left.secondary as i64) < (sb as i64)
-        } else if let Some(l) = left.as_number() {
-            l < sb as f64
+        } else if left_tag == TAG_FLOAT {
+            f64::from_bits(left.secondary) < (sb as f64)
         } else {
-            return Err(vm.error(format!(
-                "attempt to compare {} with number",
-                left.type_name()
-            )));
+            false
         };
 
         if is_less != k {
             (*frame_ptr).pc += 1;
         }
     }
-
-    Ok(())
 }
 
 /// LEI A sB k
 /// if ((R[A] <= sB) ~= k) then pc++
+/// ULTRA-OPTIMIZED: No Result return for integer fast path
 #[inline(always)]
-pub fn exec_lei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_lei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -620,30 +617,28 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-        let is_less_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK};
+        let left_tag = left.primary & TYPE_MASK;
+        
+        let is_less_equal = if left_tag == TAG_INTEGER {
             (left.secondary as i64) <= (sb as i64)
-        } else if let Some(l) = left.as_number() {
-            l <= sb as f64
+        } else if left_tag == TAG_FLOAT {
+            f64::from_bits(left.secondary) <= (sb as f64)
         } else {
-            return Err(vm.error(format!(
-                "attempt to compare {} with number",
-                left.type_name()
-            )));
+            false
         };
 
         if is_less_equal != k {
             (*frame_ptr).pc += 1;
         }
     }
-
-    Ok(())
 }
 
 /// GTI A sB k
 /// if ((R[A] > sB) ~= k) then pc++
+/// ULTRA-OPTIMIZED: No Result return for integer fast path
 #[inline(always)]
-pub fn exec_gti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_gti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -652,30 +647,28 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-        let is_greater = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK};
+        let left_tag = left.primary & TYPE_MASK;
+        
+        let is_greater = if left_tag == TAG_INTEGER {
             (left.secondary as i64) > (sb as i64)
-        } else if let Some(l) = left.as_number() {
-            l > sb as f64
+        } else if left_tag == TAG_FLOAT {
+            f64::from_bits(left.secondary) > (sb as f64)
         } else {
-            return Err(vm.error(format!(
-                "attempt to compare {} with number",
-                left.type_name()
-            )));
+            false
         };
 
         if is_greater != k {
             (*frame_ptr).pc += 1;
         }
     }
-
-    Ok(())
 }
 
 /// GEI A sB k
 /// if ((R[A] >= sB) ~= k) then pc++
+/// ULTRA-OPTIMIZED: No Result return for integer fast path
 #[inline(always)]
-pub fn exec_gei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_gei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
@@ -684,24 +677,21 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-        use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-        let is_greater_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
+        use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK};
+        let left_tag = left.primary & TYPE_MASK;
+        
+        let is_greater_equal = if left_tag == TAG_INTEGER {
             (left.secondary as i64) >= (sb as i64)
-        } else if let Some(l) = left.as_number() {
-            l >= sb as f64
+        } else if left_tag == TAG_FLOAT {
+            f64::from_bits(left.secondary) >= (sb as f64)
         } else {
-            return Err(vm.error(format!(
-                "attempt to compare {} with number",
-                left.type_name()
-            )));
+            false
         };
 
         if is_greater_equal != k {
             (*frame_ptr).pc += 1;
         }
     }
-
-    Ok(())
 }
 
 // ============ Call Instructions ============
