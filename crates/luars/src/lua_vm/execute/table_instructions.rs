@@ -55,21 +55,50 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
 /// GETTABLE A B C
 /// R[A] := R[B][R[C]]
+/// OPTIMIZED: Fast path for integer keys and tables without metatable
 #[inline(always)]
 pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    // CRITICAL: Read values BEFORE metamethod calls
-    let (table_value, key_value, _base_ptr) = unsafe {
+    // Read values using unchecked access
+    let (table_value, key_value, base_ptr) = unsafe {
         let bp = (*frame_ptr).base_ptr;
-        let table = vm.register_stack[bp + b];
-        let key = vm.register_stack[bp + c];
+        let table = *vm.register_stack.get_unchecked(bp + b);
+        let key = *vm.register_stack.get_unchecked(bp + c);
         (table, key, bp)
     };
 
-    // Use table_get_with_meta to support __index metamethod
+    // FAST PATH: Direct table access for common case (integer key, no metatable)
+    if let Some(table_id) = table_value.as_table_id() {
+        // SAFETY: table_id is valid because it came from as_table_id()
+        let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
+        
+        // Try integer key fast path first
+        if let Some(i) = key_value.as_integer() {
+            if let Some(val) = lua_table.get_int(i) {
+                unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = val };
+                return Ok(());
+            }
+        }
+        
+        // Try hash lookup
+        if let Some(val) = lua_table.get_from_hash(&key_value) {
+            if !val.is_nil() {
+                unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = val };
+                return Ok(());
+            }
+        }
+        
+        // Key not found - check if no metatable to skip metamethod handling
+        if lua_table.get_metatable().is_none() {
+            unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
+            return Ok(());
+        }
+    }
+
+    // Slow path: Use metamethod handling
     let value = vm
         .table_get_with_meta(&table_value, &key_value)
         .unwrap_or(LuaValue::nil());
@@ -83,6 +112,7 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
 /// SETTABLE A B C k
 /// R[A][R[B]] := RK(C)
+/// OPTIMIZED: Fast path for integer keys and tables without metatable
 #[inline(always)]
 pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -90,134 +120,40 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    // CRITICAL: Read all values BEFORE any metamethod calls
-    // because metamethods can modify the register stack
+    // Read all values using unchecked access
     let (table_value, key_value, set_value) = unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
-        let func_value = (*frame_ptr).function_value;
 
-        let table = vm.register_stack[base_ptr + a];
-        let key = vm.register_stack[base_ptr + b];
+        let table = *vm.register_stack.get_unchecked(base_ptr + a);
+        let key = *vm.register_stack.get_unchecked(base_ptr + b);
 
         let value = if k {
-            // OPTIMIZATION: Get constant directly using new API
-            let Some(func_id) = func_value.as_function_id() else {
-                return Err(vm.error("Not a Lua function".to_string()));
-            };
-            let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-                return Err(vm.error("Invalid function ID".to_string()));
-            };
-            let Some(constant) = func_ref.chunk.constants.get(c).copied() else {
-                return Err(vm.error(format!("Invalid constant index: {}", c)));
-            };
-            constant
+            // Get constant via cached pointer
+            *(*frame_ptr).constants_ptr.add(c)
         } else {
-            vm.register_stack[base_ptr + c]
+            *vm.register_stack.get_unchecked(base_ptr + c)
         };
 
         (table, key, value)
     };
 
-    vm.table_set_with_meta(table_value, key_value, set_value)?;
-
-    Ok(())
-}
-
-/// GETI A B C
-/// R[A] := R[B][C:integer]
-#[inline(always)]
-pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-    let table = vm.register_stack[base_ptr + b];
-
-    // FAST PATH: Direct access for tables without metatable
-    if let Some(table_id) = table.as_table_id() {
-        if let Some(lua_table) = vm.object_pool.get_table(table_id) {
-            let key = LuaValue::integer(c as i64);
-
-            // Try raw_get which checks both array and hash parts
-            if let Some(val) = lua_table.raw_get(&key) {
-                if !val.is_nil() {
-                    vm.register_stack[base_ptr + a] = val;
-                    return Ok(());
-                }
-            }
-
-            // Key not found - check if no metatable to skip metamethod handling
-            if lua_table.get_metatable().is_none() {
-                vm.register_stack[base_ptr + a] = LuaValue::nil();
-                return Ok(());
-            }
-        }
-    }
-
-    // Slow path: Use metamethod handling
-    let key = LuaValue::integer(c as i64);
-    let value = vm
-        .table_get_with_meta(&table, &key)
-        .unwrap_or(LuaValue::nil());
-    vm.register_stack[base_ptr + a] = value;
-
-    Ok(())
-}
-
-/// SETI A B C k
-/// R[A][B] := RK(C)
-#[inline(always)]
-pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_sb(instr);
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
-
-    // CRITICAL: Read all values BEFORE any metamethod calls
-    // because metamethods can modify the register stack
-    let (table_value, key_value, set_value) = unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
-        let func_value = (*frame_ptr).function_value;
-
-        let table = vm.register_stack[base_ptr + a];
-        let key = crate::LuaValue::integer(b as i64);
-
-        let value = if k {
-            // OPTIMIZATION: Get constant directly using new API
-            let Some(func_id) = func_value.as_function_id() else {
-                return Err(vm.error("Not a Lua function".to_string()));
-            };
-            let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-                return Err(vm.error("Invalid function ID".to_string()));
-            };
-            let Some(constant) = func_ref.chunk.constants.get(c).copied() else {
-                return Err(vm.error(format!("Invalid constant index: {}", c)));
-            };
-            constant
-        } else {
-            vm.register_stack[base_ptr + c]
-        };
-
-        (table, key, value)
-    };
-
-    // FAST PATH: Direct table access without metamethod check for common case
+    // FAST PATH: Direct table access for common case (no metatable)
     if let Some(table_id) = table_value.as_table_id() {
+        // SAFETY: table_id is valid because it came from as_table_id()
+        let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
+        
         // Quick check: no metatable means no __newindex to worry about
-        let has_metatable = vm
-            .object_pool
-            .get_table(table_id)
-            .map(|t| t.get_metatable().is_some())
-            .unwrap_or(false);
-
-        if !has_metatable {
-            // Ultra-fast path: direct set without any metamethod checks
-            if let Some(lua_table) = vm.object_pool.get_table_mut(table_id) {
-                lua_table.raw_set(key_value.clone(), set_value.clone());
+        if lua_table.get_metatable().is_none() {
+            let lua_table = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
+            
+            // Try integer key fast path
+            if let Some(i) = key_value.as_integer() {
+                lua_table.set_int(i, set_value);
+            } else {
+                lua_table.raw_set(key_value, set_value);
             }
-
-            // GC barrier - only for collectable values (like Lua)
+            
+            // GC barrier
             if crate::gc::GC::is_collectable(&set_value) {
                 vm.gc
                     .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
@@ -228,6 +164,100 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
     }
 
     // Slow path: use full metamethod handling
+    vm.table_set_with_meta(table_value, key_value, set_value)?;
+
+    Ok(())
+}
+
+/// GETI A B C
+/// R[A] := R[B][sC:integer]
+/// OPTIMIZED: Direct integer access using get_int() without creating LuaValue key
+#[inline(always)]
+pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let c = Instruction::get_sc(instr) as i64; // sC is the signed integer index
+
+    let base_ptr = unsafe { (*frame_ptr).base_ptr };
+    let table = unsafe { *vm.register_stack.get_unchecked(base_ptr + b) };
+
+    // FAST PATH: Direct integer access for tables using unchecked access
+    if let Some(table_id) = table.as_table_id() {
+        // SAFETY: table_id is valid because it came from as_table_id()
+        let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
+        
+        // OPTIMIZATION: Use get_int directly - C is already the integer index!
+        if let Some(val) = lua_table.get_int(c) {
+            unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = val };
+            return Ok(());
+        }
+
+        // Key not found - check if no metatable to skip metamethod handling
+        if lua_table.get_metatable().is_none() {
+            unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
+            return Ok(());
+        }
+    }
+
+    // Slow path: Use metamethod handling
+    let key = LuaValue::integer(c);
+    let value = vm
+        .table_get_with_meta(&table, &key)
+        .unwrap_or(LuaValue::nil());
+    vm.register_stack[base_ptr + a] = value;
+
+    Ok(())
+}
+
+/// SETI A B C k
+/// R[A][B] := RK(C)
+/// OPTIMIZED: Direct integer key access using set_int()
+#[inline(always)]
+pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_sb(instr) as i64; // B is already the integer key
+    let c = Instruction::get_c(instr) as usize;
+    let k = Instruction::get_k(instr);
+
+    // CRITICAL: Read all values BEFORE any metamethod calls
+    let (table_value, set_value) = unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
+
+        let table = *vm.register_stack.get_unchecked(base_ptr + a);
+
+        let value = if k {
+            // Get constant via cached pointer for speed
+            *(*frame_ptr).constants_ptr.add(c)
+        } else {
+            *vm.register_stack.get_unchecked(base_ptr + c)
+        };
+
+        (table, value)
+    };
+
+    // FAST PATH: Direct table access without metamethod check
+    if let Some(table_id) = table_value.as_table_id() {
+        // SAFETY: table_id is valid because it came from as_table_id()
+        let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
+        
+        // Quick check: no metatable means no __newindex to worry about
+        if lua_table.get_metatable().is_none() {
+            // Ultra-fast path: direct integer set
+            let lua_table = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
+            lua_table.set_int(b, set_value);
+
+            // GC barrier - only for collectable values
+            if crate::gc::GC::is_collectable(&set_value) {
+                vm.gc
+                    .barrier_forward(crate::gc::GcObjectType::Table, table_id.0);
+                vm.gc.barrier_back(&set_value);
+            }
+            return Ok(());
+        }
+    }
+
+    // Slow path: use full metamethod handling
+    let key_value = crate::LuaValue::integer(b);
     vm.table_set_with_meta(table_value, key_value, set_value)?;
 
     Ok(())

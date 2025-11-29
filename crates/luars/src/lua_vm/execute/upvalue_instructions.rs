@@ -365,21 +365,25 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let start_idx = c * 50; // 0-based for array indexing
     let count = if b == 0 { top - a - 1 } else { b };
 
-    // Fast path: direct array manipulation using new API
+    // Fast path: direct array manipulation using unchecked access
     if let Some(table_id) = table.as_table_id() {
-        if let Some(t) = vm.object_pool.get_table_mut(table_id) {
-            // Reserve space
-            let needed = start_idx + count;
-            if t.array.len() < needed {
-                t.array.resize(needed, crate::LuaValue::nil());
-            }
-
-            // Copy all values
-            for i in 0..count {
-                t.array[start_idx + i] = vm.register_stack[base_ptr + a + 1 + i];
-            }
-            return;
+        // SAFETY: table_id is valid because it came from as_table_id()
+        let t = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
+        
+        // Reserve space
+        let needed = start_idx + count;
+        if t.array.len() < needed {
+            t.array.resize(needed, crate::LuaValue::nil());
         }
+
+        // Copy all values using unchecked access
+        for i in 0..count {
+            unsafe {
+                *t.array.get_unchecked_mut(start_idx + i) = 
+                    *vm.register_stack.get_unchecked(base_ptr + a + 1 + i);
+            }
+        }
+        return;
     }
 
     // Slow path with metamethods

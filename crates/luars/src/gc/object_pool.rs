@@ -207,6 +207,18 @@ impl<T> Arena<T> {
             .and_then(|opt| opt.as_mut())
     }
 
+    /// Get mutable reference by ID without bounds checking (caller must ensure validity)
+    /// SAFETY: id must be a valid index returned from alloc() and not freed
+    #[inline(always)]
+    pub unsafe fn get_mut_unchecked(&mut self, id: u32) -> &mut T {
+        unsafe {
+            self.storage
+                .get_unchecked_mut(id as usize)
+                .as_mut()
+                .unwrap_unchecked()
+        }
+    }
+
     /// Free a slot (mark for reuse)
     #[inline]
     pub fn free(&mut self, id: u32) {
@@ -624,9 +636,23 @@ impl ObjectPoolV2 {
         self.tables.get(id.0).map(|gt| &gt.data)
     }
 
+    /// Get table without bounds checking (caller must ensure validity)
+    /// SAFETY: id must be a valid TableId from create_table
+    #[inline(always)]
+    pub unsafe fn get_table_unchecked(&self, id: TableId) -> &LuaTable {
+        unsafe { &self.tables.get_unchecked(id.0).data }
+    }
+
     #[inline(always)]
     pub fn get_table_mut(&mut self, id: TableId) -> Option<&mut LuaTable> {
         self.tables.get_mut(id.0).map(|gt| &mut gt.data)
+    }
+
+    /// Get mutable table without bounds checking (caller must ensure validity)
+    /// SAFETY: id must be a valid TableId from create_table
+    #[inline(always)]
+    pub unsafe fn get_table_mut_unchecked(&mut self, id: TableId) -> &mut LuaTable {
+        unsafe { &mut self.tables.get_mut_unchecked(id.0).data }
     }
 
     #[inline(always)]
