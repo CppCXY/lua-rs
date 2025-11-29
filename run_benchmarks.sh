@@ -11,12 +11,31 @@ BENCHMARKS=(
     "bench_control_flow.lua"
 )
 
-# Colors
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-MAGENTA='\033[0;35m'
-GREEN='\033[0;32m'
-NC='\033[0m' # No Color
+# Parse arguments
+NOCOLOR=false
+for arg in "$@"; do
+    case $arg in
+        --nocolor|-n)
+            NOCOLOR=true
+            shift
+            ;;
+    esac
+done
+
+# Colors (disabled with --nocolor)
+if [ "$NOCOLOR" = true ]; then
+    CYAN=''
+    YELLOW=''
+    MAGENTA=''
+    GREEN=''
+    NC=''
+else
+    CYAN='\033[0;36m'
+    YELLOW='\033[1;33m'
+    MAGENTA='\033[0;35m'
+    GREEN='\033[0;32m'
+    NC='\033[0m'
+fi
 
 echo ""
 echo -e "${CYAN}========================================${NC}"
