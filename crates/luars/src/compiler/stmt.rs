@@ -119,6 +119,47 @@ fn try_compile_immediate_comparison(
     Ok(None)
 }
 
+/// Try to compile binary expression as register comparison for control flow
+/// This handles comparisons between two registers (e.g., i < n where n is a variable)
+/// Returns true if successful (comparison + JMP emitted)
+/// The emitted instructions skip the JMP if condition is TRUE (continue loop)
+fn try_compile_register_comparison(
+    c: &mut Compiler,
+    expr: &LuaExpr,
+    invert: bool,
+) -> Result<bool, String> {
+    // Only handle binary comparison expressions
+    if let LuaExpr::BinaryExpr(bin_expr) = expr {
+        let (left, right) = bin_expr.get_exprs().ok_or("error")?;
+        let op = bin_expr.get_op_token().ok_or("error")?;
+        let op_kind = op.get_op();
+
+        // Check if this is a comparison operator
+        let (opcode, swap) = match op_kind {
+            BinaryOperator::OpLt => (OpCode::Lt, false),
+            BinaryOperator::OpLe => (OpCode::Le, false),
+            BinaryOperator::OpGt => (OpCode::Lt, true),  // a > b == b < a
+            BinaryOperator::OpGe => (OpCode::Le, true),  // a >= b == b <= a
+            _ => return Ok(false),
+        };
+
+        // Compile both operands
+        let left_reg = compile_expr(c, &left)?;
+        let right_reg = compile_expr(c, &right)?;
+
+        // Emit comparison instruction
+        // k=0: skip next if FALSE (we want to continue if TRUE, so FALSE means exit)
+        // For while: if (i < n) is TRUE, continue loop (skip JMP), else execute JMP to exit
+        let k = if invert { 1 } else { 0 };
+        let (a, b) = if swap { (right_reg, left_reg) } else { (left_reg, right_reg) };
+        emit(c, Instruction::encode_abc(opcode, a, b, k));
+
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// Compile any statement
 pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
     let result = match stat {
@@ -906,7 +947,10 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         // Just compile body and jump back
         None
     } else if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond, false)? {
-        // OPTIMIZATION: immediate comparison (e.g., i < 10)
+        // OPTIMIZATION: immediate comparison with constant (e.g., i < 10)
+        Some(emit_jump(c, OpCode::Jmp))
+    } else if try_compile_register_comparison(c, &cond, false)? {
+        // OPTIMIZATION: register comparison (e.g., i < n)
         Some(emit_jump(c, OpCode::Jmp))
     } else {
         // Standard path: compile expression + Test
@@ -956,6 +1000,10 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
         if let Some(_) = try_compile_immediate_comparison(c, &cond_expr, false)? {
             // Immediate comparison skips if FALSE, so Jmp executes when condition is FALSE
             // This is correct for repeat-until (continue when false)
+            let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
+            emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
+        } else if try_compile_register_comparison(c, &cond_expr, false)? {
+            // OPTIMIZATION: register comparison (e.g., i >= n)
             let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
             emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
         } else {

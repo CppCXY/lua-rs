@@ -1,6 +1,6 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
-mod dispatcher;
+mod execute;
 mod lua_call_frame;
 mod lua_error;
 mod opcode;
@@ -14,7 +14,6 @@ use crate::lua_value::{
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::{Compiler, ObjectPool, lib_registry};
-use dispatcher::dispatch_instruction;
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -168,9 +167,6 @@ impl LuaVM {
         let main_func_value = self.create_function(chunk.clone(), upvalues);
 
         // Create initial call frame using unified stack
-        let frame_id = self.next_frame_id;
-        self.next_frame_id += 1;
-
         let base_ptr = self.register_stack.len();
         let required_size = base_ptr + chunk.max_stack_size;
         self.ensure_stack_capacity(required_size);
@@ -179,13 +175,12 @@ impl LuaVM {
         let code_ptr = chunk.code.as_ptr();
 
         let frame = LuaCallFrame::new_lua_function(
-            frame_id,
             main_func_value,
             code_ptr,
             base_ptr,
-            chunk.max_stack_size,
-            0,
-            0,
+            chunk.max_stack_size,  // top
+            0,                      // result_reg
+            0,                      // nresults
         );
 
         self.push_frame(frame);
@@ -229,9 +224,6 @@ impl LuaVM {
         self.register_chunk_constants(&chunk);
 
         // Setup stack and frame
-        let frame_id = self.next_frame_id;
-        self.next_frame_id += 1;
-
         let base_ptr = 0; // Start from beginning of cleared stack
         let required_size = max_stack; // Need at least max_stack registers
 
@@ -246,7 +238,7 @@ impl LuaVM {
         }
 
         let frame =
-            LuaCallFrame::new_lua_function(frame_id, func, code_ptr, base_ptr, max_stack, 0, 0);
+            LuaCallFrame::new_lua_function(func, code_ptr, base_ptr, max_stack, 0, 0);
 
         self.push_frame(frame);
 
@@ -278,43 +270,28 @@ impl LuaVM {
     /// Lua 5.4 style: CALL pushes frame, RETURN pops frame, loop continues
     /// No recursion - pure state machine
     fn run(&mut self) -> LuaResult<LuaValue> {
-        // Pre-calculate frames pointer for direct indexing
-        // This avoids last_mut() overhead in the hot loop
-        
-        'mainloop: loop {
-            // CRITICAL: Use frame_count for direct indexing instead of last_mut()
-            // frame_count is updated by CALL (increment) and RETURN (decrement)
-            let frame_idx = self.frame_count - 1;
-            
-            // SAFETY: frame_count > 0 is guaranteed when we're in the loop
-            // CALL instruction ensures frame_count is incremented before pushing
-            // RETURN instruction sets frame_count = 0 when stack is empty and returns Exit
-            let frame_ptr = unsafe { 
-                self.frames.as_mut_ptr().add(frame_idx)
-            };
-            
-            let instr = unsafe { (*frame_ptr).code_ptr.add((*frame_ptr).pc).read() };
-            unsafe {
-                (*frame_ptr).pc += 1;
-            }
-
-            // Dispatch instruction
-            match dispatch_instruction(self, instr, frame_ptr) {
-                Ok(()) => continue 'mainloop,
-                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
-                Err(LuaError::Yield) => return Ok(LuaValue::nil()),
-                Err(e) => return Err(e),
-            }
-        }
+        // Delegate to the optimized dispatcher loop
+        execute::luavm_execute(self)
     }
 
     // ============ Frame Management (Lua 5.4 style) ============
     
     /// Push a new frame onto the call stack
-    /// Updates frame_count to maintain sync with frames Vec
+    /// OPTIMIZED: Use unsafe when capacity is available (common case with pre-allocated stack)
     #[inline(always)]
     pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) {
-        self.frames.push(frame);
+        let len = self.frames.len();
+        if len < self.frames.capacity() {
+            // Fast path: we have capacity, write directly without bounds check
+            unsafe {
+                let ptr = self.frames.as_mut_ptr().add(len);
+                std::ptr::write(ptr, frame);
+                self.frames.set_len(len + 1);
+            }
+        } else {
+            // Slow path: need to grow
+            self.frames.push(frame);
+        }
         self.frame_count = self.frames.len();
     }
     
@@ -622,7 +599,17 @@ impl LuaVM {
             self.return_values = args;
 
             // Continue execution from where it yielded
-            self.run().map(|_| self.return_values.clone())
+            match self.run() {
+                Ok(_) => {
+                    // Normal completion - return the stored return values
+                    Ok(self.return_values.clone())
+                }
+                Err(LuaError::Yield) => {
+                    // Yield happened - this is expected, get the yield values
+                    Ok(self.take_yield_values())
+                }
+                Err(e) => Err(e),
+            }
         };
 
         // Check if thread yielded by examining the result
@@ -986,23 +973,19 @@ impl LuaVM {
 
     // Integer division
 
-    /// Close all open upvalues for a specific frame
+    /// Close all open upvalues for a specific stack range
     /// Called when a frame exits to move values from stack to heap
+    /// Now uses absolute stack indices instead of frame_id
     #[allow(dead_code)]
-    fn close_upvalues(&mut self, frame_id: usize) {
-        // Find all open upvalues pointing to this frame
+    fn close_upvalues_in_range(&mut self, start_idx: usize, end_idx: usize) {
+        // Find all open upvalues pointing to this range
         let upvalues_to_close: Vec<UpvalueId> = self
             .open_upvalues
             .iter()
             .filter(|uv_id| {
-                if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
-                    if let Some(uv) = self.object_pool.get_upvalue(**uv_id) {
-                        // Check if any open upvalue points to this frame
-                        for reg_idx in 0..frame.top {
-                            if uv.points_to(frame_id, reg_idx) {
-                                return true;
-                            }
-                        }
+                if let Some(uv) = self.object_pool.get_upvalue(**uv_id) {
+                    if let Some(stack_idx) = uv.get_stack_index() {
+                        return stack_idx >= start_idx && stack_idx < end_idx;
                     }
                 }
                 false
@@ -1014,8 +997,12 @@ impl LuaVM {
         for uv_id in upvalues_to_close.iter() {
             // Get the value from the stack before closing
             if let Some(uv) = self.object_pool.get_upvalue(*uv_id) {
-                if let Some((fid, reg)) = uv.get_open_location() {
-                    let value = self.get_upvalue_value(fid, reg);
+                if let Some(stack_idx) = uv.get_stack_index() {
+                    let value = if stack_idx < self.register_stack.len() {
+                        self.register_stack[stack_idx]
+                    } else {
+                        LuaValue::nil()
+                    };
                     if let Some(uv_mut) = self.object_pool.get_upvalue_mut(*uv_id) {
                         uv_mut.close(value);
                     }
@@ -1032,15 +1019,13 @@ impl LuaVM {
         });
     }
 
-    /// Helper: Get value from stack for an open upvalue
-    fn get_upvalue_value(&self, frame_id: usize, register: usize) -> LuaValue {
-        if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
-            let abs_idx = frame.base_ptr + register;
-            if abs_idx < self.register_stack.len() {
-                return self.register_stack[abs_idx].clone();
-            }
+    /// Helper: Get value from stack for an open upvalue (using absolute index)
+    fn get_upvalue_value_at(&self, stack_idx: usize) -> LuaValue {
+        if stack_idx < self.register_stack.len() {
+            self.register_stack[stack_idx]
+        } else {
+            LuaValue::nil()
         }
-        LuaValue::nil()
     }
 
     /// Get upvalue value by UpvalueId
@@ -1048,13 +1033,10 @@ impl LuaVM {
     /// For closed upvalues, returns the stored value
     pub fn read_upvalue(&self, uv_id: UpvalueId) -> LuaValue {
         if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
-            if let Some((frame_id, register)) = uv.get_open_location() {
+            if let Some(stack_idx) = uv.get_stack_index() {
                 // Open upvalue - read from stack
-                if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
-                    let abs_idx = frame.base_ptr + register;
-                    if abs_idx < self.register_stack.len() {
-                        return self.register_stack[abs_idx];
-                    }
+                if stack_idx < self.register_stack.len() {
+                    return self.register_stack[stack_idx];
                 }
                 LuaValue::nil()
             } else if let Some(value) = uv.get_closed_value() {
@@ -1068,18 +1050,31 @@ impl LuaVM {
         }
     }
 
+    /// Fast path for reading upvalue - no bounds checking
+    /// SAFETY: uv_id must be valid, and if open, stack_idx must be valid
+    #[inline(always)]
+    pub unsafe fn read_upvalue_unchecked(&self, uv_id: UpvalueId) -> LuaValue {
+        unsafe {
+            let uv = self.object_pool.get_upvalue_unchecked(uv_id);
+            if let Some(stack_idx) = uv.get_stack_index() {
+                // Open upvalue - read directly from stack
+                *self.register_stack.get_unchecked(stack_idx)
+            } else {
+                // Closed upvalue - return stored value
+                uv.get_closed_value().unwrap_unchecked()
+            }
+        }
+    }
+
     /// Set upvalue value by UpvalueId
     /// For open upvalues, writes to register stack
     /// For closed upvalues, updates the stored value
     pub fn write_upvalue(&mut self, uv_id: UpvalueId, value: LuaValue) {
         if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
-            if let Some((frame_id, register)) = uv.get_open_location() {
+            if let Some(stack_idx) = uv.get_stack_index() {
                 // Open upvalue - write to stack
-                if let Some(frame) = self.frames.iter().find(|f| f.frame_id == frame_id) {
-                    let abs_idx = frame.base_ptr + register;
-                    if abs_idx < self.register_stack.len() {
-                        self.register_stack[abs_idx] = value;
-                    }
+                if stack_idx < self.register_stack.len() {
+                    self.register_stack[stack_idx] = value;
                 }
             } else {
                 // Closed upvalue - update stored value
@@ -1092,39 +1087,16 @@ impl LuaVM {
 
     /// Close all open upvalues at or above the given stack position
     /// Used by RETURN (k bit) and CLOSE instructions
+    /// Simplified: uses absolute stack indices directly
     pub fn close_upvalues_from(&mut self, stack_pos: usize) {
-        // Collect frame info first to avoid borrowing issues
-        let frame_info: Vec<(usize, usize, usize)> = self
-            .frames
-            .iter()
-            .map(|frame| {
-                let max_regs = if let Some(func_id) = frame.function_value.as_function_id() {
-                    self.object_pool
-                        .get_function(func_id)
-                        .map(|f| f.chunk.max_stack_size)
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-                (frame.frame_id, frame.base_ptr, max_regs)
-            })
-            .collect();
-
         let upvalues_to_close: Vec<UpvalueId> = self
             .open_upvalues
             .iter()
             .filter(|uv_id| {
                 if let Some(uv) = self.object_pool.get_upvalue(**uv_id) {
                     // Check if this upvalue points to stack_pos or higher
-                    for (frame_id, base_ptr, max_regs) in &frame_info {
-                        for reg_idx in 0..*max_regs {
-                            if uv.points_to(*frame_id, reg_idx) {
-                                let absolute_pos = base_ptr + reg_idx;
-                                if absolute_pos >= stack_pos {
-                                    return true;
-                                }
-                            }
-                        }
+                    if let Some(stack_idx) = uv.get_stack_index() {
+                        return stack_idx >= stack_pos;
                     }
                 }
                 false
@@ -1135,8 +1107,8 @@ impl LuaVM {
         // Close each upvalue
         for uv_id in upvalues_to_close.iter() {
             if let Some(uv) = self.object_pool.get_upvalue(*uv_id) {
-                if let Some((fid, reg)) = uv.get_open_location() {
-                    let value = self.get_upvalue_value(fid, reg);
+                if let Some(stack_idx) = uv.get_stack_index() {
+                    let value = self.get_upvalue_value_at(stack_idx);
                     if let Some(uv_mut) = self.object_pool.get_upvalue_mut(*uv_id) {
                         uv_mut.close(value);
                     }
@@ -1776,10 +1748,6 @@ impl LuaVM {
                 let max_stack_size = func_ref.chunk.max_stack_size;
                 let code_ptr = func_ref.chunk.code.as_ptr();
 
-                // Save current state
-                let frame_id = self.next_frame_id;
-                self.next_frame_id += 1;
-
                 // Allocate registers in global stack
                 let new_base = self.register_stack.len();
                 self.ensure_stack_capacity(new_base + max_stack_size);
@@ -1792,13 +1760,12 @@ impl LuaVM {
                 }
 
                 let temp_frame = LuaCallFrame::new_lua_function(
-                    frame_id,
                     metamethod,
                     code_ptr,
                     new_base,
-                    max_stack_size,
+                    max_stack_size,  // top
                     result_reg,
-                    1, // expect 1 result
+                    1,               // expect 1 result
                 );
 
                 self.push_frame(temp_frame);
@@ -1818,9 +1785,6 @@ impl LuaVM {
             LuaValueKind::CFunction => {
                 let cf = metamethod.as_cfunction().unwrap();
                 // Create temporary frame for CFunction
-                let frame_id = self.next_frame_id;
-                self.next_frame_id += 1;
-
                 let arg_count = args.len() + 1; // +1 for function itself
                 let new_base = self.register_stack.len();
                 self.ensure_stack_capacity(new_base + arg_count);
@@ -1830,10 +1794,7 @@ impl LuaVM {
                     self.register_stack[new_base + i + 1] = *arg;
                 }
 
-                let parent_pc = self.current_frame().pc;
-                let temp_frame = LuaCallFrame::new_c_function(
-                    frame_id, metamethod, parent_pc, new_base, arg_count,
-                );
+                let temp_frame = LuaCallFrame::new_c_function(new_base, arg_count);
 
                 self.push_frame(temp_frame);
 
@@ -2063,8 +2024,6 @@ impl LuaVM {
             LuaValueKind::CFunction => {
                 let cfunc = func.as_cfunction().unwrap();
                 // For CFunction, create a temporary frame
-                let frame_id = self.next_frame_id;
-                self.next_frame_id += 1;
 
                 // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
                 // to prevent overwriting ANY caller registers (including those beyond top)
@@ -2093,40 +2052,8 @@ impl LuaVM {
                     }
                 }
 
-                // Create dummy function and add to object pool
-                let dummy_chunk = Rc::new(Chunk {
-                    code: Vec::new(),
-                    constants: Vec::new(),
-                    locals: Vec::new(),
-                    upvalue_count: 0,
-                    param_count: 0,
-                    is_vararg: false,
-                    max_stack_size: stack_size,
-                    child_protos: Vec::new(),
-                    upvalue_descs: Vec::new(),
-                    source_name: Some("[direct_call]".to_string()),
-                    line_info: Vec::new(),
-                });
-                let dummy_func_id = self
-                    .object_pool
-                    .create_function(dummy_chunk.clone(), Vec::new());
-                let dummy_func_value = LuaValue::function_id(dummy_func_id);
-
-                // Use new_base as result_reg (same as caller_base + caller_max_stack)
-                let safe_result_reg = new_base;
-
-                // Create empty code for dummy frame
-                let code_ptr = dummy_chunk.code.as_ptr();
-
-                let temp_frame = LuaCallFrame::new_lua_function(
-                    frame_id,
-                    dummy_func_value,
-                    code_ptr,
-                    new_base,
-                    stack_size,
-                    safe_result_reg,
-                    usize::MAX,
-                );
+                // Create temporary C function frame
+                let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
 
                 self.push_frame(temp_frame);
 
@@ -2164,10 +2091,6 @@ impl LuaVM {
                     (size, func_ref.chunk.code.as_ptr())
                 };
 
-                // For Lua function, use similar logic to call_metamethod
-                let frame_id = self.next_frame_id;
-                self.next_frame_id += 1;
-
                 // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
                 let new_base = if let Some(current_frame) = self.frames.last() {
                     let caller_base = current_frame.base_ptr;
@@ -2202,50 +2125,209 @@ impl LuaVM {
                 // Use caller's max_stack as result_reg (safe write position)
                 let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
 
+                // nresults = -1 (LUA_MULTRET) to get all return values
                 let new_frame = LuaCallFrame::new_lua_function(
-                    frame_id,
                     func,
                     code_ptr,
                     new_base,
-                    max_stack_size,
+                    max_stack_size,     // top
                     safe_result_reg,
-                    usize::MAX, // Want all return values
+                    -1,                 // LUA_MULTRET - want all return values
                 );
 
                 let initial_frame_count = self.frames.len();
                 self.push_frame(new_frame);
 
-                // Execute instructions until frame returns
+                // Execute using a bounded loop that stops when frame count returns to initial
                 let exec_result: LuaResult<()> = loop {
+                    // Check if we've returned to our starting frame count
                     if self.frames.len() <= initial_frame_count {
-                        // Frame has been popped (function returned)
+                        // Frame was popped - function has returned
                         break Ok(());
                     }
 
-                    let frame_idx = self.frames.len() - 1;
+                    // Safety check for empty frames
+                    if self.frame_count == 0 {
+                        break Ok(());
+                    }
+
+                    // Get current frame info
+                    let frame_idx = self.frame_count - 1;
                     let pc = self.frames[frame_idx].pc;
-                    let function_value = self.frames[frame_idx].function_value;
+                    let code_ptr = self.frames[frame_idx].code_ptr;
 
-                    // Dynamically resolve chunk
-                    let chunk = if let Some(func_ref) = self.get_function(&function_value) {
-                        func_ref.chunk.clone()
-                    } else {
-                        break Err(self.error("Invalid function in frame".to_string()));
-                    };
-
-                    if pc >= chunk.code.len() {
-                        // End of code
-                        self.pop_frame_discard();
-                        break Ok(());
-                    }
-
-                    let instr = chunk.code[pc];
+                    // Fetch instruction
+                    let instr = unsafe { code_ptr.add(pc).read() };
                     self.frames[frame_idx].pc += 1;
 
-                    // Dispatch instruction (zero-return-value design)
-                    // Get frame_ptr for optimization
-                    let frame_ptr = &mut self.frames[frame_idx] as *mut LuaCallFrame;
-                    if let Err(e) = dispatch_instruction(self, instr, frame_ptr) {
+                    // Execute using the dispatcher but with a local frame_ptr
+                    let mut frame_ptr = unsafe { self.frames.as_mut_ptr().add(frame_idx) };
+                    
+                    // We need to call the dispatcher's instruction handlers directly
+                    // But this is complex because they expect frame_ptr_ptr for some instructions
+                    // Let's use a simpler approach: call the actual execute function
+                    use crate::lua_vm::execute::*;
+                    use crate::lua_vm::OpCode;
+                    
+                    let opcode = crate::lua_vm::Instruction::get_opcode(instr);
+                    
+                    let result: LuaResult<()> = match opcode {
+                        // Load instructions (never fail)
+                        OpCode::Move => { exec_move(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadI => { exec_loadi(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadNil => { exec_loadnil(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadFalse => { exec_loadfalse(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadTrue => { exec_loadtrue(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LFalseSkip => { exec_lfalseskip(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadF => { exec_loadf(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadK => { exec_loadk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LoadKX => { exec_loadkx(self, instr, frame_ptr); Ok(()) }
+                        OpCode::VarargPrep => { exec_varargprep(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Arithmetic
+                        OpCode::Add => { exec_add(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Sub => { exec_sub(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Mul => { exec_mul(self, instr, frame_ptr); Ok(()) }
+                        OpCode::AddI => { exec_addi(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Div => { exec_div(self, instr, frame_ptr); Ok(()) }
+                        OpCode::IDiv => { exec_idiv(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Mod => { exec_mod(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Pow => { exec_pow(self, instr, frame_ptr); Ok(()) }
+                        OpCode::AddK => { exec_addk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::SubK => { exec_subk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::MulK => { exec_mulk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::ModK => { exec_modk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::PowK => { exec_powk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::DivK => { exec_divk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::IDivK => { exec_idivk(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Bitwise
+                        OpCode::BAnd => { exec_band(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BOr => { exec_bor(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BXor => { exec_bxor(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Shl => { exec_shl(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Shr => { exec_shr(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BAndK => { exec_bandk(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BOrK => { exec_bork(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BXorK => { exec_bxork(self, instr, frame_ptr); Ok(()) }
+                        OpCode::ShrI => { exec_shri(self, instr, frame_ptr); Ok(()) }
+                        OpCode::ShlI => { exec_shli(self, instr, frame_ptr); Ok(()) }
+                        OpCode::BNot => exec_bnot(self, instr, frame_ptr),
+                        OpCode::Not => { exec_not(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Metamethod stubs
+                        OpCode::MmBin => { exec_mmbin(self, instr, frame_ptr)?; Ok(()) }
+                        OpCode::MmBinI => { exec_mmbini(self, instr, frame_ptr)?; Ok(()) }
+                        OpCode::MmBinK => { exec_mmbink(self, instr, frame_ptr)?; Ok(()) }
+                        
+                        // Comparisons
+                        OpCode::LtI => exec_lti(self, instr, frame_ptr),
+                        OpCode::LeI => exec_lei(self, instr, frame_ptr),
+                        OpCode::GtI => exec_gti(self, instr, frame_ptr),
+                        OpCode::GeI => exec_gei(self, instr, frame_ptr),
+                        OpCode::EqI => { exec_eqi(self, instr, frame_ptr); Ok(()) }
+                        OpCode::EqK => exec_eqk(self, instr, frame_ptr),
+                        
+                        // Control flow
+                        OpCode::Jmp => { exec_jmp(instr, frame_ptr); Ok(()) }
+                        OpCode::Test => { exec_test(self, instr, frame_ptr); Ok(()) }
+                        OpCode::TestSet => { exec_testset(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Loops
+                        OpCode::ForPrep => exec_forprep(self, instr, frame_ptr),
+                        OpCode::ForLoop => exec_forloop(self, instr, frame_ptr),
+                        OpCode::TForPrep => { exec_tforprep(self, instr, frame_ptr); Ok(()) }
+                        OpCode::TForLoop => { exec_tforloop(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Upvalues
+                        OpCode::GetUpval => { exec_getupval(self, instr, frame_ptr); Ok(()) }
+                        OpCode::SetUpval => { exec_setupval(self, instr, frame_ptr); Ok(()) }
+                        
+                        // Extra arg (no-op)
+                        OpCode::ExtraArg => Ok(()),
+                        
+                        // Return - check Exit specially
+                        OpCode::Return0 => {
+                            match exec_return0(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    // Check if we returned to initial frame count
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        OpCode::Return1 => {
+                            match exec_return1(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        OpCode::Return => {
+                            match exec_return(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        
+                        // Calls
+                        OpCode::Call => exec_call(self, instr, &mut frame_ptr),
+                        OpCode::TailCall => {
+                            match exec_tailcall(self, instr, &mut frame_ptr) {
+                                Ok(()) => Ok(()),
+                                Err(LuaError::Exit) => {
+                                    if self.frames.len() <= initial_frame_count {
+                                        break Ok(());
+                                    }
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        
+                        // Tables
+                        OpCode::NewTable => { exec_newtable(self, instr, frame_ptr); Ok(()) }
+                        OpCode::GetTable => exec_gettable(self, instr, frame_ptr),
+                        OpCode::SetTable => exec_settable(self, instr, frame_ptr),
+                        OpCode::GetI => exec_geti(self, instr, frame_ptr),
+                        OpCode::SetI => exec_seti(self, instr, frame_ptr),
+                        OpCode::GetField => exec_getfield(self, instr, frame_ptr),
+                        OpCode::SetField => exec_setfield(self, instr, frame_ptr),
+                        OpCode::GetTabUp => exec_gettabup(self, instr, frame_ptr),
+                        OpCode::SetTabUp => exec_settabup(self, instr, frame_ptr),
+                        OpCode::Self_ => exec_self(self, instr, frame_ptr),
+                        
+                        // Other
+                        OpCode::Unm => exec_unm(self, instr, frame_ptr),
+                        OpCode::Len => exec_len(self, instr, frame_ptr),
+                        OpCode::Concat => exec_concat(self, instr, frame_ptr),
+                        OpCode::Eq => exec_eq(self, instr, frame_ptr),
+                        OpCode::Lt => exec_lt(self, instr, frame_ptr),
+                        OpCode::Le => exec_le(self, instr, frame_ptr),
+                        OpCode::TForCall => exec_tforcall(self, instr, frame_ptr),
+                        OpCode::Closure => exec_closure(self, instr, frame_ptr),
+                        OpCode::Vararg => { exec_vararg(self, instr, frame_ptr)?; Ok(()) }
+                        OpCode::SetList => { exec_setlist(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Close => { exec_close(self, instr, frame_ptr); Ok(()) }
+                        OpCode::Tbc => { exec_tbc(self, instr, frame_ptr); Ok(()) }
+                    };
+                    
+                    if let Err(e) = result {
                         break Err(e);
                     }
                 };
@@ -2257,7 +2339,18 @@ impl LuaVM {
                         self.return_values.clear();
                         Ok(result)
                     }
-                    Err(e) => Err(e),
+                    Err(LuaError::Yield) => {
+                        // Yield - DON'T pop frames, just return the yield error
+                        // The frames need to stay for resume
+                        Err(LuaError::Yield)
+                    }
+                    Err(e) => {
+                        // Error occurred - pop frames back to initial
+                        while self.frames.len() > initial_frame_count {
+                            self.pop_frame_discard();
+                        }
+                        Err(e)
+                    }
                 }
             }
             _ => Err(self.error("attempt to call a non-function value".to_string())),

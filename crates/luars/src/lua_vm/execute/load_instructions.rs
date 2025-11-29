@@ -11,7 +11,7 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
 /// This instruction moves vararg arguments to a safe location after max_stack_size,
 /// so they won't be overwritten by local variable operations.
 #[inline(always)]
-pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, _frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize; // number of fixed params
 
     let frame_idx = vm.frames.len() - 1;
@@ -62,8 +62,6 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame)
             vm.register_stack[base_ptr + i] = LuaValue::nil();
         }
     }
-
-    let _ = frame_ptr; // Unused but kept for API consistency
 }
 
 /// LOADNIL A B

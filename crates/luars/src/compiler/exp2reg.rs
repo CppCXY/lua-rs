@@ -159,14 +159,15 @@ pub fn exp_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) -> u32 {
     discharge_vars(c, e);
 
     if e.kind == ExpKind::VNonReloc {
-        // Already in a register, but check if we need to free it
-        if !e.has_fixed_reg() {
+        // Already in a register
+        // Check if the register is NOT a local variable (i.e., it's a temp register)
+        // If it's a local (info < nactvar), we MUST NOT reuse it - allocate a new register
+        let nactvar = nvarstack(c);
+        if e.info >= nactvar {
+            // It's a temp register, can return directly
             return e.info;
         }
-        // If it's a local or fixed register, we can return it directly
-        if e.get_register().is_some() {
-            return e.get_register().unwrap();
-        }
+        // Fall through: it's a local variable, need to copy to new register
     }
 
     // Need to allocate a new register

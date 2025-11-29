@@ -998,7 +998,7 @@ fn get_binop_metamethod(tm: u8) -> &'static str {
 
 /// MmBin: Metamethod binary operation (register, register)
 #[inline(always)]
-pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -1007,7 +1007,7 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let prev_pc = (*frame_ptr).pc - 1;
 
-        if prev_pc == 0 { return; }
+        if prev_pc == 0 { return Ok(()); }
 
         // Get previous instruction to find destination register
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
@@ -1028,17 +1028,18 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         };
 
         if !metamethod.is_nil() {
-            if let Ok(Some(result)) = vm.call_metamethod(&metamethod, &[ra, rb]) {
+            if let Some(result) = vm.call_metamethod(&metamethod, &[ra, rb])? {
                 *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
         // If no metamethod, leave the instruction result as-is (error will be caught elsewhere)
     }
+    Ok(())
 }
 
 /// MmBinI: Metamethod binary operation (register, immediate)
 #[inline(always)]
-pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let c = Instruction::get_c(instr);
@@ -1048,7 +1049,7 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let prev_pc = (*frame_ptr).pc - 1;
 
-        if prev_pc == 0 { return; }
+        if prev_pc == 0 { return Ok(()); }
 
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
@@ -1067,16 +1068,17 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         if !metamethod.is_nil() {
             let args = if k { vec![rc, rb] } else { vec![rb, rc] };
-            if let Ok(Some(result)) = vm.call_metamethod(&metamethod, &args) {
+            if let Some(result) = vm.call_metamethod(&metamethod, &args)? {
                 *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
     }
+    Ok(())
 }
 
 /// MmBinK: Metamethod binary operation (register, constant)
 #[inline(always)]
-pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -1086,7 +1088,7 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let prev_pc = (*frame_ptr).pc - 1;
 
-        if prev_pc == 0 { return; }
+        if prev_pc == 0 { return Ok(()); }
 
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
@@ -1096,9 +1098,9 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         // Get constant
         let kb = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
             if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&val) = func_ref.chunk.constants.get(b) { val } else { return; }
-            } else { return; }
-        } else { return; };
+                if let Some(&val) = func_ref.chunk.constants.get(b) { val } else { return Ok(()); }
+            } else { return Ok(()); }
+        } else { return Ok(()); };
 
         let metamethod_name = get_binop_metamethod(c as u8);
         let mm_key = vm.create_string(metamethod_name);
@@ -1114,9 +1116,10 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         };
 
         if !metamethod.is_nil() {
-            if let Ok(Some(result)) = vm.call_metamethod(&metamethod, &[left, right]) {
+            if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                 *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
     }
+    Ok(())
 }

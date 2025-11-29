@@ -1,9 +1,10 @@
-mod arithmetic_instructions;
-mod control_instructions;
 /// Instruction dispatcher module
 ///
 /// This module handles the execution of Lua VM instructions.
 /// All instructions are inlined to eliminate function call overhead.
+
+mod arithmetic_instructions;
+mod control_instructions;
 mod load_instructions;
 mod loop_instructions;
 mod table_instructions;
@@ -209,15 +210,21 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             
             // ============ Metamethod stubs (skip, handled by previous instruction) ============
             OpCode::MmBin => {
-                exec_mmbin(vm, instr, frame_ptr);
+                if let Err(e) = exec_mmbin(vm, instr, frame_ptr) {
+                    return Err(e);
+                }
                 continue 'mainloop;
             }
             OpCode::MmBinI => {
-                exec_mmbini(vm, instr, frame_ptr);
+                if let Err(e) = exec_mmbini(vm, instr, frame_ptr) {
+                    return Err(e);
+                }
                 continue 'mainloop;
             }
             OpCode::MmBinK => {
-                exec_mmbink(vm, instr, frame_ptr);
+                if let Err(e) = exec_mmbink(vm, instr, frame_ptr) {
+                    return Err(e);
+                }
                 continue 'mainloop;
             }
             
@@ -259,7 +266,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             
             // ============ Control Flow (never fail) ============
             OpCode::Jmp => {
-                exec_jmp(vm, instr, frame_ptr);
+                exec_jmp(instr, frame_ptr);
                 continue 'mainloop;
             }
             OpCode::Test => {

@@ -49,6 +49,9 @@ fn test_coroutine_yield() {
     "#,
     );
 
+    if let Err(e) = &result {
+        eprintln!("test_coroutine_yield Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

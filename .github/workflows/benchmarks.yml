@@ -1,0 +1,143 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark-linux:
+    name: Benchmark (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libreadline-dev unzip
+
+      - name: Extract Lua source
+        run: |
+          cd lua_src
+          unzip -o lua-5.4.6.zip
+
+      - name: Build and Install Native Lua from source
+        run: |
+          cd lua_src/lua-5.4.6
+          make linux
+          sudo make install INSTALL_TOP=/usr/local
+          echo "/usr/local/bin" >> $GITHUB_PATH
+
+      - name: Verify Lua installation
+        run: |
+          which lua
+          lua -v
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Run Benchmarks
+        run: |
+          echo "## Benchmark Results - Linux (ubuntu-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          chmod +x run_benchmarks.sh
+          ./run_benchmarks.sh --nocolor 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  benchmark-windows:
+    name: Benchmark (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Extract Lua source
+        shell: pwsh
+        run: |
+          cd lua_src
+          Expand-Archive -Path lua-5.4.6.zip -DestinationPath . -Force
+
+      - name: Build Native Lua with CMake
+        shell: pwsh
+        run: |
+          cd lua_src/lua-5.4.6
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLUA_BUILD_INTERPRETER=ON
+          cmake --build build --config Release
+          # Add to PATH for this job
+          $luaPath = "$PWD\build\Release"
+          echo "$luaPath" >> $env:GITHUB_PATH
+          # Also copy to a known location
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\lua_bin"
+          Copy-Item "build\Release\lua.exe" "$env:GITHUB_WORKSPACE\lua_bin\"
+
+      - name: Verify Lua installation
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE\lua_bin;$env:PATH"
+          & "$env:GITHUB_WORKSPACE\lua_bin\lua.exe" -v
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Run Benchmarks
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE\lua_bin;$env:PATH"
+          echo "## Benchmark Results - Windows (windows-latest)" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+          # Use the lua we built
+          $env:NATIVE_LUA = "$env:GITHUB_WORKSPACE\lua_bin\lua.exe"
+          .\run_benchmarks.ps1 -NoColor 2>&1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+
+  benchmark-macos:
+    name: Benchmark (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: brew install readline
+
+      - name: Extract Lua source
+        run: |
+          cd lua_src
+          unzip -o lua-5.4.6.zip
+
+      - name: Build and Install Native Lua from source
+        run: |
+          cd lua_src/lua-5.4.6
+          make macosx
+          sudo make install INSTALL_TOP=/usr/local
+          echo "/usr/local/bin" >> $GITHUB_PATH
+
+      - name: Verify Lua installation
+        run: |
+          which lua
+          lua -v
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Run Benchmarks
+        run: |
+          echo "## Benchmark Results - macOS (macos-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          chmod +x run_benchmarks.sh
+          ./run_benchmarks.sh --nocolor 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
