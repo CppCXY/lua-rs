@@ -14,7 +14,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let c = Instruction::get_c(instr);
 
     let (base_ptr, func_value) = unsafe {
-        (*frame_ptr).pc += 1;  // Skip EXTRAARG
+        (*frame_ptr).pc += 1; // Skip EXTRAARG
         ((*frame_ptr).base_ptr, (*frame_ptr).function_value)
     };
 
@@ -425,7 +425,7 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
     // FAST PATH: Direct constant access via cached pointer
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(b) };
 
-    // Get set_value - either from constant or register  
+    // Get set_value - either from constant or register
     let set_value = if k {
         unsafe { *(*frame_ptr).constants_ptr.add(c) }
     } else {

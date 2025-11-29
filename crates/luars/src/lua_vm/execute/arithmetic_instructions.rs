@@ -27,8 +27,11 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         if combined_tags == TAG_INTEGER {
             // Fast path: Both integers - like Lua's setivalue, write both fields
             let result = (left.secondary as i64).wrapping_add(right.secondary as i64);
-            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
-            (*frame_ptr).pc += 1;  // Skip MMBIN
+            *reg_base.add(a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
+            (*frame_ptr).pc += 1; // Skip MMBIN
             return;
         }
 
@@ -69,7 +72,10 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         if combined_tags == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_sub(right.secondary as i64);
-            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
+            *reg_base.add(a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
             (*frame_ptr).pc += 1;
             return;
         }
@@ -110,7 +116,10 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         if combined_tags == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_mul(right.secondary as i64);
-            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
+            *reg_base.add(a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
             (*frame_ptr).pc += 1;
             return;
         }
@@ -356,7 +365,10 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         if left.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_add(sc as i64);
-            *reg_base.add(a) = LuaValue { primary: TAG_INTEGER, secondary: result as u64 };
+            *reg_base.add(a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
             (*frame_ptr).pc += 1; // Skip MMBINI
 
             // OPTIMIZATION: Check if next instruction is backward JMP (loop)
@@ -482,7 +494,7 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-        
+
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
@@ -514,13 +526,17 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
                 f64::from_bits(left.secondary)
             } else if left.primary == TAG_INTEGER {
                 left.secondary as i64 as f64
-            } else { return; };
+            } else {
+                return;
+            };
 
             let r = if constant.primary == TAG_FLOAT {
                 f64::from_bits(constant.secondary)
             } else if constant.primary == TAG_INTEGER {
                 constant.secondary as i64 as f64
-            } else { return; };
+            } else {
+                return;
+            };
 
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(l * r);
             (*frame_ptr).pc += 1;
@@ -546,7 +562,9 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         // Integer % Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let r = constant.secondary as i64;
-            if r == 0 { return; }
+            if r == 0 {
+                return;
+            }
             let l = left.secondary as i64;
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
@@ -580,8 +598,14 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        let l_float = match left.as_number() { Some(n) => n, None => return };
-        let r_float = match constant.as_number() { Some(n) => n, None => return };
+        let l_float = match left.as_number() {
+            Some(n) => n,
+            None => return,
+        };
+        let r_float = match constant.as_number() {
+            Some(n) => n,
+            None => return,
+        };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
         (*frame_ptr).pc += 1;
@@ -603,8 +627,14 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        let l_float = match left.as_number() { Some(n) => n, None => return };
-        let r_float = match constant.as_number() { Some(n) => n, None => return };
+        let l_float = match left.as_number() {
+            Some(n) => n,
+            None => return,
+        };
+        let r_float = match constant.as_number() {
+            Some(n) => n,
+            None => return,
+        };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
         (*frame_ptr).pc += 1;
@@ -629,7 +659,9 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         // Integer // Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let r = constant.secondary as i64;
-            if r == 0 { return; }
+            if r == 0 {
+                return;
+            }
             let l = left.secondary as i64;
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
@@ -771,12 +803,20 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         let l_int = left.as_integer().or_else(|| {
             left.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             })
         });
         let r_int = constant.as_integer().or_else(|| {
             constant.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             })
         });
 
@@ -804,12 +844,20 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         let l_int = left.as_integer().or_else(|| {
             left.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             })
         });
         let r_int = constant.as_integer().or_else(|| {
             constant.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             })
         });
 
@@ -837,12 +885,20 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         let l_int = left.as_integer().or_else(|| {
             left.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             })
         });
         let r_int = constant.as_integer().or_else(|| {
             constant.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 { Some(f as i64) } else { None }
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             })
         });
 
@@ -942,7 +998,7 @@ pub fn exec_not(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
         let value = *vm.register_stack.as_ptr().add(base_ptr + b);
-        
+
         // In Lua, only nil and false are falsy
         use crate::lua_value::{TAG_NIL, VALUE_FALSE};
         let is_falsy = value.primary == TAG_NIL || value.primary == VALUE_FALSE;
@@ -1039,7 +1095,9 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> L
         let base_ptr = (*frame_ptr).base_ptr;
         let prev_pc = (*frame_ptr).pc - 1;
 
-        if prev_pc == 0 { return Ok(()); }
+        if prev_pc == 0 {
+            return Ok(());
+        }
 
         // Get previous instruction to find destination register
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
@@ -1052,9 +1110,11 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> L
         let mm_key = vm.create_string(metamethod_name);
 
         let metamethod = if let Some(mt) = vm.table_get_metatable(&ra) {
-            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+            vm.table_get_with_meta(&mt, &mm_key)
+                .unwrap_or(LuaValue::nil())
         } else if let Some(mt) = vm.table_get_metatable(&rb) {
-            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+            vm.table_get_with_meta(&mt, &mm_key)
+                .unwrap_or(LuaValue::nil())
         } else {
             LuaValue::nil()
         };
@@ -1081,7 +1141,9 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
         let base_ptr = (*frame_ptr).base_ptr;
         let prev_pc = (*frame_ptr).pc - 1;
 
-        if prev_pc == 0 { return Ok(()); }
+        if prev_pc == 0 {
+            return Ok(());
+        }
 
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
@@ -1093,7 +1155,8 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
         let mm_key = vm.create_string(metamethod_name);
 
         let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
-            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+            vm.table_get_with_meta(&mt, &mm_key)
+                .unwrap_or(LuaValue::nil())
         } else {
             LuaValue::nil()
         };
@@ -1120,7 +1183,9 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
         let base_ptr = (*frame_ptr).base_ptr;
         let prev_pc = (*frame_ptr).pc - 1;
 
-        if prev_pc == 0 { return Ok(()); }
+        if prev_pc == 0 {
+            return Ok(());
+        }
 
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
@@ -1130,9 +1195,17 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
         // Get constant
         let kb = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
             if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&val) = func_ref.chunk.constants.get(b) { val } else { return Ok(()); }
-            } else { return Ok(()); }
-        } else { return Ok(()); };
+                if let Some(&val) = func_ref.chunk.constants.get(b) {
+                    val
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        };
 
         let metamethod_name = get_binop_metamethod(c as u8);
         let mm_key = vm.create_string(metamethod_name);
@@ -1140,9 +1213,11 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
         let (left, right) = if !k { (ra, kb) } else { (kb, ra) };
 
         let metamethod = if let Some(mt) = vm.table_get_metatable(&left) {
-            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+            vm.table_get_with_meta(&mt, &mm_key)
+                .unwrap_or(LuaValue::nil())
         } else if let Some(mt) = vm.table_get_metatable(&right) {
-            vm.table_get_with_meta(&mt, &mm_key).unwrap_or(LuaValue::nil())
+            vm.table_get_with_meta(&mt, &mm_key)
+                .unwrap_or(LuaValue::nil())
         } else {
             LuaValue::nil()
         };

@@ -22,7 +22,9 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
     // Get upvalue value
     let value = vm.read_upvalue(upvalue_id);
-    unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = value; }
+    unsafe {
+        *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
+    }
 }
 
 /// SETUPVAL A B
@@ -66,9 +68,7 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let (base_ptr, func_value) = unsafe {
-        ((*frame_ptr).base_ptr, (*frame_ptr).function_value)
-    };
+    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
     // Get current function using ID-based lookup
     let func_id = func_value
@@ -109,7 +109,7 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
             // Upvalue refers to a register in current function
             // Calculate absolute stack index for this upvalue
             let stack_index = base_ptr + desc.index as usize;
-            
+
             // Check if this upvalue is already open
             let existing = vm.open_upvalues.iter().find(|uv_id| {
                 vm.object_pool
@@ -162,14 +162,21 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
 
     let (base_ptr, vararg_start, vararg_count, top) = unsafe {
         let frame = &*frame_ptr;
-        (frame.base_ptr, frame.get_vararg_start(), frame.get_vararg_count(), frame.top)
+        (
+            frame.base_ptr,
+            frame.get_vararg_start(),
+            frame.get_vararg_count(),
+            frame.top,
+        )
     };
 
     if c == 0 {
         // Variable number of results - copy all varargs
         // Update frame top to accommodate all varargs
         let new_top = a + vararg_count;
-        unsafe { (*frame_ptr).top = new_top.max(top); }
+        unsafe {
+            (*frame_ptr).top = new_top.max(top);
+        }
 
         for i in 0..vararg_count {
             let value = if vararg_start + i < vm.register_stack.len() {

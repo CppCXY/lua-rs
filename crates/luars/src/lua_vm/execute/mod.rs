@@ -2,7 +2,6 @@
 ///
 /// This module handles the execution of Lua VM instructions.
 /// All instructions are inlined to eliminate function call overhead.
-
 mod arithmetic_instructions;
 mod control_instructions;
 mod load_instructions;
@@ -17,36 +16,36 @@ pub use loop_instructions::*;
 pub use table_instructions::*;
 pub use upvalue_instructions::*;
 
-use crate::LuaValue;
 use super::{Instruction, LuaError, LuaResult, LuaVM, OpCode};
+use crate::LuaValue;
 
 /// Ultra-optimized main execution loop
-/// 
+///
 /// Key optimizations:
 /// 1. Instructions that never fail don't return Result - just continue
 /// 2. frame_ptr is passed by mutable reference so CALL/RETURN can update it
 /// 3. Minimal branching on the fast path
-/// 
+///
 /// Returns: Ok(LuaValue) on success, Err on runtime error
-#[inline(never)]  // Don't inline this - it's the main loop, let it stay in cache
+#[inline(never)] // Don't inline this - it's the main loop, let it stay in cache
 pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
     // Safety check: must have at least one frame to execute
     if vm.frame_count == 0 {
         return Err(LuaError::Exit);
     }
-    
-    // Initialize frame pointer - will be updated by CALL/RETURN
-    let mut frame_ptr = unsafe { 
-        vm.frames.as_mut_ptr().add(vm.frame_count - 1) 
-    };
-    
+
+    // Initialize frame pointer - Box ensures pointer stability across Vec reallocs
+    let mut frame_ptr = vm.current_frame_ptr();
+
     'mainloop: loop {
         // Fetch and decode instruction
         let instr = unsafe { (*frame_ptr).code_ptr.add((*frame_ptr).pc).read() };
-        unsafe { (*frame_ptr).pc += 1; }
-        
+        unsafe {
+            (*frame_ptr).pc += 1;
+        }
+
         let opcode = Instruction::get_opcode(instr);
-        
+
         match opcode {
             // ============ Load Instructions (never fail) ============
             OpCode::Move => {
@@ -89,7 +88,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 exec_varargprep(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
-            
+
             // ============ Arithmetic (integer fast path never fails) ============
             OpCode::Add => {
                 exec_add(vm, instr, frame_ptr);
@@ -123,7 +122,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 exec_pow(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
-            
+
             // Arithmetic with constants
             OpCode::AddK => {
                 exec_addk(vm, instr, frame_ptr);
@@ -153,7 +152,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 exec_idivk(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
-            
+
             // ============ Bitwise (never fail for integers) ============
             OpCode::BAnd => {
                 exec_band(vm, instr, frame_ptr);
@@ -201,13 +200,13 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
                 continue 'mainloop;
             }
-            
+
             // ============ Unary operations ============
             OpCode::Not => {
                 exec_not(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
-            
+
             // ============ Metamethod stubs (skip, handled by previous instruction) ============
             OpCode::MmBin => {
                 if let Err(e) = exec_mmbin(vm, instr, frame_ptr) {
@@ -227,7 +226,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
                 continue 'mainloop;
             }
-            
+
             // ============ Comparisons (never fail for basic types) ============
             OpCode::LtI => {
                 if let Err(e) = exec_lti(vm, instr, frame_ptr) {
@@ -263,7 +262,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
                 continue 'mainloop;
             }
-            
+
             // ============ Control Flow (never fail) ============
             OpCode::Jmp => {
                 exec_jmp(instr, frame_ptr);
@@ -277,7 +276,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 exec_testset(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
-            
+
             // ============ Loop Instructions (never fail for integer loops) ============
             OpCode::ForPrep => {
                 if let Err(e) = exec_forprep(vm, instr, frame_ptr) {
@@ -299,7 +298,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 exec_tforloop(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
-            
+
             // ============ Upvalue operations ============
             OpCode::GetUpval => {
                 exec_getupval(vm, instr, frame_ptr);
@@ -309,35 +308,29 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 exec_setupval(vm, instr, frame_ptr);
                 continue 'mainloop;
             }
-            
+
             // ============ Extra arg (no-op) ============
             OpCode::ExtraArg => {
                 continue 'mainloop;
             }
-            
+
             // ============ Return Instructions (special handling - can Exit) ============
-            OpCode::Return0 => {
-                match exec_return0(vm, instr, &mut frame_ptr) {
-                    Ok(()) => continue 'mainloop,
-                    Err(LuaError::Exit) => return Ok(LuaValue::nil()),
-                    Err(e) => return Err(e),
-                }
-            }
-            OpCode::Return1 => {
-                match exec_return1(vm, instr, &mut frame_ptr) {
-                    Ok(()) => continue 'mainloop,
-                    Err(LuaError::Exit) => return Ok(LuaValue::nil()),
-                    Err(e) => return Err(e),
-                }
-            }
-            OpCode::Return => {
-                match exec_return(vm, instr, &mut frame_ptr) {
-                    Ok(()) => continue 'mainloop,
-                    Err(LuaError::Exit) => return Ok(LuaValue::nil()),
-                    Err(e) => return Err(e),
-                }
-            }
-            
+            OpCode::Return0 => match exec_return0(vm, instr, &mut frame_ptr) {
+                Ok(()) => continue 'mainloop,
+                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(e) => return Err(e),
+            },
+            OpCode::Return1 => match exec_return1(vm, instr, &mut frame_ptr) {
+                Ok(()) => continue 'mainloop,
+                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(e) => return Err(e),
+            },
+            OpCode::Return => match exec_return(vm, instr, &mut frame_ptr) {
+                Ok(()) => continue 'mainloop,
+                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(e) => return Err(e),
+            },
+
             // ============ Function calls (update frame_ptr) ============
             OpCode::Call => {
                 if let Err(e) = exec_call(vm, instr, &mut frame_ptr) {
@@ -345,14 +338,12 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
                 continue 'mainloop;
             }
-            OpCode::TailCall => {
-                match exec_tailcall(vm, instr, &mut frame_ptr) {
-                    Ok(()) => continue 'mainloop,
-                    Err(LuaError::Exit) => return Ok(LuaValue::nil()),
-                    Err(e) => return Err(e),
-                }
-            }
-            
+            OpCode::TailCall => match exec_tailcall(vm, instr, &mut frame_ptr) {
+                Ok(()) => continue 'mainloop,
+                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(e) => return Err(e),
+            },
+
             // ============ Table operations (can trigger metamethods) ============
             OpCode::NewTable => {
                 exec_newtable(vm, instr, frame_ptr);
@@ -412,7 +403,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
                 continue 'mainloop;
             }
-            
+
             // ============ Operations that can trigger metamethods ============
             OpCode::Unm => {
                 if let Err(e) = exec_unm(vm, instr, frame_ptr) {
@@ -450,7 +441,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
                 continue 'mainloop;
             }
-            
+
             // ============ TForCall ============
             OpCode::TForCall => {
                 if let Err(e) = exec_tforcall(vm, instr, frame_ptr) {
@@ -458,7 +449,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
                 continue 'mainloop;
             }
-            
+
             // ============ Closure and special ============
             OpCode::Closure => {
                 if let Err(e) = exec_closure(vm, instr, frame_ptr) {

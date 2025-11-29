@@ -138,8 +138,8 @@ fn try_compile_register_comparison(
         let (opcode, swap) = match op_kind {
             BinaryOperator::OpLt => (OpCode::Lt, false),
             BinaryOperator::OpLe => (OpCode::Le, false),
-            BinaryOperator::OpGt => (OpCode::Lt, true),  // a > b == b < a
-            BinaryOperator::OpGe => (OpCode::Le, true),  // a >= b == b <= a
+            BinaryOperator::OpGt => (OpCode::Lt, true), // a > b == b < a
+            BinaryOperator::OpGe => (OpCode::Le, true), // a >= b == b <= a
             _ => return Ok(false),
         };
 
@@ -151,7 +151,11 @@ fn try_compile_register_comparison(
         // k=0: skip next if FALSE (we want to continue if TRUE, so FALSE means exit)
         // For while: if (i < n) is TRUE, continue loop (skip JMP), else execute JMP to exit
         let k = if invert { 1 } else { 0 };
-        let (a, b) = if swap { (right_reg, left_reg) } else { (left_reg, right_reg) };
+        let (a, b) = if swap {
+            (right_reg, left_reg)
+        } else {
+            (left_reg, right_reg)
+        };
         emit(c, Instruction::encode_abc(opcode, a, b, k));
 
         return Ok(true);

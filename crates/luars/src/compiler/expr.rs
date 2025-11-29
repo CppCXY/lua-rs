@@ -1212,7 +1212,11 @@ fn compile_binary_expr_to(
                             let nvarstack = nvarstack(c);
                             let can_reuse_left = left_reg >= nvarstack;
                             let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left { left_reg } else { alloc_register(c) }
+                                if can_reuse_left {
+                                    left_reg
+                                } else {
+                                    alloc_register(c)
+                                }
                             });
                             // Lua 5.4: Use MulK for constant operand
                             emit(
@@ -1245,7 +1249,11 @@ fn compile_binary_expr_to(
                             let nvarstack = nvarstack(c);
                             let can_reuse_left = left_reg >= nvarstack;
                             let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left { left_reg } else { alloc_register(c) }
+                                if can_reuse_left {
+                                    left_reg
+                                } else {
+                                    alloc_register(c)
+                                }
                             });
                             // Lua 5.4: Use ModK for constant operand
                             emit(
@@ -1278,7 +1286,11 @@ fn compile_binary_expr_to(
                             let nvarstack = nvarstack(c);
                             let can_reuse_left = left_reg >= nvarstack;
                             let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left { left_reg } else { alloc_register(c) }
+                                if can_reuse_left {
+                                    left_reg
+                                } else {
+                                    alloc_register(c)
+                                }
                             });
                             // Lua 5.4: Use PowK for constant operand
                             emit(
@@ -1311,7 +1323,11 @@ fn compile_binary_expr_to(
                             let nvarstack = nvarstack(c);
                             let can_reuse_left = left_reg >= nvarstack;
                             let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left { left_reg } else { alloc_register(c) }
+                                if can_reuse_left {
+                                    left_reg
+                                } else {
+                                    alloc_register(c)
+                                }
                             });
                             // Lua 5.4: Use DivK for constant operand
                             emit(
@@ -1344,7 +1360,11 @@ fn compile_binary_expr_to(
                             let nvarstack = nvarstack(c);
                             let can_reuse_left = left_reg >= nvarstack;
                             let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left { left_reg } else { alloc_register(c) }
+                                if can_reuse_left {
+                                    left_reg
+                                } else {
+                                    alloc_register(c)
+                                }
                             });
                             // Lua 5.4: Use IDivK for constant operand
                             emit(
@@ -1381,7 +1401,11 @@ fn compile_binary_expr_to(
                             let nvarstack = nvarstack(c);
                             let can_reuse_left = left_reg >= nvarstack;
                             let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left { left_reg } else { alloc_register(c) }
+                                if can_reuse_left {
+                                    left_reg
+                                } else {
+                                    alloc_register(c)
+                                }
                             });
                             // Lua 5.4: Use ShrI for immediate right shift
                             emit(
@@ -1412,7 +1436,11 @@ fn compile_binary_expr_to(
                             let nvarstack = nvarstack(c);
                             let can_reuse_left = left_reg >= nvarstack;
                             let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left { left_reg } else { alloc_register(c) }
+                                if can_reuse_left {
+                                    left_reg
+                                } else {
+                                    alloc_register(c)
+                                }
                             });
                             // Lua 5.4: Use ShlI for immediate left shift
                             // Note: ShlI uses negated immediate: sC << R[B] where sC is the immediate
@@ -2256,7 +2284,7 @@ pub fn compile_call_expr_with_returns_and_dest(
             // If these overlap with local variables (< nactvar), we must relocate!
             let nactvar = c.nactvar as u32;
             let args_would_start_at = temp_func_reg + 1;
-            
+
             if args_would_start_at < nactvar || temp_func_reg < nactvar {
                 // Arguments would overwrite local variables!
                 // Move function to a safe register (at or after nactvar)

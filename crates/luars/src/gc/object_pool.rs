@@ -191,7 +191,12 @@ impl<T> Arena<T> {
     /// SAFETY: id must be a valid index returned from alloc() and not freed
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, id: u32) -> &T {
-        unsafe { self.storage.get_unchecked(id as usize).as_ref().unwrap_unchecked() }
+        unsafe {
+            self.storage
+                .get_unchecked(id as usize)
+                .as_ref()
+                .unwrap_unchecked()
+        }
     }
 
     /// Get mutable reference by ID
@@ -513,10 +518,10 @@ impl ObjectPoolV2 {
                     };
                     let id = StringId(self.strings.alloc(gc_string));
                     self.string_intern.insert(hash, id, insert_idx);
-                    
+
                     // Check if resize needed (pass dummy closure since we just inserted)
                     self.string_intern.maybe_resize(|_| hash);
-                    
+
                     return id;
                 }
             }
@@ -559,10 +564,10 @@ impl ObjectPoolV2 {
                     };
                     let id = StringId(self.strings.alloc(gc_string));
                     self.string_intern.insert(hash, id, insert_idx);
-                    
+
                     // Check if resize needed
                     self.string_intern.maybe_resize(|_| hash);
-                    
+
                     return id;
                 }
             }
@@ -1006,7 +1011,12 @@ mod tests {
         // Verify all strings are stored correctly
         for (s, id) in &ids {
             let stored = pool.get_string_str(*id);
-            assert_eq!(stored, Some(s.as_str()), "String '{}' not stored correctly", s);
+            assert_eq!(
+                stored,
+                Some(s.as_str()),
+                "String '{}' not stored correctly",
+                s
+            );
         }
 
         // Verify interning works - same string should return same ID
@@ -1022,10 +1032,8 @@ mod tests {
         let mut pool = ObjectPoolV2::new();
 
         let strings = vec![
-            "a", "b", "c", "aa", "ab", "ba", "bb",
-            "aaa", "aab", "aba", "abb", "baa", "bab", "bba", "bbb",
-            "test", "Test", "TEST", "tEsT",
-            "hello", "Hello", "HELLO", "hElLo",
+            "a", "b", "c", "aa", "ab", "ba", "bb", "aaa", "aab", "aba", "abb", "baa", "bab", "bba",
+            "bbb", "test", "Test", "TEST", "tEsT", "hello", "Hello", "HELLO", "hElLo",
         ];
 
         let mut ids = Vec::new();
@@ -1036,9 +1044,11 @@ mod tests {
         // All IDs should be unique (different strings)
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
-                assert_ne!(ids[i], ids[j], 
-                    "Different strings '{}' and '{}' got same ID", 
-                    strings[i], strings[j]);
+                assert_ne!(
+                    ids[i], ids[j],
+                    "Different strings '{}' and '{}' got same ID",
+                    strings[i], strings[j]
+                );
             }
         }
 

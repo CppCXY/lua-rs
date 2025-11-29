@@ -29,25 +29,24 @@ use crate::LuaValue;
 /// - 1 byte: callstatus
 /// - 3 bytes: padding
 pub struct LuaCallFrame {
-    pub function_value: LuaValue,     // 16 bytes
-    pub code_ptr: *const u32,         // 8 bytes - 直接指向指令数组
+    pub function_value: LuaValue,       // 16 bytes
+    pub code_ptr: *const u32,           // 8 bytes - 直接指向指令数组
     pub constants_ptr: *const LuaValue, // 8 bytes - 直接指向常量数组
-    pub base_ptr: usize,              // 8 bytes - 寄存器栈基址
-    pub top: usize,                   // 8 bytes - 栈顶
-    pub pc: usize,                    // 8 bytes - 程序计数器
-    result_reg: u32,                  // 4 bytes - 返回值写入位置
-    vararg_start: u32,                // 4 bytes - vararg 起始位置（绝对索引）
-    nresults: i16,                    // 2 bytes - 期望返回数 (-1 = LUA_MULTRET)
-    vararg_count: u16,                // 2 bytes - vararg 参数数量
-    pub callstatus: u8,               // 1 byte - 调用状态标志
-    _pad: [u8; 3],                    // 3 bytes - 对齐到 8 字节边界
+    pub base_ptr: usize,                // 8 bytes - 寄存器栈基址
+    pub top: usize,                     // 8 bytes - 栈顶
+    pub pc: usize,                      // 8 bytes - 程序计数器
+    result_reg: u32,                    // 4 bytes - 返回值写入位置
+    vararg_start: u32,                  // 4 bytes - vararg 起始位置（绝对索引）
+    nresults: i16,                      // 2 bytes - 期望返回数 (-1 = LUA_MULTRET)
+    vararg_count: u16,                  // 2 bytes - vararg 参数数量
+    pub callstatus: u8,                 // 1 byte - 调用状态标志
 }
 
 // CallStatus flags (仿照 Lua 的 CIST_* 标志)
-pub const CIST_LUA: u8 = 1 << 0;       // 是Lua函数
-pub const CIST_FRESH: u8 = 1 << 1;     // 新调用，返回时应停止执行
-pub const CIST_YPCALL: u8 = 1 << 2;    // 是 pcall（protected call）
-pub const CIST_TAIL: u8 = 1 << 3;      // 尾调用
+pub const CIST_LUA: u8 = 1 << 0; // 是Lua函数
+pub const CIST_FRESH: u8 = 1 << 1; // 新调用，返回时应停止执行
+pub const CIST_YPCALL: u8 = 1 << 2; // 是 pcall（protected call）
+pub const CIST_TAIL: u8 = 1 << 3; // 尾调用
 
 // 特殊值
 #[allow(dead_code)]
@@ -76,7 +75,6 @@ impl LuaCallFrame {
             nresults,
             vararg_count: 0,
             callstatus: CIST_LUA,
-            _pad: [0; 3],
         }
     }
 
@@ -94,7 +92,6 @@ impl LuaCallFrame {
             nresults: 0,
             vararg_count: 0,
             callstatus: 0, // C function, not CIST_LUA
-            _pad: [0; 3],
         }
     }
 

@@ -47,7 +47,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
             let count: u64 = if step_i > 0 {
                 // Ascending loop
                 if init_i > limit_i {
-                    0  // Won't execute at all
+                    0 // Won't execute at all
                 } else {
                     // (limit - init) / step + 1, using unsigned division
                     let diff = (limit_i - init_i) as u64;
@@ -56,7 +56,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
             } else {
                 // Descending loop (step < 0)
                 if init_i < limit_i {
-                    0  // Won't execute at all
+                    0 // Won't execute at all
                 } else {
                     // (init - limit) / (-step) + 1
                     let diff = (init_i - limit_i) as u64;
@@ -143,7 +143,7 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 
         // Read counter first - this is the hot path check
         let counter = (*reg_base.add(1)).secondary as i64;
-        
+
         // Fast path: integer loop with counter > 0
         // Check counter first (most common exit condition)
         if counter > 0 {
@@ -164,8 +164,9 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 
         // Check if this is actually an integer loop (counter == 0 means loop ended)
         let idx = *reg_base;
-        let combined_tags = (idx.primary | (*reg_base.add(1)).primary | (*reg_base.add(2)).primary) & TYPE_MASK;
-        
+        let combined_tags =
+            (idx.primary | (*reg_base.add(1)).primary | (*reg_base.add(2)).primary) & TYPE_MASK;
+
         if combined_tags == TAG_INTEGER {
             // Integer loop ended (counter == 0)
             return Ok(());
@@ -174,7 +175,7 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         // Slow path: float loop
         let counter_or_limit = *reg_base.add(1);
         let step = *reg_base.add(2);
-        
+
         let step_tag = step.primary & TYPE_MASK;
         let limit_tag = counter_or_limit.primary & TYPE_MASK;
         let idx_tag = idx.primary & TYPE_MASK;
@@ -250,7 +251,11 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
     let c = Instruction::get_c(instr) as usize;
 
     let (base_ptr, _func_value, _current_pc) = unsafe {
-        ((*frame_ptr).base_ptr, (*frame_ptr).function_value, (*frame_ptr).pc)
+        (
+            (*frame_ptr).base_ptr,
+            (*frame_ptr).function_value,
+            (*frame_ptr).pc,
+        )
     };
 
     // Get iterator function and state
@@ -273,10 +278,9 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             vm.register_stack[call_base + 2] = control;
 
             // Create temporary frame for the call
-            let temp_frame = LuaCallFrame::new_c_function(
-                call_base,
-                3, // func + 2 args (top)
-            );
+            let temp_frame = Box::new(LuaCallFrame::new_c_function(
+                call_base, 3, // func + 2 args (top)
+            ));
 
             vm.push_frame(temp_frame);
             let result = cfunc(vm)?;
@@ -325,15 +329,15 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
             // Create new frame with correct nresults type
             let nresults = (c + 1) as i16;
-            let new_frame = LuaCallFrame::new_lua_function(
+            let new_frame = Box::new(LuaCallFrame::new_lua_function(
                 func,
                 code_ptr,
                 constants_ptr,
                 call_base,
-                max_stack_size,  // top = max_stack_size (we initialized this many registers)
-                a + 3,           // result goes to R[A+3]
-                nresults,        // expecting c+1 results
-            );
+                max_stack_size, // top = max_stack_size (we initialized this many registers)
+                a + 3,          // result goes to R[A+3]
+                nresults,       // expecting c+1 results
+            ));
 
             vm.push_frame(new_frame);
             // Execution will continue in the new frame

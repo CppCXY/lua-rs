@@ -145,7 +145,9 @@ impl LuaUpvalue {
     /// Create an open upvalue with frame base + register (computes absolute index)
     pub fn new_open_relative(base_ptr: usize, register: usize) -> Rc<Self> {
         Rc::new(LuaUpvalue {
-            value: RefCell::new(UpvalueState::Open { stack_index: base_ptr + register }),
+            value: RefCell::new(UpvalueState::Open {
+                stack_index: base_ptr + register,
+            }),
         })
     }
 
@@ -186,10 +188,7 @@ impl LuaUpvalue {
     }
 
     /// Get the value (requires register_stack if open)
-    pub fn get_value(
-        &self,
-        register_stack: &[LuaValue],
-    ) -> LuaValue {
+    pub fn get_value(&self, register_stack: &[LuaValue]) -> LuaValue {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { stack_index } => {
@@ -204,11 +203,7 @@ impl LuaUpvalue {
     }
 
     /// Set the value (requires register_stack if open)
-    pub fn set_value(
-        &self,
-        register_stack: &mut [LuaValue],
-        value: LuaValue,
-    ) {
+    pub fn set_value(&self, register_stack: &mut [LuaValue], value: LuaValue) {
         let state = self.value.borrow();
         match *state {
             UpvalueState::Open { stack_index } => {
