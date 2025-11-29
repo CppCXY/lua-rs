@@ -171,12 +171,14 @@ impl LuaVM {
         let required_size = base_ptr + chunk.max_stack_size;
         self.ensure_stack_capacity(required_size);
 
-        // Get code pointer from chunk
+        // Get code and constants pointers from chunk
         let code_ptr = chunk.code.as_ptr();
+        let constants_ptr = chunk.constants.as_ptr();
 
         let frame = LuaCallFrame::new_lua_function(
             main_func_value,
             code_ptr,
+            constants_ptr,
             base_ptr,
             chunk.max_stack_size,  // top
             0,                      // result_reg
@@ -210,14 +212,15 @@ impl LuaVM {
         };
 
         // Clone chunk and get info before borrowing self mutably
-        let (chunk, max_stack, code_ptr) = {
+        let (chunk, max_stack, code_ptr, constants_ptr) = {
             let Some(func_ref) = self.object_pool.get_function(func_id) else {
                 return Err(self.error("Invalid function ID".to_string()));
             };
             let chunk = func_ref.chunk.clone();
             let max_stack = chunk.max_stack_size;
             let code_ptr = chunk.code.as_ptr();
-            (chunk, max_stack, code_ptr)
+            let constants_ptr = chunk.constants.as_ptr();
+            (chunk, max_stack, code_ptr, constants_ptr)
         };
 
         // Register chunk constants
@@ -238,7 +241,7 @@ impl LuaVM {
         }
 
         let frame =
-            LuaCallFrame::new_lua_function(func, code_ptr, base_ptr, max_stack, 0, 0);
+            LuaCallFrame::new_lua_function(func, code_ptr, constants_ptr, base_ptr, max_stack, 0, 0);
 
         self.push_frame(frame);
 
@@ -1747,6 +1750,7 @@ impl LuaVM {
                 };
                 let max_stack_size = func_ref.chunk.max_stack_size;
                 let code_ptr = func_ref.chunk.code.as_ptr();
+                let constants_ptr = func_ref.chunk.constants.as_ptr();
 
                 // Allocate registers in global stack
                 let new_base = self.register_stack.len();
@@ -1762,6 +1766,7 @@ impl LuaVM {
                 let temp_frame = LuaCallFrame::new_lua_function(
                     metamethod,
                     code_ptr,
+                    constants_ptr,
                     new_base,
                     max_stack_size,  // top
                     result_reg,
@@ -2079,7 +2084,7 @@ impl LuaVM {
                 };
 
                 // Get function info from object pool
-                let (max_stack_size, code_ptr) = {
+                let (max_stack_size, code_ptr, constants_ptr) = {
                     let Some(func_ref) = self.object_pool.get_function(func_id) else {
                         return Err(self.error("Invalid function".to_string()));
                     };
@@ -2088,7 +2093,7 @@ impl LuaVM {
                     } else {
                         func_ref.chunk.max_stack_size
                     };
-                    (size, func_ref.chunk.code.as_ptr())
+                    (size, func_ref.chunk.code.as_ptr(), func_ref.chunk.constants.as_ptr())
                 };
 
                 // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
@@ -2129,6 +2134,7 @@ impl LuaVM {
                 let new_frame = LuaCallFrame::new_lua_function(
                     func,
                     code_ptr,
+                    constants_ptr,
                     new_base,
                     max_stack_size,     // top
                     safe_result_reg,

@@ -309,6 +309,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
             let max_stack_size = func_ref.chunk.max_stack_size;
             let code_ptr = func_ref.chunk.code.as_ptr();
+            let constants_ptr = func_ref.chunk.constants.as_ptr();
 
             let call_base = vm.register_stack.len();
             vm.ensure_stack_capacity(call_base + max_stack_size);
@@ -327,6 +328,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             let new_frame = LuaCallFrame::new_lua_function(
                 func,
                 code_ptr,
+                constants_ptr,
                 call_base,
                 max_stack_size,  // top = max_stack_size (we initialized this many registers)
                 a + 3,           // result goes to R[A+3]

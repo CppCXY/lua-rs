@@ -785,10 +785,11 @@ fn exec_call_lua_function(
         return Err(vm.error("Invalid function ID".to_string()));
     };
 
-    let (max_stack_size, is_vararg, code_ptr) = (
+    let (max_stack_size, is_vararg, code_ptr, constants_ptr) = (
         func_ref.chunk.max_stack_size,
         func_ref.chunk.is_vararg,
         func_ref.chunk.code.as_ptr(),
+        func_ref.chunk.constants.as_ptr(),
     );
 
     // Calculate argument count - use frame_ptr directly!
@@ -842,6 +843,7 @@ fn exec_call_lua_function(
         let new_frame = LuaCallFrame::new_lua_function(
             func,
             code_ptr,
+            constants_ptr,
             new_base,
             arg_count,  // top = number of arguments
             a,          // result_reg
@@ -906,6 +908,7 @@ fn exec_call_lua_function(
     let new_frame = LuaCallFrame::new_lua_function(
         func,
         code_ptr,
+        constants_ptr,
         new_base,
         actual_arg_count,  // top = number of arguments
         a,                 // result_reg
@@ -1092,6 +1095,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCal
             };
             let max_stack_size = func_ref.chunk.max_stack_size;
             let code_ptr = func_ref.chunk.code.as_ptr();
+            let constants_ptr = func_ref.chunk.constants.as_ptr();
 
             // CRITICAL: Before popping the frame, close all upvalues that point to it
             // This ensures that any closures created in this frame can still access
@@ -1115,6 +1119,7 @@ pub fn exec_tailcall(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCal
             let new_frame = LuaCallFrame::new_lua_function(
                 func,
                 code_ptr,
+                constants_ptr,
                 old_base,
                 arg_count,  // top = number of arguments passed
                 result_reg, // result_reg from the CALLER (not 0!)

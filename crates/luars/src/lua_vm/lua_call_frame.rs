@@ -5,6 +5,7 @@ use crate::LuaValue;
 /// 关键字段：
 /// - function_value: 函数值（包含ID）
 /// - code_ptr: 直接指向指令数组，热路径优化
+/// - constants_ptr: 直接指向常量数组，热路径优化
 /// - base_ptr: 寄存器栈基址  
 /// - top: 栈顶（用于参数传递）
 /// - pc: 程序计数器
@@ -14,9 +15,10 @@ use crate::LuaValue;
 /// - vararg_start: vararg 参数在栈上的起始位置（绝对索引）
 /// - vararg_count: vararg 参数数量
 ///
-/// 内存布局（64 bytes）:
+/// 内存布局（72 bytes）:
 /// - 16 bytes: function_value
 /// - 8 bytes: code_ptr  
+/// - 8 bytes: constants_ptr
 /// - 8 bytes: base_ptr
 /// - 8 bytes: top
 /// - 8 bytes: pc
@@ -27,17 +29,18 @@ use crate::LuaValue;
 /// - 1 byte: callstatus
 /// - 3 bytes: padding
 pub struct LuaCallFrame {
-    pub function_value: LuaValue, // 16 bytes
-    pub code_ptr: *const u32,     // 8 bytes - 直接指向指令数组
-    pub base_ptr: usize,          // 8 bytes - 寄存器栈基址
-    pub top: usize,               // 8 bytes - 栈顶
-    pub pc: usize,                // 8 bytes - 程序计数器
-    result_reg: u32,              // 4 bytes - 返回值写入位置
-    vararg_start: u32,            // 4 bytes - vararg 起始位置（绝对索引）
-    nresults: i16,                // 2 bytes - 期望返回数 (-1 = LUA_MULTRET)
-    vararg_count: u16,            // 2 bytes - vararg 参数数量
-    pub callstatus: u8,           // 1 byte - 调用状态标志
-    _pad: [u8; 3],                // 3 bytes - 对齐到 8 字节边界
+    pub function_value: LuaValue,     // 16 bytes
+    pub code_ptr: *const u32,         // 8 bytes - 直接指向指令数组
+    pub constants_ptr: *const LuaValue, // 8 bytes - 直接指向常量数组
+    pub base_ptr: usize,              // 8 bytes - 寄存器栈基址
+    pub top: usize,                   // 8 bytes - 栈顶
+    pub pc: usize,                    // 8 bytes - 程序计数器
+    result_reg: u32,                  // 4 bytes - 返回值写入位置
+    vararg_start: u32,                // 4 bytes - vararg 起始位置（绝对索引）
+    nresults: i16,                    // 2 bytes - 期望返回数 (-1 = LUA_MULTRET)
+    vararg_count: u16,                // 2 bytes - vararg 参数数量
+    pub callstatus: u8,               // 1 byte - 调用状态标志
+    _pad: [u8; 3],                    // 3 bytes - 对齐到 8 字节边界
 }
 
 // CallStatus flags (仿照 Lua 的 CIST_* 标志)
@@ -55,6 +58,7 @@ impl LuaCallFrame {
     pub fn new_lua_function(
         function_value: LuaValue,
         code_ptr: *const u32,
+        constants_ptr: *const LuaValue,
         base_ptr: usize,
         top: usize,
         result_reg: usize,
@@ -63,6 +67,7 @@ impl LuaCallFrame {
         LuaCallFrame {
             function_value,
             code_ptr,
+            constants_ptr,
             base_ptr,
             top,
             pc: 0,
@@ -80,6 +85,7 @@ impl LuaCallFrame {
         LuaCallFrame {
             function_value: LuaValue::nil(),
             code_ptr: std::ptr::null(),
+            constants_ptr: std::ptr::null(),
             base_ptr,
             top,
             pc: 0,

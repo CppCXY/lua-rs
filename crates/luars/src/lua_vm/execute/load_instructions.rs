@@ -147,6 +147,7 @@ pub fn exec_loadf(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
 /// LOADK A Bx
 /// R[A] := K[Bx]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_loadk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -154,15 +155,9 @@ pub fn exec_loadk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
-        let func_id = (*frame_ptr).function_value.as_function_id();
-        
-        if let Some(fid) = func_id {
-            if let Some(func_ref) = vm.object_pool.get_function(fid) {
-                if let Some(&constant) = func_ref.chunk.constants.get(bx) {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
-                }
-            }
-        }
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(bx);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
     }
 }
 

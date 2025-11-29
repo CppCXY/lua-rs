@@ -382,6 +382,7 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// ADDK: R[A] = R[B] + K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -392,23 +393,32 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        // Get constant
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        // Try integer operation
+        // Integer + Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
-            let l = left.secondary as i64;
-            let r = constant.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.wrapping_add(r));
+            let result = (left.secondary as i64).wrapping_add(constant.secondary as i64);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
             (*frame_ptr).pc += 1;
             return;
         }
 
-        // Try float operation
+        // Float + Float fast path
+        if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
+            let result = f64::from_bits(left.secondary) + f64::from_bits(constant.secondary);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_FLOAT,
+                secondary: result.to_bits(),
+            };
+            (*frame_ptr).pc += 1;
+            return;
+        }
+
+        // Mixed types
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l + r);
             (*frame_ptr).pc += 1;
@@ -417,6 +427,7 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// SUBK: R[A] = R[B] - K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -427,20 +438,32 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
+        // Integer - Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
-            let l = left.secondary as i64;
-            let r = constant.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.wrapping_sub(r));
+            let result = (left.secondary as i64).wrapping_sub(constant.secondary as i64);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
             (*frame_ptr).pc += 1;
             return;
         }
 
+        // Float - Float fast path
+        if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
+            let result = f64::from_bits(left.secondary) - f64::from_bits(constant.secondary);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_FLOAT,
+                secondary: result.to_bits(),
+            };
+            (*frame_ptr).pc += 1;
+            return;
+        }
+
+        // Mixed types
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l - r);
             (*frame_ptr).pc += 1;
@@ -449,6 +472,7 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// MULK: R[A] = R[B] * K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -458,21 +482,33 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     unsafe {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
-
-        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
-            let l = left.secondary as i64;
-            let r = constant.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.wrapping_mul(r));
+        // Float * Float fast path (most common in benchmarks)
+        if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
+            let result = f64::from_bits(left.secondary) * f64::from_bits(constant.secondary);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_FLOAT,
+                secondary: result.to_bits(),
+            };
             (*frame_ptr).pc += 1;
             return;
         }
 
+        // Integer * Integer
+        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+            let result = (left.secondary as i64).wrapping_mul(constant.secondary as i64);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
+            (*frame_ptr).pc += 1;
+            return;
+        }
+
+        // Mixed types
         if left.primary == TAG_FLOAT || constant.primary == TAG_FLOAT {
             let l = if left.primary == TAG_FLOAT {
                 f64::from_bits(left.secondary)
@@ -493,6 +529,7 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// MODK: R[A] = R[B] % K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -503,21 +540,23 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
+        // Integer % Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let r = constant.secondary as i64;
             if r == 0 { return; }
             let l = left.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.rem_euclid(r));
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: l.rem_euclid(r) as u64,
+            };
             (*frame_ptr).pc += 1;
             return;
         }
 
+        // Float % Float
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
             let result = l - (l / r).floor() * r;
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(result);
@@ -527,6 +566,7 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// POWK: R[A] = R[B] ^ K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -537,11 +577,8 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
         let l_float = match left.as_number() { Some(n) => n, None => return };
         let r_float = match constant.as_number() { Some(n) => n, None => return };
@@ -552,6 +589,7 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// DIVK: R[A] = R[B] / K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -562,11 +600,8 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
         let l_float = match left.as_number() { Some(n) => n, None => return };
         let r_float = match constant.as_number() { Some(n) => n, None => return };
@@ -577,6 +612,7 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// IDIVK: R[A] = R[B] // K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -587,21 +623,23 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
+        // Integer // Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let r = constant.secondary as i64;
             if r == 0 { return; }
             let l = left.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l.div_euclid(r));
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: l.div_euclid(r) as u64,
+            };
             (*frame_ptr).pc += 1;
             return;
         }
 
+        // Float // Float
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number((l / r).floor());
             (*frame_ptr).pc += 1;
@@ -717,6 +755,7 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// BANDK: R[A] = R[B] & K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -727,11 +766,8 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
         let l_int = left.as_integer().or_else(|| {
             left.as_number().and_then(|f| {
@@ -752,6 +788,7 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// BORK: R[A] = R[B] | K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -762,11 +799,8 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
         let l_int = left.as_integer().or_else(|| {
             left.as_number().and_then(|f| {
@@ -787,6 +821,7 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// BXORK: R[A] = R[B] ~ K[C]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_bxork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -797,11 +832,8 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let base_ptr = (*frame_ptr).base_ptr;
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let constant = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&k) = func_ref.chunk.constants.get(c) { k } else { return; }
-            } else { return; }
-        } else { return; };
+        // FAST PATH: Direct constant access via cached pointer
+        let constant = *(*frame_ptr).constants_ptr.add(c);
 
         let l_int = left.as_integer().or_else(|| {
             left.as_number().and_then(|f| {

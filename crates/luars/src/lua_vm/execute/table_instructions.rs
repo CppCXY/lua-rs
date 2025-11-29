@@ -354,6 +354,7 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
 /// GETTABUP A B C
 /// R[A] := UpValue[B][K[C]:string]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -362,15 +363,15 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
     let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
-    // Get key constant using new API
+    // FAST PATH: Direct constant access via cached pointer
+    let key_value = unsafe { *(*frame_ptr).constants_ptr.add(c) };
+
+    // Get function for upvalues access (still needed)
     let Some(func_id) = func_value.as_function_id() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
         return Err(vm.error("Invalid function ID".to_string()));
-    };
-    let Some(key_value) = func_ref.chunk.constants.get(c).copied() else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 
     let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
@@ -411,6 +412,7 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
 /// SETTABUP A B C k
 /// UpValue[A][K[B]:string] := RK(C)
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -420,25 +422,22 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
     let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
 
-    // Get key constant and set_value using new API
+    // FAST PATH: Direct constant access via cached pointer
+    let key_value = unsafe { *(*frame_ptr).constants_ptr.add(b) };
+
+    // Get set_value - either from constant or register  
+    let set_value = if k {
+        unsafe { *(*frame_ptr).constants_ptr.add(c) }
+    } else {
+        vm.register_stack[base_ptr + c]
+    };
+
+    // Get function for upvalues access (still needed)
     let Some(func_id) = func_value.as_function_id() else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
         return Err(vm.error("Invalid function ID".to_string()));
-    };
-    let Some(key_value) = func_ref.chunk.constants.get(b).copied() else {
-        return Err(vm.error(format!("Invalid constant index: {}", b)));
-    };
-
-    // Get set_value - either from constant or register
-    let set_value = if k {
-        let Some(constant) = func_ref.chunk.constants.get(c).copied() else {
-            return Err(vm.error(format!("Invalid constant index: {}", c)));
-        };
-        constant
-    } else {
-        vm.register_stack[base_ptr + c]
     };
 
     let Some(&upvalue_id) = func_ref.upvalues.get(a) else {
