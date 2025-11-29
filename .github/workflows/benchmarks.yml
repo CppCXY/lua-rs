@@ -1,0 +1,85 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [ main, refactor ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark-linux:
+    name: Benchmark (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Native Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Run Benchmarks
+        run: |
+          echo "## Benchmark Results - Linux (ubuntu-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          chmod +x run_benchmarks.sh
+          ./run_benchmarks.sh 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  benchmark-windows:
+    name: Benchmark (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Native Lua
+        run: |
+          choco install lua54 -y
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Run Benchmarks
+        shell: pwsh
+        run: |
+          echo "## Benchmark Results - Windows (windows-latest)" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+          .\run_benchmarks.ps1 2>&1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+
+  benchmark-macos:
+    name: Benchmark (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Native Lua
+        run: brew install lua
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Run Benchmarks
+        run: |
+          echo "## Benchmark Results - macOS (macos-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          chmod +x run_benchmarks.sh
+          ./run_benchmarks.sh 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY  summary:
