@@ -42,6 +42,8 @@ Lua-RS has achieved **production-ready correctness** with **252/252 tests passin
 
 ## Latest Benchmark Results (November 29, 2025)
 
+Test platform: Windows 11, AMD Ryzen 7 5800X, Rust 1.89.0
+
 ### Arithmetic Operations
 | Operation | Lua-RS | Native Lua | % of Native | Status |
 |-----------|--------|-----------|-------------|--------|
