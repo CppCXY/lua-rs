@@ -46,7 +46,7 @@ jobs:
 
       - name: Install Native Lua
         run: |
-          choco install lua54 -y
+          choco install lua -y
 
       - name: Build Release
         run: cargo build --release
