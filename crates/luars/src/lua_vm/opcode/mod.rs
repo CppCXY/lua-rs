@@ -398,6 +398,11 @@ impl Instruction {
     }
 
     #[inline(always)]
+    pub fn encode_abck(op: OpCode, a: u32, b: u32, c: u32, k: u32) -> u32 {
+        Self::create_abck(op, a, b, c, k != 0)
+    }
+
+    #[inline(always)]
     pub fn encode_abx(op: OpCode, a: u32, bx: u32) -> u32 {
         Self::create_abx(op, a, bx)
     }

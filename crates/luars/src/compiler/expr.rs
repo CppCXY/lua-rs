@@ -2757,36 +2757,36 @@ fn compile_table_expr_to(
         }
     }
 
-    // Helper function to encode table size (Lua's int2fb encoding)
-    fn int2fb(x: usize) -> u32 {
-        if x < 8 {
-            x as u32
+    // Helper function to compute ceil(log2(x)) + 1 for hash size encoding
+    // This matches Lua's encoding: rb = (hsize != 0) ? luaO_ceillog2(hsize) + 1 : 0
+    fn ceillog2_plus1(x: usize) -> u32 {
+        if x == 0 {
+            0
+        } else if x == 1 {
+            1
         } else {
-            let mut e = 0;
-            let mut x = x - 1;
-            while x >= 16 {
-                x = (x + 1) >> 1;
-                e += 1;
-            }
-            if x < 8 {
-                ((e + 1) << 3 | x) as u32
-            } else {
-                ((e + 2) << 3 | (x - 8)) as u32
-            }
+            // ceil(log2(x)) = number of bits needed to represent x-1, which is floor(log2(x-1)) + 1
+            // For x > 1: ceil(log2(x)) = 32 - (x-1).leading_zeros() for u32
+            let bits = usize::BITS - (x - 1).leading_zeros();
+            bits + 1 // +1 as per Lua encoding
         }
     }
 
     // Create table with size hints
-    // NEWTABLE A B C: B = hash size (encoded), C = array size (encoded)
-    let b_param = int2fb(hash_count);
-    let c_param = int2fb(array_count);
+    // NEWTABLE A B C k: B = log2(hash_size)+1, C = array_size % 256
+    // EXTRAARG contains array_size / 256 when k=1
+    const MAXARG_C: usize = 255;
+    let b_param = ceillog2_plus1(hash_count);
+    let extra = array_count / (MAXARG_C + 1); // higher bits of array size
+    let c_param = (array_count % (MAXARG_C + 1)) as u32; // lower bits of array size
+    let k = if extra > 0 { 1 } else { 0 };
     emit(
         c,
-        Instruction::encode_abc(OpCode::NewTable, reg, b_param, c_param),
+        Instruction::encode_abck(OpCode::NewTable, reg, b_param, c_param, k),
     );
 
-    // EXTRAARG instruction (always 0 for now, used for extended parameters)
-    emit(c, Instruction::create_ax(OpCode::ExtraArg, 0));
+    // EXTRAARG instruction for extended array size
+    emit(c, Instruction::create_ax(OpCode::ExtraArg, extra as u32));
 
     if fields.is_empty() {
         return Ok(reg);
@@ -2913,8 +2913,8 @@ fn compile_table_expr_to(
                     // key is a numeric literal - try SETI optimization
                     if !number_token.is_float() {
                         let int_value = number_token.get_int_value();
-                        // SETI: B field is sB (signed byte), range -128 to 127
-                        if int_value >= -128 && int_value <= 127 {
+                        // SETI: B field is unsigned byte, range 0-255
+                        if int_value >= 0 && int_value <= 255 {
                             // Try to compile value as constant first (for RK optimization)
                             let (value_operand, use_constant) =
                                 if let Some(value_expr) = field.get_value_expr() {
@@ -2929,9 +2929,8 @@ fn compile_table_expr_to(
                                     (r, false)
                                 };
 
-                            // Use SETI: R(A)[sB] := RK(C) where sB is signed byte
-                            // Encode sB: add OFFSET_SB (128)
-                            let encoded_b = (int_value + 128) as u32;
+                            // Use SETI: R(A)[B] := RK(C) where B is unsigned byte
+                            let encoded_b = int_value as u32;
                             emit(
                                 c,
                                 Instruction::create_abck(
@@ -2964,8 +2963,8 @@ fn compile_table_expr_to(
                 LuaIndexKey::Expr(key_expr) => {
                     // key is an expression - try to evaluate as constant integer for SETI
                     if let Some(int_val) = try_eval_const_int(&key_expr) {
-                        // SETI: B field is sB (signed byte), range -128 to 127
-                        if int_val >= -128 && int_val <= 127 {
+                        // SETI: B field is unsigned byte, range 0-255
+                        if int_val >= 0 && int_val <= 255 {
                             // Use SETI for small integer keys
                             let (value_operand, use_constant) =
                                 if let Some(value_expr) = field.get_value_expr() {
@@ -2980,8 +2979,8 @@ fn compile_table_expr_to(
                                     (r, false)
                                 };
 
-                            // Encode sB: add OFFSET_SB (128)
-                            let encoded_b = (int_val + 128) as u32;
+                            // B is unsigned byte
+                            let encoded_b = int_val as u32;
                             emit(
                                 c,
                                 Instruction::create_abck(
@@ -3128,13 +3127,12 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
 
             match index_key {
                 LuaIndexKey::Integer(number_token) => {
-                    // Optimized: table[integer] = value -> SETI A sB C k
-                    // B field is sB (signed byte), range -128 to 127
+                    // Optimized: table[integer] = value -> SETI A B C k
+                    // B field is unsigned byte, range 0-255
                     let int_value = number_token.get_int_value();
-                    if int_value >= -128 && int_value <= 127 {
-                        // Use SETI: R(A)[sB] := RK(C)
-                        // Encode sB: add OFFSET_SB (128) to get 0-255 range
-                        let encoded_b = (int_value + 128) as u32;
+                    if int_value >= 0 && int_value <= 255 {
+                        // Use SETI: R(A)[B] := RK(C)
+                        let encoded_b = int_value as u32;
                         emit(
                             c,
                             Instruction::encode_abc(OpCode::SetI, table_reg, encoded_b, value_reg),

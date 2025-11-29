@@ -6,43 +6,54 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM};
 
 /// NEWTABLE A B C k
 /// R[A] := {} (size = B,C)
+/// B = log2(hash_size) + 1 (0 means no hash part)
+/// C = array_size % 256
+/// k = 1 means EXTRAARG follows with array_size / 256
 /// OPTIMIZED: Fast path for common empty/small table case
 #[inline(always)]
 pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr);
-    let c = Instruction::get_c(instr);
+    let b = Instruction::get_b(instr); // log2(hash_size) + 1
+    let c = Instruction::get_c(instr); // array_size % 256
+    let k = Instruction::get_k(instr); // true if EXTRAARG has high bits of array_size
+
+    // Decode hash size: if b > 0, hash_size = 2^(b-1)
+    let hash_size = if b > 0 {
+        1usize << (b - 1)
+    } else {
+        0
+    };
 
     let (base_ptr, func_value) = unsafe {
         (*frame_ptr).pc += 1; // Skip EXTRAARG
         ((*frame_ptr).base_ptr, (*frame_ptr).function_value)
     };
 
-    // Calculate array size hint
-    let array_size = if b > 0 {
-        // FAST PATH: Small table, no EXTRAARG needed
-        (b - 1) as usize
-    } else {
+    // Calculate array size - C is low bits, EXTRAARG has high bits when k=1
+    let array_size = if k {
         // Need to read EXTRAARG for large arrays
         let pc = unsafe { (*frame_ptr).pc - 1 }; // We already incremented pc
         // Use new ID-based API to get function and read EXTRAARG
         if let Some(func_id) = func_value.as_function_id() {
             if let Some(func_ref) = vm.object_pool.get_function(func_id) {
                 if pc < func_ref.chunk.code.len() {
-                    Instruction::get_ax(func_ref.chunk.code[pc]) as usize
+                    let extra = Instruction::get_ax(func_ref.chunk.code[pc]) as usize;
+                    extra * 256 + c as usize // MAXARG_C + 1 = 256
                 } else {
-                    0
+                    c as usize
                 }
             } else {
-                0
+                c as usize
             }
         } else {
-            0
+            c as usize
         }
+    } else {
+        c as usize
     };
 
-    // Create new table with size hints
-    let table = vm.create_table(array_size, c as usize);
+    // Create new table with size hints (array_size, hash_size)
+    let table = vm.create_table(array_size, hash_size);
 
     // Store in register - use unchecked for speed
     unsafe {
@@ -170,13 +181,13 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 }
 
 /// GETI A B C
-/// R[A] := R[B][sC:integer]
-/// OPTIMIZED: Direct integer access using get_int() without creating LuaValue key
+/// R[A] := R[B][C:integer]
+/// OPTIMIZED: Direct integer access using get_int_full() without creating LuaValue key
 #[inline(always)]
 pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_sc(instr) as i64; // sC is the signed integer index
+    let c = Instruction::get_c(instr) as i64; // C is unsigned integer index
 
     let base_ptr = unsafe { (*frame_ptr).base_ptr };
     let table = unsafe { *vm.register_stack.get_unchecked(base_ptr + b) };
@@ -186,8 +197,9 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
         // SAFETY: table_id is valid because it came from as_table_id()
         let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
         
-        // OPTIMIZATION: Use get_int directly - C is already the integer index!
-        if let Some(val) = lua_table.get_int(c) {
+        // Use get_int_full to check both array and hash parts
+        // This is necessary because integer keys may be stored in hash if array wasn't pre-allocated
+        if let Some(val) = lua_table.get_int_full(c) {
             unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = val };
             return Ok(());
         }
@@ -215,7 +227,7 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 #[inline(always)]
 pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_sb(instr) as i64; // B is already the integer key
+    let b = Instruction::get_b(instr) as i64; // B is unsigned integer key
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 

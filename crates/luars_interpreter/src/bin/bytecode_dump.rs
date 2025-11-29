@@ -165,15 +165,13 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             }
             OpCode::Len => format!("LEN {} {}", a, b),
             OpCode::GetI => {
-                // GETI A B sC: R[A] := R[B][sC]
-                let sc = Instruction::get_sc(instr);
-                format!("GetI {} {} {}", a, b, sc)
+                // GETI A B C: R[A] := R[B][C] - C is unsigned integer index
+                format!("GetI {} {} {}", a, b, c)
             }
             OpCode::SetI => {
-                // SETI A sB C/k: R[A][sB] := RK(C)
-                let sb = Instruction::get_sb(instr);
+                // SETI A B C/k: R[A][B] := RK(C) - B is unsigned integer index
                 let k_str = if k { "k" } else { "" };
-                format!("SetI {} {} {}{}", a, sb, c, k_str)
+                format!("SetI {} {} {}{}", a, b, c, k_str)
             }
             OpCode::EqK => {
                 // EQK A B k: if ((R[A] == K[B]) ~= k) then pc++

@@ -240,6 +240,8 @@ impl LuaTable {
 
     /// Fast integer key access - O(1) for array part
     /// Ultra-optimized hot path for ipairs iterations
+    /// Note: This only checks the array part for performance.
+    /// Use get_int_full() if the value might be in the hash part.
     #[inline(always)]
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
         if key > 0 {
@@ -255,6 +257,18 @@ impl LuaTable {
             }
         }
         None
+    }
+
+    /// Integer key access that also checks hash part
+    /// Used by GETI when array lookup fails
+    #[inline]
+    pub fn get_int_full(&self, key: i64) -> Option<LuaValue> {
+        // First try array part (fast path)
+        if let Some(val) = self.get_int(key) {
+            return Some(val);
+        }
+        // Fall back to hash part
+        self.get_from_hash(&LuaValue::integer(key))
     }
 
     /// Optimized string key access using &str - avoids LuaValue allocation

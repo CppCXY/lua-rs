@@ -319,17 +319,22 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
     };
 
     // OPTIMIZATION: Direct type tag comparison (inline integer/float checks)
-    use crate::lua_value::{TAG_FLOAT, TAG_INTEGER, TAG_STRING, TYPE_MASK};
+    use crate::lua_value::TYPE_MASK;
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
 
     // Combined type check for fast paths (single branch!)
-    let combined_tags = (left_tag << 16) | right_tag;
-    const INT_INT: u64 = (TAG_INTEGER << 16) | TAG_INTEGER;
-    const FLOAT_FLOAT: u64 = (TAG_FLOAT << 16) | TAG_FLOAT;
-    const INT_FLOAT: u64 = (TAG_INTEGER << 16) | TAG_FLOAT;
-    const FLOAT_INT: u64 = (TAG_FLOAT << 16) | TAG_INTEGER;
-    const STRING_STRING: u64 = (TAG_STRING << 16) | TAG_STRING;
+    // Note: Shift TAG values right by 48 bits to get small values (0-15) for combining
+    let left_tag_small = left_tag >> 48;
+    let right_tag_small = right_tag >> 48;
+    let combined_tags = (left_tag_small << 4) | right_tag_small;
+    
+    // Small tag values after >> 48: TAG_INTEGER=3, TAG_FLOAT=4, TAG_STRING=5
+    const INT_INT: u64 = (3 << 4) | 3;       // 0x33
+    const FLOAT_FLOAT: u64 = (4 << 4) | 4;   // 0x44
+    const INT_FLOAT: u64 = (3 << 4) | 4;     // 0x34
+    const FLOAT_INT: u64 = (4 << 4) | 3;     // 0x43
+    const STRING_STRING: u64 = (5 << 4) | 5; // 0x55
 
     let is_less = if combined_tags == INT_INT {
         // Fast integer path - single branch!
@@ -425,17 +430,22 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
     };
 
     // OPTIMIZATION: Direct type tag comparison with combined_tags (like LT)
-    use crate::lua_value::{TAG_FLOAT, TAG_INTEGER, TAG_STRING, TYPE_MASK};
+    use crate::lua_value::TYPE_MASK;
     let left_tag = left.primary & TYPE_MASK;
     let right_tag = right.primary & TYPE_MASK;
 
     // Combined type check for fast paths (single branch!)
-    let combined_tags = (left_tag << 16) | right_tag;
-    const INT_INT: u64 = (TAG_INTEGER << 16) | TAG_INTEGER;
-    const FLOAT_FLOAT: u64 = (TAG_FLOAT << 16) | TAG_FLOAT;
-    const INT_FLOAT: u64 = (TAG_INTEGER << 16) | TAG_FLOAT;
-    const FLOAT_INT: u64 = (TAG_FLOAT << 16) | TAG_INTEGER;
-    const STRING_STRING: u64 = (TAG_STRING << 16) | TAG_STRING;
+    // Note: Shift TAG values right by 48 bits to get small values (0-15) for combining
+    let left_tag_small = left_tag >> 48;
+    let right_tag_small = right_tag >> 48;
+    let combined_tags = (left_tag_small << 4) | right_tag_small;
+    
+    // Small tag values after >> 48: TAG_INTEGER=3, TAG_FLOAT=4, TAG_STRING=5
+    const INT_INT: u64 = (3 << 4) | 3;       // 0x33
+    const FLOAT_FLOAT: u64 = (4 << 4) | 4;   // 0x44
+    const INT_FLOAT: u64 = (3 << 4) | 4;     // 0x34
+    const FLOAT_INT: u64 = (4 << 4) | 3;     // 0x43
+    const STRING_STRING: u64 = (5 << 4) | 5; // 0x55
 
     let is_less_or_equal = if combined_tags == INT_INT {
         // Fast integer path - single branch!
