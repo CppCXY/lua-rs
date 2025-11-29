@@ -180,7 +180,7 @@ impl LuaVM {
         let code_ptr = chunk.code.as_ptr();
         let constants_ptr = chunk.constants.as_ptr();
 
-        let frame = Box::new(LuaCallFrame::new_lua_function(
+        let frame = LuaCallFrame::new_lua_function(
             main_func_value,
             code_ptr,
             constants_ptr,
@@ -188,7 +188,7 @@ impl LuaVM {
             chunk.max_stack_size, // top
             0,                    // result_reg
             0,                    // nresults
-        ));
+        );
 
         self.push_frame(frame);
 
@@ -245,7 +245,7 @@ impl LuaVM {
             }
         }
 
-        let frame = Box::new(LuaCallFrame::new_lua_function(
+        let frame = LuaCallFrame::new_lua_function(
             func,
             code_ptr,
             constants_ptr,
@@ -253,7 +253,7 @@ impl LuaVM {
             max_stack,
             0,
             0,
-        ));
+        );
 
         self.push_frame(frame);
 
@@ -295,9 +295,18 @@ impl LuaVM {
     /// Box<LuaCallFrame> ensures the pointer remains valid even if Vec reallocates
     /// Uses a free list to reuse previously allocated frames
     #[inline(always)]
-    pub(crate) fn push_frame(&mut self, frame: Box<LuaCallFrame>) {
-        self.frames.push(frame);
+    pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) -> *mut LuaCallFrame {
+        // Try to reuse a frame from the free list
+        let mut boxed = if let Some(mut recycled) = self.free_frames.pop() {
+            *recycled = frame;
+            recycled
+        } else {
+            Box::new(frame)
+        };
+        let ptr = boxed.as_mut() as *mut LuaCallFrame;
+        self.frames.push(boxed);
         self.frame_count = self.frames.len();
+        ptr
     }
 
     /// Pop the current frame from the call stack
@@ -1183,7 +1192,7 @@ impl LuaVM {
 
     /// Create a new table and register it with GC
     /// Create a string and register it with GC
-    /// For short strings (≤64 bytes), use interning (global deduplication)
+    /// For short strings (�?4 bytes), use interning (global deduplication)
     /// Create a string value with automatic interning for short strings
     /// Returns LuaValue directly with ZERO allocation overhead for interned strings
     ///
@@ -1780,7 +1789,7 @@ impl LuaVM {
                     }
                 }
 
-                let temp_frame = Box::new(LuaCallFrame::new_lua_function(
+                let temp_frame = LuaCallFrame::new_lua_function(
                     metamethod,
                     code_ptr,
                     constants_ptr,
@@ -1788,7 +1797,7 @@ impl LuaVM {
                     max_stack_size, // top
                     result_reg,
                     1, // expect 1 result
-                ));
+                );
 
                 self.push_frame(temp_frame);
 
@@ -1816,7 +1825,7 @@ impl LuaVM {
                     self.register_stack[new_base + i + 1] = *arg;
                 }
 
-                let temp_frame = Box::new(LuaCallFrame::new_c_function(new_base, arg_count));
+                let temp_frame = LuaCallFrame::new_c_function(new_base, arg_count);
 
                 self.push_frame(temp_frame);
 
@@ -2073,7 +2082,7 @@ impl LuaVM {
                 }
 
                 // Create temporary C function frame
-                let temp_frame = Box::new(LuaCallFrame::new_c_function(new_base, stack_size));
+                let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
 
                 self.push_frame(temp_frame);
 
@@ -2150,7 +2159,7 @@ impl LuaVM {
                 let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
 
                 // nresults = -1 (LUA_MULTRET) to get all return values
-                let new_frame = Box::new(LuaCallFrame::new_lua_function(
+                let new_frame = LuaCallFrame::new_lua_function(
                     func,
                     code_ptr,
                     constants_ptr,
@@ -2158,7 +2167,7 @@ impl LuaVM {
                     max_stack_size, // top
                     safe_result_reg,
                     -1, // LUA_MULTRET - want all return values
-                ));
+                );
 
                 let initial_frame_count = self.frames.len();
                 self.push_frame(new_frame);

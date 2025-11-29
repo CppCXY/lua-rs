@@ -409,6 +409,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
 
 /// LE A B k
 /// if ((R[A] <= R[B]) ~= k) then pc++
+/// ULTRA-OPTIMIZED: Use combined_tags for fast path like LT
 #[inline(always)]
 pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -423,15 +424,33 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
         (*reg_base.add(a), *reg_base.add(b))
     };
 
-    // OPTIMIZATION: Direct type tag comparison
-    use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
-    let is_less_or_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER
-        && (right.primary & TYPE_MASK) == TAG_INTEGER
-    {
+    // OPTIMIZATION: Direct type tag comparison with combined_tags (like LT)
+    use crate::lua_value::{TAG_FLOAT, TAG_INTEGER, TAG_STRING, TYPE_MASK};
+    let left_tag = left.primary & TYPE_MASK;
+    let right_tag = right.primary & TYPE_MASK;
+
+    // Combined type check for fast paths (single branch!)
+    let combined_tags = (left_tag << 16) | right_tag;
+    const INT_INT: u64 = (TAG_INTEGER << 16) | TAG_INTEGER;
+    const FLOAT_FLOAT: u64 = (TAG_FLOAT << 16) | TAG_FLOAT;
+    const INT_FLOAT: u64 = (TAG_INTEGER << 16) | TAG_FLOAT;
+    const FLOAT_INT: u64 = (TAG_FLOAT << 16) | TAG_INTEGER;
+    const STRING_STRING: u64 = (TAG_STRING << 16) | TAG_STRING;
+
+    let is_less_or_equal = if combined_tags == INT_INT {
+        // Fast integer path - single branch!
         (left.secondary as i64) <= (right.secondary as i64)
-    } else if let (Some(l), Some(r)) = (left.as_number(), right.as_number()) {
-        l <= r
-    } else if left.is_string() && right.is_string() {
+    } else if combined_tags == FLOAT_FLOAT {
+        // Fast float path
+        f64::from_bits(left.secondary) <= f64::from_bits(right.secondary)
+    } else if combined_tags == INT_FLOAT {
+        // Mixed: integer <= float
+        ((left.secondary as i64) as f64) <= f64::from_bits(right.secondary)
+    } else if combined_tags == FLOAT_INT {
+        // Mixed: float <= integer
+        f64::from_bits(left.secondary) <= ((right.secondary as i64) as f64)
+    } else if combined_tags == STRING_STRING {
+        // String comparison
         left <= right
     } else {
         // Try __le metamethod first
@@ -910,7 +929,7 @@ fn exec_call_lua_function(
         } else {
             return_count as i16
         };
-        let new_frame = Box::new(LuaCallFrame::new_lua_function(
+        let new_frame = LuaCallFrame::new_lua_function(
             func,
             code_ptr,
             constants_ptr,
@@ -918,10 +937,9 @@ fn exec_call_lua_function(
             arg_count, // top = number of arguments
             a,         // result_reg
             nresults,
-        ));
+        );
 
-        vm.push_frame(new_frame);
-        *frame_ptr_ptr = vm.current_frame_ptr();
+        *frame_ptr_ptr = vm.push_frame(new_frame);
         return Ok(());
     }
 
@@ -979,7 +997,7 @@ fn exec_call_lua_function(
     } else {
         return_count as i16
     };
-    let new_frame = Box::new(LuaCallFrame::new_lua_function(
+    let new_frame = LuaCallFrame::new_lua_function(
         func,
         code_ptr,
         constants_ptr,
@@ -987,10 +1005,9 @@ fn exec_call_lua_function(
         actual_arg_count, // top = number of arguments
         a,                // result_reg
         nresults,
-    ));
+    );
 
-    vm.push_frame(new_frame);
-    *frame_ptr_ptr = vm.current_frame_ptr();
+    *frame_ptr_ptr = vm.push_frame(new_frame);
     Ok(())
 }
 
@@ -1049,10 +1066,10 @@ fn exec_call_cfunction(
     vm.ensure_stack_capacity(required_top);
 
     // Push C function frame
-    let temp_frame = Box::new(LuaCallFrame::new_c_function(
+    let temp_frame = LuaCallFrame::new_c_function(
         call_base,
         actual_arg_count + 1,
-    ));
+    );
 
     vm.push_frame(temp_frame);
 
@@ -1197,7 +1214,7 @@ pub fn exec_tailcall(
             } else {
                 return_count as i16
             };
-            let new_frame = Box::new(LuaCallFrame::new_lua_function(
+            let new_frame = LuaCallFrame::new_lua_function(
                 func,
                 code_ptr,
                 constants_ptr,
@@ -1205,10 +1222,9 @@ pub fn exec_tailcall(
                 arg_count,  // top = number of arguments passed
                 result_reg, // result_reg from the CALLER (not 0!)
                 nresults,
-            ));
+            );
 
-            vm.push_frame(new_frame);
-            *frame_ptr_ptr = vm.current_frame_ptr();
+            *frame_ptr_ptr = vm.push_frame(new_frame);
 
             Ok(())
         }
@@ -1239,7 +1255,7 @@ pub fn exec_tailcall(
             }
 
             // Create temporary C function frame
-            let temp_frame = Box::new(LuaCallFrame::new_c_function(call_base, args_len + 1));
+            let temp_frame = LuaCallFrame::new_c_function(call_base, args_len + 1);
 
             // Push temp frame and call C function
             vm.push_frame(temp_frame);

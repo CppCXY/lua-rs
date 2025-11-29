@@ -278,9 +278,9 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             vm.register_stack[call_base + 2] = control;
 
             // Create temporary frame for the call
-            let temp_frame = Box::new(LuaCallFrame::new_c_function(
+            let temp_frame = LuaCallFrame::new_c_function(
                 call_base, 3, // func + 2 args (top)
-            ));
+            );
 
             vm.push_frame(temp_frame);
             let result = cfunc(vm)?;
@@ -329,7 +329,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
             // Create new frame with correct nresults type
             let nresults = (c + 1) as i16;
-            let new_frame = Box::new(LuaCallFrame::new_lua_function(
+            let new_frame = LuaCallFrame::new_lua_function(
                 func,
                 code_ptr,
                 constants_ptr,
@@ -337,7 +337,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
                 max_stack_size, // top = max_stack_size (we initialized this many registers)
                 a + 3,          // result goes to R[A+3]
                 nresults,       // expecting c+1 results
-            ));
+            );
 
             vm.push_frame(new_frame);
             // Execution will continue in the new frame
