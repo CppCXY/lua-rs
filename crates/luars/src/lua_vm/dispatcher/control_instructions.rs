@@ -150,7 +150,7 @@ pub fn exec_return(vm: &mut LuaVM, instr: u32, frame_ptr_ptr: &mut *mut LuaCallF
 /// JMP sJ
 /// pc += sJ
 #[inline(always)]
-pub fn exec_jmp(instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_jmp(_vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let sj = Instruction::get_sj(instr);
 
     unsafe {

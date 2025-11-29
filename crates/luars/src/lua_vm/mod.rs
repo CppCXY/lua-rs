@@ -2221,10 +2221,10 @@ impl LuaVM {
                         OpCode::MmBinK => { exec_mmbink(self, instr, frame_ptr)?; Ok(()) }
                         
                         // Comparisons
-                        OpCode::LtI => { exec_lti(self, instr, frame_ptr); Ok(()) }
-                        OpCode::LeI => { exec_lei(self, instr, frame_ptr); Ok(()) }
-                        OpCode::GtI => { exec_gti(self, instr, frame_ptr); Ok(()) }
-                        OpCode::GeI => { exec_gei(self, instr, frame_ptr); Ok(()) }
+                        OpCode::LtI => exec_lti(self, instr, frame_ptr),
+                        OpCode::LeI => exec_lei(self, instr, frame_ptr),
+                        OpCode::GtI => exec_gti(self, instr, frame_ptr),
+                        OpCode::GeI => exec_gei(self, instr, frame_ptr),
                         OpCode::EqI => { exec_eqi(self, instr, frame_ptr); Ok(()) }
                         OpCode::EqK => exec_eqk(self, instr, frame_ptr),
                         
