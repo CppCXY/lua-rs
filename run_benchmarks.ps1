@@ -9,10 +9,14 @@ $benchmarks = @(
     "bench_control_flow.lua"
 )
 
+# Detect Native Lua executable
+$nativeLua = if ($env:NATIVE_LUA) { $env:NATIVE_LUA } else { "lua" }
+
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Lua-RS vs Native Lua Performance" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "Native Lua: $nativeLua" -ForegroundColor Gray
 Write-Host ""
 
 foreach ($bench in $benchmarks) {
@@ -25,7 +29,7 @@ foreach ($bench in $benchmarks) {
     
     Write-Host ""
     Write-Host "--- Native Lua ---" -ForegroundColor Green
-    & lua "benchmarks\$bench"
+    & $nativeLua "benchmarks\$bench"
     
     Write-Host ""
     Write-Host "----------------------------------------"
