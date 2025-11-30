@@ -1802,8 +1802,24 @@ impl LuaVM {
                 let code_ptr = func_ref.chunk.code.as_ptr();
                 let constants_ptr = func_ref.chunk.constants.as_ptr();
 
-                // Allocate registers in global stack
-                let new_base = self.register_stack.len();
+                // CRITICAL FIX: Calculate new base relative to current frame
+                // This prevents register_stack from growing indefinitely
+                let new_base = if self.frame_count > 0 {
+                    let current_frame = &self.frames[self.frame_count - 1];
+                    let caller_base = current_frame.base_ptr;
+                    let caller_max_stack =
+                        if let Some(caller_func_id) = current_frame.function_value.as_function_id() {
+                            self.object_pool
+                                .get_function(caller_func_id)
+                                .map(|f| f.chunk.max_stack_size)
+                                .unwrap_or(256)
+                        } else {
+                            256
+                        };
+                    caller_base + caller_max_stack
+                } else {
+                    0
+                };
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
                 // Copy arguments to new frame's registers
@@ -1841,7 +1857,24 @@ impl LuaVM {
                 let cf = metamethod.as_cfunction().unwrap();
                 // Create temporary frame for CFunction
                 let arg_count = args.len() + 1; // +1 for function itself
-                let new_base = self.register_stack.len();
+                
+                // CRITICAL FIX: Calculate new base relative to current frame
+                let new_base = if self.frame_count > 0 {
+                    let current_frame = &self.frames[self.frame_count - 1];
+                    let caller_base = current_frame.base_ptr;
+                    let caller_max_stack =
+                        if let Some(caller_func_id) = current_frame.function_value.as_function_id() {
+                            self.object_pool
+                                .get_function(caller_func_id)
+                                .map(|f| f.chunk.max_stack_size)
+                                .unwrap_or(256)
+                        } else {
+                            256
+                        };
+                    caller_base + caller_max_stack
+                } else {
+                    0
+                };
                 self.ensure_stack_capacity(new_base + arg_count);
 
                 self.register_stack[new_base] = LuaValue::cfunction(cf);
@@ -2196,6 +2229,15 @@ impl LuaVM {
                         // Normal return - pop boundary frame and get return values
                         self.pop_frame_discard();
                         let result = std::mem::take(&mut self.return_values);
+                        
+                        // Clear the stack region used by this call to release references
+                        // This prevents GC from scanning stale objects after dofile/pcall
+                        for i in new_base..(new_base + max_stack_size) {
+                            if i < self.register_stack.len() {
+                                self.register_stack[i] = LuaValue::nil();
+                            }
+                        }
+                        
                         Ok(result)
                     }
                     Err(LuaError::Yield) => {
@@ -2203,8 +2245,13 @@ impl LuaVM {
                         Err(LuaError::Yield)
                     }
                     Err(e) => {
-                        // Error - pop boundary frame
+                        // Error - pop boundary frame and clear stack region
                         self.pop_frame_discard();
+                        for i in new_base..(new_base + max_stack_size) {
+                            if i < self.register_stack.len() {
+                                self.register_stack[i] = LuaValue::nil();
+                            }
+                        }
                         Err(e)
                     }
                 }

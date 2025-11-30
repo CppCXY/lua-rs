@@ -1211,8 +1211,10 @@ pub fn exec_tailcall(
                 return Err(vm.error("not a c function".to_string()));
             };
 
-            // Set up arguments in a temporary stack space
-            let call_base = vm.register_stack.len();
+            // CRITICAL FIX: Use current frame's base for C function call
+            // This avoids growing register_stack infinitely on repeated tail calls
+            // The current frame's stack space is being reused since this is a tail call
+            let call_base = base;
             vm.ensure_stack_capacity(call_base + args_len + 1);
 
             vm.register_stack[call_base] = func;

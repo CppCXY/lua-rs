@@ -306,17 +306,19 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             let code_ptr = func_ref.chunk.code.as_ptr();
             let constants_ptr = func_ref.chunk.constants.as_ptr();
 
-            let call_base = vm.register_stack.len();
+            // CRITICAL FIX: Use proper call base relative to current frame
+            // Arguments are already at base_ptr + a + 4 and base_ptr + a + 5 (state, control)
+            // New frame base should be at base_ptr + a + 4 where we placed the first arg
+            let call_base = base_ptr + a + 4;
             vm.ensure_stack_capacity(call_base + max_stack_size);
 
-            // Initialize registers
-            for i in 0..max_stack_size {
+            // Initialize registers beyond arguments
+            for i in 2..max_stack_size {
                 vm.register_stack[call_base + i] = LuaValue::nil();
             }
 
-            // Copy arguments
-            vm.register_stack[call_base] = state;
-            vm.register_stack[call_base + 1] = control;
+            // Arguments are already in place (state at +0, control at +1)
+            // No need to copy them again
 
             // Create new frame with correct nresults type
             let nresults = (c + 1) as i16;
@@ -325,9 +327,9 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
                 code_ptr,
                 constants_ptr,
                 call_base,
-                max_stack_size, // top = max_stack_size (we initialized this many registers)
-                a + 3,          // result goes to R[A+3]
-                nresults,       // expecting c+1 results
+                2,     // top = 2 (we have 2 arguments)
+                a + 3, // result goes to R[A+3]
+                nresults, // expecting c+1 results
             );
 
             vm.push_frame(new_frame);
