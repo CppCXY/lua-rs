@@ -4,14 +4,15 @@ local iterations = 1000000
 print("=== Table Operations Benchmark ===")
 print("Iterations:", iterations)
 
--- Array creation and access
+-- Array creation and access (reduced iterations due to GC overhead)
+local array_iters = iterations // 100
 local start = os.clock()
-for i = 1, iterations do
+for i = 1, array_iters do
     local t = {1, 2, 3, 4, 5}
     local x = t[1] + t[5]
 end
 local elapsed = os.clock() - start
-print(string.format("Array creation & access: %.3f seconds (%.2f M ops/sec)", elapsed, iterations / elapsed / 1000000))
+print(string.format("Array creation & access: %.3f seconds (%.2f M ops/sec)", elapsed, array_iters / elapsed / 1000000))
 
 -- Table insertion
 start = os.clock()
@@ -40,13 +41,14 @@ end
 elapsed = os.clock() - start
 print(string.format("Hash table insertion (100k): %.3f seconds", elapsed))
 
--- ipairs iteration
+-- ipairs iteration (reduced)
+local ipairs_iters = 10
 start = os.clock()
 sum = 0
-for i = 1, 100 do
+for i = 1, ipairs_iters do
     for idx, val in ipairs(t) do
         sum = sum + val
     end
 end
 elapsed = os.clock() - start
-print(string.format("ipairs iteration (100x%d): %.3f seconds", iterations, elapsed))
+print(string.format("ipairs iteration (%dx%d): %.3f seconds", ipairs_iters, iterations, elapsed))

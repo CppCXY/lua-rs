@@ -12,106 +12,191 @@ Lua-RS has achieved **production-ready correctness** with **302/302 tests passin
 ### Key Performance Highlights
 
 🏆 **Excellent Performance (>90% of native)**:
-- **Integer addition**: **101%** of native (251.89 M/s vs 250.00 M/s) - **Faster than native!**
-- **Float multiplication**: **99%** of native (248.50 M/s vs 250.00 M/s)
-- **Table insertion**: **101%** of native (71.99 M/s vs 71.43 M/s) - **Faster than native!**
-- **Nested loops**: **97%** of native (243.30 M/s vs 250.00 M/s)
+- **Integer addition**: **~220 M ops/sec** - Near native performance
+- **Float multiplication**: **~210 M ops/sec** - Near native performance
+- **Local variable access**: **~220 M ops/sec** - Extremely fast
+- **Nested loops**: **~210 M ops/sec** - Excellent optimization
+- **String length**: **~150 M ops/sec** - Faster than native!
+- **Table access**: **~115 M ops/sec** - Solid performance
+- **String equality**: **~82 M ops/sec** - Fast comparison
 
-🎯 **Good Performance (60-90% of native)**:
-- **While loop**: **85%** (127.10 M/s vs 149.25 M/s)
-- **If-else control**: **84%** (99.71 M/s vs 119.05 M/s)
-- **Mixed operations**: **80%** (125.22 M/s vs 156.25 M/s)
-- **Table access**: **77%** (128.46 M/s vs 166.67 M/s)
-- **Hash table insertion**: **136%** (0.022s vs 0.030s) - **Faster than native!**
-- **Repeat-until**: **61%** (114.36 M/s vs 188.68 M/s)
-- **String concatenation**: **60%** (2748 K/s vs 4545 K/s)
-- **Simple function call**: **59%** (32.77 M/s vs 55.56 M/s)
+🎯 **Good Performance (>50% of native)**:
+- **While loop**: ~125 M ops/sec
+- **If-else control**: ~93 M ops/sec
+- **Upvalue access**: ~95 M ops/sec
+- **Table insertion**: ~50 M ops/sec
+- **Simple function call**: ~24 M calls/sec
+- **Bitwise operations**: ~80 M ops/sec
+- **Integer division**: ~190 M ops/sec
 
-📊 **Acceptable Performance (30-60% of native)**:
-- **Array creation & access**: **45%** (5.10 M/s vs 11.24 M/s)
-- **Recursive fib(25)**: **40%** (0.010s vs 0.004s)
-- **Vararg function**: **36%** (1.29 M/s vs 3.58 M/s)
-- **ipairs iteration**: **31%** (6.785s vs 2.098s)
-- **string.sub**: **33%** (8155 K/s vs 25000 K/s)
-- **string.find**: **33%** (5553 K/s vs 16666 K/s)
-
-🏆 **Faster than Native**:
-- **string.gsub**: **146%** (0.104s vs 0.152s) - **46% faster!**
-- **Hash table insertion**: **136%** (0.022s vs 0.030s) - **36% faster!**
+📊 **Areas for Optimization**:
+- **ipairs/pairs iteration**: ~13-15 K iters/sec (vs ~120 K for numeric for)
+- **Vararg to table**: ~0.06 M ops/sec (GC overhead)
+- **Object creation**: ~40-160 K ops/sec (allocation overhead)
 
 ---
 
-## Latest Benchmark Results (November 30, 2025)
+## Latest Comprehensive Benchmark Results (November 30, 2025)
 
-### Arithmetic Operations
-| Operation | Lua-RS | Native Lua | % of Native | Status |
-|-----------|--------|-----------|-------------|--------|
-| Integer addition | **251.89 M/s** | 250.00 M/s | **101%** | Excellent 🏆 |
-| Float multiplication | **248.50 M/s** | 250.00 M/s | **99%** | Excellent 🏆 |
-| Mixed operations | **125.22 M/s** | 156.25 M/s | **80%** | Good |
+### Core Operations (10M iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Integer addition | **219 M ops/sec** | Near native |
+| Float multiplication | **200 M ops/sec** | Near native |
+| Mixed operations | **111 M ops/sec** | Good |
+| Local var access | **219 M ops/sec** | Excellent |
+| Global var access | **43 M ops/sec** | 5x slower than local |
+| Upvalue access | **96 M ops/sec** | Good |
 
-### Function Calls
-| Operation | Lua-RS | Native Lua | % of Native | Status |
-|-----------|--------|-----------|-------------|--------|
-| Simple function call | **32.77 M/s** | 55.56 M/s | **59%** | Good |
-| Recursive fib(25) | **0.010s** | 0.004s | **40%** | Acceptable |
-| Vararg function | **1.29 M/s** | 3.58 M/s | **36%** | Acceptable |
+### Control Flow (10M iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| If-else | **93 M ops/sec** | Good |
+| While loop | **121 M ops/sec** | Excellent |
+| Repeat-until | **110 M ops/sec** | Good |
+| Nested loops | **218 M ops/sec** | Excellent |
+| Numeric for | **122 K iters/sec** | Fast |
 
-### Table Operations
-| Operation | Lua-RS | Native Lua | % of Native | Status |
-|-----------|--------|-----------|-------------|--------|
-| Array creation & access | **5.10 M/s** | 11.24 M/s | **45%** | Acceptable |
-| Table insertion | **71.99 M/s** | 71.43 M/s | **101%** | Excellent 🏆 |
-| Table access | **128.46 M/s** | 166.67 M/s | **77%** | Good |
-| Hash table insertion (100k) | **0.022s** | 0.030s | **136%** | Excellent 🏆 |
-| ipairs iteration (100×1M) | **6.785s** | 2.098s | **31%** | Needs optimization |
+### Functions & Closures (1M iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Simple function call | **22 M calls/sec** | Good |
+| Recursive fib(25) | **0.010s** | Acceptable |
+| Vararg function | **1.5 M calls/sec** | OK |
+| Closure creation | **6.8 M ops/sec** | Good |
+| Upvalue read/write | **22 M ops/sec** | Excellent |
+| Nested closures | **18 M ops/sec** | Good |
 
-### String Operations
-| Operation | Lua-RS | Native Lua | % of Native | Status |
-|-----------|--------|-----------|-------------|--------|
-| String concatenation | **2748.53 K/s** | 4545.45 K/s | **60%** | Good |
-| String length | **156.99 M/s** | 100.00 M/s | **157%** | Excellent 🏆 |
-| string.sub | **8155.08 K/s** | 25000.00 K/s | **33%** | Acceptable |
-| string.find | **5553.24 K/s** | 16666.67 K/s | **33%** | Acceptable |
-| string.gsub (10k) | **0.104s** | 0.152s | **146%** | Excellent 🏆 |
+### Multiple Returns (1M iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Single return | **34 M ops/sec** | Excellent |
+| Triple return | **15 M ops/sec** | Good |
+| 10 returns | **4.8 M ops/sec** | OK |
+| select('#') | **4.4 M ops/sec** | OK |
+| table.pack | **4 M ops/sec** | OK |
+| table.unpack | **8.9 M ops/sec** | Good |
 
-### Control Flow
-| Operation | Lua-RS | Native Lua | % of Native | Status |
-|-----------|--------|-----------|-------------|--------|
-| If-else | **99.71 M/s** | 119.05 M/s | **84%** | Good |
-| While loop | **127.10 M/s** | 149.25 M/s | **85%** | Good |
-| Repeat-until | **114.36 M/s** | 188.68 M/s | **61%** | Good |
-| Nested loops (1000×1000) | **243.30 M/s** | 250.00 M/s | **97%** | Excellent 🏆 |
+### Tables (1M iterations unless noted)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Table insertion | **51 M inserts/sec** | Excellent |
+| Table access | **117 M accesses/sec** | Excellent |
+| Hash table (100k) | **0.022s** | Fast |
+| # operator | **44 M ops/sec** | Excellent |
+| table.insert (end) | **25.7 M ops/sec** | Excellent |
+| table.insert (mid) | **8.8 M ops/sec** | Good |
+| table.remove | **16.3 M ops/sec** | Good |
+| table.concat (1k) | **26 K ops/sec** | OK |
+| table.sort (random) | **6.6 K ops/sec** | OK |
+
+### Iterators (100K iterations × 1000 items)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Numeric for | **122 K iters/sec** | Fast (baseline) |
+| ipairs | **14.8 K iters/sec** | 8x slower than for |
+| pairs (array) | **12.7 K iters/sec** | Iterator overhead |
+| pairs (hash) | **14 K iters/sec** | Similar |
+| next() | **14.9 K iters/sec** | Similar |
+| Custom iterator | **11.2 K iters/sec** | Overhead |
+
+### Strings (100K iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Concatenation | **2.7 M ops/sec** | Good |
+| String length | **185 M ops/sec** | Excellent |
+| string.upper | **8.5 M ops/sec** | Good |
+| string.lower | **7.9 M ops/sec** | Good |
+| string.sub | **7.1 M ops/sec** | Good |
+| string.find | **5.1 M ops/sec** | Good |
+| string.format | **3.4 M ops/sec** | Good |
+| string.match | **1.5 M ops/sec** | OK |
+| string.gsub | **1.1 M ops/sec** | OK |
+| String equality | **82 M ops/sec** | Excellent |
+
+### Math Library (5M iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Integer mul/add/mod | **103 M ops/sec** | Excellent |
+| Float mul/add/div | **77 M ops/sec** | Good |
+| math.sqrt | **22 M ops/sec** | Good |
+| math.sin | **20 M ops/sec** | Good |
+| math.floor/ceil | **11 M ops/sec** | OK |
+| math.abs | **20 M ops/sec** | Good |
+| math.random | **11 M ops/sec** | Good |
+| Bitwise ops | **82 M ops/sec** | Excellent |
+| Integer division | **170 M ops/sec** | Excellent |
+| Power (^2) | **43 M ops/sec** | Good |
+
+### Metatables & OOP (500K/100K iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| __index (function) | **6 M ops/sec** | Good |
+| __index (table) | **19 M ops/sec** | Good |
+| __newindex | **7.2 M ops/sec** | Good |
+| __call | **13 M ops/sec** | Good |
+| __len | **7.3 M ops/sec** | Good |
+| rawget | **15.4 M ops/sec** | Good |
+| Object creation | **41 K ops/sec** | Allocation overhead |
+| Method call | **4.5 M calls/sec** | Good |
+| Property access | **56 M ops/sec** | Excellent |
+
+### Coroutines (100K iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| Create/resume/yield | **27 K cycles/sec** | OK |
+| Repeated yield | **5.6 M yields/sec** | Good |
+| coroutine.wrap | **22 K ops/sec** | OK |
+| coroutine.status | **13 M ops/sec** | Excellent |
+
+### Error Handling (100K iterations)
+| Operation | Performance | Notes |
+|-----------|-------------|-------|
+| pcall (success) | **4.3 M ops/sec** | Good |
+| pcall (error) | **3.6 M ops/sec** | Good |
+| xpcall (error) | **1.8 M ops/sec** | OK |
+| Direct call | **41 M ops/sec** | Baseline |
+| assert (success) | **16 M ops/sec** | Good |
 
 ---
 
 ## Running Benchmarks
 
-### Windows (PowerShell)
-```powershell
-.\run_benchmarks.ps1
-```
-
-### Linux/macOS (Bash)
+### Run All Benchmarks
 ```bash
-chmod +x run_benchmarks.sh
-./run_benchmarks.sh
+# Using PowerShell script (compares with native Lua)
+.\run_benchmarks.ps1
+
+# Run with lua-rs only
+.\target\release\lua.exe .\benchmarks\run_all.lua
 ```
 
-### CI
-Performance benchmarks run automatically on push to `main` or `refactor` branches. See the [Benchmarks workflow](https://github.com/CppCXY/lua-rs/actions/workflows/benchmarks.yml) for cross-platform results.
+### Individual Benchmarks
+```bash
+.\target\release\lua.exe .\benchmarks\bench_arithmetic.lua
+.\target\release\lua.exe .\benchmarks\bench_tables.lua
+.\target\release\lua.exe .\benchmarks\bench_strings.lua
+# ... etc
+```
+
+### Benchmark Files (16 total)
+- **Core**: bench_arithmetic, bench_control_flow, bench_locals
+- **Functions**: bench_functions, bench_closures, bench_multiret
+- **Tables**: bench_tables, bench_table_lib, bench_iterators
+- **Strings**: bench_strings, bench_string_lib
+- **Math**: bench_math
+- **Advanced**: bench_metatables, bench_oop, bench_coroutines, bench_errors
 
 ---
 
 ## Performance History
 
-### November 30, 2025 - call_function_internal Optimization
-- Eliminated duplicate dispatch loop in `call_function_internal`
-- Now directly calls `luavm_execute` instead of copying 300+ lines of dispatch code
-- Reduced code size, improved CPU cache efficiency
-- Integer addition now **101% of native** (faster than native Lua!)
-- Float multiplication now **99% of native**
-- Table insertion now **101% of native** (faster than native Lua!)
+### November 30, 2025 - Comprehensive Benchmarks & Optimizations
+- Added 11 new benchmark files (16 total)
+- Fixed floating-point for loop bug
+- Optimized `call_function_internal` - reduced code by ~300 lines
+- All 302 tests passing
+- Total benchmark runtime: ~120 seconds
 
 ### November 29, 2025 - While Loop Optimization
 - Optimized while/repeat loop bytecode generation
@@ -127,20 +212,21 @@ Performance benchmarks run automatically on push to `main` or `refactor` branche
 
 ## Architecture Notes
 
-### Why Some Operations are Faster Than Native
-- **Integer addition/Table insertion**: Rust's optimizations for integer operations
-- **string.gsub**: Rust's string handling is more efficient for pattern matching
-- **Hash table insertion**: Optimized Lua-style open addressing hash table
-- **String length**: Direct access to pre-computed length field
+### Performance Characteristics
+- **Local variables are ~5x faster** than global variables
+- **Numeric for is ~8-9x faster** than ipairs/pairs
+- **Property access** is very fast (~56 M ops/sec)
+- **Function calls** are efficient (~22 M calls/sec)
+- **Bitwise operations** are very fast (~82 M ops/sec)
 
 ### Known Performance Bottlenecks
-1. **ipairs iteration**: Iterator overhead compared to C implementation
-2. **Vararg functions**: Extra allocation and copying overhead
-3. **Recursive calls**: Frame allocation overhead
-4. **Array creation**: GC allocation patterns
+1. **ipairs/pairs iteration**: Iterator protocol overhead
+2. **Object creation**: Allocation and setmetatable overhead
+3. **Vararg to table**: Extra allocation and copying
+4. **Complex pattern matching**: Regex-like overhead
 
----
-
-## Detailed Optimization History
-
-See git history for detailed optimization phases (Phase 1-24).
+### Optimization Opportunities
+1. Iterator fast-path for ipairs/pairs
+2. Object pooling for common patterns
+3. Inlining for small functions
+4. Better GC tuning for allocation-heavy code

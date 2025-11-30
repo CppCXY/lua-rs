@@ -141,78 +141,72 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
 
-        // Read counter first - this is the hot path check
-        let counter = (*reg_base.add(1)).secondary as i64;
-
-        // Fast path: integer loop with counter > 0
-        if counter > 0 {
-            let idx_i = (*reg_base).secondary as i64;
-            let step_i = (*reg_base.add(2)).secondary as i64;
-            let new_idx = idx_i.wrapping_add(step_i);
-
-            // Use chgivalue pattern - only update secondary field, type tags stay the same
-            (*reg_base).secondary = new_idx as u64;
-            (*reg_base.add(1)).secondary = (counter - 1) as u64;
-            (*reg_base.add(3)).secondary = new_idx as u64;
-
-            (*frame_ptr).pc -= bx;
-            return Ok(());
-        }
-
-        // Check if this is actually an integer loop (counter == 0 means loop ended)
+        // Check types first to distinguish integer vs float loop
         let idx = *reg_base;
-        let combined_tags =
-            (idx.primary | (*reg_base.add(1)).primary | (*reg_base.add(2)).primary) & TYPE_MASK;
-
-        if combined_tags == TAG_INTEGER {
-            // Integer loop ended (counter == 0)
-            return Ok(());
-        }
-
-        // Slow path: float loop
         let counter_or_limit = *reg_base.add(1);
         let step = *reg_base.add(2);
-
-        let step_tag = step.primary & TYPE_MASK;
-        let limit_tag = counter_or_limit.primary & TYPE_MASK;
+        
         let idx_tag = idx.primary & TYPE_MASK;
+        let limit_tag = counter_or_limit.primary & TYPE_MASK;
+        let step_tag = step.primary & TYPE_MASK;
 
-        if (step_tag == TAG_FLOAT || step_tag == TAG_INTEGER)
-            && (limit_tag == TAG_FLOAT || limit_tag == TAG_INTEGER)
-            && (idx_tag == TAG_FLOAT || idx_tag == TAG_INTEGER)
-        {
-            let idx_f = if idx_tag == TAG_FLOAT {
-                f64::from_bits(idx.secondary)
-            } else {
-                idx.secondary as i64 as f64
-            };
+        // Fast path: pure integer loop (all three values are integers)
+        if idx_tag == TAG_INTEGER && limit_tag == TAG_INTEGER && step_tag == TAG_INTEGER {
+            // Read counter - R[A+1] stores remaining iteration count for integer loops
+            let counter = counter_or_limit.secondary as i64;
 
-            let limit_f = if limit_tag == TAG_FLOAT {
-                f64::from_bits(counter_or_limit.secondary)
-            } else {
-                counter_or_limit.secondary as i64 as f64
-            };
+            if counter > 0 {
+                let idx_i = idx.secondary as i64;
+                let step_i = step.secondary as i64;
+                let new_idx = idx_i.wrapping_add(step_i);
 
-            let step_f = if step_tag == TAG_FLOAT {
-                f64::from_bits(step.secondary)
-            } else {
-                step.secondary as i64 as f64
-            };
+                // Use chgivalue pattern - only update secondary field, type tags stay the same
+                (*reg_base).secondary = new_idx as u64;
+                (*reg_base.add(1)).secondary = (counter - 1) as u64;
+                (*reg_base.add(3)).secondary = new_idx as u64;
 
-            let new_idx_f = idx_f + step_f;
-            let should_continue = if step_f > 0.0 {
-                new_idx_f <= limit_f
-            } else {
-                new_idx_f >= limit_f
-            };
-
-            if should_continue {
-                *reg_base = LuaValue::number(new_idx_f);
-                *reg_base.add(3) = LuaValue::number(new_idx_f);
                 (*frame_ptr).pc -= bx;
             }
+            // counter == 0 means loop ended, just fall through
+            return Ok(());
+        }
+
+        // Slow path: float loop (at least one value is float)
+        let idx_f = if idx_tag == TAG_FLOAT {
+            f64::from_bits(idx.secondary)
+        } else if idx_tag == TAG_INTEGER {
+            idx.secondary as i64 as f64
         } else {
-            return Err(vm.error("'for' values must be numbers".to_string()));
+            return Err(vm.error("'for' index must be a number".to_string()));
+        };
+
+        let limit_f = if limit_tag == TAG_FLOAT {
+            f64::from_bits(counter_or_limit.secondary)
+        } else if limit_tag == TAG_INTEGER {
+            counter_or_limit.secondary as i64 as f64
+        } else {
+            return Err(vm.error("'for' limit must be a number".to_string()));
+        };
+
+        let step_f = if step_tag == TAG_FLOAT {
+            f64::from_bits(step.secondary)
+        } else if step_tag == TAG_INTEGER {
+            step.secondary as i64 as f64
+        } else {
+            return Err(vm.error("'for' step must be a number".to_string()));
+        };
+
+        let new_idx_f = idx_f + step_f;
+        let should_continue = if step_f > 0.0 {
+            new_idx_f <= limit_f
+        } else {
+            new_idx_f >= limit_f
+        };
+
+        if should_continue {
+            *reg_base = LuaValue::number(new_idx_f);
+            *reg_base.add(3) = LuaValue::number(new_idx_f);
+            (*frame_ptr).pc -= bx;
         }
     }
 
