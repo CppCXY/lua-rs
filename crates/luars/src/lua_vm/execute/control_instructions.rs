@@ -870,15 +870,11 @@ fn exec_call_lua_function(
     call_metamethod_self: LuaValue,
     frame_ptr_ptr: &mut *mut LuaCallFrame, // Use passed frame_ptr!
 ) -> LuaResult<()> {
-    // Get function ID and lookup in ObjectPool
-    let Some(func_id) = func.as_function_id() else {
-        return Err(vm.error("Invalid function".to_string()));
-    };
+    // Get function ID - FAST PATH: assume valid function
+    let func_id = unsafe { func.as_function_id().unwrap_unchecked() };
 
-    // Extract chunk info from ObjectPool
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
-    };
+    // Extract chunk info from ObjectPool - use unchecked for hot path
+    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
 
     let (max_stack_size, is_vararg, code_ptr, constants_ptr) = (
         func_ref.chunk.max_stack_size,
@@ -907,38 +903,25 @@ fn exec_call_lua_function(
         // Simple case: just ensure capacity and push frame
         let required_capacity = new_base + max_stack_size;
 
-        // Inline capacity check - avoid function call overhead
+        // Ensure capacity - single branch
         if vm.register_stack.len() < required_capacity {
-            vm.register_stack
-                .reserve(required_capacity - vm.register_stack.len());
-            // Only resize what's needed, don't initialize everything
+            vm.register_stack.resize(required_capacity, LuaValue::nil());
+        }
+
+        // Initialize locals beyond arguments (rare for simple functions)
+        // Only if there are more locals than arguments
+        if arg_count < max_stack_size {
             unsafe {
-                vm.register_stack.set_len(required_capacity);
-                // Initialize only slots beyond arguments
-                let reg_ptr = vm.register_stack.as_mut_ptr();
+                let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
                 let nil_val = LuaValue::nil();
                 for i in arg_count..max_stack_size {
-                    std::ptr::write(reg_ptr.add(new_base + i), nil_val);
-                }
-            }
-        } else if arg_count < max_stack_size {
-            // Stack is big enough, just initialize locals beyond args
-            unsafe {
-                let reg_ptr = vm.register_stack.as_mut_ptr();
-                let nil_val = LuaValue::nil();
-                for i in arg_count..max_stack_size {
-                    *reg_ptr.add(new_base + i) = nil_val;
+                    *reg_ptr.add(i) = nil_val;
                 }
             }
         }
 
-        // Create and push new frame
-        // nresults: return_count as i16, use LUA_MULTRET for usize::MAX
-        let nresults = if return_count == usize::MAX {
-            -1i16
-        } else {
-            return_count as i16
-        };
+        // Create and push new frame - inline nresults calculation
+        let nresults = if c == 0 { -1i16 } else { (c - 1) as i16 };
         let new_frame = LuaCallFrame::new_lua_function(
             func,
             code_ptr,
@@ -1153,7 +1136,7 @@ pub fn exec_tailcall(
 
     // Extract all frame information we'll need BEFORE taking mutable references
     let (base, return_count, result_reg, _function_value, _pc) = {
-        let frame = vm.frames.last().unwrap();
+        let frame = &vm.frames[vm.frame_count - 1];
         (
             frame.base_ptr,
             frame.get_num_results(),
@@ -1315,7 +1298,7 @@ pub fn exec_tailcall(
 
 /// RETURN0
 /// return (no values)
-/// OPTIMIZED: Use frame_ptr directly
+/// OPTIMIZED: Use frame_ptr directly, calculate caller ptr before pop
 #[inline(always)]
 pub fn exec_return0(
     vm: &mut LuaVM,
@@ -1336,17 +1319,24 @@ pub fn exec_return0(
         vm.close_upvalues_from(base_ptr);
     }
 
-    vm.pop_frame_discard();
+    // OPTIMIZED: Calculate caller frame pointer BEFORE pop
+    let has_caller = vm.frame_count > 1;
+    let caller_ptr = if has_caller {
+        unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) }
+    } else {
+        std::ptr::null_mut()
+    };
 
-    vm.return_values.clear();
+    // Pop frame - just decrement counter
+    vm.frame_count -= 1;
 
     // FAST PATH: Check if we have a caller frame
-    if !vm.frames_is_empty() {
-        // Update frame_ptr to point to caller frame
-        *frame_ptr_ptr = vm.current_frame_ptr();
+    if has_caller {
+        // Update frame_ptr (already computed)
+        *frame_ptr_ptr = caller_ptr;
 
         // Get caller's base_ptr
-        let caller_base = unsafe { (**frame_ptr_ptr).base_ptr };
+        let caller_base = unsafe { (*caller_ptr).base_ptr };
 
         // Fill expected return values with nil
         if num_results != usize::MAX && num_results > 0 {
@@ -1362,17 +1352,19 @@ pub fn exec_return0(
 
         // Update caller's top
         unsafe {
-            (**frame_ptr_ptr).top = result_reg;
+            (*caller_ptr).top = result_reg;
         }
         Ok(())
     } else {
+        // No caller - exit VM, clear return_values (empty return)
+        vm.return_values.clear();
         Err(LuaError::Exit)
     }
 }
 
 /// RETURN1 A
 /// return R[A]
-/// OPTIMIZED: Fast path for single-value return (most common case)
+/// OPTIMIZED: Ultra-fast path for single-value return (most common case)
 #[inline(always)]
 pub fn exec_return1(
     vm: &mut LuaVM,
@@ -1389,47 +1381,45 @@ pub fn exec_return1(
         )
     };
 
+    // Get return value BEFORE any other operations
+    let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+
     // Only close upvalues if there are any open (rare for simple functions)
     if !vm.open_upvalues.is_empty() {
         vm.close_upvalues_from(base_ptr);
     }
 
-    // Get return value before popping frame
-    let return_value = if base_ptr + a < vm.register_stack.len() {
-        unsafe { *vm.register_stack.get_unchecked(base_ptr + a) }
+    // OPTIMIZED: Calculate caller frame pointer BEFORE pop (avoid recalculation)
+    // frame_count - 1 is current, frame_count - 2 is caller
+    let has_caller = vm.frame_count > 1;
+    let caller_ptr = if has_caller {
+        unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) }
     } else {
-        LuaValue::nil()
+        std::ptr::null_mut()
     };
 
-    // Pop frame - we already have all info we need from frame_ptr
-    vm.pop_frame_discard();
-
-    // CRITICAL: Always set return_values for call_function_internal compatibility
-    vm.return_values.clear();
-    vm.return_values.push(return_value);
+    // Pop frame - just decrement counter
+    vm.frame_count -= 1;
 
     // Check if there's a caller frame
-    if !vm.frames_is_empty() {
-        // Update frame_ptr to point to caller frame
-        *frame_ptr_ptr = vm.current_frame_ptr();
+    if has_caller {
+        // Update frame_ptr to caller (already computed above)
+        *frame_ptr_ptr = caller_ptr;
 
-        // Get caller's base_ptr
-        let caller_base = unsafe { (**frame_ptr_ptr).base_ptr };
-        let dest_pos = caller_base + result_reg;
-
-        // Write to caller's result register
-        if dest_pos < vm.register_stack.len() {
-            vm.register_stack[dest_pos] = return_value;
-        }
-
-        // Update top
+        // Get caller's base_ptr and write return value directly
+        let caller_base = unsafe { (*caller_ptr).base_ptr };
         unsafe {
-            (**frame_ptr_ptr).top = result_reg + 1;
+            *vm.register_stack.get_unchecked_mut(caller_base + result_reg) = return_value;
+            // Update top
+            (*caller_ptr).top = result_reg + 1;
         }
 
         Ok(())
     } else {
         // No caller - exit VM (only happens at script end)
+        // Only update return_values when exiting - this is what call_function_internal reads
+        vm.return_values.clear();
+        vm.return_values.push(return_value);
         Err(LuaError::Exit)
     }
 }

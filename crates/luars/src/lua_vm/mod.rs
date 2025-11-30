@@ -20,18 +20,21 @@ use std::rc::Rc;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 
+/// Maximum call stack depth (similar to LUAI_MAXCCALLS in Lua)
+/// Lua uses 200 for the limit, we use 256 for power-of-2 alignment
+pub const MAX_CALL_DEPTH: usize = 256;
+
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
     pub(crate) global_value: LuaValue,
 
-    // Call stack - Box<LuaCallFrame> for pointer stability
-    // When Vec reallocates, the Box pointers remain valid
-    pub frames: Vec<Box<LuaCallFrame>>,
+    // Call stack - Pre-allocated Vec with fixed capacity
+    // Using Vec<LuaCallFrame> directly (no Box indirection) for cache efficiency
+    // Vec is pre-allocated to MAX_CALL_DEPTH and never reallocated
+    pub frames: Vec<LuaCallFrame>,
 
-    // Free list for recycling Box<LuaCallFrame> allocations
-    free_frames: Vec<Box<LuaCallFrame>>,
-
-    // Current frame index (avoids last_mut() overhead in hot loop)
+    // Current frame index (0 = empty, 1 = first frame, etc.)
+    // This replaces the linked-list traversal in Lua's L->ci
     pub(crate) frame_count: usize,
 
     // Global register stack (unified stack architecture, like Lua 5.4)
@@ -94,10 +97,15 @@ pub struct LuaVM {
 
 impl LuaVM {
     pub fn new() -> Self {
+        // Pre-allocate call stack with fixed size (like Lua's CallInfo pool)
+        // Vec is pre-filled to MAX_CALL_DEPTH so we can use direct indexing
+        // frame_count tracks the actual number of active frames
+        let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
+        frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
+        
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
-            frames: Vec::with_capacity(64), // Pre-allocate; Box provides pointer stability
-            free_frames: Vec::with_capacity(16), // Free list for recycling frames
+            frames,
             frame_count: 0,
             register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
             gc: GC::new(),
@@ -207,8 +215,7 @@ impl LuaVM {
     pub fn call_function(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<LuaValue> {
         // Clear previous state
         self.register_stack.clear();
-        self.frames.clear();
-        self.frame_count = 0;
+        self.frame_count = 0;  // Reset frame count (frames Vec stays pre-allocated)
         self.open_upvalues.clear();
 
         // Get function from object pool
@@ -290,47 +297,41 @@ impl LuaVM {
     }
 
     // ============ Frame Management (Lua 5.4 style) ============
+    // Uses pre-allocated Vec for O(1) operations
+    // Key optimization: Vec is pre-filled to MAX_CALL_DEPTH, so direct index access
 
     /// Push a new frame onto the call stack and return stable pointer
-    /// Box<LuaCallFrame> ensures the pointer remains valid even if Vec reallocates
-    /// Uses a free list to reuse previously allocated frames
+    /// ULTRA-OPTIMIZED: Direct index write to pre-filled Vec
     #[inline(always)]
     pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) -> *mut LuaCallFrame {
-        // Try to reuse a frame from the free list
-        let mut boxed = if let Some(mut recycled) = self.free_frames.pop() {
-            *recycled = frame;
-            recycled
-        } else {
-            Box::new(frame)
-        };
-        let ptr = boxed.as_mut() as *mut LuaCallFrame;
-        self.frames.push(boxed);
-        self.frame_count = self.frames.len();
-        ptr
+        let idx = self.frame_count;
+        debug_assert!(idx < MAX_CALL_DEPTH, "call stack overflow");
+        
+        // Direct write - Vec is pre-filled to MAX_CALL_DEPTH
+        self.frames[idx] = frame;
+        self.frame_count = idx + 1;
+        &mut self.frames[idx] as *mut LuaCallFrame
+    }
+
+    /// Pop frame without returning it
+    /// ULTRA-OPTIMIZED: Just decrement counter
+    #[inline(always)]
+    pub(crate) fn pop_frame_discard(&mut self) {
+        debug_assert!(self.frame_count > 0, "pop from empty call stack");
+        self.frame_count -= 1;
+        // Note: Don't truncate Vec - keep the capacity for reuse
+        // The frame data will be overwritten on next push
     }
 
     /// Pop the current frame from the call stack
-    /// Returns the popped frame, updates frame_count
     #[inline(always)]
-    pub(crate) fn pop_frame(&mut self) -> Option<Box<LuaCallFrame>> {
-        if let Some(boxed) = self.frames.pop() {
-            self.frame_count = self.frames.len();
-            Some(boxed)
+    #[allow(dead_code)]
+    pub(crate) fn pop_frame(&mut self) -> Option<LuaCallFrame> {
+        if self.frame_count > 0 {
+            self.frame_count -= 1;
+            Some(unsafe { std::ptr::read(self.frames.as_ptr().add(self.frame_count)) })
         } else {
             None
-        }
-    }
-
-    /// Pop frame without returning it (slightly faster)
-    /// Recycles the Box for reuse
-    #[inline(always)]
-    pub(crate) fn pop_frame_discard(&mut self) {
-        if let Some(boxed) = self.frames.pop() {
-            self.frame_count = self.frames.len();
-            // Recycle the Box for later reuse (limit to avoid memory bloat)
-            if self.free_frames.len() < 64 {
-                self.free_frames.push(boxed);
-            }
         }
     }
 
@@ -340,21 +341,24 @@ impl LuaVM {
         self.frame_count == 0
     }
 
-    // Helper methods
+    // Helper methods - direct Vec access with unsafe get_unchecked for hot path
     #[inline(always)]
     pub(crate) fn current_frame(&self) -> &LuaCallFrame {
-        unsafe { self.frames.get_unchecked(self.frame_count - 1).as_ref() }
+        debug_assert!(self.frame_count > 0);
+        unsafe { self.frames.get_unchecked(self.frame_count - 1) }
     }
 
     #[inline(always)]
     pub(crate) fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
-        unsafe { self.frames.get_unchecked_mut(self.frame_count - 1).as_mut() }
+        debug_assert!(self.frame_count > 0);
+        unsafe { self.frames.get_unchecked_mut(self.frame_count - 1) }
     }
 
     /// Get stable pointer to current frame (for execute loop)
     #[inline(always)]
     pub(crate) fn current_frame_ptr(&mut self) -> *mut LuaCallFrame {
-        unsafe { self.frames.get_unchecked_mut(self.frame_count - 1).as_mut() as *mut LuaCallFrame }
+        debug_assert!(self.frame_count > 0);
+        unsafe { self.frames.as_mut_ptr().add(self.frame_count - 1) }
     }
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
@@ -447,6 +451,7 @@ impl LuaVM {
         let mut thread = LuaThread {
             status: CoroutineStatus::Suspended,
             frames: Vec::new(),
+            frame_count: 0,
             register_stack: Vec::with_capacity(256),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
@@ -474,6 +479,7 @@ impl LuaVM {
         let thread = LuaThread {
             status: CoroutineStatus::Suspended,
             frames: Vec::new(),
+            frame_count: 0,
             register_stack: Vec::with_capacity(256),
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
@@ -546,7 +552,7 @@ impl LuaVM {
             let Some(thread) = self.object_pool.get_thread(thread_id) else {
                 return Err(self.error("invalid thread".to_string()));
             };
-            thread.frames.is_empty()
+            thread.frame_count == 0  // Use frame_count instead of frames.is_empty()
         };
 
         // Load thread state into VM
@@ -556,7 +562,7 @@ impl LuaVM {
             };
             thread.status = CoroutineStatus::Running;
             self.frames = std::mem::take(&mut thread.frames);
-            self.frame_count = self.frames.len(); // CRITICAL: sync frame_count
+            self.frame_count = thread.frame_count; // Use thread's frame_count
             self.register_stack = std::mem::take(&mut thread.register_stack);
             self.return_values = std::mem::take(&mut thread.return_values);
             self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
@@ -594,7 +600,7 @@ impl LuaVM {
             };
 
             if let (Some(a), Some(num_expected)) = (call_reg, call_nret) {
-                let frame = &self.frames[self.frames.len() - 1];
+                let frame = &self.frames[self.frame_count - 1];
                 let base_ptr = frame.base_ptr;
                 let top = frame.top;
 
@@ -657,7 +663,8 @@ impl LuaVM {
                 return Err(self.error("invalid thread".to_string()));
             };
             thread.frames = std::mem::take(&mut self.frames);
-            self.frame_count = 0; // frames is now empty
+            thread.frame_count = self.frame_count; // Save frame_count to thread
+            self.frame_count = 0; // Reset VM frame count
             thread.register_stack = std::mem::take(&mut self.register_stack);
             thread.return_values = std::mem::take(&mut self.return_values);
             thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
@@ -674,7 +681,8 @@ impl LuaVM {
                 return Err(self.error("invalid thread".to_string()));
             };
             thread.frames = std::mem::take(&mut self.frames);
-            self.frame_count = 0; // frames is now empty
+            thread.frame_count = self.frame_count; // Save frame_count to thread
+            self.frame_count = 0; // Reset VM frame count
             thread.register_stack = std::mem::take(&mut self.register_stack);
             thread.return_values = std::mem::take(&mut self.return_values);
             thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
@@ -1521,7 +1529,8 @@ impl LuaVM {
         }
 
         // 4. All registers beyond the frames (temporary values)
-        if let Some(last_frame) = self.frames.last() {
+        if self.frame_count > 0 {
+            let last_frame = &self.frames[self.frame_count - 1];
             let last_frame_end = last_frame.base_ptr + last_frame.top;
             for i in last_frame_end..self.register_stack.len() {
                 roots.push(self.register_stack[i]);
@@ -1957,7 +1966,7 @@ impl LuaVM {
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save current state
-        let initial_frame_count = self.frames.len();
+        let initial_frame_count = self.frame_count;
 
         // Try to call the function
         let result = self.call_function_internal(func, args);
@@ -1978,7 +1987,7 @@ impl LuaVM {
                 self.open_upvalues.clear();
 
                 // Now pop the frames
-                while self.frames.len() > initial_frame_count {
+                while self.frame_count > initial_frame_count {
                     self.pop_frame_discard();
                 }
 
@@ -2002,7 +2011,7 @@ impl LuaVM {
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
-        let initial_frame_count = self.frames.len();
+        let initial_frame_count = self.frame_count;
 
         let result = self.call_function_internal(func, args);
 
@@ -2013,7 +2022,7 @@ impl LuaVM {
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(_) => {
                 // Clean up frames created by the failed function call
-                while self.frames.len() > initial_frame_count {
+                while self.frame_count > initial_frame_count {
                     let frame = self.pop_frame().unwrap();
                     // Close upvalues belonging to this frame
                     self.close_upvalues_from(frame.base_ptr);
@@ -2056,7 +2065,8 @@ impl LuaVM {
 
                 // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
                 // to prevent overwriting ANY caller registers (including those beyond top)
-                let new_base = if let Some(current_frame) = self.frames.last() {
+                let new_base = if self.frame_count > 0 {
+                    let current_frame = &self.frames[self.frame_count - 1];
                     let caller_base = current_frame.base_ptr;
                     let caller_max_stack =
                         if let Some(func_id) = current_frame.function_value.as_function_id() {
@@ -2125,7 +2135,8 @@ impl LuaVM {
                 };
 
                 // CRITICAL: Allocate metamethod frame AFTER caller's max_stack
-                let new_base = if let Some(current_frame) = self.frames.last() {
+                let new_base = if self.frame_count > 0 {
+                    let current_frame = &self.frames[self.frame_count - 1];
                     let caller_base = current_frame.base_ptr;
                     let caller_max_stack = if let Some(caller_func_id) =
                         current_frame.function_value.as_function_id()
@@ -2169,13 +2180,13 @@ impl LuaVM {
                     -1, // LUA_MULTRET - want all return values
                 );
 
-                let initial_frame_count = self.frames.len();
+                let initial_frame_count = self.frame_count;
                 self.push_frame(new_frame);
 
                 // Execute using a bounded loop that stops when frame count returns to initial
                 let exec_result: LuaResult<()> = loop {
                     // Check if we've returned to our starting frame count
-                    if self.frames.len() <= initial_frame_count {
+                    if self.frame_count <= initial_frame_count {
                         // Frame was popped - function has returned
                         break Ok(());
                     }
@@ -2194,8 +2205,8 @@ impl LuaVM {
                     let instr = unsafe { code_ptr.add(pc).read() };
                     self.frames[frame_idx].pc += 1;
 
-                    // Execute using the dispatcher with Box-stable frame_ptr
-                    let mut frame_ptr = self.frames[frame_idx].as_mut() as *mut LuaCallFrame;
+                    // Execute using direct pointer to frame in Vec
+                    let mut frame_ptr = unsafe { self.frames.as_mut_ptr().add(frame_idx) };
 
                     // We need to call the dispatcher's instruction handlers directly
                     // But this is complex because they expect frame_ptr_ptr for some instructions
@@ -2427,7 +2438,7 @@ impl LuaVM {
                                 Ok(()) => Ok(()),
                                 Err(LuaError::Exit) => {
                                     // Check if we returned to initial frame count
-                                    if self.frames.len() <= initial_frame_count {
+                                    if self.frame_count <= initial_frame_count {
                                         break Ok(());
                                     }
                                     Ok(())
@@ -2438,7 +2449,7 @@ impl LuaVM {
                         OpCode::Return1 => match exec_return1(self, instr, &mut frame_ptr) {
                             Ok(()) => Ok(()),
                             Err(LuaError::Exit) => {
-                                if self.frames.len() <= initial_frame_count {
+                                if self.frame_count <= initial_frame_count {
                                     break Ok(());
                                 }
                                 Ok(())
@@ -2448,7 +2459,7 @@ impl LuaVM {
                         OpCode::Return => match exec_return(self, instr, &mut frame_ptr) {
                             Ok(()) => Ok(()),
                             Err(LuaError::Exit) => {
-                                if self.frames.len() <= initial_frame_count {
+                                if self.frame_count <= initial_frame_count {
                                     break Ok(());
                                 }
                                 Ok(())
@@ -2461,7 +2472,7 @@ impl LuaVM {
                         OpCode::TailCall => match exec_tailcall(self, instr, &mut frame_ptr) {
                             Ok(()) => Ok(()),
                             Err(LuaError::Exit) => {
-                                if self.frames.len() <= initial_frame_count {
+                                if self.frame_count <= initial_frame_count {
                                     break Ok(());
                                 }
                                 Ok(())
@@ -2530,7 +2541,7 @@ impl LuaVM {
                     }
                     Err(e) => {
                         // Error occurred - pop frames back to initial
-                        while self.frames.len() > initial_frame_count {
+                        while self.frame_count > initial_frame_count {
                             self.pop_frame_discard();
                         }
                         Err(e)

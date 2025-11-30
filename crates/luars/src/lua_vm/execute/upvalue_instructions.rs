@@ -20,8 +20,9 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
     let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
 
-    // Get upvalue value
-    let value = vm.read_upvalue(upvalue_id);
+    // OPTIMIZED: Use unchecked read for hot path
+    // SAFETY: upvalue_id is from a valid function closure
+    let value = unsafe { vm.read_upvalue_unchecked(upvalue_id) };
     unsafe {
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
     }

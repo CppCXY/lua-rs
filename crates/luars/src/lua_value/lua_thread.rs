@@ -7,8 +7,12 @@ pub struct LuaThread {
     /// Coroutine status
     pub status: CoroutineStatus,
 
-    /// Independent call stack for this coroutine (Box for pointer stability)
-    pub frames: Vec<Box<crate::lua_vm::LuaCallFrame>>,
+    /// Independent call stack for this coroutine
+    /// Using Vec<LuaCallFrame> directly (no Box) for efficiency
+    pub frames: Vec<crate::lua_vm::LuaCallFrame>,
+    
+    /// Current frame count (tracks active frames in the pre-allocated Vec)
+    pub frame_count: usize,
 
     /// Independent register stack for this coroutine
     pub register_stack: Vec<LuaValue>,

@@ -52,7 +52,7 @@ fn async_sleep_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     })?;
 
     // 收集参数
-    let frame = vm.frames.last().unwrap();
+    let frame = &vm.frames[vm.frame_count - 1];
     let base = frame.base_ptr;
     let top = frame.top;
     let mut args = Vec::new();

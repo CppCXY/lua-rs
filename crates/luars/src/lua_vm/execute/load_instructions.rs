@@ -14,8 +14,7 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
 pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, _frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize; // number of fixed params
 
-    let frame_idx = vm.frames.len() - 1;
-    let frame = &vm.frames[frame_idx];
+    let frame = vm.current_frame();
     let base_ptr = frame.base_ptr;
     let top = frame.top;
 
@@ -49,10 +48,10 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, _frame_ptr: *mut LuaCallFrame
         }
 
         // Set vararg info in frame
-        vm.frames[frame_idx].set_vararg(vararg_dest, vararg_count);
+        vm.current_frame_mut().set_vararg(vararg_dest, vararg_count);
     } else {
         // No varargs passed
-        vm.frames[frame_idx].set_vararg(base_ptr + max_stack_size, 0);
+        vm.current_frame_mut().set_vararg(base_ptr + max_stack_size, 0);
     }
 
     // Initialize local variables (registers from 0 to max_stack_size) with nil

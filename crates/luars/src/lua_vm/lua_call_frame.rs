@@ -28,6 +28,7 @@ use crate::LuaValue;
 /// - 2 bytes: vararg_count (u16)
 /// - 1 byte: callstatus
 /// - 3 bytes: padding
+#[derive(Clone)]
 pub struct LuaCallFrame {
     pub function_value: LuaValue,       // 16 bytes
     pub code_ptr: *const u32,           // 8 bytes - 直接指向指令数组
@@ -51,6 +52,25 @@ pub const CIST_TAIL: u8 = 1 << 3; // 尾调用
 // 特殊值
 #[allow(dead_code)]
 pub const LUA_MULTRET: i16 = -1;
+
+impl Default for LuaCallFrame {
+    #[inline(always)]
+    fn default() -> Self {
+        LuaCallFrame {
+            function_value: LuaValue::nil(),
+            code_ptr: std::ptr::null(),
+            constants_ptr: std::ptr::null(),
+            base_ptr: 0,
+            top: 0,
+            pc: 0,
+            result_reg: 0,
+            vararg_start: 0,
+            nresults: 0,
+            vararg_count: 0,
+            callstatus: 0,
+        }
+    }
+}
 
 impl LuaCallFrame {
     #[inline(always)]
