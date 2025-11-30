@@ -12,21 +12,22 @@ A Lua 5.4 interpreter implemented in Rust, primarily developed through AI-assist
 
 ## Test Coverage
 
-Current test status: **252 out of 252 tests passing (100%)** ✅
+Current test status: **302 out of 302 tests passing (100%)** ✅
 
 ### Performance
 
 [![Benchmarks](https://github.com/CppCXY/lua-rs/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/CppCXY/lua-rs/actions/workflows/benchmarks.yml)
 
-**Overall**: 40-104% of native Lua 5.4.6 performance
+**Overall**: 30-100%+ of native Lua 5.4.6 performance
 
-**Highlights** (November 29, 2025):
-- 🏆 **While loop**: **104%** of native (faster than native Lua!)
-- 🏆 **Integer addition**: **96%** of native
-- 🏆 **Nested loops**: **93%** of native
-- 🏆 **string.gsub**: **66% faster** than native
-- 🎯 Good performance: Float ops (77%), Hash tables (77%), Control flow (66-75%)
-- 📊 Acceptable: Function calls (41-43%), Table operations (41-70%)
+**Highlights** (November 30, 2025):
+- 🏆 **Integer addition**: **101%** of native (faster than native Lua!)
+- 🏆 **Float multiplication**: **99%** of native
+- 🏆 **Table insertion**: **101%** of native (faster than native Lua!)
+- 🏆 **Hash table insertion**: **136%** of native (36% faster!)
+- 🏆 **string.gsub**: **146%** of native (46% faster!)
+- 🎯 Good performance: Control flow (61-97%), Table access (77%)
+- 📊 Acceptable: Function calls (36-59%), String operations (33-60%)
 
 See detailed analysis: [Performance Report](PERFORMANCE_REPORT.md)
 
@@ -59,7 +60,8 @@ chmod +x run_benchmarks.sh && ./run_benchmarks.sh
 - ✅ **UTF-8**: Full UTF-8 support (`codes`, `codepoint`, `len`, `offset`, `char`)
 - ✅ **Coroutine**: `create`, `resume`, `yield`, `status`, `close`, `isyieldable`
 - ✅ **Package**: `require`, `module`, `searchers` (partial)
-- ⚠️ **IO**: Basic file operations (has known memory issues, tests skipped)
+- ✅ **IO**: File operations (`open`, `close`, `read`, `write`, `lines`, `seek`, `type`, `tmpfile`, `flush`)
+- ✅ **OS**: System functions (`time`, `date`, `clock`, `difftime`, `getenv`, `remove`, `rename`, `execute`, `exit`, `tmpname`)
 
 ### Known Limitations ⚠️
 
@@ -192,14 +194,16 @@ This project demonstrates **successful AI-assisted systems programming**. It was
 
 The codebase was developed through iterative AI assistance with human oversight. Key achievements:
 - ✅ Implemented a working Lua 5.4 VM from scratch
-- ✅ Achieved 100% test compatibility (252/252 tests)
+- ✅ Achieved 100% test compatibility (302/302 tests)
 - ✅ Successfully debugged and fixed critical memory safety issues
 - ✅ Implemented advanced optimizations (tail calls, hash tables, direct pointers)
 - ✅ Reached **production-ready correctness** with **competitive performance in key areas**
 
 ### Recent Improvements (November 2025)
-- **November 29**: While loop bytecode optimization (now 104% of native!)
-- **November 29**: Integer addition optimization (96% of native)
+- **November 30**: Optimized `call_function_internal` (eliminated duplicate dispatch loop)
+- **November 30**: Added 30 new tests for IO/OS standard libraries (302 total tests)
+- **November 30**: Integer addition/Table insertion now **faster than native Lua**
+- **November 29**: While loop bytecode optimization
 - **November 24**: CallFrame code pointer caching
 - **November 24**: C function call optimization (eliminated copying)
 - **November 24**: Hash table restructure (Lua-style open addressing)
@@ -225,4 +229,4 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 ---
 
-**Status**: Production-ready correctness (252/252 tests) with competitive performance in hash operations and pattern matching. Suitable for embedded scripting and educational purposes.
+**Status**: Production-ready correctness (302/302 tests) with competitive performance. Integer addition and table insertion now **faster than native Lua**. Suitable for embedded scripting and educational purposes.
