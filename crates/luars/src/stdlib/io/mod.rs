@@ -18,6 +18,9 @@ pub fn create_io_lib() -> LibraryModule {
         "lines" => io_lines,
         "input" => io_input,
         "output" => io_output,
+        "type" => io_type,
+        "tmpfile" => io_tmpfile,
+        "close" => io_close,
     })
 }
 
@@ -176,8 +179,76 @@ fn io_open(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// io.lines([filename]) - Return iterator for lines
 fn io_lines(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    // Stub: would need to return an iterator function
-    Err(vm.error("io.lines not yet implemented"))
+    let filename = get_arg(vm, 1);
+    
+    if let Some(filename_val) = filename {
+        // io.lines(filename) - open file and return iterator
+        let filename_str = match vm.get_string(&filename_val) {
+            Some(s) => s.as_str().to_string(),
+            None => return Err(vm.error("bad argument #1 to 'lines' (string expected)")),
+        };
+        
+        // Open the file
+        match LuaFile::open_read(&filename_str) {
+            Ok(file) => {
+                // Create file metatable
+                let file_mt = create_file_metatable(vm)?;
+                
+                // Create userdata
+                use crate::lua_value::LuaUserdata;
+                let userdata = vm.create_userdata(LuaUserdata::new(file));
+                
+                // Set metatable
+                if let Some(ud_id) = userdata.as_userdata_id() {
+                    if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
+                        ud.set_metatable(file_mt);
+                    }
+                }
+                
+                // Create state table with file handle
+                let state_table = vm.create_table(0, 1);
+                let file_key = vm.create_string("file");
+                vm.table_set_raw(&state_table, file_key, userdata);
+                
+                Ok(MultiValue::multiple(vec![
+                    LuaValue::cfunction(io_lines_iterator),
+                    state_table,
+                    LuaValue::nil(),
+                ]))
+            }
+            Err(e) => Err(vm.error(format!("cannot open file '{}': {}", filename_str, e))),
+        }
+    } else {
+        // io.lines() - read from stdin
+        Err(vm.error("io.lines() without filename not yet implemented"))
+    }
+}
+
+/// Iterator function for io.lines()
+fn io_lines_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let state_val = require_arg(vm, 1, "iterator requires state")?;
+    let file_key = vm.create_string("file");
+    let file_val = vm.table_get_raw(&state_val, &file_key);
+    if file_val.is_nil() {
+        return Err(vm.error("file not found in state".to_string()));
+    }
+
+    // Read next line
+    if let Some(ud) = vm.get_userdata(&file_val) {
+        let data = ud.get_data();
+        let mut data_ref = data.borrow_mut();
+        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+            match lua_file.read_line() {
+                Ok(Some(line)) => {
+                    return Ok(MultiValue::single(vm.create_string(&line)));
+                }
+                Ok(None) => return Ok(MultiValue::single(LuaValue::nil())),
+                Err(e) => return Err(vm.error(format!("read error: {}", e))),
+            }
+        }
+    }
+
+    Err(vm.error("expected file handle".to_string()))
 }
 
 /// io.input([file]) - Set or get default input file
@@ -190,4 +261,85 @@ fn io_input(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn io_output(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub: would need file handle support
     Err(vm.error("io.output not yet implemented"))
+}
+
+/// io.type(obj) - Check if obj is a file handle
+fn io_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let obj = get_arg(vm, 1);
+    
+    if let Some(val) = obj {
+        if let Some(ud) = vm.get_userdata(&val) {
+            let data = ud.get_data();
+            let data_ref = data.borrow();
+            if data_ref.downcast_ref::<LuaFile>().is_some() {
+                // Check if file is closed
+                drop(data_ref);
+                let data_ref = data.borrow();
+                if let Some(lua_file) = data_ref.downcast_ref::<LuaFile>() {
+                    if lua_file.is_closed() {
+                        return Ok(MultiValue::single(vm.create_string("closed file")));
+                    } else {
+                        return Ok(MultiValue::single(vm.create_string("file")));
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(MultiValue::single(LuaValue::nil()))
+}
+
+/// io.tmpfile() - Create a temporary file
+fn io_tmpfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    // Create a temporary file
+    match tempfile::tempfile() {
+        Ok(file) => {
+            // Wrap in LuaFile (need to add support for this)
+            let lua_file = LuaFile::from_file(file);
+            
+            // Create file metatable
+            let file_mt = create_file_metatable(vm)?;
+            
+            // Create userdata
+            use crate::lua_value::LuaUserdata;
+            let userdata = vm.create_userdata(LuaUserdata::new(lua_file));
+            
+            // Set metatable
+            if let Some(ud_id) = userdata.as_userdata_id() {
+                if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
+                    ud.set_metatable(file_mt);
+                }
+            }
+            
+            Ok(MultiValue::single(userdata))
+        }
+        Err(e) => {
+            Ok(MultiValue::multiple(vec![
+                LuaValue::nil(),
+                vm.create_string(&e.to_string()),
+            ]))
+        }
+    }
+}
+
+/// io.close([file]) - Close a file
+fn io_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    let file_arg = get_arg(vm, 1);
+    
+    if let Some(file_val) = file_arg {
+        if let Some(ud) = vm.get_userdata(&file_val) {
+            let data = ud.get_data();
+            let mut data_ref = data.borrow_mut();
+            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+                match lua_file.close() {
+                    Ok(_) => return Ok(MultiValue::single(LuaValue::boolean(true))),
+                    Err(e) => return Err(vm.error(format!("close error: {}", e))),
+                }
+            }
+        }
+        return Err(vm.error("expected file handle"));
+    }
+    
+    // No argument - close default output
+    Ok(MultiValue::single(LuaValue::boolean(true)))
 }

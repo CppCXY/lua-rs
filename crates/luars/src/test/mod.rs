@@ -2,10 +2,11 @@
 pub mod test_basic;
 pub mod test_control_flow;
 pub mod test_coroutine;
-// pub mod test_io;  // Commented out - IO tests require file system setup
+pub mod test_io;  // IO tests use test_data directory
 pub mod test_math;
 pub mod test_metamethods;
 pub mod test_operators;
+pub mod test_os;  // OS library tests
 pub mod test_package;
 pub mod test_string;
 pub mod test_syntax;

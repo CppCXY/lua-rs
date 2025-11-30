@@ -40,6 +40,7 @@ impl LuaFile {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .append(true)
+            .create(true)
             .open(path)?;
         Ok(LuaFile {
             inner: FileInner::Write(BufWriter::new(file)),
@@ -50,10 +51,23 @@ impl LuaFile {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .create(true)
             .open(path)?;
         Ok(LuaFile {
             inner: FileInner::ReadWrite(file),
         })
+    }
+    
+    /// Create from existing File (for tmpfile)
+    pub fn from_file(file: File) -> Self {
+        LuaFile {
+            inner: FileInner::ReadWrite(file),
+        }
+    }
+    
+    /// Check if file is closed
+    pub fn is_closed(&self) -> bool {
+        matches!(self.inner, FileInner::Closed)
     }
 
     /// Read operations
@@ -220,15 +234,31 @@ fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let mut data_ref = data.borrow_mut();
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             // Get format (default "*l") - register 2 is first argument after self
-            let format_str = if let Some(fmt) = get_arg(vm, 2) {
-                if let Some(s) = vm.get_string(&fmt) {
-                    s.as_str().to_string()
-                } else {
-                    "*l".to_string()
+            let format_arg = get_arg(vm, 2);
+            
+            // Check if format is a number (byte count)
+            if let Some(ref fmt) = format_arg {
+                if let Some(n) = fmt.as_integer() {
+                    // Read n bytes
+                    match lua_file.read_bytes(n as usize) {
+                        Ok(bytes) => {
+                            if bytes.is_empty() {
+                                return Ok(MultiValue::single(LuaValue::nil()));
+                            }
+                            let s = String::from_utf8_lossy(&bytes);
+                            return Ok(MultiValue::single(vm.create_string(&s)));
+                        }
+                        Err(e) => {
+                            return Err(vm.error(format!("read error: {}", e)));
+                        }
+                    }
                 }
-            } else {
-                "*l".to_string()
-            };
+            }
+            
+            // Otherwise treat as format string
+            let format_str = format_arg
+                .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))
+                .unwrap_or_else(|| "*l".to_string());
             let format = format_str.as_str();
 
             let result = match format {
@@ -241,13 +271,34 @@ fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     Ok(content) => vm.create_string(&content),
                     Err(e) => return Err(vm.error(format!("read error: {}", e))),
                 },
+                "*n" => {
+                    // Read a number
+                    match lua_file.read_line() {
+                        Ok(Some(line)) => {
+                            let trimmed = line.trim();
+                            if let Ok(n) = trimmed.parse::<i64>() {
+                                LuaValue::integer(n)
+                            } else if let Ok(n) = trimmed.parse::<f64>() {
+                                LuaValue::float(n)
+                            } else {
+                                LuaValue::nil()
+                            }
+                        }
+                        Ok(None) => LuaValue::nil(),
+                        Err(e) => return Err(vm.error(format!("read error: {}", e))),
+                    }
+                }
                 _ => {
-                    // Try to parse as number (byte count)
+                    // Try to parse as number (byte count) from string like "10"
                     if let Ok(n) = format.parse::<usize>() {
                         match lua_file.read_bytes(n) {
                             Ok(bytes) => {
-                                let s = String::from_utf8_lossy(&bytes);
-                                vm.create_string(&s)
+                                if bytes.is_empty() {
+                                    LuaValue::nil()
+                                } else {
+                                    let s = String::from_utf8_lossy(&bytes);
+                                    vm.create_string(&s)
+                                }
                             }
                             Err(e) => {
                                 return Err(vm.error(format!("read error: {}", e)));

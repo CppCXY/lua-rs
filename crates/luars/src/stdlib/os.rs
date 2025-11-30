@@ -73,10 +73,10 @@ fn os_exit(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn os_difftime(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let t2 = get_arg(vm, 0)
+    let t2 = get_arg(vm, 1)
         .and_then(|v| v.as_integer())
         .ok_or(vm.error("difftime: argument 1 must be a number".to_string()))?;
-    let t1 = get_arg(vm, 1)
+    let t1 = get_arg(vm, 2)
         .and_then(|v| v.as_integer())
         .ok_or(vm.error("difftime: argument 2 must be a number".to_string()))?;
 
@@ -87,7 +87,7 @@ fn os_difftime(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use std::process::Command;
 
-    let cmd = get_arg(vm, 0)
+    let cmd = get_arg(vm, 1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
             vm.object_pool
@@ -112,7 +112,7 @@ fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn os_getenv(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let varname = get_arg(vm, 0)
+    let varname = get_arg(vm, 1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
             vm.object_pool
@@ -131,7 +131,7 @@ fn os_getenv(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn os_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let filename = get_arg(vm, 0)
+    let filename = get_arg(vm, 1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
             vm.object_pool
@@ -150,7 +150,7 @@ fn os_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn os_rename(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let oldname = get_arg(vm, 0)
+    let oldname = get_arg(vm, 1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
             vm.object_pool
@@ -158,7 +158,7 @@ fn os_rename(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .map(|s| s.as_str().to_string())
         })
         .ok_or(vm.error("rename: argument 1 must be a string".to_string()))?;
-    let newname = get_arg(vm, 1)
+    let newname = get_arg(vm, 2)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
             vm.object_pool
@@ -178,7 +178,7 @@ fn os_rename(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 fn os_setlocale(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Stub implementation - just return the requested locale or "C"
-    let locale = get_arg(vm, 0)
+    let locale = get_arg(vm, 1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
             vm.object_pool

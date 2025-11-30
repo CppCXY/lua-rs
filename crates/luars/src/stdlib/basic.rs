@@ -425,7 +425,30 @@ fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 Ok(MultiValue::single(LuaValue::nil()))
             }
         }
-        // TODO: Support metatables for other types (userdata, numbers, etc.)
+        LuaValueKind::Userdata => {
+            // Return userdata metatable
+            if let Some(ud_id) = value.as_userdata_id() {
+                if let Some(ud) = vm.object_pool.get_userdata(ud_id) {
+                    let mt = ud.get_metatable();
+                    if !mt.is_nil() {
+                        // Check for __metatable field
+                        let metatable_key = vm.create_string("__metatable");
+                        if let Some(mt_id) = mt.as_table_id() {
+                            if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
+                                if let Some(protected) = mt_table.raw_get(&metatable_key) {
+                                    if !protected.is_nil() {
+                                        return Ok(MultiValue::single(protected));
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(MultiValue::single(mt));
+                    }
+                }
+            }
+            Ok(MultiValue::single(LuaValue::nil()))
+        }
+        // TODO: Support metatables for other types (numbers, etc.)
         _ => Ok(MultiValue::single(LuaValue::nil())),
     }
 }

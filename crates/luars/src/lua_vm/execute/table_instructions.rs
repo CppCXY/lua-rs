@@ -540,9 +540,12 @@ pub fn exec_self(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
     vm.register_stack[base_ptr + a + 1] = table;
 
     // R[A] := R[B][K[C]] (method)
-    let method = vm
-        .table_get_with_meta(&table, &key)
-        .unwrap_or(crate::LuaValue::nil());
+    // Support both tables and userdata
+    let method = if table.is_userdata() {
+        vm.userdata_get(&table, &key).unwrap_or(crate::LuaValue::nil())
+    } else {
+        vm.table_get_with_meta(&table, &key).unwrap_or(crate::LuaValue::nil())
+    };
     vm.register_stack[base_ptr + a] = method;
 
     Ok(())
