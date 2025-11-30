@@ -28,6 +28,10 @@ pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
     pub(crate) global_value: LuaValue,
 
+    // Hot path GC debt counter - placed early in struct for cache locality
+    // This is updated on every allocation and checked frequently
+    pub(crate) gc_debt_local: isize,
+
     // Call stack - Pre-allocated Vec with fixed capacity
     // Using Vec<LuaCallFrame> directly (no Box indirection) for cache efficiency
     // Vec is pre-allocated to MAX_CALL_DEPTH and never reallocated
@@ -40,7 +44,11 @@ pub struct LuaVM {
     // Global register stack (unified stack architecture, like Lua 5.4)
     pub register_stack: Vec<LuaValue>,
 
-    // Garbage collector
+    // Object pool for unified object management (new architecture)
+    // Placed near top for cache locality with hot operations
+    pub(crate) object_pool: ObjectPool,
+
+    // Garbage collector (cold path - only accessed during actual GC)
     pub(crate) gc: GC,
 
     // Multi-return value buffer (temporary storage for function returns)
@@ -78,9 +86,6 @@ pub struct LuaVM {
     // String metatable (shared by all strings) - stored as TableId in LuaValue
     pub(crate) string_metatable: Option<LuaValue>,
 
-    // Object pool for unified object management (new architecture)
-    pub(crate) object_pool: ObjectPool,
-
     // Async executor for Lua-Rust async bridge
     #[cfg(feature = "async")]
     pub(crate) async_executor: AsyncExecutor,
@@ -105,9 +110,11 @@ impl LuaVM {
         
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
+            gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
             frames,
             frame_count: 0,
             register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
+            object_pool: ObjectPool::new(),
             gc: GC::new(),
             return_values: Vec::with_capacity(16),
             open_upvalues: Vec::new(),
@@ -121,7 +128,6 @@ impl LuaVM {
             current_thread_value: None,
             main_thread_value: None, // Will be initialized lazily
             string_metatable: None,
-            object_pool: ObjectPool::new(),
             #[cfg(feature = "async")]
             async_executor: AsyncExecutor::new(),
             // Initialize error storage
@@ -1259,16 +1265,14 @@ impl LuaVM {
     }
 
     /// Create a new table in object pool
+    /// OPTIMIZATION: Only update local debt counter, no function calls
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
 
-        // Register with GC - ultra-lightweight, just update debt
-        self.gc
-            .register_object(id.0, crate::gc::GcObjectType::Table);
-
-        // GC check MUST NOT happen here - object not yet protected!
-        // Caller must call check_gc() AFTER storing value in register
+        // Lightweight GC tracking: just increment debt
+        // This is a single integer add, should be very fast
+        self.gc_debt_local += 256;
 
         LuaValue::table(id)
     }
@@ -1519,13 +1523,33 @@ impl LuaVM {
     /// This is called after allocating new objects (strings, tables, functions)
     /// Uses GC debt mechanism: runs when debt > 0
     ///
-    /// OPTIMIZATION: Use incremental collection with work budget
+    /// OPTIMIZATION: Fast path is inlined, slow path is separate function
+    #[inline(always)]
     fn check_gc(&mut self) {
-        // Fast path: check debt without collecting roots
-        if !self.gc.should_collect() {
+        // Ultra-fast path: single integer comparison with local debt counter
+        // Only check if debt exceeds a significant threshold (1MB)
+        // This reduces the overhead of frequent checks dramatically
+        if self.gc_debt_local <= 1024 * 1024 {
             return;
         }
+        // Slow path: actual GC work
+        self.check_gc_slow();
+    }
 
+    /// Slow path for GC - separate function to keep hot path small
+    /// Public version for direct inline checks
+    #[cold]
+    #[inline(never)]
+    pub fn check_gc_slow_pub(&mut self) {
+        self.check_gc_slow();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn check_gc_slow(&mut self) {
+        // Sync local debt to GC
+        self.gc.gc_debt = self.gc_debt_local;
+        
         // Incremental GC: only collect every N checks to reduce overhead
         self.gc.increment_check_counter();
         if !self.gc.should_run_collection() {

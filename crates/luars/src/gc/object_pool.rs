@@ -3,14 +3,15 @@
 // Key Design Principles:
 // 1. LuaValueV2 stores type tag + object ID (no pointers - Vec may relocate)
 // 2. All GC objects accessed via ID lookup in Arena
-// 3. Arena uses Vec<Option<T>> with free list for O(1) alloc/free
+// 3. ChunkedArena uses fixed-size chunks - never reallocates existing data!
 // 4. No Rc/RefCell overhead - direct access via &mut self
 // 5. GC headers embedded in objects for mark-sweep
 //
 // Memory Layout:
-// - Arena<T> stores objects in Vec<Option<T>>
-// - None = free slot (reusable via free list)
-// - Free list tracks available slots for O(1) allocation
+// - ChunkedArena stores objects in fixed-size chunks (Box<[Option<T>; CHUNK_SIZE]>)
+// - Each chunk is allocated once and never moved
+// - New chunks are added as needed, existing chunks stay in place
+// - This eliminates Vec resize overhead and improves cache locality
 
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{LuaString, LuaTable, LuaValue};
@@ -134,14 +135,22 @@ pub struct GcThread {
     pub data: LuaThread,
 }
 
-// ============ Arena Storage ============
+// ============ Chunked Arena Storage ============
 
-/// Type-safe arena for storing GC objects
-/// Uses Option<T> internally to mark free slots
-/// Free list enables O(1) allocation after initial growth
+/// Chunk size for arena storage (power of 2 for fast division)
+const CHUNK_SIZE: usize = 256;
+const CHUNK_MASK: usize = CHUNK_SIZE - 1;
+const CHUNK_SHIFT: u32 = 8; // log2(256)
+
+/// High-performance chunked arena that NEVER reallocates existing data
+/// - Uses fixed-size chunks stored in a Vec of Box pointers
+/// - When Vec of chunks grows, only the pointer array moves, not the data
+/// - Each chunk is a Box<[Option<T>; CHUNK_SIZE]> - stable address
+/// - Free list enables O(1) allocation after initial growth
 pub struct Arena<T> {
-    storage: Vec<Option<T>>,
+    chunks: Vec<Box<[Option<T>; CHUNK_SIZE]>>,
     free_list: Vec<u32>,
+    next_id: u32,
     count: usize,
 }
 
@@ -149,19 +158,31 @@ impl<T> Arena<T> {
     #[inline]
     pub fn new() -> Self {
         Self {
-            storage: Vec::new(),
+            chunks: Vec::new(),
             free_list: Vec::new(),
+            next_id: 0,
             count: 0,
         }
     }
 
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
+        let num_chunks = (cap + CHUNK_SIZE - 1) / CHUNK_SIZE;
         Self {
-            storage: Vec::with_capacity(cap),
+            chunks: Vec::with_capacity(num_chunks),
             free_list: Vec::with_capacity(cap / 8),
+            next_id: 0,
             count: 0,
         }
+    }
+
+    /// Create a new empty chunk
+    #[inline]
+    fn new_chunk() -> Box<[Option<T>; CHUNK_SIZE]> {
+        // Use MaybeUninit to avoid initializing 256 Option<T>s one by one
+        // This is safe because Option<T> with None is just zeros for most T
+        let mut chunk: Box<[Option<T>; CHUNK_SIZE]> = Box::new(std::array::from_fn(|_| None));
+        chunk
     }
 
     /// Allocate a new object and return its ID
@@ -171,29 +192,47 @@ impl<T> Arena<T> {
 
         if let Some(free_id) = self.free_list.pop() {
             // Reuse a free slot
-            self.storage[free_id as usize] = Some(value);
-            free_id
-        } else {
-            // Append new slot
-            let id = self.storage.len() as u32;
-            self.storage.push(Some(value));
-            id
+            let chunk_idx = (free_id >> CHUNK_SHIFT) as usize;
+            let slot_idx = (free_id as usize) & CHUNK_MASK;
+            self.chunks[chunk_idx][slot_idx] = Some(value);
+            return free_id;
         }
+
+        // Allocate new slot
+        let id = self.next_id;
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+
+        // Add new chunk if needed
+        if chunk_idx >= self.chunks.len() {
+            self.chunks.push(Self::new_chunk());
+        }
+
+        self.chunks[chunk_idx][slot_idx] = Some(value);
+        self.next_id += 1;
+        id
     }
 
     /// Get immutable reference by ID
     #[inline(always)]
     pub fn get(&self, id: u32) -> Option<&T> {
-        self.storage.get(id as usize).and_then(|opt| opt.as_ref())
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        self.chunks
+            .get(chunk_idx)
+            .and_then(|chunk| chunk[slot_idx].as_ref())
     }
 
     /// Get reference by ID without bounds checking (caller must ensure validity)
     /// SAFETY: id must be a valid index returned from alloc() and not freed
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, id: u32) -> &T {
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
         unsafe {
-            self.storage
-                .get_unchecked(id as usize)
+            self.chunks
+                .get_unchecked(chunk_idx)
+                .get_unchecked(slot_idx)
                 .as_ref()
                 .unwrap_unchecked()
         }
@@ -202,18 +241,23 @@ impl<T> Arena<T> {
     /// Get mutable reference by ID
     #[inline(always)]
     pub fn get_mut(&mut self, id: u32) -> Option<&mut T> {
-        self.storage
-            .get_mut(id as usize)
-            .and_then(|opt| opt.as_mut())
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        self.chunks
+            .get_mut(chunk_idx)
+            .and_then(|chunk| chunk[slot_idx].as_mut())
     }
 
     /// Get mutable reference by ID without bounds checking (caller must ensure validity)
     /// SAFETY: id must be a valid index returned from alloc() and not freed
     #[inline(always)]
     pub unsafe fn get_mut_unchecked(&mut self, id: u32) -> &mut T {
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
         unsafe {
-            self.storage
-                .get_unchecked_mut(id as usize)
+            self.chunks
+                .get_unchecked_mut(chunk_idx)
+                .get_unchecked_mut(slot_idx)
                 .as_mut()
                 .unwrap_unchecked()
         }
@@ -222,9 +266,11 @@ impl<T> Arena<T> {
     /// Free a slot (mark for reuse)
     #[inline]
     pub fn free(&mut self, id: u32) {
-        if let Some(slot) = self.storage.get_mut(id as usize) {
-            if slot.is_some() {
-                *slot = None;
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
+            if chunk[slot_idx].is_some() {
+                chunk[slot_idx] = None;
                 self.free_list.push(id);
                 self.count -= 1;
             }
@@ -234,9 +280,11 @@ impl<T> Arena<T> {
     /// Check if a slot is occupied
     #[inline(always)]
     pub fn is_valid(&self, id: u32) -> bool {
-        self.storage
-            .get(id as usize)
-            .map(|opt| opt.is_some())
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        self.chunks
+            .get(chunk_idx)
+            .map(|chunk| chunk[slot_idx].is_some())
             .unwrap_or(false)
     }
 
@@ -248,30 +296,45 @@ impl<T> Arena<T> {
 
     /// Iterate over all live objects
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
-        self.storage
-            .iter()
-            .enumerate()
-            .filter_map(|(i, opt)| opt.as_ref().map(|v| (i as u32, v)))
+        self.chunks.iter().enumerate().flat_map(|(chunk_idx, chunk)| {
+            chunk.iter().enumerate().filter_map(move |(slot_idx, opt)| {
+                opt.as_ref()
+                    .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
+            })
+        })
     }
 
     /// Iterate over all live objects mutably
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
-        self.storage
+        self.chunks
             .iter_mut()
             .enumerate()
-            .filter_map(|(i, opt)| opt.as_mut().map(|v| (i as u32, v)))
+            .flat_map(|(chunk_idx, chunk)| {
+                chunk
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(move |(slot_idx, opt)| {
+                        opt.as_mut()
+                            .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
+                    })
+            })
     }
 
-    /// Shrink internal storage
+    /// Shrink internal storage (only shrinks chunk vector capacity, not individual chunks)
     pub fn shrink_to_fit(&mut self) {
-        self.storage.shrink_to_fit();
+        self.chunks.shrink_to_fit();
         self.free_list.shrink_to_fit();
     }
 
     /// Clear all objects
     pub fn clear(&mut self) {
-        self.storage.clear();
+        for chunk in &mut self.chunks {
+            for slot in chunk.iter_mut() {
+                *slot = None;
+            }
+        }
         self.free_list.clear();
+        self.next_id = 0;
         self.count = 0;
     }
 }

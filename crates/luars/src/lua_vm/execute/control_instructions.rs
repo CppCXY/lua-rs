@@ -859,6 +859,12 @@ fn exec_call_lua_function(
     call_metamethod_self: LuaValue,
     frame_ptr_ptr: &mut *mut LuaCallFrame, // Use passed frame_ptr!
 ) -> LuaResult<()> {
+    // Safepoint GC check: run GC at function call boundaries
+    // This is much cheaper than checking on every table operation
+    if vm.gc_debt_local > 1024 * 1024 {
+        vm.check_gc_slow_pub();
+    }
+
     // Get function ID - FAST PATH: assume valid function
     let func_id = unsafe { func.as_function_id().unwrap_unchecked() };
 
