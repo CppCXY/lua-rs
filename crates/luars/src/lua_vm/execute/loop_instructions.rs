@@ -131,7 +131,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 /// R[A]+=R[A+2];
 /// if R[A] <?= R[A+1] then { pc-=Bx; R[A+3]=R[A] }
 ///
-/// ULTRA-OPTIMIZED: Minimized memory access, branch prediction friendly
+/// ULTRA-OPTIMIZED: Matches Lua's chgivalue - only update secondary field for integers
 #[inline(always)]
 pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -145,18 +145,15 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         let counter = (*reg_base.add(1)).secondary as i64;
 
         // Fast path: integer loop with counter > 0
-        // Check counter first (most common exit condition)
         if counter > 0 {
-            // Only read other values if we're continuing
             let idx_i = (*reg_base).secondary as i64;
             let step_i = (*reg_base.add(2)).secondary as i64;
             let new_idx = idx_i.wrapping_add(step_i);
 
-            // Write back - minimize writes
+            // Use chgivalue pattern - only update secondary field, type tags stay the same
             (*reg_base).secondary = new_idx as u64;
             (*reg_base.add(1)).secondary = (counter - 1) as u64;
             (*reg_base.add(3)).secondary = new_idx as u64;
-            // Note: type tags stay TAG_INTEGER, no need to rewrite primary
 
             (*frame_ptr).pc -= bx;
             return Ok(());

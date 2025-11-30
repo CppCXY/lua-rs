@@ -351,7 +351,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 // ============ Arithmetic Immediate Instructions ============
 
 /// ADDI: R[A] = R[B] + sC
-/// OPTIMIZED: Matches Lua C's setivalue behavior
+/// OPTIMIZED: Minimal branches, inline integer path
 #[inline(always)]
 pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -365,22 +365,11 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 
         if left.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_add(sc as i64);
-            *reg_base.add(a) = LuaValue {
-                primary: TAG_INTEGER,
-                secondary: result as u64,
-            };
+            // Write both fields atomically (matches Lua's setivalue)
+            let dest = reg_base.add(a);
+            (*dest).primary = TAG_INTEGER;
+            (*dest).secondary = result as u64;
             (*frame_ptr).pc += 1; // Skip MMBINI
-
-            // OPTIMIZATION: Check if next instruction is backward JMP (loop)
-            let next_instr = (*frame_ptr).code_ptr.add((*frame_ptr).pc).read();
-            if (next_instr & 0x7F) == 56 {
-                // JMP opcode
-                let sj = ((next_instr >> 7) & 0x1FFFFFF) as i32 - 16777215;
-                if sj < 0 {
-                    // Backward jump = loop
-                    (*frame_ptr).pc = ((*frame_ptr).pc as i32 + 1 + sj) as usize;
-                }
-            }
             return;
         }
 
@@ -484,7 +473,7 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// MULK: R[A] = R[B] * K[C]
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Direct field writes, minimal branching
 #[inline(always)]
 pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
@@ -498,47 +487,37 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        // Float * Float fast path (most common in benchmarks)
-        if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
-            let result = f64::from_bits(left.secondary) * f64::from_bits(constant.secondary);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
-                primary: TAG_FLOAT,
-                secondary: result.to_bits(),
-            };
-            (*frame_ptr).pc += 1;
-            return;
-        }
-
-        // Integer * Integer
+        // Integer * Integer fast path FIRST (most common in benchmarks with integer loops)
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_mul(constant.secondary as i64);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
-                primary: TAG_INTEGER,
-                secondary: result as u64,
-            };
+            let dest = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+            (*dest).primary = TAG_INTEGER;
+            (*dest).secondary = result as u64;
             (*frame_ptr).pc += 1;
             return;
         }
 
-        // Mixed types
-        if left.primary == TAG_FLOAT || constant.primary == TAG_FLOAT {
-            let l = if left.primary == TAG_FLOAT {
-                f64::from_bits(left.secondary)
-            } else if left.primary == TAG_INTEGER {
-                left.secondary as i64 as f64
-            } else {
-                return;
-            };
+        // Float * Float fast path
+        if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
+            let result = f64::from_bits(left.secondary) * f64::from_bits(constant.secondary);
+            let dest = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+            (*dest).primary = TAG_FLOAT;
+            (*dest).secondary = result.to_bits();
+            (*frame_ptr).pc += 1;
+            return;
+        }
 
-            let r = if constant.primary == TAG_FLOAT {
-                f64::from_bits(constant.secondary)
-            } else if constant.primary == TAG_INTEGER {
-                constant.secondary as i64 as f64
-            } else {
-                return;
-            };
+        // Mixed types: Integer * Float or Float * Integer
+        if left.primary == TAG_INTEGER && constant.primary == TAG_FLOAT {
+            let result = (left.secondary as i64) as f64 * f64::from_bits(constant.secondary);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
+            (*frame_ptr).pc += 1;
+            return;
+        }
 
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(l * r);
+        if left.primary == TAG_FLOAT && constant.primary == TAG_INTEGER {
+            let result = f64::from_bits(left.secondary) * (constant.secondary as i64) as f64;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
             (*frame_ptr).pc += 1;
         }
     }
