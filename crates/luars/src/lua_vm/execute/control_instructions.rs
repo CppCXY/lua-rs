@@ -276,68 +276,112 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
 
 /// LT A B k
 /// if ((R[A] < R[B]) ~= k) then pc++
-/// ULTRA-OPTIMIZED: Inline integer/float comparison, minimal type checks
+/// ULTRA-OPTIMIZED: Direct integer fast path like Lua C
 #[inline(always)]
 pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-
-    // OPTIMIZATION: Use unsafe for unchecked register access (hot path)
-    let (left, right) = unsafe {
+    unsafe {
+        let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
-        (*reg_base.add(a), *reg_base.add(b))
-    };
+        let left = *reg_base.add(a);
+        let right = *reg_base.add(b);
 
-    // OPTIMIZATION: Direct type tag comparison (inline integer/float checks)
-    use crate::lua_value::TYPE_MASK;
-    let left_tag = left.primary & TYPE_MASK;
-    let right_tag = right.primary & TYPE_MASK;
+        use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK};
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
 
-    // Combined type check for fast paths (single branch!)
-    // Note: Shift TAG values right by 48 bits to get small values (0-15) for combining
-    let left_tag_small = left_tag >> 48;
-    let right_tag_small = right_tag >> 48;
-    let combined_tags = (left_tag_small << 4) | right_tag_small;
-    
-    // Small tag values after >> 48: TAG_INTEGER=3, TAG_FLOAT=4, TAG_STRING=5
-    const INT_INT: u64 = (3 << 4) | 3;       // 0x33
-    const FLOAT_FLOAT: u64 = (4 << 4) | 4;   // 0x44
-    const INT_FLOAT: u64 = (3 << 4) | 4;     // 0x34
-    const FLOAT_INT: u64 = (4 << 4) | 3;     // 0x43
-    const STRING_STRING: u64 = (5 << 4) | 5; // 0x55
+        // Fast path: both integers (most common case in loops)
+        if left_tag == TAG_INTEGER && right_tag == TAG_INTEGER {
+            let is_less = (left.secondary as i64) < (right.secondary as i64);
+            if is_less != k {
+                (*frame_ptr).pc += 1;
+            }
+            return Ok(());
+        }
 
-    let is_less = if combined_tags == INT_INT {
-        // Fast integer path - single branch!
-        (left.secondary as i64) < (right.secondary as i64)
-    } else if combined_tags == FLOAT_FLOAT {
-        // Fast float path
-        f64::from_bits(left.secondary) < f64::from_bits(right.secondary)
-    } else if combined_tags == INT_FLOAT {
-        // Mixed: integer < float
-        ((left.secondary as i64) as f64) < f64::from_bits(right.secondary)
-    } else if combined_tags == FLOAT_INT {
-        // Mixed: float < integer
-        f64::from_bits(left.secondary) < ((right.secondary as i64) as f64)
-    } else if combined_tags == STRING_STRING {
+        // Fast path: both floats
+        if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+            let is_less = f64::from_bits(left.secondary) < f64::from_bits(right.secondary);
+            if is_less != k {
+                (*frame_ptr).pc += 1;
+            }
+            return Ok(());
+        }
+
+        // Mixed numeric types
+        if (left_tag == TAG_INTEGER || left_tag == TAG_FLOAT) 
+            && (right_tag == TAG_INTEGER || right_tag == TAG_FLOAT) {
+            let left_f = if left_tag == TAG_INTEGER {
+                (left.secondary as i64) as f64
+            } else {
+                f64::from_bits(left.secondary)
+            };
+            let right_f = if right_tag == TAG_INTEGER {
+                (right.secondary as i64) as f64
+            } else {
+                f64::from_bits(right.secondary)
+            };
+            let is_less = left_f < right_f;
+            if is_less != k {
+                (*frame_ptr).pc += 1;
+            }
+            return Ok(());
+        }
+
         // String comparison
-        left < right
-    } else {
-        // Try __lt metamethod
-        let mm_key = vm.create_string("__lt");
-        let mut found_metamethod = false;
+        use crate::lua_value::TAG_STRING;
+        if left_tag == TAG_STRING && right_tag == TAG_STRING {
+            let is_less = left < right;
+            if is_less != k {
+                (*frame_ptr).pc += 1;
+            }
+            return Ok(());
+        }
 
-        if let Some(mt) = vm.table_get_metatable(&left) {
+        // Slow path: metamethod
+        exec_lt_metamethod(vm, left, right, k, frame_ptr)
+    }
+}
+
+/// Slow path for LT metamethod lookup
+#[cold]
+#[inline(never)]
+fn exec_lt_metamethod(
+    vm: &mut LuaVM,
+    left: crate::LuaValue,
+    right: crate::LuaValue,
+    k: bool,
+    frame_ptr: *mut LuaCallFrame,
+) -> LuaResult<()> {
+    let mm_key = vm.create_string("__lt");
+    let mut found_metamethod = false;
+
+    if let Some(mt) = vm.table_get_metatable(&left) {
+        if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
+            if !metamethod.is_nil() {
+                if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
+                    let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
+                    if is_less_result != k {
+                        unsafe { (*frame_ptr).pc += 1; }
+                    }
+                    return Ok(());
+                }
+                found_metamethod = true;
+            }
+        }
+    }
+
+    if !found_metamethod {
+        if let Some(mt) = vm.table_get_metatable(&right) {
             if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
                 if !metamethod.is_nil() {
                     if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                         let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                         if is_less_result != k {
-                            unsafe {
-                                (*frame_ptr).pc += 1;
-                            }
+                            unsafe { (*frame_ptr).pc += 1; }
                         }
                         return Ok(());
                     }
@@ -345,43 +389,15 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
                 }
             }
         }
-
-        if !found_metamethod {
-            if let Some(mt) = vm.table_get_metatable(&right) {
-                if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
-                    if !metamethod.is_nil() {
-                        if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
-                            let is_less_result =
-                                !result.is_nil() && result.as_bool().unwrap_or(true);
-                            if is_less_result != k {
-                                unsafe {
-                                    (*frame_ptr).pc += 1;
-                                }
-                            }
-                            return Ok(());
-                        }
-                        found_metamethod = true;
-                    }
-                }
-            }
-        }
-
-        if !found_metamethod {
-            return Err(vm.error(format!(
-                "attempt to compare {} with {}",
-                left.type_name(),
-                right.type_name()
-            )));
-        }
-        return Ok(());
-    };
-
-    if is_less != k {
-        unsafe {
-            (*frame_ptr).pc += 1;
-        }
     }
 
+    if !found_metamethod {
+        return Err(vm.error(format!(
+            "attempt to compare {} with {}",
+            left.type_name(),
+            right.type_name()
+        )));
+    }
     Ok(())
 }
 
