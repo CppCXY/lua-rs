@@ -201,7 +201,14 @@ impl LuaVM {
         self.push_frame(frame);
 
         // Execute
-        let result = self.run()?;
+        let result = match self.run() {
+            Ok(v) => v,
+            Err(LuaError::Exit) => {
+                // Normal exit - get the return value from return_values
+                self.return_values.first().cloned().unwrap_or(LuaValue::nil())
+            }
+            Err(e) => return Err(e),
+        };
 
         // Clean up - clear stack used by this execution
         self.register_stack.clear();
@@ -448,9 +455,13 @@ impl LuaVM {
 
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
     pub fn create_thread_value(&mut self, func: LuaValue) -> LuaValue {
+        // Pre-allocate frames like the main VM does
+        let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
+        frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
+        
         let mut thread = LuaThread {
             status: CoroutineStatus::Suspended,
-            frames: Vec::new(),
+            frames,
             frame_count: 0,
             register_stack: Vec::with_capacity(256),
             return_values: Vec::new(),
@@ -476,9 +487,13 @@ impl LuaVM {
     /// Create a new thread (coroutine) - legacy version returning Rc<RefCell<>>
     /// This is still needed for internal VM state tracking (current_thread)
     pub fn create_thread(&mut self, func: LuaValue) -> Rc<RefCell<LuaThread>> {
+        // Pre-allocate frames like the main VM does
+        let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
+        frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
+        
         let thread = LuaThread {
             status: CoroutineStatus::Suspended,
-            frames: Vec::new(),
+            frames,
             frame_count: 0,
             register_stack: Vec::with_capacity(256),
             return_values: Vec::new(),
@@ -2166,8 +2181,11 @@ impl LuaVM {
                     }
                 }
 
-                // Use caller's max_stack as result_reg (safe write position)
-                let safe_result_reg = new_base; // Same as caller_base + caller_max_stack
+                // CRITICAL: Push a C function "boundary" frame BEFORE the Lua frame
+                // This ensures RETURN will detect caller as C function and write to return_values
+                let boundary_frame = LuaCallFrame::new_c_function(new_base, 0);
+                self.push_frame(boundary_frame);
+                let initial_frame_count = self.frame_count;
 
                 // nresults = -1 (LUA_MULTRET) to get all return values
                 let new_frame = LuaCallFrame::new_lua_function(
@@ -2176,11 +2194,10 @@ impl LuaVM {
                     constants_ptr,
                     new_base,
                     max_stack_size, // top
-                    safe_result_reg,
-                    -1, // LUA_MULTRET - want all return values
+                    0,              // result_reg - not used, return values go to return_values
+                    -1,             // LUA_MULTRET - want all return values
                 );
 
-                let initial_frame_count = self.frame_count;
                 self.push_frame(new_frame);
 
                 // Execute using a bounded loop that stops when frame count returns to initial
@@ -2529,6 +2546,8 @@ impl LuaVM {
 
                 match exec_result {
                     Ok(_) => {
+                        // Pop the boundary frame
+                        self.pop_frame_discard();
                         // Get return values
                         let result = self.return_values.clone();
                         self.return_values.clear();
@@ -2540,8 +2559,8 @@ impl LuaVM {
                         Err(LuaError::Yield)
                     }
                     Err(e) => {
-                        // Error occurred - pop frames back to initial
-                        while self.frame_count > initial_frame_count {
+                        // Error occurred - pop frames back to initial (including boundary frame)
+                        while self.frame_count >= initial_frame_count {
                             self.pop_frame_discard();
                         }
                         Err(e)

@@ -15,40 +15,52 @@ pub fn exec_return(
 ) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
-    // let _c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    // Close upvalues before popping the frame
+    // Get frame info BEFORE popping
     let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr };
-    vm.close_upvalues_from(base_ptr);
-
-    let Some(frame) = vm.pop_frame() else {
-        return Err(vm.error("RETURN with no frame on stack".to_string()));
-    };
-
-    let base_ptr = frame.base_ptr;
-    let result_reg = frame.get_result_reg();
-    let num_results = frame.get_num_results();
+    let result_reg = unsafe { (**frame_ptr_ptr).get_result_reg() };
+    let num_results = unsafe { (**frame_ptr_ptr).get_num_results() };
+    let top = unsafe { (**frame_ptr_ptr).top };
 
     // Calculate return count
-    let return_count = if b == 0 {
-        frame.top.saturating_sub(a)
+    let return_count = if b == 0 { top.saturating_sub(a) } else { b - 1 };
+
+    // Close upvalues before popping the frame
+    if !vm.open_upvalues.is_empty() {
+        vm.close_upvalues_from(base_ptr);
+    }
+
+    // Handle upvalue closing (k bit) - BEFORE popping frame
+    if k {
+        let close_from = base_ptr + a;
+        vm.close_upvalues_from(close_from);
+        vm.close_to_be_closed(close_from)?;
+    }
+
+    // Calculate caller info BEFORE pop
+    let has_caller = vm.frame_count > 1;
+    let (caller_ptr, caller_is_lua) = if has_caller {
+        let ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+        let is_lua = unsafe { (*ptr).is_lua() };
+        (ptr, is_lua)
     } else {
-        b - 1
+        (std::ptr::null_mut(), false)
     };
 
-    // === 零拷贝返回值优化 ===
-    // 关键：返回值需要写回 caller 的 R[result_reg]
-    // 而不是写到 caller 的栈顶
-    if !vm.frames_is_empty() {
-        let caller_frame = vm.current_frame();
-        let caller_base = caller_frame.base_ptr;
+    // Pop frame - decrement counter
+    vm.frame_count -= 1;
 
-        // 返回值目标位置：caller_base + result_reg
+    // Check if caller is a Lua function
+    if has_caller && caller_is_lua {
+        // Update frame_ptr to caller
+        *frame_ptr_ptr = caller_ptr;
+
+        let caller_base = unsafe { (*caller_ptr).base_ptr };
         let dest_base = caller_base + result_reg;
 
-        // 确保目标位置有足够空间
-        let dest_end = dest_base + return_count.max(num_results.min(return_count));
+        // Ensure destination has enough space
+        let dest_end = dest_base + return_count.max(if num_results == usize::MAX { return_count } else { num_results });
         if vm.register_stack.len() < dest_end {
             vm.ensure_stack_capacity(dest_end);
             vm.register_stack.resize(dest_end, LuaValue::nil());
@@ -58,36 +70,22 @@ pub fn exec_return(
             let reg_ptr = vm.register_stack.as_mut_ptr();
 
             if num_results == usize::MAX {
-                // 返回所有值
+                // Return all values
                 if return_count > 0 {
-                    // 源：base_ptr + a
-                    // 目标：caller_base + result_reg
-                    // 检查是否重叠
                     let src_start = base_ptr + a;
                     let src_end = src_start + return_count;
                     let dst_start = dest_base;
                     let dst_end = dst_start + return_count;
 
-                    // 如果区域重叠，使用 copy；否则使用 copy_nonoverlapping
                     if (src_start < dst_end) && (dst_start < src_end) {
-                        std::ptr::copy(
-                            reg_ptr.add(src_start),
-                            reg_ptr.add(dst_start),
-                            return_count,
-                        );
+                        std::ptr::copy(reg_ptr.add(src_start), reg_ptr.add(dst_start), return_count);
                     } else {
-                        std::ptr::copy_nonoverlapping(
-                            reg_ptr.add(src_start),
-                            reg_ptr.add(dst_start),
-                            return_count,
-                        );
+                        std::ptr::copy_nonoverlapping(reg_ptr.add(src_start), reg_ptr.add(dst_start), return_count);
                     }
                 }
-
-                // 更新 caller 的 top
-                vm.current_frame_mut().top = result_reg + return_count;
+                (*caller_ptr).top = result_reg + return_count;
             } else {
-                // 固定数量的返回值
+                // Fixed number of return values
                 let nil_val = LuaValue::nil();
                 for i in 0..num_results {
                     let val = if i < return_count {
@@ -97,56 +95,31 @@ pub fn exec_return(
                     };
                     *reg_ptr.add(dest_base + i) = val;
                 }
-
-                // 更新 caller 的 top
-                vm.current_frame_mut().top = result_reg + num_results;
+                (*caller_ptr).top = result_reg + num_results;
             }
         }
 
-        // 截断寄存器栈回到 caller 的范围
-        // 零拷贝设计：callee 的栈空间可能与 caller 重叠
-        // 需要保留 caller 需要的部分
-        let caller_frame = vm.current_frame();
-        if let Some(func_id) = caller_frame.function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                let caller_max_stack = func_ref.chunk.max_stack_size;
-                let caller_end = caller_frame.base_ptr + caller_max_stack;
-
-                // 保留返回值所需的空间
-                let needed_end = dest_end.max(caller_end);
-                if vm.register_stack.len() > needed_end {
-                    vm.register_stack.truncate(needed_end);
-                }
-            }
-        }
-    }
-
-    // Handle upvalue closing (k bit)
-    if k {
-        let close_from = base_ptr + a;
-        vm.close_upvalues_from(close_from);
-        // Also call __close metamethods for to-be-closed variables
-        vm.close_to_be_closed(close_from)?;
-    }
-
-    // CRITICAL: If frames are now empty, we're done - return control to caller
-    // This prevents run() loop from trying to access empty frame
-    if vm.frames_is_empty() {
-        // Save return values before exiting
+        Ok(())
+    } else if has_caller {
+        // Caller is C function - write return values to return_values
+        *frame_ptr_ptr = caller_ptr;
         vm.return_values.clear();
         for i in 0..return_count {
             if base_ptr + a + i < vm.register_stack.len() {
                 vm.return_values.push(vm.register_stack[base_ptr + a + i]);
             }
         }
-        // Signal end of execution
-        return Err(LuaError::Exit);
+        Err(LuaError::Exit)
+    } else {
+        // No caller - exit VM
+        vm.return_values.clear();
+        for i in 0..return_count {
+            if base_ptr + a + i < vm.register_stack.len() {
+                vm.return_values.push(vm.register_stack[base_ptr + a + i]);
+            }
+        }
+        Err(LuaError::Exit)
     }
-
-    // Update frame_ptr to point to new current frame
-    *frame_ptr_ptr = vm.current_frame_ptr();
-
-    Ok(())
 }
 
 // ============ Jump Instructions ============
@@ -1319,19 +1292,21 @@ pub fn exec_return0(
         vm.close_upvalues_from(base_ptr);
     }
 
-    // OPTIMIZED: Calculate caller frame pointer BEFORE pop
+    // OPTIMIZED: Calculate caller frame pointer and check if Lua BEFORE pop
     let has_caller = vm.frame_count > 1;
-    let caller_ptr = if has_caller {
-        unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) }
+    let (caller_ptr, caller_is_lua) = if has_caller {
+        let ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+        let is_lua = unsafe { (*ptr).is_lua() };
+        (ptr, is_lua)
     } else {
-        std::ptr::null_mut()
+        (std::ptr::null_mut(), false)
     };
 
     // Pop frame - just decrement counter
     vm.frame_count -= 1;
 
-    // FAST PATH: Check if we have a caller frame
-    if has_caller {
+    // FAST PATH: Lua caller (most common case - Lua calling Lua)
+    if has_caller && caller_is_lua {
         // Update frame_ptr (already computed)
         *frame_ptr_ptr = caller_ptr;
 
@@ -1355,6 +1330,12 @@ pub fn exec_return0(
             (*caller_ptr).top = result_reg;
         }
         Ok(())
+    } else if has_caller {
+        // C function caller (pcall/xpcall/metamethods via call_function_internal)
+        // Write to return_values for call_function_internal to read
+        *frame_ptr_ptr = caller_ptr;
+        vm.return_values.clear();
+        Err(LuaError::Exit)
     } else {
         // No caller - exit VM, clear return_values (empty return)
         vm.return_values.clear();
@@ -1389,20 +1370,21 @@ pub fn exec_return1(
         vm.close_upvalues_from(base_ptr);
     }
 
-    // OPTIMIZED: Calculate caller frame pointer BEFORE pop (avoid recalculation)
-    // frame_count - 1 is current, frame_count - 2 is caller
+    // OPTIMIZED: Calculate caller frame pointer and check if Lua BEFORE pop
     let has_caller = vm.frame_count > 1;
-    let caller_ptr = if has_caller {
-        unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) }
+    let (caller_ptr, caller_is_lua) = if has_caller {
+        let ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+        let is_lua = unsafe { (*ptr).is_lua() };
+        (ptr, is_lua)
     } else {
-        std::ptr::null_mut()
+        (std::ptr::null_mut(), false)
     };
 
     // Pop frame - just decrement counter
     vm.frame_count -= 1;
 
-    // Check if there's a caller frame
-    if has_caller {
+    // FAST PATH: Lua caller (most common - Lua calling Lua)
+    if has_caller && caller_is_lua {
         // Update frame_ptr to caller (already computed above)
         *frame_ptr_ptr = caller_ptr;
 
@@ -1415,9 +1397,15 @@ pub fn exec_return1(
         }
 
         Ok(())
+    } else if has_caller {
+        // C function caller (pcall/xpcall/metamethods via call_function_internal)
+        // Write to return_values for call_function_internal to read
+        *frame_ptr_ptr = caller_ptr;
+        vm.return_values.clear();
+        vm.return_values.push(return_value);
+        Err(LuaError::Exit)
     } else {
         // No caller - exit VM (only happens at script end)
-        // Only update return_values when exiting - this is what call_function_internal reads
         vm.return_values.clear();
         vm.return_values.push(return_value);
         Err(LuaError::Exit)

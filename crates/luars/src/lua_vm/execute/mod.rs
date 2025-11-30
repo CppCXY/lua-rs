@@ -317,17 +317,17 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             // ============ Return Instructions (special handling - can Exit) ============
             OpCode::Return0 => match exec_return0(vm, instr, &mut frame_ptr) {
                 Ok(()) => continue 'mainloop,
-                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(LuaError::Exit) => return Err(LuaError::Exit),
                 Err(e) => return Err(e),
             },
             OpCode::Return1 => match exec_return1(vm, instr, &mut frame_ptr) {
                 Ok(()) => continue 'mainloop,
-                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(LuaError::Exit) => return Err(LuaError::Exit),
                 Err(e) => return Err(e),
             },
             OpCode::Return => match exec_return(vm, instr, &mut frame_ptr) {
                 Ok(()) => continue 'mainloop,
-                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(LuaError::Exit) => return Err(LuaError::Exit),
                 Err(e) => return Err(e),
             },
 
@@ -340,7 +340,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             }
             OpCode::TailCall => match exec_tailcall(vm, instr, &mut frame_ptr) {
                 Ok(()) => continue 'mainloop,
-                Err(LuaError::Exit) => return Ok(LuaValue::nil()),
+                Err(LuaError::Exit) => return Err(LuaError::Exit),
                 Err(e) => return Err(e),
             },
 
