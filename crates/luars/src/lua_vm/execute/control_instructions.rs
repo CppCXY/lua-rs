@@ -1082,21 +1082,34 @@ fn exec_call_cfunction(
         *frame_ptr_ptr = vm.current_frame_ptr();
     }
 
-    // Copy return values
-    let values = result.all_values();
+    // OPTIMIZED: Copy return values without heap allocation for common cases
+    let result_len = result.len();
     let num_returns = if return_count == usize::MAX {
-        values.len()
+        result_len
     } else {
-        return_count.min(values.len())
+        return_count.min(result_len)
     };
 
-    if num_returns > 0 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                values.as_ptr(),
-                vm.register_stack.as_mut_ptr().add(call_base),
-                num_returns,
-            );
+    // Fast path: copy inline values directly (no Vec allocation)
+    if result.overflow.is_none() {
+        // Values are stored inline
+        if num_returns > 0 {
+            vm.register_stack[call_base] = result.inline[0];
+        }
+        if num_returns > 1 {
+            vm.register_stack[call_base + 1] = result.inline[1];
+        }
+    } else {
+        // Slow path: overflow to Vec
+        let values = result.all_values();
+        if num_returns > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    values.as_ptr(),
+                    vm.register_stack.as_mut_ptr().add(call_base),
+                    num_returns,
+                );
+            }
         }
     }
 

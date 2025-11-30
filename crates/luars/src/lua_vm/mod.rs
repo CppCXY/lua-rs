@@ -1237,6 +1237,18 @@ impl LuaVM {
         LuaValue::string(id)
     }
 
+    /// Create string from owned String (avoids clone for non-interned strings)
+    #[inline]
+    pub fn create_string_owned(&mut self, s: String) -> LuaValue {
+        let len = s.len();
+        let id = self.object_pool.create_string_owned(s);
+
+        let estimated_bytes = 32 + len;
+        self.gc.record_allocation(estimated_bytes);
+
+        LuaValue::string(id)
+    }
+
     /// Get string by LuaValue (resolves ID from object pool)
     pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
         if let Some(id) = value.as_string_id() {

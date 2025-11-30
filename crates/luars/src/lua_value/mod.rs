@@ -44,30 +44,103 @@ pub use lua_value::{
 };
 
 /// Multi-return values from Lua functions
+/// OPTIMIZED: Use inline storage for common single-value case
 #[derive(Debug, Clone)]
 pub struct MultiValue {
-    pub values: Option<Vec<LuaValue>>,
+    // Inline storage for 0-2 values (covers 99% of cases without heap allocation)
+    pub inline: [LuaValue; 2],
+    // Count of values stored inline (0, 1, or 2)
+    pub inline_count: u8,
+    // Only used when > 2 values
+    pub overflow: Option<Vec<LuaValue>>,
 }
 
 impl MultiValue {
+    #[inline(always)]
     pub fn empty() -> Self {
-        MultiValue { values: None }
+        MultiValue {
+            inline: [LuaValue::nil(), LuaValue::nil()],
+            inline_count: 0,
+            overflow: None,
+        }
     }
 
+    #[inline(always)]
     pub fn single(value: LuaValue) -> Self {
         MultiValue {
-            values: Some(vec![value]),
+            inline: [value, LuaValue::nil()],
+            inline_count: 1,
+            overflow: None,
+        }
+    }
+    
+    #[inline(always)]
+    pub fn two(v1: LuaValue, v2: LuaValue) -> Self {
+        MultiValue {
+            inline: [v1, v2],
+            inline_count: 2,
+            overflow: None,
         }
     }
 
     pub fn multiple(values: Vec<LuaValue>) -> Self {
-        MultiValue {
-            values: Some(values),
+        let len = values.len();
+        if len == 0 {
+            Self::empty()
+        } else if len == 1 {
+            Self::single(values.into_iter().next().unwrap())
+        } else if len == 2 {
+            let mut iter = values.into_iter();
+            Self::two(iter.next().unwrap(), iter.next().unwrap())
+        } else {
+            MultiValue {
+                inline: [LuaValue::nil(), LuaValue::nil()],
+                inline_count: 0,
+                overflow: Some(values),
+            }
         }
     }
 
+    #[inline(always)]
     pub fn all_values(self) -> Vec<LuaValue> {
-        self.values.unwrap_or_default()
+        if let Some(v) = self.overflow {
+            v
+        } else {
+            match self.inline_count {
+                0 => Vec::new(),
+                1 => vec![self.inline[0]],
+                2 => vec![self.inline[0], self.inline[1]],
+                _ => Vec::new(),
+            }
+        }
+    }
+    
+    /// Get count of return values (optimized, no allocation)
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        if let Some(ref v) = self.overflow {
+            v.len()
+        } else {
+            self.inline_count as usize
+        }
+    }
+    
+    /// Check if empty
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.inline_count == 0 && self.overflow.is_none()
+    }
+    
+    /// Get first value (common case, optimized)
+    #[inline(always)]
+    pub fn first(&self) -> Option<LuaValue> {
+        if let Some(ref v) = self.overflow {
+            v.first().copied()
+        } else if self.inline_count > 0 {
+            Some(self.inline[0])
+        } else {
+            None
+        }
     }
 }
 
@@ -87,6 +160,12 @@ impl LuaString {
         s.hash(&mut hasher);
         let hash = hasher.finish();
 
+        LuaString { data: s, hash }
+    }
+
+    /// Create LuaString with pre-computed hash (avoids double hashing)
+    #[inline]
+    pub fn with_hash(s: String, hash: u64) -> Self {
         LuaString { data: s, hash }
     }
 

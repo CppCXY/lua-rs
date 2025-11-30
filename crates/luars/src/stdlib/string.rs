@@ -29,6 +29,7 @@ pub fn create_string_lib() -> LibraryModule {
 }
 
 /// string.byte(s [, i [, j]]) - Return byte values
+/// OPTIMIZED: Fast path for single byte return (common case)
 fn string_byte(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 1, "string.byte")?;
     let Some(string_id) = s_value.as_string_id() else {
@@ -42,7 +43,6 @@ fn string_byte(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let len = str_bytes.len() as i64;
 
     let i = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1);
-
     let j = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(i);
 
     // Convert negative indices
@@ -53,8 +53,24 @@ fn string_byte(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Ok(MultiValue::empty());
     }
 
-    let mut result = Vec::new();
-    for idx in start..=end.min(len) {
+    let end = end.min(len);
+    
+    // FAST PATH: Single byte return (most common case)
+    if start == end && start >= 1 && start <= len {
+        let byte = str_bytes[(start - 1) as usize];
+        return Ok(MultiValue::single(LuaValue::integer(byte as i64)));
+    }
+    
+    // FAST PATH: Two byte return
+    if end == start + 1 && start >= 1 && end <= len {
+        let b1 = str_bytes[(start - 1) as usize] as i64;
+        let b2 = str_bytes[(end - 1) as usize] as i64;
+        return Ok(MultiValue::two(LuaValue::integer(b1), LuaValue::integer(b2)));
+    }
+
+    // Slow path: multiple returns
+    let mut result = Vec::with_capacity((end - start + 1) as usize);
+    for idx in start..=end {
         if idx >= 1 && idx <= len {
             let byte = str_bytes[(idx - 1) as usize];
             result.push(LuaValue::integer(byte as i64));
@@ -92,7 +108,7 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             return Err(vm.error("invalid byte sequence in 'string.char'".to_string()));
         }
     };
-    let result = vm.create_string(&result_str);
+    let result = vm.create_string_owned(result_str);
     Ok(MultiValue::single(result))
 }
 
@@ -126,7 +142,7 @@ fn string_lower(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         };
         s.as_str().to_lowercase()
     };
-    let result = vm.create_string(&result);
+    let result = vm.create_string_owned(result);
     Ok(MultiValue::single(result))
 }
 
@@ -142,7 +158,7 @@ fn string_upper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         };
         s.as_str().to_uppercase()
     };
-    let result = vm.create_string(&result);
+    let result = vm.create_string_owned(result);
     Ok(MultiValue::single(result))
 }
 
@@ -202,7 +218,7 @@ fn string_rep(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
     };
 
-    let result = vm.create_string(&result);
+    let result = vm.create_string_owned(result);
     Ok(MultiValue::single(result))
 }
 
@@ -220,24 +236,17 @@ fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         };
         s.as_str().chars().rev().collect::<String>()
     };
-    let result = vm.create_string(&reversed);
+    let result = vm.create_string_owned(reversed);
     Ok(MultiValue::single(result))
 }
 
 /// string.sub(s, i [, j]) - Extract substring
-/// OPTIMIZED: Lua uses byte indices, not character indices!
+/// ULTRA-OPTIMIZED: Avoid unnecessary allocations
 fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 1, "string.sub")?;
     let Some(string_id) = s_value.as_string_id() else {
         return Err(vm.error("bad argument #1 to 'string.sub' (string expected)".to_string()));
     };
-    let s_str = {
-        let Some(s) = vm.object_pool.get_string(string_id) else {
-            return Err(vm.error("bad argument #1 to 'string.sub' (string expected)".to_string()));
-        };
-        s.as_str().to_string()
-    };
-    let byte_len = s_str.len() as i64;
 
     let i_value = require_arg(vm, 2, "string.sub")?;
     let Some(i) = i_value.as_integer() else {
@@ -245,25 +254,41 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     let j = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(-1);
-    // Lua string.sub uses byte positions, not character positions!
-    // Convert negative indices
-    let start = if i < 0 { byte_len + i + 1 } else { i };
-    let end = if j < 0 { byte_len + j + 1 } else { j };
 
-    // Clamp to valid range [1, byte_len]
-    let start = start.max(1).min(byte_len + 1) as usize;
-    let end = end.max(0).min(byte_len) as usize;
+    // Compute indices and extract substring slice
+    let substring = {
+        let Some(s) = vm.object_pool.get_string(string_id) else {
+            return Err(vm.error("bad argument #1 to 'string.sub' (string expected)".to_string()));
+        };
+        let s_str = s.as_str();
+        let byte_len = s_str.len() as i64;
 
-    let result_str = if start > 0 && start <= end + 1 {
-        // Direct byte slicing - much faster!
-        let start_byte = (start - 1).min(s_str.len());
-        let end_byte = end.min(s_str.len());
-        &s_str[start_byte..end_byte]
-    } else {
-        ""
+        // Lua string.sub uses byte positions, not character positions!
+        let start = if i < 0 { byte_len + i + 1 } else { i };
+        let end = if j < 0 { byte_len + j + 1 } else { j };
+
+        // Clamp to valid range
+        let start = start.max(1).min(byte_len + 1) as usize;
+        let end = end.max(0).min(byte_len) as usize;
+
+        if start > 0 && start <= end + 1 {
+            let start_byte = (start - 1).min(s_str.len());
+            let end_byte = end.min(s_str.len());
+            
+            // Fast path: return original string if full range
+            if start_byte == 0 && end_byte == s_str.len() {
+                return Ok(MultiValue::single(s_value));
+            }
+            
+            // Need to copy the substring out
+            s_str[start_byte..end_byte].to_string()
+        } else {
+            String::new()
+        }
     };
 
-    let result = vm.create_string(result_str);
+    // Now create the result (borrow released)
+    let result = vm.create_string_owned(substring);
     Ok(MultiValue::single(result))
 }
 
@@ -666,11 +691,12 @@ fn string_format(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
     }
 
-    let result_str = vm.create_string(&result);
+    let result_str = vm.create_string_owned(result);
     Ok(MultiValue::single(result_str))
 }
 
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
+/// ULTRA-OPTIMIZED: Avoid string cloning in hot path
 fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 1, "string.find")?;
     let Some(s_id) = s_value.as_string_id() else {
@@ -685,33 +711,34 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let plain = get_arg(vm, 4).map(|v| v.is_truthy()).unwrap_or(false);
     let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
 
-    // Cache string values to avoid borrow issues
-    let (s_str, pattern) = {
-        let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(vm.error("bad argument #1 to 'string.find' (string expected)".to_string()));
-        };
-        let Some(pattern_str) = vm.object_pool.get_string(pattern_id) else {
-            return Err(vm.error("bad argument #2 to 'string.find' (string expected)".to_string()));
-        };
-        (s.as_str().to_string(), pattern_str.as_str().to_string())
+    // OPTIMIZATION: Get string references without cloning first
+    // Only clone when absolutely necessary (for complex pattern matching)
+    let Some(s_lua) = vm.object_pool.get_string(s_id) else {
+        return Err(vm.error("bad argument #1 to 'string.find' (string expected)".to_string()));
     };
+    let s_str = s_lua.as_str();
+    
+    let Some(pattern_lua) = vm.object_pool.get_string(pattern_id) else {
+        return Err(vm.error("bad argument #2 to 'string.find' (string expected)".to_string()));
+    };
+    let pattern = pattern_lua.as_str();
 
     // Fast path: check if pattern contains special characters
     // If not, use plain search even if plain=false (major optimization)
-    let has_special = pattern.chars().any(|c| {
+    let has_special = pattern.bytes().any(|c| {
         matches!(
             c,
-            '%' | '.' | '[' | ']' | '*' | '+' | '-' | '?' | '^' | '$' | '(' | ')'
+            b'%' | b'.' | b'[' | b']' | b'*' | b'+' | b'-' | b'?' | b'^' | b'$' | b'(' | b')'
         )
     });
 
     if plain || !has_special {
-        // Plain string search (no pattern matching)
+        // Plain string search (no pattern matching) - NO ALLOCATION!
         if start_pos > s_str.len() {
             return Ok(MultiValue::single(LuaValue::nil()));
         }
 
-        if let Some(pos) = s_str[start_pos..].find(&pattern) {
+        if let Some(pos) = s_str[start_pos..].find(pattern) {
             let actual_pos = start_pos + pos;
             let end_pos = actual_pos + pattern.len();
             Ok(MultiValue::multiple(vec![
@@ -722,16 +749,20 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             Ok(MultiValue::single(LuaValue::nil()))
         }
     } else {
+        // Complex pattern - need to clone for pattern parser (it takes ownership)
+        let pattern_owned = pattern.to_string();
+        let s_owned = s_str.to_string();
+        
         // Pattern matching - parse and check if it's a simple literal
-        match lua_pattern::parse_pattern(&pattern) {
+        match lua_pattern::parse_pattern(&pattern_owned) {
             Ok(parsed_pattern) => {
                 // Fast path: if pattern is just a literal string, use plain search
                 if let Some(literal) = parsed_pattern.as_literal_string() {
-                    if start_pos > s_str.len() {
+                    if start_pos > s_owned.len() {
                         return Ok(MultiValue::single(LuaValue::nil()));
                     }
 
-                    if let Some(pos) = s_str[start_pos..].find(&literal) {
+                    if let Some(pos) = s_owned[start_pos..].find(&literal) {
                         let actual_pos = start_pos + pos;
                         let end_pos = actual_pos + literal.len();
                         Ok(MultiValue::multiple(vec![
@@ -744,7 +775,7 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 } else {
                     // Complex pattern - use full pattern matcher
                     if let Some((start, end, captures)) =
-                        lua_pattern::find(&s_str, &parsed_pattern, start_pos)
+                        lua_pattern::find(&s_owned, &parsed_pattern, start_pos)
                     {
                         let mut results = vec![
                             LuaValue::integer((start + 1) as i64),

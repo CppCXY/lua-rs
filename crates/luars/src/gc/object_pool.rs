@@ -504,11 +504,10 @@ impl ObjectPoolV2 {
     #[inline]
     pub fn create_string(&mut self, s: &str) -> StringId {
         let len = s.len();
+        let hash = Self::hash_string(s);
 
         // Intern short strings for deduplication
         if len <= self.max_intern_length {
-            let hash = Self::hash_string(s);
-
             // Use closure to compare string content (handles hash collisions correctly)
             let compare = |id: StringId| -> bool {
                 self.strings
@@ -523,10 +522,10 @@ impl ObjectPoolV2 {
                     return existing_id;
                 }
                 Err(insert_idx) => {
-                    // Not found, create new interned string
+                    // Not found, create new interned string with pre-computed hash
                     let gc_string = GcString {
                         header: GcHeader::default(),
-                        data: LuaString::new(s.to_string()),
+                        data: LuaString::with_hash(s.to_string(), hash),
                     };
                     let id = StringId(self.strings.alloc(gc_string));
                     self.string_intern.insert(hash, id, insert_idx);
@@ -538,10 +537,10 @@ impl ObjectPoolV2 {
                 }
             }
         } else {
-            // Long strings are not interned
+            // Long strings are not interned, but still use pre-computed hash
             let gc_string = GcString {
                 header: GcHeader::default(),
-                data: LuaString::new(s.to_string()),
+                data: LuaString::with_hash(s.to_string(), hash),
             };
             StringId(self.strings.alloc(gc_string))
         }
@@ -551,10 +550,9 @@ impl ObjectPoolV2 {
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> StringId {
         let len = s.len();
+        let hash = Self::hash_string(&s);
 
         if len <= self.max_intern_length {
-            let hash = Self::hash_string(&s);
-
             // Use closure to compare string content
             let compare = |id: StringId| -> bool {
                 self.strings
@@ -569,10 +567,10 @@ impl ObjectPoolV2 {
                     return existing_id;
                 }
                 Err(insert_idx) => {
-                    // Not found, create new interned string with owned data
+                    // Not found, create new interned string with owned data and pre-computed hash
                     let gc_string = GcString {
                         header: GcHeader::default(),
-                        data: LuaString::new(s),
+                        data: LuaString::with_hash(s, hash),
                     };
                     let id = StringId(self.strings.alloc(gc_string));
                     self.string_intern.insert(hash, id, insert_idx);
@@ -584,9 +582,10 @@ impl ObjectPoolV2 {
                 }
             }
         } else {
+            // Long strings use pre-computed hash
             let gc_string = GcString {
                 header: GcHeader::default(),
-                data: LuaString::new(s),
+                data: LuaString::with_hash(s, hash),
             };
             StringId(self.strings.alloc(gc_string))
         }

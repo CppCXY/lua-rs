@@ -258,7 +258,8 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
             }
         }
 
-        let result_value = vm.create_string(&result);
+        // OPTIMIZED: Use create_string_owned to avoid extra clone
+        let result_value = vm.create_string_owned(result);
         vm.register_stack[base_ptr + a] = result_value;
 
         // No GC check for fast path - rely on debt mechanism
@@ -299,7 +300,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
 
         if let (Some(l), Some(r)) = (left_str, right_str) {
             let concat_result = l + &r;
-            result_value = vm.create_string(&concat_result);
+            result_value = vm.create_string_owned(concat_result);
         } else {
             // Try __concat metamethod
             let mm_key = vm.create_string("__concat");
