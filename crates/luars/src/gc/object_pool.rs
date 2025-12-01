@@ -21,12 +21,14 @@ use std::rc::Rc;
 // ============ GC Header ============
 
 /// GC object header - embedded in every GC-managed object
-/// Kept minimal (2 bytes) to reduce memory overhead
+/// Based on Lua 5.4's CommonHeader design
+/// Kept minimal to reduce memory overhead
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct GcHeader {
     pub marked: bool,
-    pub age: u8, // For generational GC
+    pub age: u8,    // For generational GC (like Lua's G_NEW, G_SURVIVAL, G_OLD, etc.)
+    pub fixed: bool, // If true, object is never collected (like Lua's fixedgc list)
 }
 
 // ============ Object IDs ============
@@ -658,7 +660,79 @@ impl ObjectPoolV2 {
         pool.tm_concat = pool.create_string("__concat");
         pool.tm_metatable = pool.create_string("__metatable");
         
+        // Fix all metamethod name strings - they should never be collected
+        // (like Lua's luaC_fix in luaT_init)
+        pool.fix_string(pool.tm_index);
+        pool.fix_string(pool.tm_newindex);
+        pool.fix_string(pool.tm_call);
+        pool.fix_string(pool.tm_tostring);
+        pool.fix_string(pool.tm_len);
+        pool.fix_string(pool.tm_pairs);
+        pool.fix_string(pool.tm_ipairs);
+        pool.fix_string(pool.tm_gc);
+        pool.fix_string(pool.tm_close);
+        pool.fix_string(pool.tm_mode);
+        pool.fix_string(pool.tm_name);
+        pool.fix_string(pool.tm_eq);
+        pool.fix_string(pool.tm_lt);
+        pool.fix_string(pool.tm_le);
+        pool.fix_string(pool.tm_add);
+        pool.fix_string(pool.tm_sub);
+        pool.fix_string(pool.tm_mul);
+        pool.fix_string(pool.tm_div);
+        pool.fix_string(pool.tm_mod);
+        pool.fix_string(pool.tm_pow);
+        pool.fix_string(pool.tm_unm);
+        pool.fix_string(pool.tm_idiv);
+        pool.fix_string(pool.tm_band);
+        pool.fix_string(pool.tm_bor);
+        pool.fix_string(pool.tm_bxor);
+        pool.fix_string(pool.tm_bnot);
+        pool.fix_string(pool.tm_shl);
+        pool.fix_string(pool.tm_shr);
+        pool.fix_string(pool.tm_concat);
+        pool.fix_string(pool.tm_metatable);
+        
         pool
+    }
+
+    /// Get pre-cached metamethod StringId by TM enum value
+    /// This is the fast path for metamethod lookup in hot code
+    /// TMS enum from ltm.h:
+    /// TM_INDEX=0, TM_NEWINDEX=1, TM_GC=2, TM_MODE=3, TM_LEN=4, TM_EQ=5,
+    /// TM_ADD=6, TM_SUB=7, TM_MUL=8, TM_MOD=9, TM_POW=10, TM_DIV=11,
+    /// TM_IDIV=12, TM_BAND=13, TM_BOR=14, TM_BXOR=15, TM_SHL=16, TM_SHR=17,
+    /// TM_UNM=18, TM_BNOT=19, TM_LT=20, TM_LE=21, TM_CONCAT=22, TM_CALL=23
+    #[inline]
+    pub fn get_binop_tm(&self, tm: u8) -> StringId {
+        match tm {
+            0 => self.tm_index,
+            1 => self.tm_newindex,
+            2 => self.tm_gc,
+            3 => self.tm_mode,
+            4 => self.tm_len,
+            5 => self.tm_eq,
+            6 => self.tm_add,
+            7 => self.tm_sub,
+            8 => self.tm_mul,
+            9 => self.tm_mod,
+            10 => self.tm_pow,
+            11 => self.tm_div,
+            12 => self.tm_idiv,
+            13 => self.tm_band,
+            14 => self.tm_bor,
+            15 => self.tm_bxor,
+            16 => self.tm_shl,
+            17 => self.tm_shr,
+            18 => self.tm_unm,
+            19 => self.tm_bnot,
+            20 => self.tm_lt,
+            21 => self.tm_le,
+            22 => self.tm_concat,
+            23 => self.tm_call,
+            24 => self.tm_close,
+            _ => self.tm_index, // Fallback to __index
+        }
     }
 
     // ==================== String Operations ====================
@@ -771,6 +845,25 @@ impl ObjectPoolV2 {
     #[inline(always)]
     pub fn get_string_str(&self, id: StringId) -> Option<&str> {
         self.strings.get(id.0).map(|gs| gs.data.as_str())
+    }
+
+    /// Mark a string as fixed (never collected) - like Lua's luaC_fix()
+    /// Used for metamethod names and other permanent strings
+    #[inline]
+    pub fn fix_string(&mut self, id: StringId) {
+        if let Some(gs) = self.strings.get_mut(id.0) {
+            gs.header.fixed = true;
+            gs.header.marked = true; // Always considered marked
+        }
+    }
+
+    /// Mark a table as fixed (never collected)
+    #[inline]
+    pub fn fix_table(&mut self, id: TableId) {
+        if let Some(gt) = self.tables.get_mut(id.0) {
+            gt.header.fixed = true;
+            gt.header.marked = true;
+        }
     }
 
     // ==================== Table Operations ====================

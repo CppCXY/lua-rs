@@ -28,6 +28,11 @@ pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
     pub(crate) global_value: LuaValue,
 
+    // Registry table (like Lua's LUA_REGISTRYINDEX)
+    // Used to store objects that should be protected from GC but not visible to Lua code
+    // This is a GC root and all values in it are protected
+    pub(crate) registry: LuaValue,
+
     // Hot path GC debt counter - placed early in struct for cache locality
     // This is updated on every allocation and checked frequently
     pub(crate) gc_debt_local: isize,
@@ -110,6 +115,7 @@ impl LuaVM {
         
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
+            registry: LuaValue::nil(), // Will be initialized below
             gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
             frames,
             frame_count: 0,
@@ -135,13 +141,74 @@ impl LuaVM {
             yield_values: Vec::new(),
         };
 
+        // Initialize registry (like Lua's init_registry)
+        // Registry is a GC root and protects all values stored in it
+        let registry = vm.create_table(2, 8);
+        if let Some(registry_id) = registry.as_table_id() {
+            // Fix the registry table so it's never collected
+            vm.object_pool.fix_table(registry_id);
+        }
+        vm.registry = registry;
+
         // Set _G to point to the global table itself
         let globals_ref = vm.create_table(0, 20);
         vm.global_value = globals_ref;
         vm.set_global("_G", globals_ref);
         vm.set_global("_ENV", globals_ref);
+        
+        // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
+        vm.registry_set_integer(1, globals_ref);
 
         vm
+    }
+    
+    /// Set a value in the registry by integer key
+    pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table_mut(reg_id) {
+                reg_table.set_int(key, value);
+            }
+        }
+    }
+    
+    /// Get a value from the registry by integer key
+    pub fn registry_get_integer(&self, key: i64) -> Option<LuaValue> {
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table(reg_id) {
+                return reg_table.get_int(key);
+            }
+        }
+        None
+    }
+    
+    /// Set a value in the registry by string key
+    pub fn registry_set(&mut self, key: &str, value: LuaValue) {
+        let key_value = self.create_string(key);
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table_mut(reg_id) {
+                reg_table.raw_set(key_value, value);
+            }
+        }
+    }
+    
+    /// Get a value from the registry by string key
+    pub fn registry_get(&self, key: &str) -> Option<LuaValue> {
+        // We can't use create_string here as it requires &mut self
+        // So we do a linear search (registry is typically small)
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table(reg_id) {
+                for (k, v) in reg_table.iter_all() {
+                    if let Some(k_id) = k.as_string_id() {
+                        if let Some(k_str) = self.object_pool.get_string_str(k_id) {
+                            if k_str == key {
+                                return Some(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     // Register access helpers for unified stack architecture
@@ -1567,7 +1634,10 @@ impl LuaVM {
         // 1. Global table
         roots.push(self.global_value);
 
-        // 2. String metatable
+        // 2. Registry table (persistent objects storage)
+        roots.push(self.registry);
+
+        // 3. String metatable
         if let Some(mt) = &self.string_metatable {
             roots.push(*mt);
         }
@@ -1658,6 +1728,9 @@ impl LuaVM {
 
         // Add the global table itself as a root
         roots.push(self.global_value);
+
+        // Add registry table as a root (persistent objects)
+        roots.push(self.registry);
 
         // Add string metatable if present
         if let Some(mt) = &self.string_metatable {

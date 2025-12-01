@@ -149,22 +149,34 @@ impl GC {
         collected
     }
 
-    /// Clear all marks in all arenas
+    /// Clear all marks in all arenas (skip fixed objects - they stay marked)
     fn clear_marks(&self, pool: &mut ObjectPool) {
         for (_, table) in pool.tables.iter_mut() {
-            table.header.marked = false;
+            if !table.header.fixed {
+                table.header.marked = false;
+            }
         }
         for (_, func) in pool.functions.iter_mut() {
-            func.header.marked = false;
+            if !func.header.fixed {
+                func.header.marked = false;
+            }
         }
         for (_, upval) in pool.upvalues.iter_mut() {
-            upval.header.marked = false;
+            if !upval.header.fixed {
+                upval.header.marked = false;
+            }
         }
         for (_, thread) in pool.threads.iter_mut() {
-            thread.header.marked = false;
+            if !thread.header.fixed {
+                thread.header.marked = false;
+            }
+        }
+        for (_, string) in pool.strings.iter_mut() {
+            if !string.header.fixed {
+                string.header.marked = false;
+            }
         }
         // Note: userdata uses Rc internally, no GcHeader
-        // Strings are interned, don't collect them
     }
 
     /// Mark phase - traverse from roots
@@ -255,18 +267,26 @@ impl GC {
                 crate::lua_value::LuaValueKind::Userdata => {
                     // Userdata uses Rc internally, no GC needed
                 }
-                _ => {} // Strings, numbers, booleans, nil - no marking needed
+                crate::lua_value::LuaValueKind::String => {
+                    // Mark strings (they can be collected if not fixed)
+                    if let Some(id) = value.as_string_id() {
+                        if let Some(string) = pool.strings.get_mut(id.0) {
+                            string.header.marked = true;
+                        }
+                    }
+                }
+                _ => {} // Numbers, booleans, nil, CFunction - no marking needed
             }
         }
     }
 
-    /// Sweep phase - free unmarked objects
+    /// Sweep phase - free unmarked objects (skip fixed objects)
     fn sweep(&mut self, pool: &mut ObjectPool) -> usize {
         let mut collected = 0;
 
-        // Collect unmarked tables
+        // Collect unmarked tables (skip fixed ones)
         let tables_to_free: Vec<u32> = pool.tables.iter()
-            .filter(|(_, t)| !t.header.marked)
+            .filter(|(_, t)| !t.header.marked && !t.header.fixed)
             .map(|(id, _)| id)
             .collect();
         for id in tables_to_free {
@@ -275,9 +295,9 @@ impl GC {
             self.record_deallocation(256);
         }
 
-        // Collect unmarked functions
+        // Collect unmarked functions (skip fixed ones)
         let funcs_to_free: Vec<u32> = pool.functions.iter()
-            .filter(|(_, f)| !f.header.marked)
+            .filter(|(_, f)| !f.header.marked && !f.header.fixed)
             .map(|(id, _)| id)
             .collect();
         for id in funcs_to_free {
@@ -286,9 +306,9 @@ impl GC {
             self.record_deallocation(128);
         }
 
-        // Collect unmarked upvalues
+        // Collect unmarked upvalues (skip fixed ones)
         let upvals_to_free: Vec<u32> = pool.upvalues.iter()
-            .filter(|(_, u)| !u.header.marked)
+            .filter(|(_, u)| !u.header.marked && !u.header.fixed)
             .map(|(id, _)| id)
             .collect();
         for id in upvals_to_free {
@@ -296,14 +316,26 @@ impl GC {
             collected += 1;
         }
 
-        // Collect unmarked threads
+        // Collect unmarked threads (skip fixed ones)
         let threads_to_free: Vec<u32> = pool.threads.iter()
-            .filter(|(_, t)| !t.header.marked)
+            .filter(|(_, t)| !t.header.marked && !t.header.fixed)
             .map(|(id, _)| id)
             .collect();
         for id in threads_to_free {
             pool.threads.free(id);
             collected += 1;
+        }
+        
+        // Collect unmarked strings (skip fixed ones)
+        // Note: interned strings are usually kept, but this handles non-interned long strings
+        let strings_to_free: Vec<u32> = pool.strings.iter()
+            .filter(|(_, s)| !s.header.marked && !s.header.fixed)
+            .map(|(id, _)| id)
+            .collect();
+        for id in strings_to_free {
+            pool.strings.free(id);
+            collected += 1;
+            self.record_deallocation(64);
         }
 
         // Note: userdata uses Rc internally, no sweep needed

@@ -325,8 +325,8 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
     } else if let Some(f) = value.as_number() {
         LuaValue::number(-f)
     } else {
-        // Try metamethod
-        let mm_key = vm.create_string("__unm");
+        // Try metamethod - use pre-cached __unm StringId
+        let mm_key = LuaValue::string(vm.object_pool.tm_unm);
         if let Some(mt) = vm.table_get_metatable(&value) {
             if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
                 if !metamethod.is_nil() {
@@ -948,8 +948,8 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
         return Ok(());
     }
 
-    // Try metamethod for non-integer values
-    let mm_key = vm.create_string("__bnot");
+    // Try metamethod for non-integer values - use pre-cached __bnot StringId
+    let mm_key = LuaValue::string(vm.object_pool.tm_bnot);
     if let Some(mt) = vm.table_get_metatable(&value) {
         if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
             if !metamethod.is_nil() {
@@ -996,7 +996,8 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
 
     // Check for __len metamethod first (for tables)
     if value.is_table() {
-        let mm_key = vm.create_string("__len");
+        // Use pre-cached __len StringId
+        let mm_key = LuaValue::string(vm.object_pool.tm_len);
         if let Some(mt) = vm.table_get_metatable(&value) {
             if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
                 if !metamethod.is_nil() {
@@ -1032,37 +1033,6 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lua
     Ok(())
 }
 
-/// Get metamethod name for binary operation
-fn get_binop_metamethod(tm: u8) -> &'static str {
-    // TMS enum from ltm.h:
-    // TM_INDEX=0, TM_NEWINDEX=1, TM_GC=2, TM_MODE=3, TM_LEN=4, TM_EQ=5,
-    // TM_ADD=6, TM_SUB=7, TM_MUL=8, TM_MOD=9, TM_POW=10, TM_DIV=11,
-    // TM_IDIV=12, TM_BAND=13, TM_BOR=14, TM_BXOR=15, TM_SHL=16, TM_SHR=17,
-    // TM_UNM=18, TM_BNOT=19, TM_LT=20, TM_LE=21, TM_CONCAT=22, TM_CALL=23, TM_CLOSE=24
-    match tm {
-        6 => "__add",
-        7 => "__sub",
-        8 => "__mul",
-        9 => "__mod",
-        10 => "__pow",
-        11 => "__div",
-        12 => "__idiv",
-        13 => "__band",
-        14 => "__bor",
-        15 => "__bxor",
-        16 => "__shl",
-        17 => "__shr",
-        22 => "__concat",
-        5 => "__eq",
-        20 => "__lt",
-        21 => "__le",
-        18 => "__unm",
-        19 => "__bnot",
-        4 => "__len",
-        _ => "__unknown",
-    }
-}
-
 /// MmBin: Metamethod binary operation (register, register)
 #[inline(always)]
 pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
@@ -1085,8 +1055,8 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> L
         let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
         let rb = *vm.register_stack.as_ptr().add(base_ptr + b);
 
-        let metamethod_name = get_binop_metamethod(c as u8);
-        let mm_key = vm.create_string(metamethod_name);
+        // Use pre-cached metamethod StringId
+        let mm_key = LuaValue::string(vm.object_pool.get_binop_tm(c as u8));
 
         let metamethod = if let Some(mt) = vm.table_get_metatable(&ra) {
             vm.table_get_with_meta(&mt, &mm_key)
@@ -1130,8 +1100,8 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
         let rb = *vm.register_stack.as_ptr().add(base_ptr + a);
         let rc = LuaValue::integer(sb as i64);
 
-        let metamethod_name = get_binop_metamethod(c as u8);
-        let mm_key = vm.create_string(metamethod_name);
+        // Use pre-cached metamethod StringId
+        let mm_key = LuaValue::string(vm.object_pool.get_binop_tm(c as u8));
 
         let metamethod = if let Some(mt) = vm.table_get_metatable(&rb) {
             vm.table_get_with_meta(&mt, &mm_key)
@@ -1186,8 +1156,8 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
             return Ok(());
         };
 
-        let metamethod_name = get_binop_metamethod(c as u8);
-        let mm_key = vm.create_string(metamethod_name);
+        // Use pre-cached metamethod StringId
+        let mm_key = LuaValue::string(vm.object_pool.get_binop_tm(c as u8));
 
         let (left, right) = if !k { (ra, kb) } else { (kb, ra) };
 
