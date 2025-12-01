@@ -25,8 +25,6 @@ Current test status: **302 out of 302 tests passing (100%)** ✅
 - 🏆 **Local variable access**: **~220 M ops/sec** (5x faster than globals!)
 - 🏆 **Nested loops**: **~218 M ops/sec** (excellent)
 - 🏆 **Table access**: **~117 M ops/sec** (solid)
-- 🏆 **String length**: **~185 M ops/sec** (faster than native!)
-- 🎯 **Numeric for**: ~122 K iters/sec vs ~15 K for ipairs (8x faster)
 - 📊 **Function calls**: ~22 M calls/sec
 
 **Benchmark Coverage** (16 benchmark files):
@@ -37,7 +35,6 @@ Current test status: **302 out of 302 tests passing (100%)** ✅
 - Math: math
 - Advanced: metatables, oop, coroutines, errors
 
-See detailed analysis: [Performance Report](PERFORMANCE_REPORT.md)
 
 Run benchmarks locally:
 ```bash
