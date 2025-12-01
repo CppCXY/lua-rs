@@ -181,7 +181,7 @@ impl<T> Arena<T> {
     fn new_chunk() -> Box<[Option<T>; CHUNK_SIZE]> {
         // Use MaybeUninit to avoid initializing 256 Option<T>s one by one
         // This is safe because Option<T> with None is just zeros for most T
-        let mut chunk: Box<[Option<T>; CHUNK_SIZE]> = Box::new(std::array::from_fn(|_| None));
+        let chunk: Box<[Option<T>; CHUNK_SIZE]> = Box::new(std::array::from_fn(|_| None));
         chunk
     }
 

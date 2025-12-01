@@ -1567,9 +1567,13 @@ impl LuaVM {
             roots.push(*mt);
         }
 
-        // 3. ALL frame registers (not just current frame)
+        // 3. ALL frame registers AND function values (not just current frame)
         // This is critical - any register in any active frame must be kept alive
-        for frame in &self.frames {
+        // Also, the function being executed in each frame must be kept alive!
+        for frame in &self.frames[..self.frame_count] {
+            // Add the function value for this frame - this is CRITICAL!
+            roots.push(frame.function_value);
+            
             let base_ptr = frame.base_ptr;
             let top = frame.top;
             for i in 0..top {
@@ -1650,12 +1654,22 @@ impl LuaVM {
         // Add the global table itself as a root
         roots.push(self.global_value);
 
-        // Add all frame registers as roots
-        for frame in &self.frames {
+        // Add string metatable if present
+        if let Some(mt) = &self.string_metatable {
+            roots.push(*mt);
+        }
+
+        // Add all frame registers AND function values as roots
+        for frame in &self.frames[..self.frame_count] {
+            // CRITICAL: Add the function being executed
+            roots.push(frame.function_value);
+            
             let base_ptr = frame.base_ptr;
             let top = frame.top;
             for i in 0..top {
-                roots.push(self.register_stack[base_ptr + i]);
+                if base_ptr + i < self.register_stack.len() {
+                    roots.push(self.register_stack[base_ptr + i]);
+                }
             }
         }
 
