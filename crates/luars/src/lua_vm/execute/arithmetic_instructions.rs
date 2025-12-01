@@ -7,6 +7,35 @@ use crate::{
     lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
 };
 
+/// Slow path for ADD - separate function to hint branch predictor
+#[cold]
+#[inline(never)]
+fn exec_add_slow(
+    reg_base: *mut LuaValue,
+    a: usize,
+    left: LuaValue,
+    right: LuaValue,
+    frame_ptr: *mut LuaCallFrame,
+) {
+    unsafe {
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
+
+        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+            LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
+        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+            LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
+        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+            LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
+        } else {
+            return;
+        };
+
+        *reg_base.add(a) = result;
+        (*frame_ptr).pc += 1;
+    }
+}
+
 /// ADD: R[A] = R[B] + R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior - always write both fields
 #[inline(always)]
@@ -21,7 +50,7 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
-        // Combined type check - if result is 0, both are integers
+        // Combined type check - if result is TAG_INTEGER, both are integers
         let combined_tags = (left.primary | right.primary) & TYPE_MASK;
 
         if combined_tags == TAG_INTEGER {
@@ -35,16 +64,31 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
             return;
         }
 
-        // Slow path: Float operations
+        // Slow path: Float operations - in separate cold function
+        exec_add_slow(reg_base, a, left, right, frame_ptr);
+    }
+}
+
+/// Slow path for SUB
+#[cold]
+#[inline(never)]
+fn exec_sub_slow(
+    reg_base: *mut LuaValue,
+    a: usize,
+    left: LuaValue,
+    right: LuaValue,
+    frame_ptr: *mut LuaCallFrame,
+) {
+    unsafe {
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
         let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-            LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
+            LuaValue::number(f64::from_bits(left.secondary) - f64::from_bits(right.secondary))
         } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-            LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
+            LuaValue::number((left.secondary as i64) as f64 - f64::from_bits(right.secondary))
         } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-            LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
+            LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
         } else {
             return;
         };
@@ -80,15 +124,30 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
             return;
         }
 
+        exec_sub_slow(reg_base, a, left, right, frame_ptr);
+    }
+}
+
+/// Slow path for MUL
+#[cold]
+#[inline(never)]
+fn exec_mul_slow(
+    reg_base: *mut LuaValue,
+    a: usize,
+    left: LuaValue,
+    right: LuaValue,
+    frame_ptr: *mut LuaCallFrame,
+) {
+    unsafe {
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
         let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-            LuaValue::number(f64::from_bits(left.secondary) - f64::from_bits(right.secondary))
+            LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
         } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-            LuaValue::number((left.secondary as i64) as f64 - f64::from_bits(right.secondary))
+            LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
         } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-            LuaValue::number(f64::from_bits(left.secondary) - (right.secondary as i64) as f64)
+            LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
         } else {
             return;
         };
@@ -124,27 +183,12 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
             return;
         }
 
-        let left_tag = left.primary & TYPE_MASK;
-        let right_tag = right.primary & TYPE_MASK;
-
-        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-            LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
-        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-            LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
-        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-            LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
-        } else {
-            return;
-        };
-
-        *reg_base.add(a) = result;
-        (*frame_ptr).pc += 1;
+        exec_mul_slow(reg_base, a, left, right, frame_ptr);
     }
 }
 
 /// DIV: R[A] = R[B] / R[C]
 /// Division always returns float in Lua
-#[inline(always)]
 pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -181,7 +225,6 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
-#[inline(always)]
 pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -231,7 +274,6 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// MOD: R[A] = R[B] % R[C]
-#[inline(always)]
 pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -282,7 +324,6 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// POW: R[A] = R[B] ^ R[C]
-#[inline(always)]
 pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -308,7 +349,6 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
-#[inline(always)]
 pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;

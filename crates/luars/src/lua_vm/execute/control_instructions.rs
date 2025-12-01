@@ -7,7 +7,6 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM};
 
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
-#[inline(always)]
 pub fn exec_return(
     vm: &mut LuaVM,
     instr: u32,
