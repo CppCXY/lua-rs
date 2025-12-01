@@ -3,14 +3,15 @@
 // Key Design Principles:
 // 1. LuaValueV2 stores type tag + object ID (no pointers - Vec may relocate)
 // 2. All GC objects accessed via ID lookup in Arena
-// 3. Arena uses Vec<Option<T>> with free list for O(1) alloc/free
+// 3. ChunkedArena uses fixed-size chunks - never reallocates existing data!
 // 4. No Rc/RefCell overhead - direct access via &mut self
 // 5. GC headers embedded in objects for mark-sweep
 //
 // Memory Layout:
-// - Arena<T> stores objects in Vec<Option<T>>
-// - None = free slot (reusable via free list)
-// - Free list tracks available slots for O(1) allocation
+// - ChunkedArena stores objects in fixed-size chunks (Box<[Option<T>; CHUNK_SIZE]>)
+// - Each chunk is allocated once and never moved
+// - New chunks are added as needed, existing chunks stay in place
+// - This eliminates Vec resize overhead and improves cache locality
 
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{LuaString, LuaTable, LuaValue};
@@ -20,12 +21,14 @@ use std::rc::Rc;
 // ============ GC Header ============
 
 /// GC object header - embedded in every GC-managed object
-/// Kept minimal (2 bytes) to reduce memory overhead
+/// Based on Lua 5.4's CommonHeader design
+/// Kept minimal to reduce memory overhead
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct GcHeader {
     pub marked: bool,
-    pub age: u8, // For generational GC
+    pub age: u8,    // For generational GC (like Lua's G_NEW, G_SURVIVAL, G_OLD, etc.)
+    pub fixed: bool, // If true, object is never collected (like Lua's fixedgc list)
 }
 
 // ============ Object IDs ============
@@ -134,14 +137,22 @@ pub struct GcThread {
     pub data: LuaThread,
 }
 
-// ============ Arena Storage ============
+// ============ Chunked Arena Storage ============
 
-/// Type-safe arena for storing GC objects
-/// Uses Option<T> internally to mark free slots
-/// Free list enables O(1) allocation after initial growth
+/// Chunk size for arena storage (power of 2 for fast division)
+const CHUNK_SIZE: usize = 256;
+const CHUNK_MASK: usize = CHUNK_SIZE - 1;
+const CHUNK_SHIFT: u32 = 8; // log2(256)
+
+/// High-performance chunked arena that NEVER reallocates existing data
+/// - Uses fixed-size chunks stored in a Vec of Box pointers
+/// - When Vec of chunks grows, only the pointer array moves, not the data
+/// - Each chunk is a Box<[Option<T>; CHUNK_SIZE]> - stable address
+/// - Free list enables O(1) allocation after initial growth
 pub struct Arena<T> {
-    storage: Vec<Option<T>>,
+    chunks: Vec<Box<[Option<T>; CHUNK_SIZE]>>,
     free_list: Vec<u32>,
+    next_id: u32,
     count: usize,
 }
 
@@ -149,19 +160,31 @@ impl<T> Arena<T> {
     #[inline]
     pub fn new() -> Self {
         Self {
-            storage: Vec::new(),
+            chunks: Vec::new(),
             free_list: Vec::new(),
+            next_id: 0,
             count: 0,
         }
     }
 
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
+        let num_chunks = (cap + CHUNK_SIZE - 1) / CHUNK_SIZE;
         Self {
-            storage: Vec::with_capacity(cap),
+            chunks: Vec::with_capacity(num_chunks),
             free_list: Vec::with_capacity(cap / 8),
+            next_id: 0,
             count: 0,
         }
+    }
+
+    /// Create a new empty chunk
+    #[inline]
+    fn new_chunk() -> Box<[Option<T>; CHUNK_SIZE]> {
+        // Use MaybeUninit to avoid initializing 256 Option<T>s one by one
+        // This is safe because Option<T> with None is just zeros for most T
+        let chunk: Box<[Option<T>; CHUNK_SIZE]> = Box::new(std::array::from_fn(|_| None));
+        chunk
     }
 
     /// Allocate a new object and return its ID
@@ -171,29 +194,47 @@ impl<T> Arena<T> {
 
         if let Some(free_id) = self.free_list.pop() {
             // Reuse a free slot
-            self.storage[free_id as usize] = Some(value);
-            free_id
-        } else {
-            // Append new slot
-            let id = self.storage.len() as u32;
-            self.storage.push(Some(value));
-            id
+            let chunk_idx = (free_id >> CHUNK_SHIFT) as usize;
+            let slot_idx = (free_id as usize) & CHUNK_MASK;
+            self.chunks[chunk_idx][slot_idx] = Some(value);
+            return free_id;
         }
+
+        // Allocate new slot
+        let id = self.next_id;
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+
+        // Add new chunk if needed
+        if chunk_idx >= self.chunks.len() {
+            self.chunks.push(Self::new_chunk());
+        }
+
+        self.chunks[chunk_idx][slot_idx] = Some(value);
+        self.next_id += 1;
+        id
     }
 
     /// Get immutable reference by ID
     #[inline(always)]
     pub fn get(&self, id: u32) -> Option<&T> {
-        self.storage.get(id as usize).and_then(|opt| opt.as_ref())
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        self.chunks
+            .get(chunk_idx)
+            .and_then(|chunk| chunk[slot_idx].as_ref())
     }
 
     /// Get reference by ID without bounds checking (caller must ensure validity)
     /// SAFETY: id must be a valid index returned from alloc() and not freed
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, id: u32) -> &T {
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
         unsafe {
-            self.storage
-                .get_unchecked(id as usize)
+            self.chunks
+                .get_unchecked(chunk_idx)
+                .get_unchecked(slot_idx)
                 .as_ref()
                 .unwrap_unchecked()
         }
@@ -202,18 +243,23 @@ impl<T> Arena<T> {
     /// Get mutable reference by ID
     #[inline(always)]
     pub fn get_mut(&mut self, id: u32) -> Option<&mut T> {
-        self.storage
-            .get_mut(id as usize)
-            .and_then(|opt| opt.as_mut())
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        self.chunks
+            .get_mut(chunk_idx)
+            .and_then(|chunk| chunk[slot_idx].as_mut())
     }
 
     /// Get mutable reference by ID without bounds checking (caller must ensure validity)
     /// SAFETY: id must be a valid index returned from alloc() and not freed
     #[inline(always)]
     pub unsafe fn get_mut_unchecked(&mut self, id: u32) -> &mut T {
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
         unsafe {
-            self.storage
-                .get_unchecked_mut(id as usize)
+            self.chunks
+                .get_unchecked_mut(chunk_idx)
+                .get_unchecked_mut(slot_idx)
                 .as_mut()
                 .unwrap_unchecked()
         }
@@ -222,9 +268,11 @@ impl<T> Arena<T> {
     /// Free a slot (mark for reuse)
     #[inline]
     pub fn free(&mut self, id: u32) {
-        if let Some(slot) = self.storage.get_mut(id as usize) {
-            if slot.is_some() {
-                *slot = None;
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
+            if chunk[slot_idx].is_some() {
+                chunk[slot_idx] = None;
                 self.free_list.push(id);
                 self.count -= 1;
             }
@@ -234,9 +282,11 @@ impl<T> Arena<T> {
     /// Check if a slot is occupied
     #[inline(always)]
     pub fn is_valid(&self, id: u32) -> bool {
-        self.storage
-            .get(id as usize)
-            .map(|opt| opt.is_some())
+        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
+        let slot_idx = (id as usize) & CHUNK_MASK;
+        self.chunks
+            .get(chunk_idx)
+            .map(|chunk| chunk[slot_idx].is_some())
             .unwrap_or(false)
     }
 
@@ -248,30 +298,45 @@ impl<T> Arena<T> {
 
     /// Iterate over all live objects
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
-        self.storage
-            .iter()
-            .enumerate()
-            .filter_map(|(i, opt)| opt.as_ref().map(|v| (i as u32, v)))
+        self.chunks.iter().enumerate().flat_map(|(chunk_idx, chunk)| {
+            chunk.iter().enumerate().filter_map(move |(slot_idx, opt)| {
+                opt.as_ref()
+                    .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
+            })
+        })
     }
 
     /// Iterate over all live objects mutably
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
-        self.storage
+        self.chunks
             .iter_mut()
             .enumerate()
-            .filter_map(|(i, opt)| opt.as_mut().map(|v| (i as u32, v)))
+            .flat_map(|(chunk_idx, chunk)| {
+                chunk
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(move |(slot_idx, opt)| {
+                        opt.as_mut()
+                            .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
+                    })
+            })
     }
 
-    /// Shrink internal storage
+    /// Shrink internal storage (only shrinks chunk vector capacity, not individual chunks)
     pub fn shrink_to_fit(&mut self) {
-        self.storage.shrink_to_fit();
+        self.chunks.shrink_to_fit();
         self.free_list.shrink_to_fit();
     }
 
     /// Clear all objects
     pub fn clear(&mut self) {
-        self.storage.clear();
+        for chunk in &mut self.chunks {
+            for slot in chunk.iter_mut() {
+                *slot = None;
+            }
+        }
         self.free_list.clear();
+        self.next_id = 0;
         self.count = 0;
     }
 }
@@ -299,6 +364,40 @@ pub struct ObjectPoolV2 {
     // Uses linear probing with string content comparison for collision handling
     string_intern: StringInternTable,
     max_intern_length: usize,
+
+    // Pre-cached metamethod name StringIds (like Lua's G(L)->tmname[])
+    // These are created at initialization and never collected
+    // Stored as StringId to avoid repeated hash lookup in hot paths
+    pub tm_index: StringId,      // "__index"
+    pub tm_newindex: StringId,   // "__newindex"
+    pub tm_call: StringId,       // "__call"
+    pub tm_tostring: StringId,   // "__tostring"
+    pub tm_len: StringId,        // "__len"
+    pub tm_pairs: StringId,      // "__pairs"
+    pub tm_ipairs: StringId,     // "__ipairs"
+    pub tm_gc: StringId,         // "__gc"
+    pub tm_close: StringId,      // "__close"
+    pub tm_mode: StringId,       // "__mode"
+    pub tm_name: StringId,       // "__name"
+    pub tm_eq: StringId,         // "__eq"
+    pub tm_lt: StringId,         // "__lt"
+    pub tm_le: StringId,         // "__le"
+    pub tm_add: StringId,        // "__add"
+    pub tm_sub: StringId,        // "__sub"
+    pub tm_mul: StringId,        // "__mul"
+    pub tm_div: StringId,        // "__div"
+    pub tm_mod: StringId,        // "__mod"
+    pub tm_pow: StringId,        // "__pow"
+    pub tm_unm: StringId,        // "__unm"
+    pub tm_idiv: StringId,       // "__idiv"
+    pub tm_band: StringId,       // "__band"
+    pub tm_bor: StringId,        // "__bor"
+    pub tm_bxor: StringId,       // "__bxor"
+    pub tm_bnot: StringId,       // "__bnot"
+    pub tm_shl: StringId,        // "__shl"
+    pub tm_shr: StringId,        // "__shr"
+    pub tm_concat: StringId,     // "__concat"
+    pub tm_metatable: StringId,  // "__metatable"
 }
 
 // ============ Lua-style String Interning Table ============
@@ -486,7 +585,7 @@ impl StringInternTable {
 
 impl ObjectPoolV2 {
     pub fn new() -> Self {
-        Self {
+        let mut pool = Self {
             strings: Arena::with_capacity(256),
             tables: Arena::with_capacity(64),
             functions: Arena::with_capacity(32),
@@ -495,6 +594,144 @@ impl ObjectPoolV2 {
             threads: Arena::with_capacity(8),
             string_intern: StringInternTable::with_capacity(256),
             max_intern_length: 64, // Strings <= 64 bytes are interned
+            // Placeholder values - will be initialized below
+            tm_index: StringId(0),
+            tm_newindex: StringId(0),
+            tm_call: StringId(0),
+            tm_tostring: StringId(0),
+            tm_len: StringId(0),
+            tm_pairs: StringId(0),
+            tm_ipairs: StringId(0),
+            tm_gc: StringId(0),
+            tm_close: StringId(0),
+            tm_mode: StringId(0),
+            tm_name: StringId(0),
+            tm_eq: StringId(0),
+            tm_lt: StringId(0),
+            tm_le: StringId(0),
+            tm_add: StringId(0),
+            tm_sub: StringId(0),
+            tm_mul: StringId(0),
+            tm_div: StringId(0),
+            tm_mod: StringId(0),
+            tm_pow: StringId(0),
+            tm_unm: StringId(0),
+            tm_idiv: StringId(0),
+            tm_band: StringId(0),
+            tm_bor: StringId(0),
+            tm_bxor: StringId(0),
+            tm_bnot: StringId(0),
+            tm_shl: StringId(0),
+            tm_shr: StringId(0),
+            tm_concat: StringId(0),
+            tm_metatable: StringId(0),
+        };
+        
+        // Pre-create all metamethod name strings (like Lua's luaT_init)
+        // These strings are interned and will never be collected
+        pool.tm_index = pool.create_string("__index");
+        pool.tm_newindex = pool.create_string("__newindex");
+        pool.tm_call = pool.create_string("__call");
+        pool.tm_tostring = pool.create_string("__tostring");
+        pool.tm_len = pool.create_string("__len");
+        pool.tm_pairs = pool.create_string("__pairs");
+        pool.tm_ipairs = pool.create_string("__ipairs");
+        pool.tm_gc = pool.create_string("__gc");
+        pool.tm_close = pool.create_string("__close");
+        pool.tm_mode = pool.create_string("__mode");
+        pool.tm_name = pool.create_string("__name");
+        pool.tm_eq = pool.create_string("__eq");
+        pool.tm_lt = pool.create_string("__lt");
+        pool.tm_le = pool.create_string("__le");
+        pool.tm_add = pool.create_string("__add");
+        pool.tm_sub = pool.create_string("__sub");
+        pool.tm_mul = pool.create_string("__mul");
+        pool.tm_div = pool.create_string("__div");
+        pool.tm_mod = pool.create_string("__mod");
+        pool.tm_pow = pool.create_string("__pow");
+        pool.tm_unm = pool.create_string("__unm");
+        pool.tm_idiv = pool.create_string("__idiv");
+        pool.tm_band = pool.create_string("__band");
+        pool.tm_bor = pool.create_string("__bor");
+        pool.tm_bxor = pool.create_string("__bxor");
+        pool.tm_bnot = pool.create_string("__bnot");
+        pool.tm_shl = pool.create_string("__shl");
+        pool.tm_shr = pool.create_string("__shr");
+        pool.tm_concat = pool.create_string("__concat");
+        pool.tm_metatable = pool.create_string("__metatable");
+        
+        // Fix all metamethod name strings - they should never be collected
+        // (like Lua's luaC_fix in luaT_init)
+        pool.fix_string(pool.tm_index);
+        pool.fix_string(pool.tm_newindex);
+        pool.fix_string(pool.tm_call);
+        pool.fix_string(pool.tm_tostring);
+        pool.fix_string(pool.tm_len);
+        pool.fix_string(pool.tm_pairs);
+        pool.fix_string(pool.tm_ipairs);
+        pool.fix_string(pool.tm_gc);
+        pool.fix_string(pool.tm_close);
+        pool.fix_string(pool.tm_mode);
+        pool.fix_string(pool.tm_name);
+        pool.fix_string(pool.tm_eq);
+        pool.fix_string(pool.tm_lt);
+        pool.fix_string(pool.tm_le);
+        pool.fix_string(pool.tm_add);
+        pool.fix_string(pool.tm_sub);
+        pool.fix_string(pool.tm_mul);
+        pool.fix_string(pool.tm_div);
+        pool.fix_string(pool.tm_mod);
+        pool.fix_string(pool.tm_pow);
+        pool.fix_string(pool.tm_unm);
+        pool.fix_string(pool.tm_idiv);
+        pool.fix_string(pool.tm_band);
+        pool.fix_string(pool.tm_bor);
+        pool.fix_string(pool.tm_bxor);
+        pool.fix_string(pool.tm_bnot);
+        pool.fix_string(pool.tm_shl);
+        pool.fix_string(pool.tm_shr);
+        pool.fix_string(pool.tm_concat);
+        pool.fix_string(pool.tm_metatable);
+        
+        pool
+    }
+
+    /// Get pre-cached metamethod StringId by TM enum value
+    /// This is the fast path for metamethod lookup in hot code
+    /// TMS enum from ltm.h:
+    /// TM_INDEX=0, TM_NEWINDEX=1, TM_GC=2, TM_MODE=3, TM_LEN=4, TM_EQ=5,
+    /// TM_ADD=6, TM_SUB=7, TM_MUL=8, TM_MOD=9, TM_POW=10, TM_DIV=11,
+    /// TM_IDIV=12, TM_BAND=13, TM_BOR=14, TM_BXOR=15, TM_SHL=16, TM_SHR=17,
+    /// TM_UNM=18, TM_BNOT=19, TM_LT=20, TM_LE=21, TM_CONCAT=22, TM_CALL=23
+    #[inline]
+    pub fn get_binop_tm(&self, tm: u8) -> StringId {
+        match tm {
+            0 => self.tm_index,
+            1 => self.tm_newindex,
+            2 => self.tm_gc,
+            3 => self.tm_mode,
+            4 => self.tm_len,
+            5 => self.tm_eq,
+            6 => self.tm_add,
+            7 => self.tm_sub,
+            8 => self.tm_mul,
+            9 => self.tm_mod,
+            10 => self.tm_pow,
+            11 => self.tm_div,
+            12 => self.tm_idiv,
+            13 => self.tm_band,
+            14 => self.tm_bor,
+            15 => self.tm_bxor,
+            16 => self.tm_shl,
+            17 => self.tm_shr,
+            18 => self.tm_unm,
+            19 => self.tm_bnot,
+            20 => self.tm_lt,
+            21 => self.tm_le,
+            22 => self.tm_concat,
+            23 => self.tm_call,
+            24 => self.tm_close,
+            _ => self.tm_index, // Fallback to __index
         }
     }
 
@@ -608,6 +845,25 @@ impl ObjectPoolV2 {
     #[inline(always)]
     pub fn get_string_str(&self, id: StringId) -> Option<&str> {
         self.strings.get(id.0).map(|gs| gs.data.as_str())
+    }
+
+    /// Mark a string as fixed (never collected) - like Lua's luaC_fix()
+    /// Used for metamethod names and other permanent strings
+    #[inline]
+    pub fn fix_string(&mut self, id: StringId) {
+        if let Some(gs) = self.strings.get_mut(id.0) {
+            gs.header.fixed = true;
+            gs.header.marked = true; // Always considered marked
+        }
+    }
+
+    /// Mark a table as fixed (never collected)
+    #[inline]
+    pub fn fix_table(&mut self, id: TableId) {
+        if let Some(gt) = self.tables.get_mut(id.0) {
+            gt.header.fixed = true;
+            gt.header.marked = true;
+        }
     }
 
     // ==================== Table Operations ====================

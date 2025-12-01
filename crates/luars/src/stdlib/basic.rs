@@ -254,39 +254,36 @@ fn lua_ipairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// Iterator function for ipairs - Optimized for performance
 #[inline]
 fn ipairs_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    // Fast path: direct argument access without validation
-    let table_val = if let Some(val) = get_arg(vm, 1) {
-        val
-    } else {
-        return Err(vm.error("ipairs iterator: table expected".to_string()));
-    };
+    // ULTRA-FAST PATH: Direct register access without get_arg overhead
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+    
+    // Arguments are at base_ptr + 1 (table) and base_ptr + 2 (index)
+    // Avoid bounds checking in hot path
+    let table_val = unsafe { *vm.register_stack.get_unchecked(base_ptr + 1) };
+    let index_val = unsafe { *vm.register_stack.get_unchecked(base_ptr + 2) };
 
-    let index_val = if let Some(val) = get_arg(vm, 2) {
-        val
-    } else {
-        return Err(vm.error("ipairs iterator: index expected".to_string()));
-    };
-
-    // Use ObjectPool API for table access
+    // Fast path: both table and index are valid
     if let Some(table_id) = table_val.as_table_id() {
         if let Some(index) = index_val.as_integer() {
             let next_index = index + 1;
 
-            // Access table via ObjectPool
+            // Access table via ObjectPool - unchecked for speed
             if let Some(table) = vm.object_pool.get_table(table_id) {
                 if let Some(value) = table.get_int(next_index) {
-                    return Ok(MultiValue::multiple(vec![
+                    // Use MultiValue::two() to avoid Vec allocation
+                    return Ok(MultiValue::two(
                         LuaValue::integer(next_index),
                         value,
-                    ]));
+                    ));
                 }
-                // Reached end of array
+                // Reached end of array - return single nil
                 return Ok(MultiValue::single(LuaValue::nil()));
             }
         }
     }
 
-    // Slow path with proper validation
+    // Slow path with error
     Err(vm.error("ipairs iterator: invalid table or index".to_string()))
 }
 
@@ -309,9 +306,19 @@ fn lua_pairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// next(table [, index]) - Return next key-value pair
+/// OPTIMIZED: Avoid Vec allocation for common 2-return case
 fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let table_val = require_arg(vm, 1, "next")?;
-    let index_val = get_arg(vm, 2).unwrap_or(LuaValue::nil());
+    // Fast path: direct register access
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr;
+    let top = frame.top;
+    
+    let table_val = unsafe { *vm.register_stack.get_unchecked(base_ptr + 1) };
+    let index_val = if top > 2 {
+        unsafe { *vm.register_stack.get_unchecked(base_ptr + 2) }
+    } else {
+        LuaValue::nil()
+    };
 
     // Use ObjectPool API for table access
     if let Some(table_id) = table_val.as_table_id() {
@@ -319,7 +326,8 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let result = table.next(&index_val);
 
             match result {
-                Some((key, value)) => Ok(MultiValue::multiple(vec![key, value])),
+                // Use MultiValue::two() to avoid Vec allocation
+                Some((key, value)) => Ok(MultiValue::two(key, value)),
                 None => Ok(MultiValue::single(LuaValue::nil())),
             }
         } else {

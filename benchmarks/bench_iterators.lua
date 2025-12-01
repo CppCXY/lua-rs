@@ -1,5 +1,5 @@
 -- Benchmark: Iterators (ipairs, pairs, custom)
-local iterations = 100000
+local iterations = 10000
 
 print("=== Iterators Benchmark ===")
 print("Iterations:", iterations)

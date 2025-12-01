@@ -28,6 +28,15 @@ pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
     pub(crate) global_value: LuaValue,
 
+    // Registry table (like Lua's LUA_REGISTRYINDEX)
+    // Used to store objects that should be protected from GC but not visible to Lua code
+    // This is a GC root and all values in it are protected
+    pub(crate) registry: LuaValue,
+
+    // Hot path GC debt counter - placed early in struct for cache locality
+    // This is updated on every allocation and checked frequently
+    pub(crate) gc_debt_local: isize,
+
     // Call stack - Pre-allocated Vec with fixed capacity
     // Using Vec<LuaCallFrame> directly (no Box indirection) for cache efficiency
     // Vec is pre-allocated to MAX_CALL_DEPTH and never reallocated
@@ -40,7 +49,11 @@ pub struct LuaVM {
     // Global register stack (unified stack architecture, like Lua 5.4)
     pub register_stack: Vec<LuaValue>,
 
-    // Garbage collector
+    // Object pool for unified object management (new architecture)
+    // Placed near top for cache locality with hot operations
+    pub(crate) object_pool: ObjectPool,
+
+    // Garbage collector (cold path - only accessed during actual GC)
     pub(crate) gc: GC,
 
     // Multi-return value buffer (temporary storage for function returns)
@@ -78,9 +91,6 @@ pub struct LuaVM {
     // String metatable (shared by all strings) - stored as TableId in LuaValue
     pub(crate) string_metatable: Option<LuaValue>,
 
-    // Object pool for unified object management (new architecture)
-    pub(crate) object_pool: ObjectPool,
-
     // Async executor for Lua-Rust async bridge
     #[cfg(feature = "async")]
     pub(crate) async_executor: AsyncExecutor,
@@ -105,9 +115,12 @@ impl LuaVM {
         
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
+            registry: LuaValue::nil(), // Will be initialized below
+            gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
             frames,
             frame_count: 0,
             register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
+            object_pool: ObjectPool::new(),
             gc: GC::new(),
             return_values: Vec::with_capacity(16),
             open_upvalues: Vec::new(),
@@ -121,7 +134,6 @@ impl LuaVM {
             current_thread_value: None,
             main_thread_value: None, // Will be initialized lazily
             string_metatable: None,
-            object_pool: ObjectPool::new(),
             #[cfg(feature = "async")]
             async_executor: AsyncExecutor::new(),
             // Initialize error storage
@@ -129,13 +141,74 @@ impl LuaVM {
             yield_values: Vec::new(),
         };
 
+        // Initialize registry (like Lua's init_registry)
+        // Registry is a GC root and protects all values stored in it
+        let registry = vm.create_table(2, 8);
+        if let Some(registry_id) = registry.as_table_id() {
+            // Fix the registry table so it's never collected
+            vm.object_pool.fix_table(registry_id);
+        }
+        vm.registry = registry;
+
         // Set _G to point to the global table itself
         let globals_ref = vm.create_table(0, 20);
         vm.global_value = globals_ref;
         vm.set_global("_G", globals_ref);
         vm.set_global("_ENV", globals_ref);
+        
+        // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
+        vm.registry_set_integer(1, globals_ref);
 
         vm
+    }
+    
+    /// Set a value in the registry by integer key
+    pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table_mut(reg_id) {
+                reg_table.set_int(key, value);
+            }
+        }
+    }
+    
+    /// Get a value from the registry by integer key
+    pub fn registry_get_integer(&self, key: i64) -> Option<LuaValue> {
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table(reg_id) {
+                return reg_table.get_int(key);
+            }
+        }
+        None
+    }
+    
+    /// Set a value in the registry by string key
+    pub fn registry_set(&mut self, key: &str, value: LuaValue) {
+        let key_value = self.create_string(key);
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table_mut(reg_id) {
+                reg_table.raw_set(key_value, value);
+            }
+        }
+    }
+    
+    /// Get a value from the registry by string key
+    pub fn registry_get(&self, key: &str) -> Option<LuaValue> {
+        // We can't use create_string here as it requires &mut self
+        // So we do a linear search (registry is typically small)
+        if let Some(reg_id) = self.registry.as_table_id() {
+            if let Some(reg_table) = self.object_pool.get_table(reg_id) {
+                for (k, v) in reg_table.iter_all() {
+                    if let Some(k_id) = k.as_string_id() {
+                        if let Some(k_str) = self.object_pool.get_string_str(k_id) {
+                            if k_str == key {
+                                return Some(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     // Register access helpers for unified stack architecture
@@ -421,8 +494,8 @@ impl LuaVM {
         // Create the metatable
         let metatable = self.create_table(0, 1);
 
-        // Create the __index key before any borrowing
-        let index_key = self.create_string("__index");
+        // Use pre-cached __index StringId for fast lookup
+        let index_key = LuaValue::string(self.object_pool.tm_index);
 
         // Get the table reference to set __index
         if let Some(mt_ref) = self.get_table_mut(&metatable) {
@@ -797,7 +870,8 @@ impl LuaVM {
         if lua_table_value.is_string() {
             // Strings use a shared metatable
             if let Some(string_mt) = self.get_string_metatable() {
-                let index_key = self.create_string("__index");
+                // Use pre-cached __index StringId for fast lookup
+                let index_key = LuaValue::string(self.object_pool.tm_index);
 
                 // Get the __index field from string metatable
                 if let Some(index_table) = self.table_get_with_meta(&string_mt, &index_key) {
@@ -829,7 +903,8 @@ impl LuaVM {
         if let Some(mt) = meta_value
             && let Some(meta_id) = mt.as_table_id()
         {
-            let index_key = self.create_string("__index");
+            // Use pre-cached __index StringId - avoids hash computation and intern lookup
+            let index_key = LuaValue::string(self.object_pool.tm_index);
 
             let index_value = {
                 let metatable = self.object_pool.get_table(meta_id)?;
@@ -841,8 +916,17 @@ impl LuaVM {
                     LuaValueKind::Table => {
                         return self.table_get_with_meta(&index_val, key);
                     }
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![lua_table_value.clone(), key.clone()];
+                    // Fast path for CFunction __index
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = index_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_2(cfunc, *lua_table_value, *key) {
+                                Ok(result) => return result,
+                                Err(_) => return None,
+                            }
+                        }
+                    }
+                    LuaValueKind::Function => {
+                        let args = [*lua_table_value, *key];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -874,7 +958,8 @@ impl LuaVM {
         };
 
         if let Some(mt_id) = metatable.as_table_id() {
-            let index_key = self.create_string("__index");
+            // Use pre-cached __index StringId
+            let index_key = LuaValue::string(self.object_pool.tm_index);
 
             let index_value = {
                 let mt = self.object_pool.get_table(mt_id)?;
@@ -886,9 +971,18 @@ impl LuaVM {
                     // __index is a table - look up in that table
                     LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
 
-                    // __index is a function - call it with (userdata, key)
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![lua_userdata_value.clone(), key.clone()];
+                    // Fast path for CFunction __index
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = index_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_2(cfunc, *lua_userdata_value, *key) {
+                                Ok(result) => return result,
+                                Err(_) => return None,
+                            }
+                        }
+                    }
+                    // Lua function - use slower path
+                    LuaValueKind::Function => {
+                        let args = [*lua_userdata_value, *key];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -905,7 +999,8 @@ impl LuaVM {
     /// Get value from string with metatable support
     /// Handles __index metamethod for strings
     pub fn string_get(&mut self, string_val: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        let index_key = self.create_string("__index");
+        // Use pre-cached __index StringId
+        let index_key = LuaValue::string(self.object_pool.tm_index);
         // Check for __index metamethod in string metatable
         if let Some(mt) = &self.string_metatable.clone() {
             let index_value = if let Some(mt_ref) = self.get_table(mt) {
@@ -918,9 +1013,18 @@ impl LuaVM {
                 match index_val.kind() {
                     // __index is a table - look up in that table (this is the common case for strings)
                     LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
-                    // __index is a function - call it with (string, key)
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![string_val.clone(), key.clone()];
+                    // Fast path for CFunction __index
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = index_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_2(cfunc, *string_val, *key) {
+                                Ok(result) => return result,
+                                Err(_) => return None,
+                            }
+                        }
+                    }
+                    // Lua function - slower path
+                    LuaValueKind::Function => {
+                        let args = [*string_val, *key];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -973,7 +1077,8 @@ impl LuaVM {
         if let Some(mt) = meta_value
             && let Some(mt_id) = mt.as_table_id()
         {
-            let newindex_key = self.create_string("__newindex");
+            // Use pre-cached __newindex StringId - avoids hash computation and intern lookup
+            let newindex_key = LuaValue::string(self.object_pool.tm_newindex);
 
             let newindex_value = {
                 let Some(metatable) = self.object_pool.get_table(mt_id) else {
@@ -987,8 +1092,18 @@ impl LuaVM {
                     LuaValueKind::Table => {
                         return self.table_set_with_meta(newindex_val, key, value);
                     }
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![lua_table_val, key, value];
+                    // Fast path for CFunction __newindex
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = newindex_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_3(cfunc, lua_table_val, key, value) {
+                                Ok(_) => return Ok(()),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    // Lua function - slower path
+                    LuaValueKind::Function => {
+                        let args = [lua_table_val, key, value];
                         match self.call_metamethod(&newindex_val, &args) {
                             Ok(_) => return Ok(()),
                             Err(e) => return Err(e),
@@ -1018,9 +1133,177 @@ impl LuaVM {
         func: &LuaValue,
         args: &[LuaValue],
     ) -> LuaResult<Option<LuaValue>> {
-        // Use call_function_internal for both C functions and Lua functions
+        // Fast path for CFunction
+        if let Some(cfunc) = func.as_cfunction() {
+            match args.len() {
+                1 => return self.call_cfunc_metamethod_1(cfunc, args[0]),
+                2 => return self.call_cfunc_metamethod_2(cfunc, args[0], args[1]),
+                3 => return self.call_cfunc_metamethod_3(cfunc, args[0], args[1], args[2]),
+                _ => {}
+            }
+        }
+        
+        // Slow path for Lua functions and general cases
         let result = self.call_function_internal(func.clone(), args.to_vec())?;
         Ok(result.get(0).cloned())
+    }
+    
+    /// Fast path for calling CFunction metamethods with 2 arguments
+    /// Used by __index, __newindex, etc. Avoids Vec allocation.
+    /// Returns the first return value.
+    #[inline(always)]
+    pub fn call_cfunc_metamethod_2(
+        &mut self,
+        cfunc: crate::lua_value::CFunction,
+        arg1: LuaValue,
+        arg2: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        // Calculate new base position - use current frame's top area
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            let caller_base = current_frame.base_ptr;
+            let caller_max_stack =
+                if let Some(func_id) = current_frame.function_value.as_function_id() {
+                    self.object_pool
+                        .get_function(func_id)
+                        .map(|f| f.chunk.max_stack_size)
+                        .unwrap_or(256)
+                } else {
+                    256
+                };
+            caller_base + caller_max_stack
+        } else {
+            0
+        };
+        
+        let stack_size = 3; // func + 2 args
+        self.ensure_stack_capacity(new_base + stack_size);
+
+        // Set up arguments directly (no Vec allocation)
+        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
+        self.register_stack[new_base + 1] = arg1;
+        self.register_stack[new_base + 2] = arg2;
+
+        // Create C function frame
+        let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
+        self.push_frame(temp_frame);
+
+        // Call CFunction
+        let result = match cfunc(self) {
+            Ok(r) => {
+                self.pop_frame_discard();
+                Ok(r.first())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        };
+        
+        result
+    }
+    
+    /// Fast path for calling CFunction metamethods with 1 argument
+    /// Used by __len, __unm, __bnot, etc. Avoids Vec allocation.
+    #[inline(always)]
+    pub fn call_cfunc_metamethod_1(
+        &mut self,
+        cfunc: crate::lua_value::CFunction,
+        arg1: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            let caller_base = current_frame.base_ptr;
+            let caller_max_stack =
+                if let Some(func_id) = current_frame.function_value.as_function_id() {
+                    self.object_pool
+                        .get_function(func_id)
+                        .map(|f| f.chunk.max_stack_size)
+                        .unwrap_or(256)
+                } else {
+                    256
+                };
+            caller_base + caller_max_stack
+        } else {
+            0
+        };
+        
+        let stack_size = 2; // func + 1 arg
+        self.ensure_stack_capacity(new_base + stack_size);
+
+        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
+        self.register_stack[new_base + 1] = arg1;
+
+        let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
+        self.push_frame(temp_frame);
+
+        let result = match cfunc(self) {
+            Ok(r) => {
+                self.pop_frame_discard();
+                Ok(r.first())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        };
+        
+        result
+    }
+    
+    /// Fast path for calling CFunction metamethods with 3 arguments
+    /// Used by __newindex. Avoids Vec allocation.
+    #[inline(always)]
+    pub fn call_cfunc_metamethod_3(
+        &mut self,
+        cfunc: crate::lua_value::CFunction,
+        arg1: LuaValue,
+        arg2: LuaValue,
+        arg3: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            let caller_base = current_frame.base_ptr;
+            let caller_max_stack =
+                if let Some(func_id) = current_frame.function_value.as_function_id() {
+                    self.object_pool
+                        .get_function(func_id)
+                        .map(|f| f.chunk.max_stack_size)
+                        .unwrap_or(256)
+                } else {
+                    256
+                };
+            caller_base + caller_max_stack
+        } else {
+            0
+        };
+        
+        let stack_size = 4; // func + 3 args
+        self.ensure_stack_capacity(new_base + stack_size);
+
+        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
+        self.register_stack[new_base + 1] = arg1;
+        self.register_stack[new_base + 2] = arg2;
+        self.register_stack[new_base + 3] = arg3;
+
+        let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
+        self.push_frame(temp_frame);
+
+        let result = match cfunc(self) {
+            Ok(r) => {
+                self.pop_frame_discard();
+                Ok(r.first())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        };
+        
+        result
     }
 
     // Integer division
@@ -1192,8 +1475,8 @@ impl LuaVM {
                 continue;
             }
 
-            // Try to get __close metamethod
-            let close_key = self.create_string("__close");
+            // Try to get __close metamethod using pre-cached StringId
+            let close_key = LuaValue::string(self.object_pool.tm_close);
             let metamethod = if let Some(mt) = self.table_get_metatable(&value) {
                 self.table_get_with_meta(&mt, &close_key)
             } else {
@@ -1259,16 +1542,14 @@ impl LuaVM {
     }
 
     /// Create a new table in object pool
+    /// OPTIMIZATION: Only update local debt counter, no function calls
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
 
-        // Register with GC - ultra-lightweight, just update debt
-        self.gc
-            .register_object(id.0, crate::gc::GcObjectType::Table);
-
-        // GC check MUST NOT happen here - object not yet protected!
-        // Caller must call check_gc() AFTER storing value in register
+        // Lightweight GC tracking: just increment debt
+        // This is a single integer add, should be very fast
+        self.gc_debt_local += 256;
 
         LuaValue::table(id)
     }
@@ -1519,13 +1800,33 @@ impl LuaVM {
     /// This is called after allocating new objects (strings, tables, functions)
     /// Uses GC debt mechanism: runs when debt > 0
     ///
-    /// OPTIMIZATION: Use incremental collection with work budget
+    /// OPTIMIZATION: Fast path is inlined, slow path is separate function
+    #[inline(always)]
     fn check_gc(&mut self) {
-        // Fast path: check debt without collecting roots
-        if !self.gc.should_collect() {
+        // Ultra-fast path: single integer comparison with local debt counter
+        // Only check if debt exceeds a significant threshold (1MB)
+        // This reduces the overhead of frequent checks dramatically
+        if self.gc_debt_local <= 1024 * 1024 {
             return;
         }
+        // Slow path: actual GC work
+        self.check_gc_slow();
+    }
 
+    /// Slow path for GC - separate function to keep hot path small
+    /// Public version for direct inline checks
+    #[cold]
+    #[inline(never)]
+    pub fn check_gc_slow_pub(&mut self) {
+        self.check_gc_slow();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn check_gc_slow(&mut self) {
+        // Sync local debt to GC
+        self.gc.gc_debt = self.gc_debt_local;
+        
         // Incremental GC: only collect every N checks to reduce overhead
         self.gc.increment_check_counter();
         if !self.gc.should_run_collection() {
@@ -1538,14 +1839,21 @@ impl LuaVM {
         // 1. Global table
         roots.push(self.global_value);
 
-        // 2. String metatable
+        // 2. Registry table (persistent objects storage)
+        roots.push(self.registry);
+
+        // 3. String metatable
         if let Some(mt) = &self.string_metatable {
             roots.push(*mt);
         }
 
-        // 3. ALL frame registers (not just current frame)
+        // 3. ALL frame registers AND function values (not just current frame)
         // This is critical - any register in any active frame must be kept alive
-        for frame in &self.frames {
+        // Also, the function being executed in each frame must be kept alive!
+        for frame in &self.frames[..self.frame_count] {
+            // Add the function value for this frame - this is CRITICAL!
+            roots.push(frame.function_value);
+            
             let base_ptr = frame.base_ptr;
             let top = frame.top;
             for i in 0..top {
@@ -1626,12 +1934,25 @@ impl LuaVM {
         // Add the global table itself as a root
         roots.push(self.global_value);
 
-        // Add all frame registers as roots
-        for frame in &self.frames {
+        // Add registry table as a root (persistent objects)
+        roots.push(self.registry);
+
+        // Add string metatable if present
+        if let Some(mt) = &self.string_metatable {
+            roots.push(*mt);
+        }
+
+        // Add all frame registers AND function values as roots
+        for frame in &self.frames[..self.frame_count] {
+            // CRITICAL: Add the function being executed
+            roots.push(frame.function_value);
+            
             let base_ptr = frame.base_ptr;
             let top = frame.top;
             for i in 0..top {
-                roots.push(self.register_stack[base_ptr + i]);
+                if base_ptr + i < self.register_stack.len() {
+                    roots.push(self.register_stack[base_ptr + i]);
+                }
             }
         }
 
@@ -2207,13 +2528,20 @@ impl LuaVM {
                 
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
-                // Initialize registers with nil, then copy args
-                for i in new_base..(new_base + max_stack_size) {
-                    self.register_stack[i] = LuaValue::nil();
-                }
-                for (i, arg) in args.iter().enumerate() {
-                    if i < max_stack_size {
-                        self.register_stack[new_base + i] = *arg;
+                // Copy args first, then initialize remaining with nil (only beyond args)
+                let arg_count = args.len().min(max_stack_size);
+                unsafe {
+                    let dst = self.register_stack.as_mut_ptr().add(new_base);
+                    // Copy arguments
+                    for (i, arg) in args.iter().enumerate() {
+                        if i < max_stack_size {
+                            *dst.add(i) = *arg;
+                        }
+                    }
+                    // Initialize remaining registers with nil
+                    let nil_val = LuaValue::nil();
+                    for i in arg_count..max_stack_size {
+                        *dst.add(i) = nil_val;
                     }
                 }
 
@@ -2242,13 +2570,9 @@ impl LuaVM {
                         self.pop_frame_discard();
                         let result = std::mem::take(&mut self.return_values);
                         
-                        // Clear the stack region used by this call to release references
-                        // This prevents GC from scanning stale objects after dofile/pcall
-                        for i in new_base..(new_base + max_stack_size) {
-                            if i < self.register_stack.len() {
-                                self.register_stack[i] = LuaValue::nil();
-                            }
-                        }
+                        // NOTE: We intentionally don't clear the stack here anymore.
+                        // The stack will be overwritten on next call, and GC can handle
+                        // any stale references. This gives significant performance improvement.
                         
                         Ok(result)
                     }

@@ -1,232 +1,262 @@
-# Lua-RS Performance Report
+# Lua-RS vs Native Lua 性能对比分析报告
 
-> **Last Updated**: November 30, 2025  
-> **Test Environment**: Windows 11, AMD Ryzen 7 5800X, Rust 1.89.0
-> **Lua-RS Version**: main 
-> **Native Lua Version**: Lua 5.4.6
+> **更新时间**: 2025-12-01
+> **分支**: gc
+> **目的**: 识别性能瓶颈，为后续优化提供参考
 
-## Executive Summary
+## 概述
 
-Lua-RS has achieved **production-ready correctness** with **302/302 tests passing (100%)**. The interpreter delivers **40-100%+ of native Lua 5.4 performance** across most operations, with excellent performance in arithmetic and control flow operations.
-
-### Key Performance Highlights
-
-🏆 **Excellent Performance (>90% of native)**:
-- **Integer addition**: **~220 M ops/sec** - Near native performance
-- **Float multiplication**: **~210 M ops/sec** - Near native performance
-- **Local variable access**: **~220 M ops/sec** - Extremely fast
-- **Nested loops**: **~210 M ops/sec** - Excellent optimization
-- **String length**: **~150 M ops/sec** - Faster than native!
-- **Table access**: **~115 M ops/sec** - Solid performance
-- **String equality**: **~82 M ops/sec** - Fast comparison
-
-🎯 **Good Performance (>50% of native)**:
-- **While loop**: ~125 M ops/sec
-- **If-else control**: ~93 M ops/sec
-- **Upvalue access**: ~95 M ops/sec
-- **Table insertion**: ~50 M ops/sec
-- **Simple function call**: ~24 M calls/sec
-- **Bitwise operations**: ~80 M ops/sec
-- **Integer division**: ~190 M ops/sec
-
-📊 **Areas for Optimization**:
-- **ipairs/pairs iteration**: ~13-15 K iters/sec (vs ~120 K for numeric for)
-- **Vararg to table**: ~0.06 M ops/sec (GC overhead)
-- **Object creation**: ~40-160 K ops/sec (allocation overhead)
+| 指标 | Native Lua | Lua-RS | 比率 |
+|------|-----------|--------|------|
+| **总执行时间** | 11.80s | 80.18s | **6.8x 慢** |
 
 ---
 
-## Latest Comprehensive Benchmark Results (November 30, 2025)
+## 🔴 严重性能问题 (>5x 差距) - 优先级: 高
 
-### Core Operations (10M iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Integer addition | **219 M ops/sec** | Near native |
-| Float multiplication | **200 M ops/sec** | Near native |
-| Mixed operations | **111 M ops/sec** | Good |
-| Local var access | **219 M ops/sec** | Excellent |
-| Global var access | **43 M ops/sec** | 5x slower than local |
-| Upvalue access | **96 M ops/sec** | Good |
+### 1. OOP 方法调用 (~30x 慢)
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Method call (colon) | 10,638 K/s | 350 K/s | **30x** |
+| Method call (dot) | 11,628 K/s | 399 K/s | **29x** |
+| Inherited method call | 10,000 K/s | 392 K/s | **25x** |
+| Closure method call | 38,462 K/s | 466 K/s | **82x** |
+| Prototype chain (3 levels) | 22,727 K/s | 429 K/s | **53x** |
 
-### Control Flow (10M iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| If-else | **93 M ops/sec** | Good |
-| While loop | **121 M ops/sec** | Excellent |
-| Repeat-until | **110 M ops/sec** | Good |
-| Nested loops | **218 M ops/sec** | Excellent |
-| Numeric for | **122 K iters/sec** | Fast |
+**根因分析**: 
+- 方法调用涉及 `__index` 元方法查找
+- 每次调用都需要多次表查找
+- 可能存在不必要的闭包创建或值复制
 
-### Functions & Closures (1M iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Simple function call | **22 M calls/sec** | Good |
-| Recursive fib(25) | **0.010s** | Acceptable |
-| Vararg function | **1.5 M calls/sec** | OK |
-| Closure creation | **6.8 M ops/sec** | Good |
-| Upvalue read/write | **22 M ops/sec** | Excellent |
-| Nested closures | **18 M ops/sec** | Good |
-
-### Multiple Returns (1M iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Single return | **34 M ops/sec** | Excellent |
-| Triple return | **15 M ops/sec** | Good |
-| 10 returns | **4.8 M ops/sec** | OK |
-| select('#') | **4.4 M ops/sec** | OK |
-| table.pack | **4 M ops/sec** | OK |
-| table.unpack | **8.9 M ops/sec** | Good |
-
-### Tables (1M iterations unless noted)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Table insertion | **51 M inserts/sec** | Excellent |
-| Table access | **117 M accesses/sec** | Excellent |
-| Hash table (100k) | **0.022s** | Fast |
-| # operator | **44 M ops/sec** | Excellent |
-| table.insert (end) | **25.7 M ops/sec** | Excellent |
-| table.insert (mid) | **8.8 M ops/sec** | Good |
-| table.remove | **16.3 M ops/sec** | Good |
-| table.concat (1k) | **26 K ops/sec** | OK |
-| table.sort (random) | **6.6 K ops/sec** | OK |
-
-### Iterators (100K iterations × 1000 items)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Numeric for | **122 K iters/sec** | Fast (baseline) |
-| ipairs | **14.8 K iters/sec** | 8x slower than for |
-| pairs (array) | **12.7 K iters/sec** | Iterator overhead |
-| pairs (hash) | **14 K iters/sec** | Similar |
-| next() | **14.9 K iters/sec** | Similar |
-| Custom iterator | **11.2 K iters/sec** | Overhead |
-
-### Strings (100K iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Concatenation | **2.7 M ops/sec** | Good |
-| String length | **185 M ops/sec** | Excellent |
-| string.upper | **8.5 M ops/sec** | Good |
-| string.lower | **7.9 M ops/sec** | Good |
-| string.sub | **7.1 M ops/sec** | Good |
-| string.find | **5.1 M ops/sec** | Good |
-| string.format | **3.4 M ops/sec** | Good |
-| string.match | **1.5 M ops/sec** | OK |
-| string.gsub | **1.1 M ops/sec** | OK |
-| String equality | **82 M ops/sec** | Excellent |
-
-### Math Library (5M iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Integer mul/add/mod | **103 M ops/sec** | Excellent |
-| Float mul/add/div | **77 M ops/sec** | Good |
-| math.sqrt | **22 M ops/sec** | Good |
-| math.sin | **20 M ops/sec** | Good |
-| math.floor/ceil | **11 M ops/sec** | OK |
-| math.abs | **20 M ops/sec** | Good |
-| math.random | **11 M ops/sec** | Good |
-| Bitwise ops | **82 M ops/sec** | Excellent |
-| Integer division | **170 M ops/sec** | Excellent |
-| Power (^2) | **43 M ops/sec** | Good |
-
-### Metatables & OOP (500K/100K iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| __index (function) | **6 M ops/sec** | Good |
-| __index (table) | **19 M ops/sec** | Good |
-| __newindex | **7.2 M ops/sec** | Good |
-| __call | **13 M ops/sec** | Good |
-| __len | **7.3 M ops/sec** | Good |
-| rawget | **15.4 M ops/sec** | Good |
-| Object creation | **41 K ops/sec** | Allocation overhead |
-| Method call | **4.5 M calls/sec** | Good |
-| Property access | **56 M ops/sec** | Excellent |
-
-### Coroutines (100K iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| Create/resume/yield | **27 K cycles/sec** | OK |
-| Repeated yield | **5.6 M yields/sec** | Good |
-| coroutine.wrap | **22 K ops/sec** | OK |
-| coroutine.status | **13 M ops/sec** | Excellent |
-
-### Error Handling (100K iterations)
-| Operation | Performance | Notes |
-|-----------|-------------|-------|
-| pcall (success) | **4.3 M ops/sec** | Good |
-| pcall (error) | **3.6 M ops/sec** | Good |
-| xpcall (error) | **1.8 M ops/sec** | OK |
-| Direct call | **41 M ops/sec** | Baseline |
-| assert (success) | **16 M ops/sec** | Good |
+**优化方向**:
+- 优化 `__index` 元方法的快速路径
+- 缓存方法查找结果
+- 减少方法调用的开销
 
 ---
 
-## Running Benchmarks
+### 2. 迭代器 (~50-60x 慢)
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Custom stateless iter | 24.88 K/s | 0.44 K/s | **57x** |
+| Multi-value iterator | 16.92 K/s | 0.42 K/s | **40x** |
+| Closure iterator (100) | 256.41 K/s | 4.03 K/s | **64x** |
 
-### Run All Benchmarks
-```bash
-# Using PowerShell script (compares with native Lua)
-.\run_benchmarks.ps1
+**根因分析**:
+- `TFORCALL` 指令实现效率低
+- 迭代器函数调用开销大
+- 多返回值处理性能差
 
-# Run with lua-rs only
-.\target\release\lua.exe .\benchmarks\run_all.lua
-```
-
-### Individual Benchmarks
-```bash
-.\target\release\lua.exe .\benchmarks\bench_arithmetic.lua
-.\target\release\lua.exe .\benchmarks\bench_tables.lua
-.\target\release\lua.exe .\benchmarks\bench_strings.lua
-# ... etc
-```
-
-### Benchmark Files (16 total)
-- **Core**: bench_arithmetic, bench_control_flow, bench_locals
-- **Functions**: bench_functions, bench_closures, bench_multiret
-- **Tables**: bench_tables, bench_table_lib, bench_iterators
-- **Strings**: bench_strings, bench_string_lib
-- **Math**: bench_math
-- **Advanced**: bench_metatables, bench_oop, bench_coroutines, bench_errors
+**优化方向**:
+- 优化 `TFORCALL`/`TFORLOOP` 指令
+- 减少迭代器函数调用的开销
+- 优化多返回值处理
 
 ---
 
-## Performance History
+### 3. 协程创建 (~9x 慢)
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Create/resume/yield | 487.80 K/s | 56.13 K/s | **8.7x** |
+| coroutine.wrap | 2,000 K/s | 73.75 K/s | **27x** |
 
-### November 30, 2025 - Comprehensive Benchmarks & Optimizations
-- Added 11 new benchmark files (16 total)
-- Fixed floating-point for loop bug
-- Optimized `call_function_internal` - reduced code by ~300 lines
-- All 302 tests passing
-- Total benchmark runtime: ~120 seconds
+**根因分析**:
+- 协程创建时分配过多内存
+- 协程状态管理开销大
 
-### November 29, 2025 - While Loop Optimization
-- Optimized while/repeat loop bytecode generation
-- While loop at **85% of native**
-- Nested loops at **97% of native**
-
-### November 24, 2025 - CallFrame Optimization  
-- Implemented code pointer caching in CallFrame
-- Eliminated HashMap lookups in hot paths
-- Major improvements across all benchmarks
+**优化方向**:
+- 优化协程状态结构
+- 复用协程栈空间
 
 ---
 
-## Architecture Notes
+### 4. 对象创建 (~10x 慢)
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Object creation | 3,571 K/s | 359 K/s | **10x** |
+| Inherited object creation | 2,000 K/s | 195 K/s | **10x** |
+| Closure object creation | 1,667 K/s | 99 K/s | **17x** |
 
-### Performance Characteristics
-- **Local variables are ~5x faster** than global variables
-- **Numeric for is ~8-9x faster** than ipairs/pairs
-- **Property access** is very fast (~56 M ops/sec)
-- **Function calls** are efficient (~22 M calls/sec)
-- **Bitwise operations** are very fast (~82 M ops/sec)
+**根因分析**:
+- 表创建和元表设置开销大
+- 闭包创建效率低
 
-### Known Performance Bottlenecks
-1. **ipairs/pairs iteration**: Iterator protocol overhead
-2. **Object creation**: Allocation and setmetatable overhead
-3. **Vararg to table**: Extra allocation and copying
-4. **Complex pattern matching**: Regex-like overhead
+---
 
-### Optimization Opportunities
-1. Iterator fast-path for ipairs/pairs
-2. Object pooling for common patterns
-3. Inlining for small functions
-4. Better GC tuning for allocation-heavy code
+### 5. __call 元方法 (~81x 慢)
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| __call metamethod | 33.33 M/s | 0.41 M/s | **81x** |
+
+**根因分析**:
+- `__call` 元方法查找和调用路径未优化
+- 每次调用都进行完整的元方法查找
+
+**优化方向**:
+- 缓存 `__call` 元方法
+- 优化表的 `__call` 调用路径
+
+---
+
+### 6. Returns as func args (~101x 慢)
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Returns as func args | 22.22 M/s | 0.22 M/s | **101x** |
+
+**根因分析**:
+- 将函数返回值作为另一个函数参数时效率极低
+- 多返回值传递开销大
+
+---
+
+## 🟠 中等性能问题 (2-5x 差距) - 优先级: 中
+
+### 1. 基础循环性能
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| While loop | 123.46 M/s | 50.23 M/s | **2.5x** |
+| Repeat-until | 140.85 M/s | 78.44 M/s | **1.8x** |
+| Nested loops | 250 M/s | 138.58 M/s | **1.8x** |
+
+**根因分析**:
+- 指令调度开销 (match 分发)
+- 每条指令返回主循环的开销
+
+**优化方向**:
+- 考虑超级指令合并常见指令序列
+- 优化主循环调度
+
+---
+
+### 2. ipairs/pairs 迭代
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| ipairs (1000 items) | 33.56 K/s | 10.35 K/s | **3.2x** |
+| pairs on array | 32.47 K/s | 10.45 K/s | **3.1x** |
+| pairs on hash | 22.94 K/s | 9.98 K/s | **2.3x** |
+| next() iteration | 23.20 K/s | 9.87 K/s | **2.4x** |
+
+**优化方向**:
+- 优化 `ipairs`/`pairs` 的 C 函数实现
+- 减少每次迭代的函数调用开销
+
+---
+
+### 3. 全局变量访问
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Global var access | 73.53 M/s | 28.93 M/s | **2.5x** |
+| Global table field | 42.37 M/s | 19.38 M/s | **2.2x** |
+
+**优化方向**:
+- 优化 `GETTABUP`/`SETTABUP` 指令
+- 优化 `_ENV` 表查找
+
+---
+
+### 4. 字符串操作
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| string.reverse | 7,143 K/s | 2,668 K/s | **2.7x** |
+| string.rep | 2,174 K/s | 1,083 K/s | **2.0x** |
+| string.format (complex) | 1,408 K/s | 668 K/s | **2.1x** |
+| string.char | 11,111 K/s | 4,557 K/s | **2.4x** |
+
+---
+
+### 5. Upvalue 操作
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Upvalue read/write | 45.45 M/s | 18.75 M/s | **2.4x** |
+| Multiple upvalues | 32.26 M/s | 16.24 M/s | **2.0x** |
+
+---
+
+### 6. math.min/max
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| math.min/max | 18.05 M/s | 6.18 M/s | **2.9x** |
+
+---
+
+### 7. __index (function)
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| __index (function) | 22.73 M/s | 3.62 M/s | **6.3x** |
+
+---
+
+## 🟢 性能接近 (<2x 差距) - 可接受
+
+| 测试项 | Lua | Lua-RS | 差距 |
+|--------|-----|--------|------|
+| Integer addition | 200 M/s | 137 M/s | 1.5x |
+| Float multiplication | 200 M/s | 135 M/s | 1.5x |
+| Local var access | 227 M/s | 131 M/s | 1.7x |
+| Table insertion | 47.62 M/s | 41.90 M/s | 1.1x |
+| Table access | 111 M/s | 61.74 M/s | 1.8x |
+| string.upper/lower | ~4,500 K/s | ~6,200 K/s | **Lua-RS 更快!** |
+| string.byte | 20,000 K/s | 20,924 K/s | **Lua-RS 更快!** |
+| table.sort | 相近 | 相近 | ~1x |
+| Integer division (//) | 78 M/s | 114 M/s | **Lua-RS 更快!** |
+
+---
+
+## 🔵 Lua-RS 更快的项目
+
+| 测试项 | Lua | Lua-RS | Lua-RS 优势 |
+|--------|-----|--------|-------------|
+| Integer division (//) | 78 M/s | 114 M/s | 1.5x 更快 |
+| Repeated yield | 685 K/s | 2,997 K/s | 4.4x 更快 |
+| pcall (error) | 508 K/s | 2,184 K/s | 4.3x 更快 |
+| xpcall (error) | 431 K/s | 1,273 K/s | 3.0x 更快 |
+| string.upper | 4,545 K/s | 6,716 K/s | 1.5x 更快 |
+| table.move | 112 K/s | 163 K/s | 1.5x 更快 |
+
+---
+
+## 优化优先级建议
+
+### 第一优先级 (影响最大)
+1. **OOP 方法调用** - 30-82x 差距，影响所有面向对象代码
+2. **自定义迭代器** - 40-64x 差距，影响 `for...in` 循环
+3. **__call 元方法** - 81x 差距
+
+### 第二优先级
+4. **Returns as func args** - 101x 差距，但使用场景相对较少
+5. **协程创建** - 9-27x 差距
+6. **对象创建** - 10-17x 差距
+
+### 第三优先级
+7. **基础循环 (while/repeat)** - 1.8-2.5x 差距
+8. **全局变量访问** - 2.2-2.5x 差距
+9. **ipairs/pairs** - 2.3-3.2x 差距
+
+---
+
+## 架构层面的优化建议
+
+### 1. 方法调用优化
+- 实现内联缓存 (Inline Caching) 加速重复的方法查找
+- 对 `self:method()` 模式进行特殊优化
+
+### 2. 迭代器优化
+- 优化 `TFORCALL` 指令，减少函数调用开销
+- 考虑对 `ipairs`/`pairs` 进行特殊处理
+
+### 3. 函数调用优化
+- 减少函数调用帧的创建开销
+- 优化多返回值传递
+
+### 4. 循环优化
+- 实现超级指令，合并常见指令序列
+- 考虑循环不变代码外提
+
+### 5. 元方法优化
+- 缓存元方法查找结果
+- 对常用元方法 (`__index`, `__call`) 实现快速路径
+
+---
+
+*报告生成时间: 2025-12-01*
+*基准测试迭代次数: 见各测试项*

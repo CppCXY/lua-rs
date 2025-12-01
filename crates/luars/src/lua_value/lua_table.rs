@@ -298,6 +298,7 @@ impl LuaTable {
     }
 
     /// Fast integer key write
+    /// OPTIMIZED: Use resize_with for better performance
     #[inline]
     pub fn set_int(&mut self, key: i64, value: LuaValue) {
         if value.is_nil() {
@@ -316,15 +317,27 @@ impl LuaTable {
             let array_len = self.array.len();
 
             if idx < array_len {
+                // Fast path: within existing array
                 self.array[idx] = value;
                 return;
             } else if idx == array_len {
+                // Sequential append - use reserve to reduce reallocations
+                if self.array.capacity() == array_len {
+                    // Need to grow - reserve extra space
+                    let extra = if array_len == 0 { 8 } else { array_len };
+                    self.array.reserve(extra);
+                }
                 self.array.push(value);
+                return;
+            } else if idx < array_len + 8 && idx < 256 {
+                // Small gap - fill with nils and extend
+                self.array.resize_with(idx + 1, LuaValue::nil);
+                self.array[idx] = value;
                 return;
             }
         }
 
-        // Out of array range, use hash
+        // Out of array range or large gap, use hash
         self.set_in_hash(LuaValue::integer(key), value);
     }
 

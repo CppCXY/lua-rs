@@ -244,7 +244,8 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
     // If not equal by value, try __eq metamethod
     // IMPORTANT: Both operands must have the SAME __eq metamethod (Lua 5.4 spec)
     if !is_equal && (left.is_table() || right.is_table()) {
-        let mm_key = vm.create_string("__eq");
+        // Use pre-cached __eq StringId
+        let mm_key = LuaValue::string(vm.object_pool.tm_eq);
 
         let left_mt = vm.table_get_metatable(&left);
         let right_mt = vm.table_get_metatable(&right);
@@ -356,7 +357,8 @@ fn exec_lt_metamethod(
     k: bool,
     frame_ptr: *mut LuaCallFrame,
 ) -> LuaResult<()> {
-    let mm_key = vm.create_string("__lt");
+    // Use pre-cached __lt StringId
+    let mm_key = LuaValue::string(vm.object_pool.tm_lt);
     let mut found_metamethod = false;
 
     if let Some(mt) = vm.table_get_metatable(&left) {
@@ -452,8 +454,8 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
         // String comparison
         left <= right
     } else {
-        // Try __le metamethod first
-        let mm_key_le = vm.create_string("__le");
+        // Try __le metamethod first - use pre-cached StringId
+        let mm_key_le = LuaValue::string(vm.object_pool.tm_le);
         let mut found_metamethod = false;
 
         if let Some(mt) = vm.table_get_metatable(&left) {
@@ -494,7 +496,8 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
 
         // If __le not found, try __lt and compute !(b < a)
         if !found_metamethod {
-            let mm_key_lt = vm.create_string("__lt");
+            // Use pre-cached __lt StringId
+            let mm_key_lt = LuaValue::string(vm.object_pool.tm_lt);
 
             if let Some(mt) = vm.table_get_metatable(&right) {
                 if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key_lt) {
@@ -809,7 +812,8 @@ pub fn exec_call(
         });
 
         if let Some(metatable) = metatable_opt {
-            let call_key = vm.create_string("__call");
+            // Use pre-cached __call StringId
+            let call_key = LuaValue::string(vm.object_pool.tm_call);
             if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
                 if call_func.is_callable() {
                     if call_func.is_cfunction() {
@@ -859,6 +863,12 @@ fn exec_call_lua_function(
     call_metamethod_self: LuaValue,
     frame_ptr_ptr: &mut *mut LuaCallFrame, // Use passed frame_ptr!
 ) -> LuaResult<()> {
+    // Safepoint GC check: run GC at function call boundaries
+    // This is much cheaper than checking on every table operation
+    if vm.gc_debt_local > 1024 * 1024 {
+        vm.check_gc_slow_pub();
+    }
+
     // Get function ID - FAST PATH: assume valid function
     let func_id = unsafe { func.as_function_id().unwrap_unchecked() };
 

@@ -302,8 +302,8 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
             let concat_result = l + &r;
             result_value = vm.create_string_owned(concat_result);
         } else {
-            // Try __concat metamethod
-            let mm_key = vm.create_string("__concat");
+            // Try __concat metamethod - use pre-cached StringId
+            let mm_key = LuaValue::string(vm.object_pool.tm_concat);
             let mut found_metamethod = false;
 
             if let Some(mt) = vm.table_get_metatable(&result_value) {
