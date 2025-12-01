@@ -131,7 +131,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 /// R[A]+=R[A+2];
 /// if R[A] <?= R[A+1] then { pc-=Bx; R[A+3]=R[A] }
 ///
-/// ULTRA-OPTIMIZED: Matches Lua's chgivalue - only update secondary field for integers
+/// ULTRA-OPTIMIZED: Only check step type (like Lua C), use chgivalue pattern
 #[inline(always)]
 pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -141,37 +141,52 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         let base_ptr = (*frame_ptr).base_ptr;
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
 
-        // Check types first to distinguish integer vs float loop
-        let idx = *reg_base;
-        let counter_or_limit = *reg_base.add(1);
+        // Only check step type - like Lua C's ttisinteger(s2v(ra + 2))
         let step = *reg_base.add(2);
-
-        let idx_tag = idx.primary & TYPE_MASK;
-        let limit_tag = counter_or_limit.primary & TYPE_MASK;
-        let step_tag = step.primary & TYPE_MASK;
-
-        // Fast path: pure integer loop (all three values are integers)
-        if idx_tag == TAG_INTEGER && limit_tag == TAG_INTEGER && step_tag == TAG_INTEGER {
-            // Read counter - R[A+1] stores remaining iteration count for integer loops
-            let counter = counter_or_limit.secondary as i64;
-
-            if counter > 0 {
-                let idx_i = idx.secondary as i64;
+        
+        if step.primary == TAG_INTEGER {
+            // Integer loop - step is integer, so idx and counter must be too (set by FORPREP)
+            let count = (*reg_base.add(1)).secondary; // counter as u64
+            
+            if count > 0 {
+                let idx = (*reg_base).secondary as i64;
                 let step_i = step.secondary as i64;
-                let new_idx = idx_i.wrapping_add(step_i);
-
-                // Use chgivalue pattern - only update secondary field, type tags stay the same
-                (*reg_base).secondary = new_idx as u64;
-                (*reg_base.add(1)).secondary = (counter - 1) as u64;
-                (*reg_base.add(3)).secondary = new_idx as u64;
-
+                let new_idx = idx.wrapping_add(step_i);
+                
+                // chgivalue pattern - only update secondary (value), primary (type) stays same
+                (*reg_base.add(1)).secondary = count - 1; // counter--
+                (*reg_base).secondary = new_idx as u64;   // idx += step
+                (*reg_base.add(3)).secondary = new_idx as u64; // control = idx
+                
                 (*frame_ptr).pc -= bx;
             }
-            // counter == 0 means loop ended, just fall through
+            // count == 0: loop ended, fall through
             return Ok(());
         }
 
-        // Slow path: float loop (at least one value is float)
+        // Float loop - slower path
+        exec_forloop_float(vm, reg_base, bx, frame_ptr)
+    }
+}
+
+/// Float loop - separate cold function
+#[cold]
+#[inline(never)]
+fn exec_forloop_float(
+    vm: &mut LuaVM,
+    reg_base: *mut LuaValue,
+    bx: usize,
+    frame_ptr: *mut LuaCallFrame,
+) -> LuaResult<()> {
+    unsafe {
+        let idx = *reg_base;
+        let limit = *reg_base.add(1);
+        let step = *reg_base.add(2);
+        
+        let idx_tag = idx.primary & TYPE_MASK;
+        let limit_tag = limit.primary & TYPE_MASK;
+        let step_tag = step.primary & TYPE_MASK;
+
         let idx_f = if idx_tag == TAG_FLOAT {
             f64::from_bits(idx.secondary)
         } else if idx_tag == TAG_INTEGER {
@@ -181,9 +196,9 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         };
 
         let limit_f = if limit_tag == TAG_FLOAT {
-            f64::from_bits(counter_or_limit.secondary)
+            f64::from_bits(limit.secondary)
         } else if limit_tag == TAG_INTEGER {
-            counter_or_limit.secondary as i64 as f64
+            limit.secondary as i64 as f64
         } else {
             return Err(vm.error("'for' limit must be a number".to_string()));
         };
