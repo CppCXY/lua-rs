@@ -60,7 +60,12 @@ pub fn exec_return(
         let dest_base = caller_base + result_reg;
 
         // Ensure destination has enough space
-        let dest_end = dest_base + return_count.max(if num_results == usize::MAX { return_count } else { num_results });
+        let dest_end = dest_base
+            + return_count.max(if num_results == usize::MAX {
+                return_count
+            } else {
+                num_results
+            });
         if vm.register_stack.len() < dest_end {
             vm.ensure_stack_capacity(dest_end);
             vm.register_stack.resize(dest_end, LuaValue::nil());
@@ -78,9 +83,17 @@ pub fn exec_return(
                     let dst_end = dst_start + return_count;
 
                     if (src_start < dst_end) && (dst_start < src_end) {
-                        std::ptr::copy(reg_ptr.add(src_start), reg_ptr.add(dst_start), return_count);
+                        std::ptr::copy(
+                            reg_ptr.add(src_start),
+                            reg_ptr.add(dst_start),
+                            return_count,
+                        );
                     } else {
-                        std::ptr::copy_nonoverlapping(reg_ptr.add(src_start), reg_ptr.add(dst_start), return_count);
+                        std::ptr::copy_nonoverlapping(
+                            reg_ptr.add(src_start),
+                            reg_ptr.add(dst_start),
+                            return_count,
+                        );
                     }
                 }
                 (*caller_ptr).top = result_reg + return_count;
@@ -290,7 +303,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
         let left = *reg_base.add(a);
         let right = *reg_base.add(b);
 
-        use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK};
+        use crate::lua_value::{TAG_FLOAT, TAG_INTEGER, TYPE_MASK};
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
@@ -313,8 +326,9 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
         }
 
         // Mixed numeric types
-        if (left_tag == TAG_INTEGER || left_tag == TAG_FLOAT) 
-            && (right_tag == TAG_INTEGER || right_tag == TAG_FLOAT) {
+        if (left_tag == TAG_INTEGER || left_tag == TAG_FLOAT)
+            && (right_tag == TAG_INTEGER || right_tag == TAG_FLOAT)
+        {
             let left_f = if left_tag == TAG_INTEGER {
                 (left.secondary as i64) as f64
             } else {
@@ -367,7 +381,9 @@ fn exec_lt_metamethod(
                 if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                     let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                     if is_less_result != k {
-                        unsafe { (*frame_ptr).pc += 1; }
+                        unsafe {
+                            (*frame_ptr).pc += 1;
+                        }
                     }
                     return Ok(());
                 }
@@ -383,7 +399,9 @@ fn exec_lt_metamethod(
                     if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                         let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                         if is_less_result != k {
-                            unsafe { (*frame_ptr).pc += 1; }
+                            unsafe {
+                                (*frame_ptr).pc += 1;
+                            }
                         }
                         return Ok(());
                     }
@@ -430,12 +448,12 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaR
     let left_tag_small = left_tag >> 48;
     let right_tag_small = right_tag >> 48;
     let combined_tags = (left_tag_small << 4) | right_tag_small;
-    
+
     // Small tag values after >> 48: TAG_INTEGER=3, TAG_FLOAT=4, TAG_STRING=5
-    const INT_INT: u64 = (3 << 4) | 3;       // 0x33
-    const FLOAT_FLOAT: u64 = (4 << 4) | 4;   // 0x44
-    const INT_FLOAT: u64 = (3 << 4) | 4;     // 0x34
-    const FLOAT_INT: u64 = (4 << 4) | 3;     // 0x43
+    const INT_INT: u64 = (3 << 4) | 3; // 0x33
+    const FLOAT_FLOAT: u64 = (4 << 4) | 4; // 0x44
+    const INT_FLOAT: u64 = (3 << 4) | 4; // 0x34
+    const FLOAT_INT: u64 = (4 << 4) | 3; // 0x43
     const STRING_STRING: u64 = (5 << 4) | 5; // 0x55
 
     let is_less_or_equal = if combined_tags == INT_INT {
@@ -1058,10 +1076,7 @@ fn exec_call_cfunction(
     vm.ensure_stack_capacity(required_top);
 
     // Push C function frame
-    let temp_frame = LuaCallFrame::new_c_function(
-        call_base,
-        actual_arg_count + 1,
-    );
+    let temp_frame = LuaCallFrame::new_c_function(call_base, actual_arg_count + 1);
 
     vm.push_frame(temp_frame);
 
@@ -1432,7 +1447,8 @@ pub fn exec_return1(
         // Get caller's base_ptr and write return value directly
         let caller_base = unsafe { (*caller_ptr).base_ptr };
         unsafe {
-            *vm.register_stack.get_unchecked_mut(caller_base + result_reg) = return_value;
+            *vm.register_stack
+                .get_unchecked_mut(caller_base + result_reg) = return_value;
             // Update top
             (*caller_ptr).top = result_reg + 1;
         }

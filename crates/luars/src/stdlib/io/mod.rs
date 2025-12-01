@@ -180,36 +180,36 @@ fn io_open(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// io.lines([filename]) - Return iterator for lines
 fn io_lines(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let filename = get_arg(vm, 1);
-    
+
     if let Some(filename_val) = filename {
         // io.lines(filename) - open file and return iterator
         let filename_str = match vm.get_string(&filename_val) {
             Some(s) => s.as_str().to_string(),
             None => return Err(vm.error("bad argument #1 to 'lines' (string expected)")),
         };
-        
+
         // Open the file
         match LuaFile::open_read(&filename_str) {
             Ok(file) => {
                 // Create file metatable
                 let file_mt = create_file_metatable(vm)?;
-                
+
                 // Create userdata
                 use crate::lua_value::LuaUserdata;
                 let userdata = vm.create_userdata(LuaUserdata::new(file));
-                
+
                 // Set metatable
                 if let Some(ud_id) = userdata.as_userdata_id() {
                     if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
                         ud.set_metatable(file_mt);
                     }
                 }
-                
+
                 // Create state table with file handle
                 let state_table = vm.create_table(0, 1);
                 let file_key = vm.create_string("file");
                 vm.table_set_raw(&state_table, file_key, userdata);
-                
+
                 Ok(MultiValue::multiple(vec![
                     LuaValue::cfunction(io_lines_iterator),
                     state_table,
@@ -266,7 +266,7 @@ fn io_output(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// io.type(obj) - Check if obj is a file handle
 fn io_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let obj = get_arg(vm, 1);
-    
+
     if let Some(val) = obj {
         if let Some(ud) = vm.get_userdata(&val) {
             let data = ud.get_data();
@@ -285,7 +285,7 @@ fn io_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
         }
     }
-    
+
     Ok(MultiValue::single(LuaValue::nil()))
 }
 
@@ -296,36 +296,34 @@ fn io_tmpfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         Ok(file) => {
             // Wrap in LuaFile (need to add support for this)
             let lua_file = LuaFile::from_file(file);
-            
+
             // Create file metatable
             let file_mt = create_file_metatable(vm)?;
-            
+
             // Create userdata
             use crate::lua_value::LuaUserdata;
             let userdata = vm.create_userdata(LuaUserdata::new(lua_file));
-            
+
             // Set metatable
             if let Some(ud_id) = userdata.as_userdata_id() {
                 if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
                     ud.set_metatable(file_mt);
                 }
             }
-            
+
             Ok(MultiValue::single(userdata))
         }
-        Err(e) => {
-            Ok(MultiValue::multiple(vec![
-                LuaValue::nil(),
-                vm.create_string(&e.to_string()),
-            ]))
-        }
+        Err(e) => Ok(MultiValue::multiple(vec![
+            LuaValue::nil(),
+            vm.create_string(&e.to_string()),
+        ])),
     }
 }
 
 /// io.close([file]) - Close a file
 fn io_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let file_arg = get_arg(vm, 1);
-    
+
     if let Some(file_val) = file_arg {
         if let Some(ud) = vm.get_userdata(&file_val) {
             let data = ud.get_data();
@@ -339,7 +337,7 @@ fn io_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
         return Err(vm.error("expected file handle"));
     }
-    
+
     // No argument - close default output
     Ok(MultiValue::single(LuaValue::boolean(true)))
 }

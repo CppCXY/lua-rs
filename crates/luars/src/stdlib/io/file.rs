@@ -57,14 +57,14 @@ impl LuaFile {
             inner: FileInner::ReadWrite(file),
         })
     }
-    
+
     /// Create from existing File (for tmpfile)
     pub fn from_file(file: File) -> Self {
         LuaFile {
             inner: FileInner::ReadWrite(file),
         }
     }
-    
+
     /// Check if file is closed
     pub fn is_closed(&self) -> bool {
         matches!(self.inner, FileInner::Closed)
@@ -235,7 +235,7 @@ fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
             // Get format (default "*l") - register 2 is first argument after self
             let format_arg = get_arg(vm, 2);
-            
+
             // Check if format is a number (byte count)
             if let Some(ref fmt) = format_arg {
                 if let Some(n) = fmt.as_integer() {
@@ -254,7 +254,7 @@ fn file_read(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     }
                 }
             }
-            
+
             // Otherwise treat as format string
             let format_str = format_arg
                 .and_then(|v| vm.get_string(&v).map(|s| s.as_str().to_string()))

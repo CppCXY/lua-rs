@@ -10,7 +10,7 @@ pub struct LuaThread {
     /// Independent call stack for this coroutine
     /// Using Vec<LuaCallFrame> directly (no Box) for efficiency
     pub frames: Vec<crate::lua_vm::LuaCallFrame>,
-    
+
     /// Current frame count (tracks active frames in the pre-allocated Vec)
     pub frame_count: usize,
 

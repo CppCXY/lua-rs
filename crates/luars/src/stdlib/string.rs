@@ -54,18 +54,21 @@ fn string_byte(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     let end = end.min(len);
-    
+
     // FAST PATH: Single byte return (most common case)
     if start == end && start >= 1 && start <= len {
         let byte = str_bytes[(start - 1) as usize];
         return Ok(MultiValue::single(LuaValue::integer(byte as i64)));
     }
-    
+
     // FAST PATH: Two byte return
     if end == start + 1 && start >= 1 && end <= len {
         let b1 = str_bytes[(start - 1) as usize] as i64;
         let b2 = str_bytes[(end - 1) as usize] as i64;
-        return Ok(MultiValue::two(LuaValue::integer(b1), LuaValue::integer(b2)));
+        return Ok(MultiValue::two(
+            LuaValue::integer(b1),
+            LuaValue::integer(b2),
+        ));
     }
 
     // Slow path: multiple returns
@@ -274,12 +277,12 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         if start > 0 && start <= end + 1 {
             let start_byte = (start - 1).min(s_str.len());
             let end_byte = end.min(s_str.len());
-            
+
             // Fast path: return original string if full range
             if start_byte == 0 && end_byte == s_str.len() {
                 return Ok(MultiValue::single(s_value));
             }
-            
+
             // Need to copy the substring out
             s_str[start_byte..end_byte].to_string()
         } else {
@@ -717,7 +720,7 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("bad argument #1 to 'string.find' (string expected)".to_string()));
     };
     let s_str = s_lua.as_str();
-    
+
     let Some(pattern_lua) = vm.object_pool.get_string(pattern_id) else {
         return Err(vm.error("bad argument #2 to 'string.find' (string expected)".to_string()));
     };
@@ -752,7 +755,7 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         // Complex pattern - need to clone for pattern parser (it takes ownership)
         let pattern_owned = pattern.to_string();
         let s_owned = s_str.to_string();
-        
+
         // Pattern matching - parse and check if it's a simple literal
         match lua_pattern::parse_pattern(&pattern_owned) {
             Ok(parsed_pattern) => {

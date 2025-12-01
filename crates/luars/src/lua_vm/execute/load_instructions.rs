@@ -51,7 +51,8 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, _frame_ptr: *mut LuaCallFrame
         vm.current_frame_mut().set_vararg(vararg_dest, vararg_count);
     } else {
         // No varargs passed
-        vm.current_frame_mut().set_vararg(base_ptr + max_stack_size, 0);
+        vm.current_frame_mut()
+            .set_vararg(base_ptr + max_stack_size, 0);
     }
 
     // Initialize local variables (registers from 0 to max_stack_size) with nil

@@ -18,11 +18,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let k = Instruction::get_k(instr); // true if EXTRAARG has high bits of array_size
 
     // Decode hash size: if b > 0, hash_size = 2^(b-1)
-    let hash_size = if b > 0 {
-        1usize << (b - 1)
-    } else {
-        0
-    };
+    let hash_size = if b > 0 { 1usize << (b - 1) } else { 0 };
 
     let (base_ptr, func_value) = unsafe {
         (*frame_ptr).pc += 1; // Skip EXTRAARG
@@ -84,7 +80,7 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
     if let Some(table_id) = table_value.as_table_id() {
         // SAFETY: table_id is valid because it came from as_table_id()
         let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
-        
+
         // Try integer key fast path first
         if let Some(i) = key_value.as_integer() {
             if let Some(val) = lua_table.get_int(i) {
@@ -92,7 +88,7 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
                 return Ok(());
             }
         }
-        
+
         // Try hash lookup
         if let Some(val) = lua_table.get_from_hash(&key_value) {
             if !val.is_nil() {
@@ -100,7 +96,7 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
                 return Ok(());
             }
         }
-        
+
         // Key not found - check if no metatable to skip metamethod handling
         if lua_table.get_metatable().is_none() {
             unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
@@ -151,18 +147,18 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
     if let Some(table_id) = table_value.as_table_id() {
         // SAFETY: table_id is valid because it came from as_table_id()
         let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
-        
+
         // Quick check: no metatable means no __newindex to worry about
         if lua_table.get_metatable().is_none() {
             let lua_table = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
-            
+
             // Try integer key fast path
             if let Some(i) = key_value.as_integer() {
                 lua_table.set_int(i, set_value);
             } else {
                 lua_table.raw_set(key_value, set_value);
             }
-            
+
             // Note: GC barrier is handled lazily during collection
             return Ok(());
         }
@@ -190,7 +186,7 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
     if let Some(table_id) = table.as_table_id() {
         // SAFETY: table_id is valid because it came from as_table_id()
         let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
-        
+
         // Use get_int_full to check both array and hash parts
         // This is necessary because integer keys may be stored in hash if array wasn't pre-allocated
         if let Some(val) = lua_table.get_int_full(c) {
@@ -245,7 +241,7 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
     if let Some(table_id) = table_value.as_table_id() {
         // SAFETY: table_id is valid because it came from as_table_id()
         let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
-        
+
         // Quick check: no metatable means no __newindex to worry about
         if lua_table.get_metatable().is_none() {
             // Ultra-fast path: direct integer set
@@ -522,9 +518,11 @@ pub fn exec_self(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
     // R[A] := R[B][K[C]] (method)
     // Support both tables and userdata
     let method = if table.is_userdata() {
-        vm.userdata_get(&table, &key).unwrap_or(crate::LuaValue::nil())
+        vm.userdata_get(&table, &key)
+            .unwrap_or(crate::LuaValue::nil())
     } else {
-        vm.table_get_with_meta(&table, &key).unwrap_or(crate::LuaValue::nil())
+        vm.table_get_with_meta(&table, &key)
+            .unwrap_or(crate::LuaValue::nil())
     };
     vm.register_stack[base_ptr + a] = method;
 

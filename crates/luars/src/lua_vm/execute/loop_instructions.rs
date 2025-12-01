@@ -145,7 +145,7 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
         let idx = *reg_base;
         let counter_or_limit = *reg_base.add(1);
         let step = *reg_base.add(2);
-        
+
         let idx_tag = idx.primary & TYPE_MASK;
         let limit_tag = counter_or_limit.primary & TYPE_MASK;
         let step_tag = step.primary & TYPE_MASK;
@@ -327,8 +327,8 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
                 code_ptr,
                 constants_ptr,
                 call_base,
-                2,     // top = 2 (we have 2 arguments)
-                a + 3, // result goes to R[A+3]
+                2,        // top = 2 (we have 2 arguments)
+                a + 3,    // result goes to R[A+3]
                 nresults, // expecting c+1 results
             );
 

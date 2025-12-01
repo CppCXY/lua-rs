@@ -371,7 +371,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     if let Some(table_id) = table.as_table_id() {
         // SAFETY: table_id is valid because it came from as_table_id()
         let t = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
-        
+
         // Reserve space
         let needed = start_idx + count;
         if t.array.len() < needed {
@@ -381,7 +381,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
         // Copy all values using unchecked access
         for i in 0..count {
             unsafe {
-                *t.array.get_unchecked_mut(start_idx + i) = 
+                *t.array.get_unchecked_mut(start_idx + i) =
                     *vm.register_stack.get_unchecked(base_ptr + a + 1 + i);
             }
         }

@@ -1,5 +1,5 @@
 // Simplified Garbage Collector for Lua VM
-// 
+//
 // Key insight: Objects are already stored in Arena with GcHeader.
 // We don't need a separate HashMap to track them!
 //
@@ -30,15 +30,15 @@ pub struct GC {
     // Lua 5.4 GC debt mechanism
     pub(crate) gc_debt: isize,
     pub(crate) total_bytes: usize,
-    
+
     // GC parameters
-    gc_pause: usize,          // Pause parameter (default 200 = 200%)
+    gc_pause: usize, // Pause parameter (default 200 = 200%)
     // gc_step_mul: usize,       // Step multiplier
-    
+
     // Collection throttling
     check_counter: u32,
     check_interval: u32,
-    
+
     // Statistics
     stats: GCStats,
 }
@@ -120,7 +120,7 @@ impl GC {
         if !self.should_collect() {
             return;
         }
-        
+
         self.check_counter = 0;
         self.collect(roots, pool);
     }
@@ -140,11 +140,10 @@ impl GC {
         let collected = self.sweep(pool);
 
         // Update debt
-        let alive_estimate = pool.tables.len() * 256 
-            + pool.functions.len() * 128 
-            + pool.strings.len() * 64;
+        let alive_estimate =
+            pool.tables.len() * 256 + pool.functions.len() * 128 + pool.strings.len() * 64;
         self.gc_debt = -((alive_estimate * self.gc_pause / 100) as isize);
-        
+
         self.stats.objects_collected += collected;
         collected
     }
@@ -217,13 +216,13 @@ impl GC {
                                 (false, vec![], vec![])
                             }
                         };
-                        
+
                         if should_mark {
                             // Now we can safely mark
                             if let Some(func) = pool.functions.get_mut(id.0) {
                                 func.header.marked = true;
                             }
-                            
+
                             // Mark upvalues separately
                             for upval_id in upvalue_ids {
                                 if let Some(upval) = pool.upvalues.get_mut(upval_id.0) {
@@ -235,7 +234,7 @@ impl GC {
                                     }
                                 }
                             }
-                            
+
                             // Add constants to worklist
                             worklist.extend(constants);
                         }
@@ -255,7 +254,7 @@ impl GC {
                                 None
                             }
                         };
-                        
+
                         if let Some(values) = stack_values {
                             if let Some(thread) = pool.threads.get_mut(id.0) {
                                 thread.header.marked = true;
@@ -285,7 +284,9 @@ impl GC {
         let mut collected = 0;
 
         // Collect unmarked tables (skip fixed ones)
-        let tables_to_free: Vec<u32> = pool.tables.iter()
+        let tables_to_free: Vec<u32> = pool
+            .tables
+            .iter()
             .filter(|(_, t)| !t.header.marked && !t.header.fixed)
             .map(|(id, _)| id)
             .collect();
@@ -296,7 +297,9 @@ impl GC {
         }
 
         // Collect unmarked functions (skip fixed ones)
-        let funcs_to_free: Vec<u32> = pool.functions.iter()
+        let funcs_to_free: Vec<u32> = pool
+            .functions
+            .iter()
             .filter(|(_, f)| !f.header.marked && !f.header.fixed)
             .map(|(id, _)| id)
             .collect();
@@ -307,7 +310,9 @@ impl GC {
         }
 
         // Collect unmarked upvalues (skip fixed ones)
-        let upvals_to_free: Vec<u32> = pool.upvalues.iter()
+        let upvals_to_free: Vec<u32> = pool
+            .upvalues
+            .iter()
             .filter(|(_, u)| !u.header.marked && !u.header.fixed)
             .map(|(id, _)| id)
             .collect();
@@ -317,7 +322,9 @@ impl GC {
         }
 
         // Collect unmarked threads (skip fixed ones)
-        let threads_to_free: Vec<u32> = pool.threads.iter()
+        let threads_to_free: Vec<u32> = pool
+            .threads
+            .iter()
             .filter(|(_, t)| !t.header.marked && !t.header.fixed)
             .map(|(id, _)| id)
             .collect();
@@ -325,10 +332,12 @@ impl GC {
             pool.threads.free(id);
             collected += 1;
         }
-        
+
         // Collect unmarked strings (skip fixed ones)
         // Note: interned strings are usually kept, but this handles non-interned long strings
-        let strings_to_free: Vec<u32> = pool.strings.iter()
+        let strings_to_free: Vec<u32> = pool
+            .strings
+            .iter()
             .filter(|(_, s)| !s.header.marked && !s.header.fixed)
             .map(|(id, _)| id)
             .collect();

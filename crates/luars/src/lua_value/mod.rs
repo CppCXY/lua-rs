@@ -73,7 +73,7 @@ impl MultiValue {
             overflow: None,
         }
     }
-    
+
     #[inline(always)]
     pub fn two(v1: LuaValue, v2: LuaValue) -> Self {
         MultiValue {
@@ -114,7 +114,7 @@ impl MultiValue {
             }
         }
     }
-    
+
     /// Get count of return values (optimized, no allocation)
     #[inline(always)]
     pub fn len(&self) -> usize {
@@ -124,13 +124,13 @@ impl MultiValue {
             self.inline_count as usize
         }
     }
-    
+
     /// Check if empty
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.inline_count == 0 && self.overflow.is_none()
     }
-    
+
     /// Get first value (common case, optimized)
     #[inline(always)]
     pub fn first(&self) -> Option<LuaValue> {

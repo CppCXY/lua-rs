@@ -112,10 +112,10 @@ impl LuaVM {
         // frame_count tracks the actual number of active frames
         let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
         frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
-        
+
         let mut vm = LuaVM {
             global_value: LuaValue::nil(),
-            registry: LuaValue::nil(), // Will be initialized below
+            registry: LuaValue::nil(),    // Will be initialized below
             gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
             frames,
             frame_count: 0,
@@ -155,13 +155,13 @@ impl LuaVM {
         vm.global_value = globals_ref;
         vm.set_global("_G", globals_ref);
         vm.set_global("_ENV", globals_ref);
-        
+
         // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
         vm.registry_set_integer(1, globals_ref);
 
         vm
     }
-    
+
     /// Set a value in the registry by integer key
     pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
         if let Some(reg_id) = self.registry.as_table_id() {
@@ -170,7 +170,7 @@ impl LuaVM {
             }
         }
     }
-    
+
     /// Get a value from the registry by integer key
     pub fn registry_get_integer(&self, key: i64) -> Option<LuaValue> {
         if let Some(reg_id) = self.registry.as_table_id() {
@@ -180,7 +180,7 @@ impl LuaVM {
         }
         None
     }
-    
+
     /// Set a value in the registry by string key
     pub fn registry_set(&mut self, key: &str, value: LuaValue) {
         let key_value = self.create_string(key);
@@ -190,7 +190,7 @@ impl LuaVM {
             }
         }
     }
-    
+
     /// Get a value from the registry by string key
     pub fn registry_get(&self, key: &str) -> Option<LuaValue> {
         // We can't use create_string here as it requires &mut self
@@ -278,7 +278,10 @@ impl LuaVM {
             Ok(v) => v,
             Err(LuaError::Exit) => {
                 // Normal exit - get the return value from return_values
-                self.return_values.first().cloned().unwrap_or(LuaValue::nil())
+                self.return_values
+                    .first()
+                    .cloned()
+                    .unwrap_or(LuaValue::nil())
             }
             Err(e) => return Err(e),
         };
@@ -295,7 +298,7 @@ impl LuaVM {
     pub fn call_function(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<LuaValue> {
         // Clear previous state
         self.register_stack.clear();
-        self.frame_count = 0;  // Reset frame count (frames Vec stays pre-allocated)
+        self.frame_count = 0; // Reset frame count (frames Vec stays pre-allocated)
         self.open_upvalues.clear();
 
         // Get function from object pool
@@ -386,7 +389,7 @@ impl LuaVM {
     pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) -> *mut LuaCallFrame {
         let idx = self.frame_count;
         debug_assert!(idx < MAX_CALL_DEPTH, "call stack overflow");
-        
+
         // Direct write - Vec is pre-filled to MAX_CALL_DEPTH
         self.frames[idx] = frame;
         self.frame_count = idx + 1;
@@ -531,7 +534,7 @@ impl LuaVM {
         // Pre-allocate frames like the main VM does
         let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
         frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
-        
+
         let mut thread = LuaThread {
             status: CoroutineStatus::Suspended,
             frames,
@@ -563,7 +566,7 @@ impl LuaVM {
         // Pre-allocate frames like the main VM does
         let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
         frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
-        
+
         let thread = LuaThread {
             status: CoroutineStatus::Suspended,
             frames,
@@ -640,7 +643,7 @@ impl LuaVM {
             let Some(thread) = self.object_pool.get_thread(thread_id) else {
                 return Err(self.error("invalid thread".to_string()));
             };
-            thread.frame_count == 0  // Use frame_count instead of frames.is_empty()
+            thread.frame_count == 0 // Use frame_count instead of frames.is_empty()
         };
 
         // Load thread state into VM
@@ -1142,12 +1145,12 @@ impl LuaVM {
                 _ => {}
             }
         }
-        
+
         // Slow path for Lua functions and general cases
         let result = self.call_function_internal(func.clone(), args.to_vec())?;
         Ok(result.get(0).cloned())
     }
-    
+
     /// Fast path for calling CFunction metamethods with 2 arguments
     /// Used by __index, __newindex, etc. Avoids Vec allocation.
     /// Returns the first return value.
@@ -1175,7 +1178,7 @@ impl LuaVM {
         } else {
             0
         };
-        
+
         let stack_size = 3; // func + 2 args
         self.ensure_stack_capacity(new_base + stack_size);
 
@@ -1200,10 +1203,10 @@ impl LuaVM {
                 Err(e)
             }
         };
-        
+
         result
     }
-    
+
     /// Fast path for calling CFunction metamethods with 1 argument
     /// Used by __len, __unm, __bnot, etc. Avoids Vec allocation.
     #[inline(always)]
@@ -1228,7 +1231,7 @@ impl LuaVM {
         } else {
             0
         };
-        
+
         let stack_size = 2; // func + 1 arg
         self.ensure_stack_capacity(new_base + stack_size);
 
@@ -1249,10 +1252,10 @@ impl LuaVM {
                 Err(e)
             }
         };
-        
+
         result
     }
-    
+
     /// Fast path for calling CFunction metamethods with 3 arguments
     /// Used by __newindex. Avoids Vec allocation.
     #[inline(always)]
@@ -1279,7 +1282,7 @@ impl LuaVM {
         } else {
             0
         };
-        
+
         let stack_size = 4; // func + 3 args
         self.ensure_stack_capacity(new_base + stack_size);
 
@@ -1302,7 +1305,7 @@ impl LuaVM {
                 Err(e)
             }
         };
-        
+
         result
     }
 
@@ -1826,7 +1829,7 @@ impl LuaVM {
     fn check_gc_slow(&mut self) {
         // Sync local debt to GC
         self.gc.gc_debt = self.gc_debt_local;
-        
+
         // Incremental GC: only collect every N checks to reduce overhead
         self.gc.increment_check_counter();
         if !self.gc.should_run_collection() {
@@ -1853,7 +1856,7 @@ impl LuaVM {
         for frame in &self.frames[..self.frame_count] {
             // Add the function value for this frame - this is CRITICAL!
             roots.push(frame.function_value);
-            
+
             let base_ptr = frame.base_ptr;
             let top = frame.top;
             for i in 0..top {
@@ -1946,7 +1949,7 @@ impl LuaVM {
         for frame in &self.frames[..self.frame_count] {
             // CRITICAL: Add the function being executed
             roots.push(frame.function_value);
-            
+
             let base_ptr = frame.base_ptr;
             let top = frame.top;
             for i in 0..top {
@@ -2140,15 +2143,16 @@ impl LuaVM {
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
                     let caller_base = current_frame.base_ptr;
-                    let caller_max_stack =
-                        if let Some(caller_func_id) = current_frame.function_value.as_function_id() {
-                            self.object_pool
-                                .get_function(caller_func_id)
-                                .map(|f| f.chunk.max_stack_size)
-                                .unwrap_or(256)
-                        } else {
-                            256
-                        };
+                    let caller_max_stack = if let Some(caller_func_id) =
+                        current_frame.function_value.as_function_id()
+                    {
+                        self.object_pool
+                            .get_function(caller_func_id)
+                            .map(|f| f.chunk.max_stack_size)
+                            .unwrap_or(256)
+                    } else {
+                        256
+                    };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -2190,20 +2194,21 @@ impl LuaVM {
                 let cf = metamethod.as_cfunction().unwrap();
                 // Create temporary frame for CFunction
                 let arg_count = args.len() + 1; // +1 for function itself
-                
+
                 // CRITICAL FIX: Calculate new base relative to current frame
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
                     let caller_base = current_frame.base_ptr;
-                    let caller_max_stack =
-                        if let Some(caller_func_id) = current_frame.function_value.as_function_id() {
-                            self.object_pool
-                                .get_function(caller_func_id)
-                                .map(|f| f.chunk.max_stack_size)
-                                .unwrap_or(256)
-                        } else {
-                            256
-                        };
+                    let caller_max_stack = if let Some(caller_func_id) =
+                        current_frame.function_value.as_function_id()
+                    {
+                        self.object_pool
+                            .get_function(caller_func_id)
+                            .map(|f| f.chunk.max_stack_size)
+                            .unwrap_or(256)
+                    } else {
+                        256
+                    };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -2442,7 +2447,7 @@ impl LuaVM {
         match func.kind() {
             LuaValueKind::CFunction => {
                 let cfunc = func.as_cfunction().unwrap();
-                
+
                 // Calculate new base position
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
@@ -2460,7 +2465,7 @@ impl LuaVM {
                 } else {
                     0
                 };
-                
+
                 let stack_size = args.len() + 1;
                 self.ensure_stack_capacity(new_base + stack_size);
 
@@ -2486,7 +2491,7 @@ impl LuaVM {
                         Err(e)
                     }
                 };
-                
+
                 result
             }
             LuaValueKind::Function => {
@@ -2525,7 +2530,7 @@ impl LuaVM {
                 } else {
                     0
                 };
-                
+
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
                 // Copy args first, then initialize remaining with nil (only beyond args)
@@ -2569,11 +2574,11 @@ impl LuaVM {
                         // Normal return - pop boundary frame and get return values
                         self.pop_frame_discard();
                         let result = std::mem::take(&mut self.return_values);
-                        
+
                         // NOTE: We intentionally don't clear the stack here anymore.
                         // The stack will be overwritten on next call, and GC can handle
                         // any stale references. This gives significant performance improvement.
-                        
+
                         Ok(result)
                     }
                     Err(LuaError::Yield) => {

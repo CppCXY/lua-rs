@@ -27,7 +27,7 @@ use std::rc::Rc;
 #[repr(C)]
 pub struct GcHeader {
     pub marked: bool,
-    pub age: u8,    // For generational GC (like Lua's G_NEW, G_SURVIVAL, G_OLD, etc.)
+    pub age: u8,     // For generational GC (like Lua's G_NEW, G_SURVIVAL, G_OLD, etc.)
     pub fixed: bool, // If true, object is never collected (like Lua's fixedgc list)
 }
 
@@ -298,12 +298,15 @@ impl<T> Arena<T> {
 
     /// Iterate over all live objects
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
-        self.chunks.iter().enumerate().flat_map(|(chunk_idx, chunk)| {
-            chunk.iter().enumerate().filter_map(move |(slot_idx, opt)| {
-                opt.as_ref()
-                    .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
+        self.chunks
+            .iter()
+            .enumerate()
+            .flat_map(|(chunk_idx, chunk)| {
+                chunk.iter().enumerate().filter_map(move |(slot_idx, opt)| {
+                    opt.as_ref()
+                        .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
+                })
             })
-        })
     }
 
     /// Iterate over all live objects mutably
@@ -368,36 +371,36 @@ pub struct ObjectPoolV2 {
     // Pre-cached metamethod name StringIds (like Lua's G(L)->tmname[])
     // These are created at initialization and never collected
     // Stored as StringId to avoid repeated hash lookup in hot paths
-    pub tm_index: StringId,      // "__index"
-    pub tm_newindex: StringId,   // "__newindex"
-    pub tm_call: StringId,       // "__call"
-    pub tm_tostring: StringId,   // "__tostring"
-    pub tm_len: StringId,        // "__len"
-    pub tm_pairs: StringId,      // "__pairs"
-    pub tm_ipairs: StringId,     // "__ipairs"
-    pub tm_gc: StringId,         // "__gc"
-    pub tm_close: StringId,      // "__close"
-    pub tm_mode: StringId,       // "__mode"
-    pub tm_name: StringId,       // "__name"
-    pub tm_eq: StringId,         // "__eq"
-    pub tm_lt: StringId,         // "__lt"
-    pub tm_le: StringId,         // "__le"
-    pub tm_add: StringId,        // "__add"
-    pub tm_sub: StringId,        // "__sub"
-    pub tm_mul: StringId,        // "__mul"
-    pub tm_div: StringId,        // "__div"
-    pub tm_mod: StringId,        // "__mod"
-    pub tm_pow: StringId,        // "__pow"
-    pub tm_unm: StringId,        // "__unm"
-    pub tm_idiv: StringId,       // "__idiv"
-    pub tm_band: StringId,       // "__band"
-    pub tm_bor: StringId,        // "__bor"
-    pub tm_bxor: StringId,       // "__bxor"
-    pub tm_bnot: StringId,       // "__bnot"
-    pub tm_shl: StringId,        // "__shl"
-    pub tm_shr: StringId,        // "__shr"
-    pub tm_concat: StringId,     // "__concat"
-    pub tm_metatable: StringId,  // "__metatable"
+    pub tm_index: StringId,     // "__index"
+    pub tm_newindex: StringId,  // "__newindex"
+    pub tm_call: StringId,      // "__call"
+    pub tm_tostring: StringId,  // "__tostring"
+    pub tm_len: StringId,       // "__len"
+    pub tm_pairs: StringId,     // "__pairs"
+    pub tm_ipairs: StringId,    // "__ipairs"
+    pub tm_gc: StringId,        // "__gc"
+    pub tm_close: StringId,     // "__close"
+    pub tm_mode: StringId,      // "__mode"
+    pub tm_name: StringId,      // "__name"
+    pub tm_eq: StringId,        // "__eq"
+    pub tm_lt: StringId,        // "__lt"
+    pub tm_le: StringId,        // "__le"
+    pub tm_add: StringId,       // "__add"
+    pub tm_sub: StringId,       // "__sub"
+    pub tm_mul: StringId,       // "__mul"
+    pub tm_div: StringId,       // "__div"
+    pub tm_mod: StringId,       // "__mod"
+    pub tm_pow: StringId,       // "__pow"
+    pub tm_unm: StringId,       // "__unm"
+    pub tm_idiv: StringId,      // "__idiv"
+    pub tm_band: StringId,      // "__band"
+    pub tm_bor: StringId,       // "__bor"
+    pub tm_bxor: StringId,      // "__bxor"
+    pub tm_bnot: StringId,      // "__bnot"
+    pub tm_shl: StringId,       // "__shl"
+    pub tm_shr: StringId,       // "__shr"
+    pub tm_concat: StringId,    // "__concat"
+    pub tm_metatable: StringId, // "__metatable"
 }
 
 // ============ Lua-style String Interning Table ============
@@ -626,7 +629,7 @@ impl ObjectPoolV2 {
             tm_concat: StringId(0),
             tm_metatable: StringId(0),
         };
-        
+
         // Pre-create all metamethod name strings (like Lua's luaT_init)
         // These strings are interned and will never be collected
         pool.tm_index = pool.create_string("__index");
@@ -659,7 +662,7 @@ impl ObjectPoolV2 {
         pool.tm_shr = pool.create_string("__shr");
         pool.tm_concat = pool.create_string("__concat");
         pool.tm_metatable = pool.create_string("__metatable");
-        
+
         // Fix all metamethod name strings - they should never be collected
         // (like Lua's luaC_fix in luaT_init)
         pool.fix_string(pool.tm_index);
@@ -692,7 +695,7 @@ impl ObjectPoolV2 {
         pool.fix_string(pool.tm_shr);
         pool.fix_string(pool.tm_concat);
         pool.fix_string(pool.tm_metatable);
-        
+
         pool
     }
 
