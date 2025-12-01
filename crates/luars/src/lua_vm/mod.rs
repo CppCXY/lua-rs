@@ -916,8 +916,17 @@ impl LuaVM {
                     LuaValueKind::Table => {
                         return self.table_get_with_meta(&index_val, key);
                     }
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![lua_table_value.clone(), key.clone()];
+                    // Fast path for CFunction __index
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = index_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_2(cfunc, *lua_table_value, *key) {
+                                Ok(result) => return result,
+                                Err(_) => return None,
+                            }
+                        }
+                    }
+                    LuaValueKind::Function => {
+                        let args = [*lua_table_value, *key];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -962,9 +971,18 @@ impl LuaVM {
                     // __index is a table - look up in that table
                     LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
 
-                    // __index is a function - call it with (userdata, key)
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![lua_userdata_value.clone(), key.clone()];
+                    // Fast path for CFunction __index
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = index_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_2(cfunc, *lua_userdata_value, *key) {
+                                Ok(result) => return result,
+                                Err(_) => return None,
+                            }
+                        }
+                    }
+                    // Lua function - use slower path
+                    LuaValueKind::Function => {
+                        let args = [*lua_userdata_value, *key];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -995,9 +1013,18 @@ impl LuaVM {
                 match index_val.kind() {
                     // __index is a table - look up in that table (this is the common case for strings)
                     LuaValueKind::Table => return self.table_get_with_meta(&index_val, key),
-                    // __index is a function - call it with (string, key)
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![string_val.clone(), key.clone()];
+                    // Fast path for CFunction __index
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = index_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_2(cfunc, *string_val, *key) {
+                                Ok(result) => return result,
+                                Err(_) => return None,
+                            }
+                        }
+                    }
+                    // Lua function - slower path
+                    LuaValueKind::Function => {
+                        let args = [*string_val, *key];
                         match self.call_metamethod(&index_val, &args) {
                             Ok(result) => return result,
                             Err(_) => return None,
@@ -1065,8 +1092,18 @@ impl LuaVM {
                     LuaValueKind::Table => {
                         return self.table_set_with_meta(newindex_val, key, value);
                     }
-                    LuaValueKind::CFunction | LuaValueKind::Function => {
-                        let args = vec![lua_table_val, key, value];
+                    // Fast path for CFunction __newindex
+                    LuaValueKind::CFunction => {
+                        if let Some(cfunc) = newindex_val.as_cfunction() {
+                            match self.call_cfunc_metamethod_3(cfunc, lua_table_val, key, value) {
+                                Ok(_) => return Ok(()),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    // Lua function - slower path
+                    LuaValueKind::Function => {
+                        let args = [lua_table_val, key, value];
                         match self.call_metamethod(&newindex_val, &args) {
                             Ok(_) => return Ok(()),
                             Err(e) => return Err(e),
@@ -1096,9 +1133,177 @@ impl LuaVM {
         func: &LuaValue,
         args: &[LuaValue],
     ) -> LuaResult<Option<LuaValue>> {
-        // Use call_function_internal for both C functions and Lua functions
+        // Fast path for CFunction
+        if let Some(cfunc) = func.as_cfunction() {
+            match args.len() {
+                1 => return self.call_cfunc_metamethod_1(cfunc, args[0]),
+                2 => return self.call_cfunc_metamethod_2(cfunc, args[0], args[1]),
+                3 => return self.call_cfunc_metamethod_3(cfunc, args[0], args[1], args[2]),
+                _ => {}
+            }
+        }
+        
+        // Slow path for Lua functions and general cases
         let result = self.call_function_internal(func.clone(), args.to_vec())?;
         Ok(result.get(0).cloned())
+    }
+    
+    /// Fast path for calling CFunction metamethods with 2 arguments
+    /// Used by __index, __newindex, etc. Avoids Vec allocation.
+    /// Returns the first return value.
+    #[inline(always)]
+    pub fn call_cfunc_metamethod_2(
+        &mut self,
+        cfunc: crate::lua_value::CFunction,
+        arg1: LuaValue,
+        arg2: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        // Calculate new base position - use current frame's top area
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            let caller_base = current_frame.base_ptr;
+            let caller_max_stack =
+                if let Some(func_id) = current_frame.function_value.as_function_id() {
+                    self.object_pool
+                        .get_function(func_id)
+                        .map(|f| f.chunk.max_stack_size)
+                        .unwrap_or(256)
+                } else {
+                    256
+                };
+            caller_base + caller_max_stack
+        } else {
+            0
+        };
+        
+        let stack_size = 3; // func + 2 args
+        self.ensure_stack_capacity(new_base + stack_size);
+
+        // Set up arguments directly (no Vec allocation)
+        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
+        self.register_stack[new_base + 1] = arg1;
+        self.register_stack[new_base + 2] = arg2;
+
+        // Create C function frame
+        let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
+        self.push_frame(temp_frame);
+
+        // Call CFunction
+        let result = match cfunc(self) {
+            Ok(r) => {
+                self.pop_frame_discard();
+                Ok(r.first())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        };
+        
+        result
+    }
+    
+    /// Fast path for calling CFunction metamethods with 1 argument
+    /// Used by __len, __unm, __bnot, etc. Avoids Vec allocation.
+    #[inline(always)]
+    pub fn call_cfunc_metamethod_1(
+        &mut self,
+        cfunc: crate::lua_value::CFunction,
+        arg1: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            let caller_base = current_frame.base_ptr;
+            let caller_max_stack =
+                if let Some(func_id) = current_frame.function_value.as_function_id() {
+                    self.object_pool
+                        .get_function(func_id)
+                        .map(|f| f.chunk.max_stack_size)
+                        .unwrap_or(256)
+                } else {
+                    256
+                };
+            caller_base + caller_max_stack
+        } else {
+            0
+        };
+        
+        let stack_size = 2; // func + 1 arg
+        self.ensure_stack_capacity(new_base + stack_size);
+
+        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
+        self.register_stack[new_base + 1] = arg1;
+
+        let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
+        self.push_frame(temp_frame);
+
+        let result = match cfunc(self) {
+            Ok(r) => {
+                self.pop_frame_discard();
+                Ok(r.first())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        };
+        
+        result
+    }
+    
+    /// Fast path for calling CFunction metamethods with 3 arguments
+    /// Used by __newindex. Avoids Vec allocation.
+    #[inline(always)]
+    pub fn call_cfunc_metamethod_3(
+        &mut self,
+        cfunc: crate::lua_value::CFunction,
+        arg1: LuaValue,
+        arg2: LuaValue,
+        arg3: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            let caller_base = current_frame.base_ptr;
+            let caller_max_stack =
+                if let Some(func_id) = current_frame.function_value.as_function_id() {
+                    self.object_pool
+                        .get_function(func_id)
+                        .map(|f| f.chunk.max_stack_size)
+                        .unwrap_or(256)
+                } else {
+                    256
+                };
+            caller_base + caller_max_stack
+        } else {
+            0
+        };
+        
+        let stack_size = 4; // func + 3 args
+        self.ensure_stack_capacity(new_base + stack_size);
+
+        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
+        self.register_stack[new_base + 1] = arg1;
+        self.register_stack[new_base + 2] = arg2;
+        self.register_stack[new_base + 3] = arg3;
+
+        let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
+        self.push_frame(temp_frame);
+
+        let result = match cfunc(self) {
+            Ok(r) => {
+                self.pop_frame_discard();
+                Ok(r.first())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        };
+        
+        result
     }
 
     // Integer division
@@ -2323,13 +2528,20 @@ impl LuaVM {
                 
                 self.ensure_stack_capacity(new_base + max_stack_size);
 
-                // Initialize registers with nil, then copy args
-                for i in new_base..(new_base + max_stack_size) {
-                    self.register_stack[i] = LuaValue::nil();
-                }
-                for (i, arg) in args.iter().enumerate() {
-                    if i < max_stack_size {
-                        self.register_stack[new_base + i] = *arg;
+                // Copy args first, then initialize remaining with nil (only beyond args)
+                let arg_count = args.len().min(max_stack_size);
+                unsafe {
+                    let dst = self.register_stack.as_mut_ptr().add(new_base);
+                    // Copy arguments
+                    for (i, arg) in args.iter().enumerate() {
+                        if i < max_stack_size {
+                            *dst.add(i) = *arg;
+                        }
+                    }
+                    // Initialize remaining registers with nil
+                    let nil_val = LuaValue::nil();
+                    for i in arg_count..max_stack_size {
+                        *dst.add(i) = nil_val;
                     }
                 }
 
@@ -2358,13 +2570,9 @@ impl LuaVM {
                         self.pop_frame_discard();
                         let result = std::mem::take(&mut self.return_values);
                         
-                        // Clear the stack region used by this call to release references
-                        // This prevents GC from scanning stale objects after dofile/pcall
-                        for i in new_base..(new_base + max_stack_size) {
-                            if i < self.register_stack.len() {
-                                self.register_stack[i] = LuaValue::nil();
-                            }
-                        }
+                        // NOTE: We intentionally don't clear the stack here anymore.
+                        // The stack will be overwritten on next call, and GC can handle
+                        // any stale references. This gives significant performance improvement.
                         
                         Ok(result)
                     }
