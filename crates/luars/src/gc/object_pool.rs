@@ -362,6 +362,40 @@ pub struct ObjectPoolV2 {
     // Uses linear probing with string content comparison for collision handling
     string_intern: StringInternTable,
     max_intern_length: usize,
+
+    // Pre-cached metamethod name StringIds (like Lua's G(L)->tmname[])
+    // These are created at initialization and never collected
+    // Stored as StringId to avoid repeated hash lookup in hot paths
+    pub tm_index: StringId,      // "__index"
+    pub tm_newindex: StringId,   // "__newindex"
+    pub tm_call: StringId,       // "__call"
+    pub tm_tostring: StringId,   // "__tostring"
+    pub tm_len: StringId,        // "__len"
+    pub tm_pairs: StringId,      // "__pairs"
+    pub tm_ipairs: StringId,     // "__ipairs"
+    pub tm_gc: StringId,         // "__gc"
+    pub tm_close: StringId,      // "__close"
+    pub tm_mode: StringId,       // "__mode"
+    pub tm_name: StringId,       // "__name"
+    pub tm_eq: StringId,         // "__eq"
+    pub tm_lt: StringId,         // "__lt"
+    pub tm_le: StringId,         // "__le"
+    pub tm_add: StringId,        // "__add"
+    pub tm_sub: StringId,        // "__sub"
+    pub tm_mul: StringId,        // "__mul"
+    pub tm_div: StringId,        // "__div"
+    pub tm_mod: StringId,        // "__mod"
+    pub tm_pow: StringId,        // "__pow"
+    pub tm_unm: StringId,        // "__unm"
+    pub tm_idiv: StringId,       // "__idiv"
+    pub tm_band: StringId,       // "__band"
+    pub tm_bor: StringId,        // "__bor"
+    pub tm_bxor: StringId,       // "__bxor"
+    pub tm_bnot: StringId,       // "__bnot"
+    pub tm_shl: StringId,        // "__shl"
+    pub tm_shr: StringId,        // "__shr"
+    pub tm_concat: StringId,     // "__concat"
+    pub tm_metatable: StringId,  // "__metatable"
 }
 
 // ============ Lua-style String Interning Table ============
@@ -549,7 +583,7 @@ impl StringInternTable {
 
 impl ObjectPoolV2 {
     pub fn new() -> Self {
-        Self {
+        let mut pool = Self {
             strings: Arena::with_capacity(256),
             tables: Arena::with_capacity(64),
             functions: Arena::with_capacity(32),
@@ -558,7 +592,73 @@ impl ObjectPoolV2 {
             threads: Arena::with_capacity(8),
             string_intern: StringInternTable::with_capacity(256),
             max_intern_length: 64, // Strings <= 64 bytes are interned
-        }
+            // Placeholder values - will be initialized below
+            tm_index: StringId(0),
+            tm_newindex: StringId(0),
+            tm_call: StringId(0),
+            tm_tostring: StringId(0),
+            tm_len: StringId(0),
+            tm_pairs: StringId(0),
+            tm_ipairs: StringId(0),
+            tm_gc: StringId(0),
+            tm_close: StringId(0),
+            tm_mode: StringId(0),
+            tm_name: StringId(0),
+            tm_eq: StringId(0),
+            tm_lt: StringId(0),
+            tm_le: StringId(0),
+            tm_add: StringId(0),
+            tm_sub: StringId(0),
+            tm_mul: StringId(0),
+            tm_div: StringId(0),
+            tm_mod: StringId(0),
+            tm_pow: StringId(0),
+            tm_unm: StringId(0),
+            tm_idiv: StringId(0),
+            tm_band: StringId(0),
+            tm_bor: StringId(0),
+            tm_bxor: StringId(0),
+            tm_bnot: StringId(0),
+            tm_shl: StringId(0),
+            tm_shr: StringId(0),
+            tm_concat: StringId(0),
+            tm_metatable: StringId(0),
+        };
+        
+        // Pre-create all metamethod name strings (like Lua's luaT_init)
+        // These strings are interned and will never be collected
+        pool.tm_index = pool.create_string("__index");
+        pool.tm_newindex = pool.create_string("__newindex");
+        pool.tm_call = pool.create_string("__call");
+        pool.tm_tostring = pool.create_string("__tostring");
+        pool.tm_len = pool.create_string("__len");
+        pool.tm_pairs = pool.create_string("__pairs");
+        pool.tm_ipairs = pool.create_string("__ipairs");
+        pool.tm_gc = pool.create_string("__gc");
+        pool.tm_close = pool.create_string("__close");
+        pool.tm_mode = pool.create_string("__mode");
+        pool.tm_name = pool.create_string("__name");
+        pool.tm_eq = pool.create_string("__eq");
+        pool.tm_lt = pool.create_string("__lt");
+        pool.tm_le = pool.create_string("__le");
+        pool.tm_add = pool.create_string("__add");
+        pool.tm_sub = pool.create_string("__sub");
+        pool.tm_mul = pool.create_string("__mul");
+        pool.tm_div = pool.create_string("__div");
+        pool.tm_mod = pool.create_string("__mod");
+        pool.tm_pow = pool.create_string("__pow");
+        pool.tm_unm = pool.create_string("__unm");
+        pool.tm_idiv = pool.create_string("__idiv");
+        pool.tm_band = pool.create_string("__band");
+        pool.tm_bor = pool.create_string("__bor");
+        pool.tm_bxor = pool.create_string("__bxor");
+        pool.tm_bnot = pool.create_string("__bnot");
+        pool.tm_shl = pool.create_string("__shl");
+        pool.tm_shr = pool.create_string("__shr");
+        pool.tm_concat = pool.create_string("__concat");
+        pool.tm_metatable = pool.create_string("__metatable");
+        
+        pool
     }
 
     // ==================== String Operations ====================

@@ -427,8 +427,8 @@ impl LuaVM {
         // Create the metatable
         let metatable = self.create_table(0, 1);
 
-        // Create the __index key before any borrowing
-        let index_key = self.create_string("__index");
+        // Use pre-cached __index StringId for fast lookup
+        let index_key = LuaValue::string(self.object_pool.tm_index);
 
         // Get the table reference to set __index
         if let Some(mt_ref) = self.get_table_mut(&metatable) {
@@ -803,7 +803,8 @@ impl LuaVM {
         if lua_table_value.is_string() {
             // Strings use a shared metatable
             if let Some(string_mt) = self.get_string_metatable() {
-                let index_key = self.create_string("__index");
+                // Use pre-cached __index StringId for fast lookup
+                let index_key = LuaValue::string(self.object_pool.tm_index);
 
                 // Get the __index field from string metatable
                 if let Some(index_table) = self.table_get_with_meta(&string_mt, &index_key) {
@@ -835,7 +836,8 @@ impl LuaVM {
         if let Some(mt) = meta_value
             && let Some(meta_id) = mt.as_table_id()
         {
-            let index_key = self.create_string("__index");
+            // Use pre-cached __index StringId - avoids hash computation and intern lookup
+            let index_key = LuaValue::string(self.object_pool.tm_index);
 
             let index_value = {
                 let metatable = self.object_pool.get_table(meta_id)?;
@@ -880,7 +882,8 @@ impl LuaVM {
         };
 
         if let Some(mt_id) = metatable.as_table_id() {
-            let index_key = self.create_string("__index");
+            // Use pre-cached __index StringId
+            let index_key = LuaValue::string(self.object_pool.tm_index);
 
             let index_value = {
                 let mt = self.object_pool.get_table(mt_id)?;
@@ -911,7 +914,8 @@ impl LuaVM {
     /// Get value from string with metatable support
     /// Handles __index metamethod for strings
     pub fn string_get(&mut self, string_val: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        let index_key = self.create_string("__index");
+        // Use pre-cached __index StringId
+        let index_key = LuaValue::string(self.object_pool.tm_index);
         // Check for __index metamethod in string metatable
         if let Some(mt) = &self.string_metatable.clone() {
             let index_value = if let Some(mt_ref) = self.get_table(mt) {
@@ -979,7 +983,8 @@ impl LuaVM {
         if let Some(mt) = meta_value
             && let Some(mt_id) = mt.as_table_id()
         {
-            let newindex_key = self.create_string("__newindex");
+            // Use pre-cached __newindex StringId - avoids hash computation and intern lookup
+            let newindex_key = LuaValue::string(self.object_pool.tm_newindex);
 
             let newindex_value = {
                 let Some(metatable) = self.object_pool.get_table(mt_id) else {
@@ -1198,8 +1203,8 @@ impl LuaVM {
                 continue;
             }
 
-            // Try to get __close metamethod
-            let close_key = self.create_string("__close");
+            // Try to get __close metamethod using pre-cached StringId
+            let close_key = LuaValue::string(self.object_pool.tm_close);
             let metamethod = if let Some(mt) = self.table_get_metatable(&value) {
                 self.table_get_with_meta(&mt, &close_key)
             } else {
