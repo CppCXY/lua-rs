@@ -155,11 +155,13 @@ pub struct LuaString {
 
 impl LuaString {
     pub fn new(s: String) -> Self {
-        use fxhash::FxHasher;
-        use std::hash::Hasher;
-        let mut hasher = FxHasher::default();
-        hasher.write(s.as_bytes());
-        let hash = hasher.finish();
+        // Use FNV-1a hash for consistency with ObjectPool
+        let bytes = s.as_bytes();
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+        }
 
         LuaString { data: s, hash }
     }

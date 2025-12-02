@@ -54,7 +54,7 @@ pub struct LuaVM {
     pub(crate) object_pool: ObjectPool,
 
     // Garbage collector (cold path - only accessed during actual GC)
-    pub gc: GC,
+    pub(crate) gc: GC,
 
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
