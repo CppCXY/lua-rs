@@ -87,21 +87,22 @@ impl LuaTable {
     }
 
     /// Hash function for LuaValue - optimized for speed
+    /// Uses identity hash for GC objects (string/table/function ID) and value hash for primitives
     #[inline(always)]
     fn hash_key(key: &LuaValue, size: usize) -> usize {
-        if size == 0 {
-            return 0;
-        }
-
-        // Use XOR of both words for good distribution
-        // This is faster than type-checking and works for all value types
-        let raw = key.primary ^ key.secondary;
-
-        // Simple but effective mixing (from FxHash)
-        let hash = raw.wrapping_mul(0x517cc1b727220a95);
+        // Combine primary and secondary for best distribution
+        // For strings: primary has tag|id, secondary is 0 -> hash of id
+        // For integers: primary has tag, secondary has value -> hash of value
+        // For floats: similar to integers
+        // XOR gives good mixing without branch
+        let raw = key.primary.wrapping_add(key.secondary);
+        
+        // Fibonacci hashing - excellent distribution for sequential IDs
+        // Golden ratio: 2^64 / phi ≈ 0x9e3779b97f4a7c15
+        let hash = raw.wrapping_mul(0x9e3779b97f4a7c15);
 
         // Fast modulo using bitmask (size is power of 2)
-        (hash as usize) & (size - 1)
+        (hash >> 32) as usize & (size - 1)
     }
 
     /// Find a node with the given key, returns Some(index) if found

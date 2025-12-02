@@ -75,21 +75,22 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
         (table, key)
     };
 
-    // FAST PATH: Direct table access for common case (integer key, no metatable)
+    // FAST PATH: Direct table access for common case
     if let Some(table_id) = table_value.as_table_id() {
         // SAFETY: table_id is valid because it came from as_table_id()
         let lua_table = unsafe { vm.object_pool.get_table_unchecked(table_id) };
 
-        // Try integer key fast path first
-        if let Some(i) = key_value.as_integer() {
-            if let Some(val) = lua_table.get_int(i) {
-                unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = val };
-                return Ok(());
-            }
-        }
+        // Check key type to choose optimal path
+        // Integer keys may be in array part, other keys are in hash part
+        let result = if let Some(i) = key_value.as_integer() {
+            // Integer key: try array first, then hash
+            lua_table.get_int(i).or_else(|| lua_table.get_from_hash(&key_value))
+        } else {
+            // Non-integer key: direct hash lookup (most common for string keys)
+            lua_table.get_from_hash(&key_value)
+        };
 
-        // Try hash lookup
-        if let Some(val) = lua_table.get_from_hash(&key_value) {
+        if let Some(val) = result {
             if !val.is_nil() {
                 unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = val };
                 return Ok(());
@@ -259,43 +260,34 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_
 
 /// GETFIELD A B C
 /// R[A] := R[B][K[C]:string]
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let func_value = unsafe { (*frame_ptr).function_value };
-
-    // Get key constant using new API
-    let Some(func_id) = func_value.as_function_id() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
-    };
-    let Some(key_value) = func_ref.chunk.constants.get(c).copied() else {
-        return Err(vm.error(format!("Invalid constant index: {}", c)));
-    };
-
-    let table_value = vm.register_stack[*base_ptr + b];
+    // FAST PATH: Direct constant access via cached pointer (like GETTABUP)
+    let key_value = unsafe { *(*frame_ptr).constants_ptr.add(c) };
+    let table_value = unsafe { *vm.register_stack.get_unchecked(*base_ptr + b) };
 
     // FAST PATH: Direct hash access for tables without metatable
     if let Some(table_id) = table_value.as_table_id() {
-        if let Some(table_ref) = vm.object_pool.get_table(table_id) {
-            // Use optimized hash-only lookup (GETFIELD always uses string keys, never integers)
-            if let Some(val) = table_ref.get_from_hash(&key_value) {
-                if !val.is_nil() {
-                    vm.register_stack[*base_ptr + a] = val;
-                    return Ok(());
-                }
-            }
+        // OPTIMIZED: Use unchecked table access
+        let table_ref = unsafe { vm.object_pool.get_table_unchecked(table_id) };
 
-            // Check if no metatable - can return nil directly
-            if table_ref.get_metatable().is_none() {
-                vm.register_stack[*base_ptr + a] = LuaValue::nil();
+        // GETFIELD always uses string keys - direct hash lookup
+        if let Some(val) = table_ref.get_from_hash(&key_value) {
+            if !val.is_nil() {
+                unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = val };
                 return Ok(());
             }
+        }
+
+        // Check if no metatable - can return nil directly
+        if table_ref.get_metatable().is_none() {
+            unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
+            return Ok(());
         }
     }
 
@@ -306,13 +298,14 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 
     // IMPORTANT: Re-read base_ptr after metamethod call in case frames changed
     *base_ptr = unsafe { (*frame_ptr).base_ptr };
-    vm.register_stack[*base_ptr + a] = value;
+    unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = value };
 
     Ok(())
 }
 
 /// SETFIELD A B C k
 /// R[A][K[B]:string] := RK(C)
+/// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -320,47 +313,29 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    // CRITICAL: Read all values BEFORE any metamethod calls
-    // because metamethods can modify the register stack
+    // FAST PATH: Direct access via cached pointers
     let (table_value, key_value, set_value) = unsafe {
-        let func_value = (*frame_ptr).function_value;
-
-        // Get key constant using new API
-        let Some(func_id) = func_value.as_function_id() else {
-            return Err(vm.error("Not a Lua function".to_string()));
-        };
-        let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-            return Err(vm.error("Invalid function ID".to_string()));
-        };
-        let Some(key) = func_ref.chunk.constants.get(b).copied() else {
-            return Err(vm.error(format!("Invalid constant index: {}", b)));
-        };
-
-        let table = vm.register_stack[*base_ptr + a];
-
+        let table = *vm.register_stack.get_unchecked(*base_ptr + a);
+        let key = *(*frame_ptr).constants_ptr.add(b);
         let value = if k {
-            let Some(constant) = func_ref.chunk.constants.get(c).copied() else {
-                return Err(vm.error(format!("Invalid constant index: {}", c)));
-            };
-            constant
+            *(*frame_ptr).constants_ptr.add(c)
         } else {
-            vm.register_stack[*base_ptr + c]
+            *vm.register_stack.get_unchecked(*base_ptr + c)
         };
-
         (table, key, value)
     };
 
     // FAST PATH: Direct table access without metamethod check for common case
     if let Some(table_id) = table_value.as_table_id() {
-        if let Some(table_ref) = vm.object_pool.get_table_mut(table_id) {
-            // Quick check: no metatable means no __newindex to worry about
-            if table_ref.get_metatable().is_none() {
-                // Ultra-fast path: direct set without any metamethod checks
-                table_ref.raw_set(key_value.clone(), set_value.clone());
+        // OPTIMIZED: Use unchecked access
+        let table_ref = unsafe { vm.object_pool.get_table_unchecked(table_id) };
 
-                // Note: GC barrier is handled lazily during collection
-                return Ok(());
-            }
+        // Quick check: no metatable means no __newindex to worry about
+        if table_ref.get_metatable().is_none() {
+            let table_ref = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
+            // Ultra-fast path: direct set without any metamethod checks
+            table_ref.raw_set(key_value, set_value);
+            return Ok(());
         }
     }
 

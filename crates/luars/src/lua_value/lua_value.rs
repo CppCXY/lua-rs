@@ -405,28 +405,30 @@ impl LuaValue {
     // ============ Equality ============
 
     /// Raw equality (no metamethods)
-    /// OPTIMIZED: For interned types (string/table/etc), primary contains ID - no secondary check needed
+    /// OPTIMIZED: Branchless comparison for common case, only branch for float NaN handling
     #[inline(always)]
     pub fn raw_equal(&self, other: &Self) -> bool {
-        // Fast path: if primary differs, they're not equal (different type or ID)
-        if self.primary != other.primary {
-            return false;
-        }
-        // Primary matches
-        // Only INTEGER and FLOAT store value in secondary
-        // INTEGER: primary is just TAG_INTEGER, value in secondary
-        // FLOAT: primary is just TAG_FLOAT, value bits in secondary + NaN handling
-        // All other types: ID or value encoded in primary, secondary unused or always 0
-        let tag = self.primary & TAG_MASK;
-        if tag == TAG_INTEGER {
-            self.secondary == other.secondary
-        } else if tag == TAG_FLOAT {
-            let a = f64::from_bits(self.secondary);
-            let b = f64::from_bits(other.secondary);
-            a == b
+        // Compare both primary and secondary
+        // This is branchless and correct for:
+        // - Strings/Tables/Functions: primary has tag|id, secondary is 0
+        // - Integers: primary is TAG_INTEGER, secondary has value
+        // - Booleans: primary is TAG_TRUE or TAG_FALSE, secondary is 0
+        // - Nil: primary is TAG_NIL, secondary is 0
+        //
+        // Special case: Float - IEEE 754 says NaN != NaN, but bit comparison would say equal
+        // We handle this with a single branch check
+        if self.primary == other.primary && self.secondary == other.secondary {
+            // Fast path: bits match
+            // Need to verify this isn't two NaNs comparing equal
+            if (self.primary & TAG_MASK) == TAG_FLOAT {
+                // For floats, use proper IEEE comparison
+                let a = f64::from_bits(self.secondary);
+                a == a // Returns false if NaN
+            } else {
+                true
+            }
         } else {
-            // String, Table, Function, etc - primary already contains unique ID
-            true
+            false
         }
     }
 
