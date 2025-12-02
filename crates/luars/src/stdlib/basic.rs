@@ -817,7 +817,7 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     // Optional chunk name for error messages
-    let _chunkname = get_arg(vm, 2)
+    let chunkname = get_arg(vm, 2)
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
                 vm.object_pool
@@ -841,8 +841,8 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Optional environment table
     let env = get_arg(vm, 4);
 
-    // Compile the code using VM's string pool
-    match vm.compile(&code_str) {
+    // Compile the code using VM's string pool with chunk name
+    match vm.compile_with_name(&code_str, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
             // Loaded chunks need _ENV as upvalue[0]
@@ -886,8 +886,9 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
     };
 
-    // Compile the code using VM's string pool
-    match vm.compile(&code) {
+    // Compile the code using VM's string pool with chunk name
+    let chunkname = format!("@{}", filename_str);
+    match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
             let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);
@@ -912,21 +913,22 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         })
     });
 
-    let code = if let Some(fname) = filename {
+    let (code, chunkname) = if let Some(fname) = filename {
         // Load from specified file
-        match std::fs::read_to_string(&fname) {
+        let code = match std::fs::read_to_string(&fname) {
             Ok(c) => c,
             Err(e) => {
                 return Err(vm.error(format!("cannot open {}: {}", fname, e)));
             }
-        }
+        };
+        (code, format!("@{}", fname))
     } else {
         // Load from stdin (simplified: return error for now)
         return Err(vm.error("stdin loading not implemented".to_string()));
     };
 
-    // Compile and execute using VM's string pool
-    match vm.compile(&code) {
+    // Compile and execute using VM's string pool with chunk name
+    match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
             let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);

@@ -206,8 +206,9 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
     };
 
-    // Compile it using VM's string pool
-    let chunk = vm.compile(&source)?;
+    // Compile it using VM's string pool with chunk name
+    let chunkname = format!("@{}", filepath_str);
+    let chunk = vm.compile_with_name(&source, &chunkname)?;
     // Create a function from the chunk
     let func = vm.create_function(Rc::new(chunk), vec![]);
 

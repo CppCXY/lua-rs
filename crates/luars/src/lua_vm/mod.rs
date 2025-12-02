@@ -2652,7 +2652,8 @@ impl LuaVM {
         args: Vec<LuaValue>,
         coroutine: LuaValue,
     ) -> LuaResult<u64> {
-        let task_id = self.async_executor.spawn_task(func_name, args, coroutine)?;
+        let task_id = self.async_executor.spawn_task(func_name, args, coroutine)
+            .map_err(|e| self.error(e))?;
         Ok(task_id)
     }
 

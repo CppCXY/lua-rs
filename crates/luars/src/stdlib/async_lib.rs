@@ -20,27 +20,19 @@ pub fn create_async_lib() -> LibraryModule {
 /// Register async functions to the executor
 pub fn register_async_functions(vm: &mut LuaVM) {
     // Register the actual async implementation
-    vm.register_async_function("sleep", async_sleep_impl);
+    vm.async_executor.register_async_function(
+        "sleep".to_string(),
+        |args: Vec<LuaValue>| async move {
+            let ms = args.get(0)
+                .and_then(|v| v.as_number())
+                .unwrap_or(0.0) as u64;
+
+            sleep(Duration::from_millis(ms)).await;
+            Ok(vec![])
+        }
+    );
 
     // TODO: Add more async functions as needed
-}
-
-/// Async sleep implementation (runs in tokio)
-async fn async_sleep_impl(args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
-    if args.is_empty() {
-        return Err(vm.error("sleep requires 1 argument (milliseconds)".to_string()));
-    }
-
-    let ms = match args[0].as_number() {
-        Some(n) => n as u64,
-        None => {
-            return Err(vm.error("sleep argument must be a number".to_string()));
-        }
-    };
-
-    sleep(Duration::from_millis(ms)).await;
-
-    Ok(vec![])
 }
 
 /// Wrapper function that can be called from Lua
@@ -61,8 +53,10 @@ fn async_sleep_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     // 启动异步任务
-    let task_id = vm.async_call("sleep", args, coroutine)?;
+    let task_id = vm.async_executor.spawn_task("sleep", args, coroutine)
+        .map_err(|e| vm.error(e))?;
 
     // Yield协程
-    Err(LuaError::Yield(vec![LuaValue::integer(task_id as i64)]))
+    vm.yield_values = vec![LuaValue::integer(task_id as i64)];
+    Err(LuaError::Yield)
 }

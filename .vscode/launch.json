@@ -1,0 +1,25 @@
+{
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'luars-interpreter'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=lua",
+                    "--package=luars_interpreter",
+                    "--target=x86_64-pc-windows-gnu",
+                ],
+                "filter": {
+                    "name": "lua",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "test_simple.lua"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+    ]
+}

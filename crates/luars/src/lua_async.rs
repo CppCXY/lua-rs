@@ -88,12 +88,12 @@ impl AsyncExecutor {
         func_name: &str,
         args: Vec<LuaValue>,
         coroutine: LuaValue,
-    ) -> Result<AsyncTaskId, LuaError> {
+    ) -> Result<AsyncTaskId, String> {
         let func = self
             .async_functions
             .get(func_name)
             .ok_or_else(|| {
-                LuaError::RuntimeError(format!("Async function '{}' not registered", func_name))
+                format!("Async function '{}' not registered", func_name)
             })?
             .clone();
 
@@ -175,7 +175,7 @@ pub fn create_async_wrapper(func_name: String) -> impl Fn(&mut LuaVM) -> LuaResu
     move |vm: &mut LuaVM| -> LuaResult<MultiValue> {
         // 检查是否在协程中
         let coroutine = vm.current_thread_value.clone().ok_or_else(|| {
-            LuaError::RuntimeError(format!(
+            vm.error(format!(
                 "async function '{}' can only be called from within a coroutine",
                 func_name
             ))
@@ -186,14 +186,23 @@ pub fn create_async_wrapper(func_name: String) -> impl Fn(&mut LuaVM) -> LuaResu
         let base = frame.base_ptr;
         let top = frame.top;
         let mut args = Vec::new();
-        for i in 1..top {
-            args.push(vm.register_stack[base + i]);
+        // 修正: 参数从base+1开始，到top结束
+        for i in (base + 1)..top {
+            args.push(vm.register_stack[i]);
         }
 
         // 启动异步任务
-        let task_id = vm.async_executor.spawn_task(&func_name, args, coroutine)?;
+        let task_id = vm.async_executor.spawn_task(&func_name, args, coroutine)
+            .map_err(|e| vm.error(e))?;
 
         // Yield协程，返回task_id
-        Err(LuaError::Yield(vec![LuaValue::integer(task_id as i64)]))
+        vm.yield_values = vec![LuaValue::integer(task_id as i64)];
+        Err(LuaError::Yield)
+    }
+}
+
+impl Default for AsyncExecutor {
+    fn default() -> Self {
+        Self::new()
     }
 }
