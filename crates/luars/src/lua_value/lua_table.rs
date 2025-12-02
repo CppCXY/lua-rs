@@ -292,9 +292,12 @@ impl LuaTable {
     }
 
     /// Get from hash part
-    #[inline]
+    #[inline(always)]
     pub(crate) fn get_from_hash(&self, key: &LuaValue) -> Option<LuaValue> {
-        self.find_node(key).map(|idx| self.nodes[idx].value)
+        match self.find_node(key) {
+            Some(idx) => Some(unsafe { self.nodes.get_unchecked(idx).value }),
+            None => None,
+        }
     }
 
     /// Fast integer key write

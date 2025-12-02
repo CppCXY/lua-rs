@@ -405,16 +405,28 @@ impl LuaValue {
     // ============ Equality ============
 
     /// Raw equality (no metamethods)
+    /// OPTIMIZED: For interned types (string/table/etc), primary contains ID - no secondary check needed
     #[inline(always)]
     pub fn raw_equal(&self, other: &Self) -> bool {
-        // For most types, both tag and data must match
-        // Special case: NaN != NaN for floats
-        if (self.primary & TAG_MASK) == TAG_FLOAT && (other.primary & TAG_MASK) == TAG_FLOAT {
+        // Fast path: if primary differs, they're not equal (different type or ID)
+        if self.primary != other.primary {
+            return false;
+        }
+        // Primary matches
+        // Only INTEGER and FLOAT store value in secondary
+        // INTEGER: primary is just TAG_INTEGER, value in secondary
+        // FLOAT: primary is just TAG_FLOAT, value bits in secondary + NaN handling
+        // All other types: ID or value encoded in primary, secondary unused or always 0
+        let tag = self.primary & TAG_MASK;
+        if tag == TAG_INTEGER {
+            self.secondary == other.secondary
+        } else if tag == TAG_FLOAT {
             let a = f64::from_bits(self.secondary);
             let b = f64::from_bits(other.secondary);
-            a == b // This handles NaN correctly
+            a == b
         } else {
-            self.primary == other.primary && self.secondary == other.secondary
+            // String, Table, Function, etc - primary already contains unique ID
+            true
         }
     }
 

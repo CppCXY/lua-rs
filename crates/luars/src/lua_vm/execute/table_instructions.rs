@@ -373,48 +373,42 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// GETTABUP A B C
 /// R[A] := UpValue[B][K[C]:string]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// Note: Key is always a string from constant table per Lua 5.4 spec
 #[inline(always)]
 pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let func_value = unsafe { (*frame_ptr).function_value };
-
     // FAST PATH: Direct constant access via cached pointer
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(c) };
 
-    // Get function for upvalues access (still needed)
-    let Some(func_id) = func_value.as_function_id() else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
-    };
+    // OPTIMIZED: Use unchecked access for hot path
+    let func_value = unsafe { (*frame_ptr).function_value };
+    let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
+    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+    let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
 
-    let Some(&upvalue_id) = func_ref.upvalues.get(b) else {
-        return Err(vm.error(format!("Invalid upvalue index: {}", b)));
-    };
-
-    // Get upvalue value
-    let table_value = vm.read_upvalue(upvalue_id);
+    // OPTIMIZED: Use unchecked upvalue read
+    let table_value = unsafe { vm.read_upvalue_unchecked(upvalue_id) };
 
     // FAST PATH: Direct hash access for tables without metatable
     if let Some(table_id) = table_value.as_table_id() {
-        if let Some(table_ref) = vm.object_pool.get_table(table_id) {
-            // Try direct access
-            if let Some(val) = table_ref.raw_get(&key_value) {
-                if !val.is_nil() {
-                    vm.register_stack[*base_ptr + a] = val;
-                    return Ok(());
-                }
-            }
+        // OPTIMIZED: Use unchecked table access
+        let table_ref = unsafe { vm.object_pool.get_table_unchecked(table_id) };
 
-            // Check if no metatable - can return nil directly
-            if table_ref.get_metatable().is_none() {
-                vm.register_stack[*base_ptr + a] = LuaValue::nil();
+        // Key is always string from constants, skip integer check - use direct hash lookup
+        if let Some(val) = table_ref.get_from_hash(&key_value) {
+            if !val.is_nil() {
+                unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = val };
                 return Ok(());
             }
+        }
+
+        // Check if no metatable - can return nil directly
+        if table_ref.get_metatable().is_none() {
+            unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
+            return Ok(());
         }
     }
 
@@ -423,7 +417,7 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
         .table_get_with_meta(&table_value, &key_value)
         .unwrap_or(LuaValue::nil());
 
-    vm.register_stack[*base_ptr + a] = value;
+    unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = value };
 
     Ok(())
 }
