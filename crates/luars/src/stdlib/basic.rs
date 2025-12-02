@@ -613,7 +613,19 @@ fn lua_collectgarbage(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             // Return a dummy value for now
             Ok(MultiValue::single(LuaValue::integer(0)))
         }
-        "stop" | "restart" | "step" | "setpause" | "setstepmul" | "isrunning" => {
+        "stop" => {
+            // Set GC debt to very negative value to prevent collection
+            vm.gc.gc_debt = isize::MIN / 2;
+            vm.gc_debt_local = isize::MIN / 2;
+            Ok(MultiValue::single(LuaValue::integer(0)))
+        }
+        "restart" => {
+            // Reset GC debt to trigger collection
+            vm.gc.gc_debt = 0;
+            vm.gc_debt_local = 0;
+            Ok(MultiValue::single(LuaValue::integer(0)))
+        }
+        "step" | "setpause" | "setstepmul" | "isrunning" => {
             // Simplified: just return 0
             Ok(MultiValue::single(LuaValue::integer(0)))
         }

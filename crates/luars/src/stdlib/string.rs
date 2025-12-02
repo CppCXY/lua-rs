@@ -244,7 +244,7 @@ fn string_reverse(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// string.sub(s, i [, j]) - Extract substring
-/// ULTRA-OPTIMIZED: Avoid unnecessary allocations
+/// ULTRA-OPTIMIZED: Uses create_substring to avoid allocations when possible
 fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 1, "string.sub")?;
     let Some(string_id) = s_value.as_string_id() else {
@@ -258,13 +258,12 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     let j = get_arg(vm, 3).and_then(|v| v.as_integer()).unwrap_or(-1);
 
-    // Compute indices and extract substring slice
-    let substring = {
+    // Get string length and compute byte indices
+    let (start_byte, end_byte) = {
         let Some(s) = vm.object_pool.get_string(string_id) else {
             return Err(vm.error("bad argument #1 to 'string.sub' (string expected)".to_string()));
         };
-        let s_str = s.as_str();
-        let byte_len = s_str.len() as i64;
+        let byte_len = s.as_str().len() as i64;
 
         // Lua string.sub uses byte positions, not character positions!
         let start = if i < 0 { byte_len + i + 1 } else { i };
@@ -275,24 +274,18 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let end = end.max(0).min(byte_len) as usize;
 
         if start > 0 && start <= end + 1 {
-            let start_byte = (start - 1).min(s_str.len());
-            let end_byte = end.min(s_str.len());
-
-            // Fast path: return original string if full range
-            if start_byte == 0 && end_byte == s_str.len() {
-                return Ok(MultiValue::single(s_value));
-            }
-
-            // Need to copy the substring out
-            s_str[start_byte..end_byte].to_string()
+            let start_byte = (start - 1).min(byte_len as usize);
+            let end_byte = end.min(byte_len as usize);
+            (start_byte, end_byte)
         } else {
-            String::new()
+            // Empty string
+            (0, 0)
         }
     };
 
-    // Now create the result (borrow released)
-    let result = vm.create_string_owned(substring);
-    Ok(MultiValue::single(result))
+    // Use optimized create_substring
+    let result_id = vm.object_pool.create_substring(string_id, start_byte, end_byte);
+    Ok(MultiValue::single(LuaValue::string(result_id)))
 }
 
 /// string.format(formatstring, ...) - Format string (simplified)

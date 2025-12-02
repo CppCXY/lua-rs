@@ -831,13 +831,19 @@ impl ObjectPoolV2 {
         }
     }
 
+    /// Fast hash function - use byte-level mixing for better distribution
+    /// Especially for strings with common prefixes like "key1", "key2", etc.
     #[inline(always)]
     fn hash_string(s: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
-        hasher.finish()
+        // Use a simple but effective hash: FNV-1a variant
+        // This has better distribution for similar strings than FxHash
+        let bytes = s.as_bytes();
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+        }
+        hash
     }
 
     #[inline(always)]
@@ -848,6 +854,85 @@ impl ObjectPoolV2 {
     #[inline(always)]
     pub fn get_string_str(&self, id: StringId) -> Option<&str> {
         self.strings.get(id.0).map(|gs| gs.data.as_str())
+    }
+
+    /// Create a substring from an existing string (optimized for string.sub)
+    /// Returns the original string ID if the range covers the entire string.
+    /// This avoids allocating a new String until we know it's actually needed.
+    #[inline]
+    pub fn create_substring(&mut self, source_id: StringId, start: usize, end: usize) -> StringId {
+        // First phase: get substring info and check intern table
+        let intern_result = {
+            let Some(gs) = self.strings.get(source_id.0) else {
+                return self.create_string("");
+            };
+            let s = gs.data.as_str();
+            
+            // Clamp indices
+            let start = start.min(s.len());
+            let end = end.min(s.len());
+            
+            if start >= end {
+                return self.create_string("");
+            }
+            
+            // Fast path: return original if full range
+            if start == 0 && end == s.len() {
+                return source_id;
+            }
+            
+            let slice = &s[start..end];
+            let len = slice.len();
+            let hash = Self::hash_string(slice);
+            
+            // For short strings, check intern table first before allocating
+            if len <= self.max_intern_length {
+                let compare = |id: StringId| -> bool {
+                    self.strings
+                        .get(id.0)
+                        .map(|gs| gs.data.as_str() == slice)
+                        .unwrap_or(false)
+                };
+
+                match self.string_intern.find_or_insert_index(hash, compare) {
+                    Ok(existing_id) => {
+                        // Found existing interned string! No allocation needed!
+                        return existing_id;
+                    }
+                    Err(insert_idx) => {
+                        // Need to allocate - save slice content and insert index
+                        Some((slice.to_string(), hash, insert_idx))
+                    }
+                }
+            } else {
+                // Long strings - just need to allocate
+                Some((slice.to_string(), hash, usize::MAX))
+            }
+        };
+        
+        // Second phase: allocate and insert (if needed)
+        if let Some((substring, hash, insert_idx)) = intern_result {
+            if insert_idx != usize::MAX {
+                // Short string - insert into intern table at saved index
+                let gc_string = GcString {
+                    header: GcHeader::default(),
+                    data: LuaString::with_hash(substring, hash),
+                };
+                let id = StringId(self.strings.alloc(gc_string));
+                self.string_intern.insert(hash, id, insert_idx);
+                self.string_intern.maybe_resize(|_| hash);
+                id
+            } else {
+                // Long string - just allocate
+                let gc_string = GcString {
+                    header: GcHeader::default(),
+                    data: LuaString::with_hash(substring, hash),
+                };
+                StringId(self.strings.alloc(gc_string))
+            }
+        } else {
+            unreachable!()
+        }
     }
 
     /// Mark a string as fixed (never collected) - like Lua's luaC_fix()

@@ -9,9 +9,8 @@ use crate::lua_vm::LuaResult;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::rc::Rc;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
@@ -156,8 +155,10 @@ pub struct LuaString {
 
 impl LuaString {
     pub fn new(s: String) -> Self {
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
+        use fxhash::FxHasher;
+        use std::hash::Hasher;
+        let mut hasher = FxHasher::default();
+        hasher.write(s.as_bytes());
         let hash = hasher.finish();
 
         LuaString { data: s, hash }

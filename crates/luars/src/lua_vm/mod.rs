@@ -54,7 +54,7 @@ pub struct LuaVM {
     pub(crate) object_pool: ObjectPool,
 
     // Garbage collector (cold path - only accessed during actual GC)
-    pub(crate) gc: GC,
+    pub gc: GC,
 
     // Multi-return value buffer (temporary storage for function returns)
     pub return_values: Vec<LuaValue>,
@@ -1905,6 +1905,9 @@ impl LuaVM {
 
         // Perform GC step with complete root set
         self.gc.step(&roots, &mut self.object_pool);
+        
+        // Sync debt back from GC (it may have been reset to negative after collection)
+        self.gc_debt_local = self.gc.gc_debt;
     }
 
     // ============ GC Management ============
