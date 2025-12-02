@@ -2015,9 +2015,35 @@ impl LuaVM {
     // ===== Lightweight Error Handling API =====
 
     /// Set runtime error and return lightweight error enum
-    #[inline]
+    /// If an error handler is set (via xpcall), it will be called immediately
     pub fn error(&mut self, message: impl Into<String>) -> LuaError {
-        self.error_message = message.into();
+        let msg = message.into();
+        
+        // Check if there's an error handler (set by xpcall)
+        if let Some(handler) = self.error_handler.clone() {
+            // Call the error handler with the error message
+            // Note: The call stack is still intact at this point
+            let err_value = self.create_string(&msg);
+            
+            match self.call_function_internal(handler, vec![err_value]) {
+                Ok(handler_results) => {
+                    // Error handler succeeded, use its return value as the new error message
+                    if let Some(result) = handler_results.first() {
+                        self.error_message = self.value_to_string_raw(result);
+                    } else {
+                        self.error_message = msg;
+                    }
+                }
+                Err(_) => {
+                    // Error handler itself failed, use original message
+                    self.error_message = format!("error in error handler: {}", msg);
+                }
+            }
+        } else {
+            // No error handler, just set the message
+            self.error_message = msg;
+        }
+        
         LuaError::RuntimeError
     }
 
@@ -2413,7 +2439,8 @@ impl LuaVM {
         }
     }
 
-    /// Protected call with error handler
+    /// Protected call with error handler (xpcall semantics)
+    /// The error handler is registered and will be called by error() when an error occurs
     /// Note: Yields are NOT caught by xpcall - they propagate through
     pub fn protected_call_with_handler(
         &mut self,
@@ -2421,50 +2448,34 @@ impl LuaVM {
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        // Save old error handler and set the new one
         let old_handler = self.error_handler.clone();
         self.error_handler = Some(err_handler.clone());
 
         let initial_frame_count = self.frame_count;
 
+        // Call the function - if it errors, error() will call the handler
         let result = self.call_function_internal(func, args);
 
+        // Restore old error handler
         self.error_handler = old_handler;
 
         match result {
             Ok(values) => Ok((true, values)),
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(_) => {
-                // IMPORTANT: For xpcall, we call the error handler BEFORE cleaning up frames
-                // This allows the handler to access the full call stack for traceback generation
-                
-                // Get the error message (which already includes traceback)
-                let msg = self.error_message.clone();
-                let err_value = self.create_string(&msg);
-                let err_display = format!("Runtime Error: {}", msg);
-
-                // Call error handler with the error message BEFORE cleaning up frames
-                let handler_result = self.call_function_internal(err_handler, vec![err_value]);
-
-                // NOW clean up frames created by the failed function call
+                // Error occurred (and handler was already called in error())
+                // Clean up frames created by the failed function call
                 while self.frame_count > initial_frame_count {
                     let frame = self.pop_frame().unwrap();
                     // Close upvalues belonging to this frame
                     self.close_upvalues_from(frame.base_ptr);
                 }
-
-                match handler_result {
-                    Ok(handler_values) => Ok((false, handler_values)),
-                    Err(LuaError::Yield) => {
-                        // Yield from error handler - propagate it
-                        let values = self.take_yield_values();
-                        Err(self.do_yield(values))
-                    }
-                    Err(_) => {
-                        let err_str =
-                            self.create_string(&format!("Error in error handler: {}", err_display));
-                        Ok((false, vec![err_str]))
-                    }
-                }
+                
+                // Return the error message (which may have been modified by the handler)
+                let msg = self.error_message.clone();
+                let err_str = self.create_string(&msg);
+                Ok((false, vec![err_str]))
             }
         }
     }
