@@ -18,7 +18,28 @@ pub use upvalue_instructions::*;
 
 use super::{Instruction, LuaError, LuaResult, LuaVM, OpCode};
 use crate::LuaValue;
-use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+use crate::lua_value::{TAG_INTEGER, TAG_FLOAT, TYPE_MASK};
+
+/// Update base_ptr from frame (like Lua C's updatebase macro)
+/// Called after operations that may change the call stack
+#[inline(always)]
+unsafe fn updatebase(frame_ptr: *mut crate::lua_vm::LuaCallFrame, base_ptr: &mut usize) {
+    *base_ptr = (*frame_ptr).base_ptr;
+}
+
+/// Update both pc and base_ptr from frame
+/// Used after CALL/RETURN instructions
+#[inline(always)]
+unsafe fn updatestate(
+    frame_ptr: *mut crate::lua_vm::LuaCallFrame, 
+    pc: &mut usize, 
+    code_ptr: &mut *const u32,
+    base_ptr: &mut usize
+) {
+    *pc = (*frame_ptr).pc;
+    *code_ptr = (*frame_ptr).code_ptr;
+    *base_ptr = (*frame_ptr).base_ptr;
+}
 
 /// Ultra-optimized main execution loop
 ///
@@ -26,6 +47,7 @@ use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
 /// 1. Local variables: pc, code_ptr, base_ptr cached locally (like Lua C's luaV_execute)
 /// 2. Hot path instructions inlined directly in match
 /// 3. State reload only when frame changes (CALL/RETURN)
+/// 4. Pass mutable references to avoid frequent frame_ptr writes
 ///
 /// Returns: Ok(LuaValue) on success, Err on runtime error
 #[inline(never)] // Don't inline this - it's the main loop, let it stay in cache
@@ -59,9 +81,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
         let opcode = Instruction::get_opcode(instr);
 
         match opcode {
-            // ============ HOT PATH: Inline for maximum speed ============
+            // ============ HOT PATH: Inline simple instructions (< 10 lines) ============
             
-            // MOVE - directly inline with cached base_ptr
+            // MOVE - R[A] := R[B]
             OpCode::Move => {
                 let a = Instruction::get_a(instr) as usize;
                 let b = Instruction::get_b(instr) as usize;
@@ -72,7 +94,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             
-            // LOADI - directly inline with cached base_ptr
+            // LOADI - R[A] := sBx
             OpCode::LoadI => {
                 let a = Instruction::get_a(instr) as usize;
                 let sbx = Instruction::get_sbx(instr);
@@ -82,51 +104,89 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             
-            // ============ Other Load Instructions ============
-            OpCode::LoadNil => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_loadnil(vm, instr, frame_ptr);
-                continue 'mainloop;
-            }
-            OpCode::LoadFalse => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_loadfalse(vm, instr, frame_ptr);
-                continue 'mainloop;
-            }
-            OpCode::LoadTrue => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_loadtrue(vm, instr, frame_ptr);
-                continue 'mainloop;
-            }
-            OpCode::LFalseSkip => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_lfalseskip(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
-                continue 'mainloop;
-            }
+            // LOADF - R[A] := (float)sBx
             OpCode::LoadF => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_loadf(vm, instr, frame_ptr);
+                let a = Instruction::get_a(instr) as usize;
+                let sbx = Instruction::get_sbx(instr);
+                unsafe {
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(sbx as f64);
+                }
                 continue 'mainloop;
             }
+            
+            // LOADTRUE - R[A] := true
+            OpCode::LoadTrue => {
+                let a = Instruction::get_a(instr) as usize;
+                unsafe {
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(true);
+                }
+                continue 'mainloop;
+            }
+            
+            // LOADFALSE - R[A] := false
+            OpCode::LoadFalse => {
+                let a = Instruction::get_a(instr) as usize;
+                unsafe {
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
+                }
+                continue 'mainloop;
+            }
+            
+            // LFALSESKIP - R[A] := false; pc++
+            OpCode::LFalseSkip => {
+                let a = Instruction::get_a(instr) as usize;
+                unsafe {
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
+                }
+                pc += 1;
+                continue 'mainloop;
+            }
+            
+            // LOADNIL - R[A], ..., R[A+B] := nil
+            OpCode::LoadNil => {
+                let a = Instruction::get_a(instr) as usize;
+                let b = Instruction::get_b(instr) as usize;
+                unsafe {
+                    let nil_val = LuaValue::nil();
+                    let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
+                    for i in 0..=b {
+                        *reg_ptr.add(a + i) = nil_val;
+                    }
+                }
+                continue 'mainloop;
+            }
+            
+            // LOADK - R[A] := K[Bx]
             OpCode::LoadK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_loadk(vm, instr, frame_ptr);
+                let a = Instruction::get_a(instr) as usize;
+                let bx = Instruction::get_bx(instr) as usize;
+                unsafe {
+                    let constant = *(*frame_ptr).constants_ptr.add(bx);
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                }
                 continue 'mainloop;
             }
+            
+            // LOADKX - R[A] := K[extra arg]; pc++
             OpCode::LoadKX => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_loadkx(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                let a = Instruction::get_a(instr) as usize;
+                unsafe {
+                    let extra_instr = *code_ptr.add(pc);
+                    pc += 1;
+                    let bx = Instruction::get_ax(extra_instr) as usize;
+                    let constant = *(*frame_ptr).constants_ptr.add(bx);
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                }
                 continue 'mainloop;
             }
+            
+            // VARARGPREP - complex, call function
             OpCode::VarargPrep => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_varargprep(vm, instr, frame_ptr);
+                exec_varargprep(vm, instr, frame_ptr, &mut base_ptr);
                 continue 'mainloop;
             }
 
-            // ============ Arithmetic (hot path inline) ============
+            // ============ Arithmetic (inline integer fast path) ============
             OpCode::Add => {
                 let a = Instruction::get_a(instr) as usize;
                 let b = Instruction::get_b(instr) as usize;
@@ -142,248 +202,196 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         pc += 1; // Skip MMBIN
                         continue 'mainloop;
                     }
+                    // Float fast path
+                    if combined_tags == TAG_FLOAT {
+                        let result = f64::from_bits(left.secondary) + f64::from_bits(right.secondary);
+                        *reg_base.add(a) = LuaValue { primary: TAG_FLOAT, secondary: result.to_bits() };
+                        pc += 1; // Skip MMBIN
+                        continue 'mainloop;
+                    }
                 }
-                // Slow path: floats or metamethods
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_add(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                // Slow path: mixed types or metamethods
+                exec_add(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
+            
+            // Other arithmetic - call functions
             OpCode::Sub => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_sub(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_sub(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::Mul => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_mul(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_mul(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::AddI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_addi(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_addi(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::Div => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_div(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_div(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::IDiv => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_idiv(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_idiv(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::Mod => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_mod(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_mod(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::Pow => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_pow(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_pow(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
 
             // Arithmetic with constants
             OpCode::AddK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_addk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_addk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::SubK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_subk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_subk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::MulK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_mulk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_mulk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::ModK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_modk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_modk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::PowK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_powk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_powk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::DivK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_divk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_divk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::IDivK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_idivk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_idivk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
 
-            // ============ Bitwise (never fail for integers) ============
+            // ============ Bitwise (inline simple ones) ============
             OpCode::BAnd => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_band(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_band(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::BOr => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_bor(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_bor(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::BXor => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_bxor(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_bxor(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::Shl => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_shl(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_shl(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::Shr => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_shr(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_shr(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::BAndK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_bandk(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_bandk(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::BOrK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_bork(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_bork(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::BXorK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_bxork(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_bxork(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::ShrI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_shri(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_shri(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::ShlI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_shli(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_shli(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
                 continue 'mainloop;
             }
             OpCode::BNot => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_bnot(vm, instr, frame_ptr) {
+                if let Err(e) = exec_bnot(vm, instr, frame_ptr, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
 
-            // ============ Unary operations ============
+            // ============ Unary operations (inline NOT) ============
             OpCode::Not => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_not(vm, instr, frame_ptr);
+                let a = Instruction::get_a(instr) as usize;
+                let b = Instruction::get_b(instr) as usize;
+                unsafe {
+                    let value = *vm.register_stack.as_ptr().add(base_ptr + b);
+                    let is_falsy = !value.is_truthy();
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
+                }
                 continue 'mainloop;
             }
 
-            // ============ Metamethod stubs (skip, handled by previous instruction) ============
+            // ============ Metamethod stubs ============
             OpCode::MmBin => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_mmbin(vm, instr, frame_ptr) {
+                if let Err(e) = exec_mmbin(vm, instr, frame_ptr, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::MmBinI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_mmbini(vm, instr, frame_ptr) {
+                if let Err(e) = exec_mmbini(vm, instr, frame_ptr, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::MmBinK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_mmbink(vm, instr, frame_ptr) {
+                if let Err(e) = exec_mmbink(vm, instr, frame_ptr, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
 
-            // ============ Comparisons (may skip next instruction) ============
+            // ============ Comparisons (inline simple ones) ============
             OpCode::LtI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_lti(vm, instr, frame_ptr) {
+                if let Err(e) = exec_lti(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
             OpCode::LeI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_lei(vm, instr, frame_ptr) {
+                if let Err(e) = exec_lei(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
             OpCode::GtI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_gti(vm, instr, frame_ptr) {
+                if let Err(e) = exec_gti(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
             OpCode::GeI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_gei(vm, instr, frame_ptr) {
+                if let Err(e) = exec_gei(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
             OpCode::EqI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_eqi(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_eqi(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::EqK => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_eqk(vm, instr, frame_ptr) {
+                if let Err(e) = exec_eqk(vm, instr, frame_ptr, &mut pc) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
 
-            // ============ Control Flow (inline for speed) ============
+            // ============ Control Flow (inline JMP and TEST) ============
             OpCode::Jmp => {
                 let sj = Instruction::get_sj(instr);
                 pc = (pc as i32 + sj) as usize;
@@ -395,27 +403,22 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 unsafe {
                     let val = *vm.register_stack.as_ptr().add(base_ptr + a);
                     let is_truthy = val.is_truthy();
-                    // If (not value) == k, skip next instruction
                     if !is_truthy == k {
-                        pc += 1; // Skip next instruction
+                        pc += 1;
                     }
                 }
                 continue 'mainloop;
             }
             OpCode::TestSet => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_testset(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_testset(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
 
-            // ============ Loop Instructions (hot path inline) ============
+            // ============ Loop Instructions (inline FORLOOP) ============
             OpCode::ForPrep => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_forprep(vm, instr, frame_ptr) {
+                if let Err(e) = exec_forprep(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
             OpCode::ForLoop => {
@@ -425,7 +428,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
                     let step = *reg_base.add(2);
                     
-                    // Integer loop (vast majority of cases)
+                    // Integer loop (like Lua C)
                     if step.primary == TAG_INTEGER {
                         let count = (*reg_base.add(1)).secondary;
                         if count > 0 {
@@ -439,35 +442,29 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         }
                         continue 'mainloop;
                     }
-                    // Float loop - use existing function
-                    (*frame_ptr).pc = pc;
-                    let _ = exec_forloop(vm, instr, frame_ptr);
-                    pc = (*frame_ptr).pc;
+                    // Float loop
+                    if let Err(e) = exec_forloop(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                        return Err(e);
+                    }
                 }
                 continue 'mainloop;
             }
             OpCode::TForPrep => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_tforprep(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_tforprep(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::TForLoop => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_tforloop(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_tforloop(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
 
-            // ============ Upvalue operations ============
+            // ============ Upvalue operations (inline simple ones) ============
             OpCode::GetUpval => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_getupval(vm, instr, frame_ptr);
+                exec_getupval(vm, instr, frame_ptr, base_ptr);
                 continue 'mainloop;
             }
             OpCode::SetUpval => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_setupval(vm, instr, frame_ptr);
+                exec_setupval(vm, instr, frame_ptr, base_ptr);
                 continue 'mainloop;
             }
 
@@ -476,17 +473,12 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
 
-            // ============ Return Instructions (reload state after frame change) ============
+            // ============ Return Instructions (update state after frame change) ============
             OpCode::Return0 => {
-                unsafe { (*frame_ptr).pc = pc; }
                 match exec_return0(vm, instr, &mut frame_ptr) {
                     Ok(()) => {
-                        // Reload state from new frame
-                        unsafe {
-                            pc = (*frame_ptr).pc;
-                            code_ptr = (*frame_ptr).code_ptr;
-                            base_ptr = (*frame_ptr).base_ptr;
-                        }
+                        // Reload state from new frame (like Lua C)
+                        unsafe { updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr); }
                         continue 'mainloop;
                     }
                     Err(LuaError::Exit) => return Err(LuaError::Exit),
@@ -494,14 +486,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
             }
             OpCode::Return1 => {
-                unsafe { (*frame_ptr).pc = pc; }
                 match exec_return1(vm, instr, &mut frame_ptr) {
                     Ok(()) => {
-                        unsafe {
-                            pc = (*frame_ptr).pc;
-                            code_ptr = (*frame_ptr).code_ptr;
-                            base_ptr = (*frame_ptr).base_ptr;
-                        }
+                        unsafe { updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr); }
                         continue 'mainloop;
                     }
                     Err(LuaError::Exit) => return Err(LuaError::Exit),
@@ -509,14 +496,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
             }
             OpCode::Return => {
-                unsafe { (*frame_ptr).pc = pc; }
                 match exec_return(vm, instr, &mut frame_ptr) {
                     Ok(()) => {
-                        unsafe {
-                            pc = (*frame_ptr).pc;
-                            code_ptr = (*frame_ptr).code_ptr;
-                            base_ptr = (*frame_ptr).base_ptr;
-                        }
+                        unsafe { updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr); }
                         continue 'mainloop;
                     }
                     Err(LuaError::Exit) => return Err(LuaError::Exit),
@@ -524,29 +506,19 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
             }
 
-            // ============ Function calls (reload state after frame change) ============
+            // ============ Function calls (update state after frame change) ============
             OpCode::Call => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_call(vm, instr, &mut frame_ptr) {
+                if let Err(e) = exec_call(vm, instr, base_ptr, &mut frame_ptr) {
                     return Err(e);
                 }
                 // Reload state from new frame
-                unsafe {
-                    pc = (*frame_ptr).pc;
-                    code_ptr = (*frame_ptr).code_ptr;
-                    base_ptr = (*frame_ptr).base_ptr;
-                }
+                unsafe { updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr); }
                 continue 'mainloop;
             }
             OpCode::TailCall => {
-                unsafe { (*frame_ptr).pc = pc; }
                 match exec_tailcall(vm, instr, &mut frame_ptr) {
                     Ok(()) => {
-                        unsafe {
-                            pc = (*frame_ptr).pc;
-                            code_ptr = (*frame_ptr).code_ptr;
-                            base_ptr = (*frame_ptr).base_ptr;
-                        }
+                        unsafe { updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr); }
                         continue 'mainloop;
                     }
                     Err(LuaError::Exit) => return Err(LuaError::Exit),
@@ -554,72 +526,61 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
             }
 
-            // ============ Table operations (can trigger metamethods) ============
+            // ============ Table operations ============
             OpCode::NewTable => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_newtable(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_newtable(vm, instr, frame_ptr, &mut pc);
                 continue 'mainloop;
             }
             OpCode::GetTable => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_gettable(vm, instr, frame_ptr) {
+                if let Err(e) = exec_gettable(vm, instr, frame_ptr, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::SetTable => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_settable(vm, instr, frame_ptr) {
+                if let Err(e) = exec_settable(vm, instr, frame_ptr, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::GetI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_geti(vm, instr, frame_ptr) {
+                if let Err(e) = exec_geti(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::SetI => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_seti(vm, instr, frame_ptr) {
+                if let Err(e) = exec_seti(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::GetField => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_getfield(vm, instr, frame_ptr) {
+                if let Err(e) = exec_getfield(vm, instr, frame_ptr, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::SetField => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_setfield(vm, instr, frame_ptr) {
+                if let Err(e) = exec_setfield(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::GetTabUp => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_gettabup(vm, instr, frame_ptr) {
+                if let Err(e) = exec_gettabup(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::SetTabUp => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_settabup(vm, instr, frame_ptr) {
+                if let Err(e) = exec_settabup(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Self_ => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_self(vm, instr, frame_ptr) {
+                if let Err(e) = exec_self(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
@@ -627,55 +588,45 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Operations that can trigger metamethods ============
             OpCode::Unm => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_unm(vm, instr, frame_ptr) {
+                if let Err(e) = exec_unm(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Len => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_len(vm, instr, frame_ptr) {
+                if let Err(e) = exec_len(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Concat => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_concat(vm, instr, frame_ptr) {
+                if let Err(e) = exec_concat(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Eq => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_eq(vm, instr, frame_ptr) {
+                if let Err(e) = exec_eq(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
             OpCode::Lt => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_lt(vm, instr, frame_ptr) {
+                if let Err(e) = exec_lt(vm, instr, frame_ptr, &mut pc, base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
             OpCode::Le => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_le(vm, instr, frame_ptr) {
+                if let Err(e) = exec_le(vm, instr, frame_ptr, &mut pc, base_ptr) {
                     return Err(e);
                 }
-                unsafe { pc = (*frame_ptr).pc; }
                 continue 'mainloop;
             }
 
             // ============ TForCall ============
             OpCode::TForCall => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_tforcall(vm, instr, frame_ptr) {
+                if let Err(e) = exec_tforcall(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
@@ -683,33 +634,27 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Closure and special ============
             OpCode::Closure => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_closure(vm, instr, frame_ptr) {
+                if let Err(e) = exec_closure(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Vararg => {
-                unsafe { (*frame_ptr).pc = pc; }
-                if let Err(e) = exec_vararg(vm, instr, frame_ptr) {
+                if let Err(e) = exec_vararg(vm, instr, frame_ptr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::SetList => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_setlist(vm, instr, frame_ptr);
-                unsafe { pc = (*frame_ptr).pc; }
+                exec_setlist(vm, instr, frame_ptr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::Close => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_close(vm, instr, frame_ptr);
+                exec_close(vm, instr, base_ptr);
                 continue 'mainloop;
             }
             OpCode::Tbc => {
-                unsafe { (*frame_ptr).pc = pc; }
-                exec_tbc(vm, instr, frame_ptr);
+                exec_tbc(vm, instr, base_ptr);
                 continue 'mainloop;
             }
         }

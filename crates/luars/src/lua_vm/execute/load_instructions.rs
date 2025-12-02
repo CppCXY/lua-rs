@@ -10,11 +10,11 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
 ///
 /// This instruction moves vararg arguments to a safe location after max_stack_size,
 /// so they won't be overwritten by local variable operations.
-pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, _frame_ptr: *mut LuaCallFrame) {
+pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize; // number of fixed params
 
     let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let frame_base = frame.base_ptr;
     let top = frame.top;
 
     // Get max_stack_size from the function using new ObjectPool API
@@ -26,24 +26,24 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, _frame_ptr: *mut LuaCallFrame
     };
     let max_stack_size = func_ref.chunk.max_stack_size;
 
-    // Arguments were placed starting at base_ptr by CALL instruction
-    // Fixed parameters are at base_ptr + 0 to base_ptr + a - 1
-    // Extra arguments (varargs) are at base_ptr + a to base_ptr + top - 1
-    // We need to move the varargs to base_ptr + max_stack_size to protect them
+    // Arguments were placed starting at frame_base by CALL instruction
+    // Fixed parameters are at frame_base + 0 to frame_base + a - 1
+    // Extra arguments (varargs) are at frame_base + a to frame_base + top - 1
+    // We need to move the varargs to frame_base + max_stack_size to protect them
     // from being overwritten by local variable operations
 
     if top > a {
         let vararg_count = top - a;
-        let vararg_dest = base_ptr + max_stack_size;
+        let vararg_dest = frame_base + max_stack_size;
 
         // Ensure we have enough space for the varargs
         let required_size = vararg_dest + vararg_count;
         vm.ensure_stack_capacity(required_size);
 
-        // Move varargs from base_ptr + a to base_ptr + max_stack_size
+        // Move varargs from frame_base + a to frame_base + max_stack_size
         // Copy in reverse order in case source and destination overlap
         for i in (0..vararg_count).rev() {
-            vm.register_stack[vararg_dest + i] = vm.register_stack[base_ptr + a + i];
+            vm.register_stack[vararg_dest + i] = vm.register_stack[frame_base + a + i];
         }
 
         // Set vararg info in frame
@@ -51,16 +51,19 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, _frame_ptr: *mut LuaCallFrame
     } else {
         // No varargs passed
         vm.current_frame_mut()
-            .set_vararg(base_ptr + max_stack_size, 0);
+            .set_vararg(frame_base + max_stack_size, 0);
     }
 
     // Initialize local variables (registers from 0 to max_stack_size) with nil
     // But preserve fixed parameters (0..a)
     for i in a..max_stack_size {
-        if base_ptr + i < vm.register_stack.len() {
-            vm.register_stack[base_ptr + i] = LuaValue::nil();
+        if frame_base + i < vm.register_stack.len() {
+            vm.register_stack[frame_base + i] = LuaValue::nil();
         }
     }
+    
+    // updatebase - frame operations may change base_ptr
+    unsafe { *base_ptr = (*frame_ptr).base_ptr; }
 }
 
 /// LOADNIL A B
