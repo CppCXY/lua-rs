@@ -737,10 +737,10 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         if let Some(pos) = s_str[start_pos..].find(pattern) {
             let actual_pos = start_pos + pos;
             let end_pos = actual_pos + pattern.len();
-            Ok(MultiValue::multiple(vec![
+            Ok(MultiValue::two(
                 LuaValue::integer((actual_pos + 1) as i64),
                 LuaValue::integer(end_pos as i64),
-            ]))
+            ))
         } else {
             Ok(MultiValue::single(LuaValue::nil()))
         }
@@ -761,10 +761,10 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                     if let Some(pos) = s_owned[start_pos..].find(&literal) {
                         let actual_pos = start_pos + pos;
                         let end_pos = actual_pos + literal.len();
-                        Ok(MultiValue::multiple(vec![
+                        Ok(MultiValue::two(
                             LuaValue::integer((actual_pos + 1) as i64),
                             LuaValue::integer(end_pos as i64),
-                        ]))
+                        ))
                     } else {
                         Ok(MultiValue::single(LuaValue::nil()))
                     }
