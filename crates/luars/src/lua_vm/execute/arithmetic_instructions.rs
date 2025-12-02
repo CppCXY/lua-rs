@@ -1061,11 +1061,12 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 }
 
 /// MmBin: Metamethod binary operation (register, register)
+/// OPTIMIZED: Uses passed code_ptr instead of dereferencing frame_ptr
 #[inline(always)]
 pub fn exec_mmbin(
     vm: &mut LuaVM,
     instr: u32,
-    frame_ptr: *mut LuaCallFrame,
+    code_ptr: *const u32,
     pc: &mut usize,
     base_ptr: usize,
 ) -> LuaResult<()> {
@@ -1081,7 +1082,7 @@ pub fn exec_mmbin(
         }
 
         // Get previous instruction to find destination register
-        let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
+        let prev_instr = code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
 
         let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
@@ -1111,11 +1112,12 @@ pub fn exec_mmbin(
 }
 
 /// MmBinI: Metamethod binary operation (register, immediate)
+/// OPTIMIZED: Uses passed code_ptr instead of dereferencing frame_ptr
 #[inline(always)]
 pub fn exec_mmbini(
     vm: &mut LuaVM,
     instr: u32,
-    frame_ptr: *mut LuaCallFrame,
+    code_ptr: *const u32,
     pc: &mut usize,
     base_ptr: usize,
 ) -> LuaResult<()> {
@@ -1131,7 +1133,7 @@ pub fn exec_mmbini(
             return Ok(());
         }
 
-        let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
+        let prev_instr = code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
 
         let rb = *vm.register_stack.as_ptr().add(base_ptr + a);
@@ -1158,11 +1160,13 @@ pub fn exec_mmbini(
 }
 
 /// MmBinK: Metamethod binary operation (register, constant)
+/// OPTIMIZED: Uses passed code_ptr and constants_ptr instead of dereferencing frame_ptr
 #[inline(always)]
 pub fn exec_mmbink(
     vm: &mut LuaVM,
     instr: u32,
-    frame_ptr: *mut LuaCallFrame,
+    code_ptr: *const u32,
+    constants_ptr: *const LuaValue,
     pc: &mut usize,
     base_ptr: usize,
 ) -> LuaResult<()> {
@@ -1178,25 +1182,13 @@ pub fn exec_mmbink(
             return Ok(());
         }
 
-        let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
+        let prev_instr = code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
 
         let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-        // Get constant
-        let kb = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
-            if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if let Some(&val) = func_ref.chunk.constants.get(b) {
-                    val
-                } else {
-                    return Ok(());
-                }
-            } else {
-                return Ok(());
-            }
-        } else {
-            return Ok(());
-        };
+        // Get constant via passed constants_ptr
+        let kb = *constants_ptr.add(b);
 
         // Use pre-cached metamethod StringId
         let mm_key = LuaValue::string(vm.object_pool.get_binop_tm(c as u8));

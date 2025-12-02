@@ -246,8 +246,9 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize
 
 /// TFORCALL A C
 /// R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);
+/// Returns true if a Lua function was called and frame changed (needs updatestate)
 #[inline(always)]
-pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: &mut *mut LuaCallFrame, base_ptr: usize) -> LuaResult<bool> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -288,6 +289,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<(
             for i in values.len()..=c {
                 vm.register_stack[base_ptr + a + 3 + i] = LuaValue::nil();
             }
+            Ok(false) // No frame change for C functions
         }
         LuaValueKind::Function => {
             // For Lua functions, we need to use CALL instruction logic
@@ -335,14 +337,14 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<(
             );
 
             vm.push_frame(new_frame);
-            // Execution will continue in the new frame
+            // Update frame_ptr to point to new frame
+            *frame_ptr = vm.current_frame_ptr();
+            Ok(true) // Frame changed, need updatestate
         }
         _ => {
-            return Err(vm.error("attempt to call a non-function value in for loop".to_string()));
+            Err(vm.error("attempt to call a non-function value in for loop".to_string()))
         }
     }
-
-    Ok(())
 }
 
 /// TFORLOOP A Bx

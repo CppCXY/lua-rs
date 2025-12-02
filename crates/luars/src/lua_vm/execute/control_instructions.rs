@@ -211,14 +211,12 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 pub fn exec_eq(
     vm: &mut LuaVM,
     instr: u32,
-    frame_ptr: *mut LuaCallFrame,
     pc: &mut usize,
+    base_ptr: usize,
 ) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
-
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {
@@ -421,14 +419,12 @@ fn exec_lt_metamethod(
 pub fn exec_le(
     vm: &mut LuaVM,
     instr: u32,
-    frame_ptr: *mut LuaCallFrame,
     pc: &mut usize,
+    base_ptr: usize,
 ) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
-
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {

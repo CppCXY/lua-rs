@@ -9,7 +9,7 @@ use crate::{
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
 #[inline(always)]
-pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: usize) {
+pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -31,7 +31,7 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
 /// SETUPVAL A B
 /// UpValue[B] := R[A]
 #[inline(always)]
-pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: usize) {
+pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -62,7 +62,7 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 /// R[A] := closure(KPROTO[Bx])
 /// OPTIMIZED: Fast path for closures without upvalues
 #[inline(always)]
-pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) -> LuaResult<()> {
     use crate::gc::UpvalueId;
 
 
@@ -156,7 +156,7 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
 /// Vararg arguments are stored at frame.vararg_start (set by VARARGPREP).
 /// This instruction copies them to the target registers.
 #[inline(always)]
-pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -352,7 +352,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
 /// SETLIST A B C k
 /// R[A][C+i] := R[A+i], 1 <= i <= B
 #[inline(always)]
-pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: usize) {
+pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
