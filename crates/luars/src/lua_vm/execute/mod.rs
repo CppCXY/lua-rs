@@ -18,7 +18,7 @@ pub use upvalue_instructions::*;
 
 use super::{Instruction, LuaError, LuaResult, LuaVM, OpCode};
 use crate::LuaValue;
-use crate::lua_value::TAG_INTEGER;
+use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
 use crate::lua_vm::LuaCallFrame;
 
 /// Save current pc to frame (like Lua C's savepc macro)
@@ -413,15 +413,16 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let bx = Instruction::get_bx(instr) as usize;
                 unsafe {
                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    let step = *reg_base.add(2);
-
-                    // Integer loop (like Lua C)
-                    if step.primary == TAG_INTEGER {
+                    let idx = *reg_base;
+                    
+                    // Integer loop: check if idx is integer (FORPREP sets this correctly)
+                    // If any of init/limit/step was float, FORPREP uses float mode
+                    if (idx.primary & TYPE_MASK) == TAG_INTEGER {
                         let count = (*reg_base.add(1)).secondary;
                         if count > 0 {
-                            let idx = (*reg_base).secondary as i64;
-                            let step_i = step.secondary as i64;
-                            let new_idx = idx.wrapping_add(step_i);
+                            let idx_i = idx.secondary as i64;
+                            let step_i = (*reg_base.add(2)).secondary as i64;
+                            let new_idx = idx_i.wrapping_add(step_i);
                             (*reg_base.add(1)).secondary = count - 1;
                             (*reg_base).secondary = new_idx as u64;
                             (*reg_base.add(3)).secondary = new_idx as u64;
@@ -499,12 +500,14 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             OpCode::Call => {
                 // Save current pc to frame before call (so return knows where to resume)
                 savepc!(frame_ptr, pc);
-                if let Err(e) = exec_call(vm, instr, &mut frame_ptr) {
-                    return Err(e);
-                }
-                // Reload state from new frame
-                unsafe {
-                    updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
+                match exec_call(vm, instr, &mut frame_ptr) {
+                    Ok(_) => {
+                        // Lua function: frame changed, reload state from new frame
+                        unsafe {
+                            updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
+                        }
+                    }
+                    Err(e) => return Err(e),
                 }
                 continue 'mainloop;
             }

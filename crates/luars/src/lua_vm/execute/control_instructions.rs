@@ -755,6 +755,8 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 /// CALL A B C
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
 /// ULTRA-OPTIMIZED: Minimize overhead for the common case (Lua function, no metamethod)
+/// Returns Ok(true) if frame changed (Lua function) and updatestate is needed
+/// Returns Ok(false) if frame unchanged (C function) and no updatestate needed
 #[inline(always)]
 pub fn exec_call(
     vm: &mut LuaVM,
@@ -776,7 +778,7 @@ pub fn exec_call(
     // Check type tag directly without full pattern match
     use crate::lua_value::TAG_FUNCTION;
     if (func.primary & crate::lua_value::TYPE_MASK) == TAG_FUNCTION {
-        return exec_call_lua_function(
+        exec_call_lua_function(
             vm,
             func,
             a,
@@ -786,12 +788,13 @@ pub fn exec_call(
             false,
             LuaValue::nil(),
             frame_ptr_ptr,
-        );
+        )?;
+        return Ok(()); // Frame changed, need updatestate
     }
 
     // Check for CFunction
     if func.is_cfunction() {
-        return exec_call_cfunction(
+        exec_call_cfunction(
             vm,
             func,
             a,
@@ -801,7 +804,8 @@ pub fn exec_call(
             false,
             LuaValue::nil(),
             frame_ptr_ptr,
-        );
+        )?;
+        return Ok(()); // Frame unchanged, no updatestate needed
     }
 
     // Slow path: Check for __call metamethod
@@ -818,7 +822,7 @@ pub fn exec_call(
             if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
                 if call_func.is_callable() {
                     if call_func.is_cfunction() {
-                        return exec_call_cfunction(
+                        exec_call_cfunction(
                             vm,
                             call_func,
                             a,
@@ -828,9 +832,10 @@ pub fn exec_call(
                             true,
                             func,
                             frame_ptr_ptr,
-                        );
+                        )?;
+                        return Ok(()); // C function, no updatestate
                     } else {
-                        return exec_call_lua_function(
+                        exec_call_lua_function(
                             vm,
                             call_func,
                             a,
@@ -840,7 +845,8 @@ pub fn exec_call(
                             true,
                             func,
                             frame_ptr_ptr,
-                        );
+                        )?;
+                        return Ok(()); // Lua function, need updatestate
                     }
                 }
             }

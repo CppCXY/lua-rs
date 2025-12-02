@@ -130,7 +130,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 /// R[A]+=R[A+2];
 /// if R[A] <?= R[A+1] then { pc-=Bx; R[A+3]=R[A] }
 ///
-/// ULTRA-OPTIMIZED: Only check step type (like Lua C), use chgivalue pattern
+/// ULTRA-OPTIMIZED: Check idx type (set by FORPREP), use chgivalue pattern
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_forloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
@@ -140,17 +140,17 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
     unsafe {
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
 
-        // Only check step type - like Lua C's ttisinteger(s2v(ra + 2))
-        let step = *reg_base.add(2);
+        // Check idx type - FORPREP sets this to integer only if ALL of init/limit/step are integers
+        let idx = *reg_base;
         
-        if step.primary == TAG_INTEGER {
-            // Integer loop - step is integer, so idx and counter must be too (set by FORPREP)
+        if (idx.primary & TYPE_MASK) == TAG_INTEGER {
+            // Integer loop - idx and counter are integers (set by FORPREP)
             let count = (*reg_base.add(1)).secondary; // counter as u64
             
             if count > 0 {
-                let idx = (*reg_base).secondary as i64;
-                let step_i = step.secondary as i64;
-                let new_idx = idx.wrapping_add(step_i);
+                let idx_i = idx.secondary as i64;
+                let step_i = (*reg_base.add(2)).secondary as i64;
+                let new_idx = idx_i.wrapping_add(step_i);
                 
                 // chgivalue pattern - only update secondary (value), primary (type) stays same
                 (*reg_base.add(1)).secondary = count - 1; // counter--

@@ -140,7 +140,7 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 }
 
 /// DIV: R[A] = R[B] / R[C]
-/// Division always returns float in Lua
+/// OPTIMIZED: If both are integers and division is exact, return integer
 pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -151,6 +151,21 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
+        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
+
+        // Fast path: both integers - check if division is exact
+        if combined_tags == TAG_INTEGER {
+            let l = left.secondary as i64;
+            let r = right.secondary as i64;
+            if r != 0 && l % r == 0 {
+                // Exact division - return integer
+                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l / r);
+                *pc += 1;
+                return;
+            }
+        }
+
+        // Slow path: convert to float
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
@@ -224,6 +239,7 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 }
 
 /// MOD: R[A] = R[B] % R[C]
+/// OPTIMIZED: Returns integer when both operands are integers
 pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
@@ -242,6 +258,7 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
                 return; // Mod by zero - let MMBIN handle
             }
             let l = left.secondary as i64;
+            // Integer modulo always returns integer
             LuaValue::integer(l.rem_euclid(r))
         } else {
             let left_tag = left.primary & TYPE_MASK;
@@ -263,8 +280,14 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
                 return;
             };
 
-            let result = l_float - (l_float / r_float).floor() * r_float;
-            LuaValue::number(result)
+            let float_result = l_float - (l_float / r_float).floor() * r_float;
+            // Check if result is an integer
+            if float_result.fract() == 0.0 && float_result.is_finite() 
+                && float_result >= i64::MIN as f64 && float_result <= i64::MAX as f64 {
+                LuaValue::integer(float_result as i64)
+            } else {
+                LuaValue::number(float_result)
+            }
         };
 
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
@@ -525,7 +548,7 @@ pub fn exec_mulk(
 }
 
 /// MODK: R[A] = R[B] % K[C]
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Returns integer when result is integer
 #[inline(always)]
 pub fn exec_modk(
     vm: &mut LuaVM,
@@ -540,11 +563,9 @@ pub fn exec_modk(
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-
-        // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        // Integer % Integer fast path
+        // Integer % Integer fast path - always returns integer
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let r = constant.secondary as i64;
             if r == 0 {
@@ -559,10 +580,15 @@ pub fn exec_modk(
             return;
         }
 
-        // Float % Float
+        // Float % Float - check if result is integer
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-            let result = l - (l / r).floor() * r;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(result);
+            let float_result = l - (l / r).floor() * r;
+            if float_result.fract() == 0.0 && float_result.is_finite()
+                && float_result >= i64::MIN as f64 && float_result <= i64::MAX as f64 {
+                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(float_result as i64);
+            } else {
+                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(float_result);
+            }
             *pc += 1;
         }
     }
@@ -603,7 +629,7 @@ pub fn exec_powk(
 }
 
 /// DIVK: R[A] = R[B] / K[C]
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Returns integer when division is exact
 #[inline(always)]
 pub fn exec_divk(
     vm: &mut LuaVM,
@@ -618,9 +644,18 @@ pub fn exec_divk(
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-
-        // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
+
+        // Fast path: both integers - check if division is exact
+        if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
+            let l = left.secondary as i64;
+            let r = constant.secondary as i64;
+            if r != 0 && l % r == 0 {
+                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l / r);
+                *pc += 1;
+                return;
+            }
+        }
 
         let l_float = match left.as_number() {
             Some(n) => n,
