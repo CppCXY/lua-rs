@@ -144,7 +144,7 @@ impl<'a> Compiler<'a> {
         let mut compiler = Compiler::new(vm);
 
         let tree = LuaParser::parse(source, ParserConfig::with_level(LuaLanguageLevel::Lua54));
-        let _line_index = LineIndex::parse(source);
+        let line_index = LineIndex::parse(source);
         if tree.has_syntax_errors() {
             let errors: Vec<String> = tree
                 .get_errors()
@@ -162,14 +162,14 @@ impl<'a> Compiler<'a> {
             .child_chunks
             .into_iter()
             .map(|child| {
-                let opt = optimize_chunk(child);
+                let opt = child;
                 std::rc::Rc::new(opt)
             })
             .collect();
         compiler.chunk.child_protos = optimized_children;
 
         // Apply optimization to main chunk
-        let optimized = optimize_chunk(compiler.chunk);
+        let optimized = compiler.chunk;
         Ok(optimized)
     }
 }
@@ -234,32 +234,4 @@ fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
         compile_stat(c, &stat)?;
     }
     Ok(())
-}
-
-/// Apply optimization to a chunk
-fn optimize_chunk(chunk: Chunk) -> Chunk {
-    // Optimizer temporarily disabled - causes issues with loops
-    // The simple constant folder doesn't handle control flow correctly
-    // Need proper basic block analysis before enabling optimizations
-
-    // Return chunk unchanged
-    chunk
-
-    /* Disabled optimizer code:
-    let (optimized_code, optimized_constants) = optimize_constants(&chunk.code, &chunk.constants);
-
-    Chunk {
-        code: optimized_code,
-        constants: optimized_constants,
-        locals: chunk.locals,
-        upvalue_count: chunk.upvalue_count,
-        param_count: chunk.param_count,
-        is_vararg: chunk.is_vararg,
-        max_stack_size: chunk.max_stack_size,
-        child_protos: chunk.child_protos,
-        upvalue_descs: chunk.upvalue_descs,
-        source_name: chunk.source_name,
-        line_info: chunk.line_info,
-    }
-    */
 }
