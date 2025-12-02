@@ -14,8 +14,11 @@ pub fn create_string_value(c: &mut Compiler, s: &str) -> LuaValue {
 }
 
 /// Emit an instruction and return its position
+/// Automatically fills line_info with last_line
 pub fn emit(c: &mut Compiler, instr: u32) -> usize {
     c.chunk.code.push(instr);
+    // Fill line_info - use last_line or 0 if not set
+    c.chunk.line_info.push(c.last_line);
     c.chunk.code.len() - 1
 }
 

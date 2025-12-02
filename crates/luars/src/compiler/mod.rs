@@ -7,6 +7,7 @@ mod helpers;
 mod stmt;
 mod tagmethod;
 
+use rowan::TextRange;
 pub(crate) use tagmethod::TagMethod;
 
 use crate::lua_value::Chunk;
@@ -61,6 +62,8 @@ pub struct Compiler<'a> {
     pub(crate) child_chunks: Vec<Chunk>, // Nested function chunks
     pub(crate) scope_chain: Rc<RefCell<ScopeChain>>, // Scope chain for variable resolution
     pub(crate) vm_ptr: *mut LuaVM,       // VM pointer for string pool access
+    pub(crate) last_line: u32,           // Last line number for line_info (not used currently)
+    pub(crate) line_index: &'a LineIndex, // Line index for error reporting
     pub(crate) _phantom: std::marker::PhantomData<&'a mut LuaVM>,
 }
 
@@ -103,7 +106,7 @@ pub(crate) struct GotoInfo {
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(vm: &'a mut LuaVM) -> Self {
+    pub fn new(vm: &'a mut LuaVM, line_index: &'a LineIndex) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
@@ -116,12 +119,19 @@ impl<'a> Compiler<'a> {
             child_chunks: Vec::new(),
             scope_chain: ScopeChain::new(),
             vm_ptr: vm as *mut LuaVM,
+            last_line: 1,
+            line_index,
             _phantom: std::marker::PhantomData,
         }
     }
 
     /// Create a new compiler with a parent scope chain
-    pub fn new_with_parent(parent_scope: Rc<RefCell<ScopeChain>>, vm_ptr: *mut LuaVM) -> Self {
+    pub fn new_with_parent(
+        parent_scope: Rc<RefCell<ScopeChain>>,
+        vm_ptr: *mut LuaVM,
+        line_index: &'a LineIndex,
+        current_line: u32,
+    ) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
@@ -134,6 +144,8 @@ impl<'a> Compiler<'a> {
             child_chunks: Vec::new(),
             scope_chain: ScopeChain::new_with_parent(parent_scope),
             vm_ptr,
+            last_line: current_line,
+            line_index,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -141,21 +153,32 @@ impl<'a> Compiler<'a> {
     /// Compile Lua source code to bytecode
     /// Creates raw Box strings - VM must call register_chunk_constants() to intern them
     pub fn compile(vm: &mut LuaVM, source: &str) -> Result<Chunk, String> {
-        let mut compiler = Compiler::new(vm);
+        Self::compile_with_name(vm, source, "chunk")
+    }
 
+    /// Compile Lua source code with a specific chunk name
+    pub fn compile_with_name(
+        vm: &mut LuaVM,
+        source: &str,
+        chunk_name: &str,
+    ) -> Result<Chunk, String> {
         let tree = LuaParser::parse(source, ParserConfig::with_level(LuaLanguageLevel::Lua54));
         let line_index = LineIndex::parse(source);
         if tree.has_syntax_errors() {
             let errors: Vec<String> = tree
                 .get_errors()
                 .iter()
-                .map(|e| format!("{:?}", e))
+                .map(|e| {
+                    beautify_compiler_error(&e.message, e.range, chunk_name, source, &line_index)
+                })
                 .collect();
-            return Err(format!("Syntax errors: {}", errors.join(", ")));
+            return Err(format!("Syntax errors:\n{}", errors.join("\n")));
         }
+        let mut compiler = Compiler::new(vm, &line_index);
+        compiler.chunk.source_name = Some(chunk_name.to_string());
 
-        let chunk = tree.get_chunk_node();
-        compile_chunk(&mut compiler, &chunk)?;
+        let chunk_node = tree.get_chunk_node();
+        compile_chunk(&mut compiler, &chunk_node)?;
 
         // Optimize child chunks first
         let optimized_children: Vec<std::rc::Rc<Chunk>> = compiler
@@ -171,6 +194,12 @@ impl<'a> Compiler<'a> {
         // Apply optimization to main chunk
         let optimized = compiler.chunk;
         Ok(optimized)
+    }
+
+    pub fn save_line_info(&mut self, range: TextRange) {
+        if let Some(line) = self.line_index.get_line(range.start()) {
+            self.last_line = (line + 1) as u32;
+        }
     }
 }
 
@@ -191,10 +220,7 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
         index: 0,
     });
 
-    // Emit VARARGPREP at the beginning - Lua 5.4 always emits this for main chunks
-    // It adjusts vararg parameters for functions that accept ... (varargs)
-    // For non-vararg functions, nparams = param_count; for vararg functions, nparams is used
-    // Main chunks are always considered vararg (param_count = 0, is_vararg = true)
+    // Emit VARARGPREP at the beginning
     c.chunk.is_vararg = true;
     emit(c, Instruction::encode_abc(OpCode::VarargPrep, 0, 0, 0));
 
@@ -206,20 +232,6 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     check_unresolved_gotos(c)?;
 
     // Emit return at the end
-    // Lua 5.4: RETURN instruction format: RETURN A B C k
-    // A = first register to return (usually 0 or freereg)
-    // B = number of values to return + 1 (1 means 0 returns, 2 means 1 return, 0 means return to top)
-    // C = is vararg flag (main chunks are vararg, so C should be > 0)
-    // k = needs to close upvalues
-    //
-    // For main chunk final return:
-    // - A should be the current free register (or 0 if no registers used)
-    // - B = 1 (return 0 values)
-    // - C = 1 (chunk is vararg, need to correct func - actually encoded in k bit + C field)
-    // - k = depends on whether we have upvalues to close
-    //
-    // Looking at luac output, for main chunks it uses: RETURN freereg 1 1
-    // Main chunk always uses regular RETURN (not Return0), with k=1
     let freereg = c.freereg;
     emit(
         c,
@@ -234,4 +246,18 @@ fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
         compile_stat(c, &stat)?;
     }
     Ok(())
+}
+
+fn beautify_compiler_error(
+    err: &str,
+    range: TextRange,
+    chunk_name: &str,
+    source: &str,
+    line_index: &LineIndex,
+) -> String {
+    let Some((line, col)) = line_index.get_line_col(range.start(), source) else {
+        return err.to_string();
+    };
+
+    format!("{}:{}:{}: {}", chunk_name, line + 1, col + 1, err)
 }

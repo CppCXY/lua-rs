@@ -371,6 +371,15 @@ impl LuaVM {
         Ok(chunk)
     }
 
+    pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<Chunk> {
+        let chunk = match Compiler::compile_with_name(self, source, chunk_name) {
+            Ok(c) => c,
+            Err(e) => return Err(self.compile_error(e)),
+        };
+
+        Ok(chunk)
+    }
+
     /// Main execution loop - interprets bytecode instructions
     /// Lua 5.4 style: CALL pushes frame, RETURN pops frame, loop continues
     /// No recursion - pure state machine

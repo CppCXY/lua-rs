@@ -6,15 +6,13 @@ use super::expr::{
 };
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
-use crate::compiler::expr::{
-    compile_call_expr_with_returns, compile_closure_expr, compile_closure_expr_to,
-};
+use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr_to};
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
-    BinaryOperator, LuaAssignStat, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat,
-    LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLiteralToken, LuaLocalStat,
-    LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
+    BinaryOperator, LuaAssignStat, LuaAstNode, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr,
+    LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat,
+    LuaLiteralToken, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
 };
 
 /// Check if an expression is a vararg (...) literal
@@ -166,6 +164,8 @@ fn try_compile_register_comparison(
 
 /// Compile any statement
 pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
+    c.save_line_info(stat.get_range());
+
     let result = match stat {
         LuaStat::LocalStat(s) => compile_local_stat(c, s),
         LuaStat::AssignStat(s) => compile_assign_stat(c, s),
@@ -1334,8 +1334,10 @@ fn compile_function_stat(c: &mut Compiler, stat: &LuaFuncStat) -> Result<(), Str
     } else {
         false
     };
+
+    let func_name = func_name_var_expr.get_text();
     // Compile the closure to get function value
-    let func_reg = compile_closure_expr(c, &closure, is_colon)?;
+    let func_reg = compile_closure_expr_to(c, &closure, None, is_colon, Some(func_name.clone()))?;
 
     compile_var_expr(c, &func_name_var_expr, func_reg)?;
 
@@ -1371,10 +1373,10 @@ fn compile_local_function_stat(
         is_const: false,
         is_to_be_closed: false,
     });
-    c.chunk.locals.push(func_name);
+    c.chunk.locals.push(func_name.clone());
 
     // Compile the closure - use dest=Some(func_reg) to ensure it goes to the correct register
-    let closure_reg = compile_closure_expr_to(c, &closure, Some(func_reg), false)?;
+    let closure_reg = compile_closure_expr_to(c, &closure, Some(func_reg), false, Some(func_name))?;
 
     // Sanity check: closure should be compiled to func_reg
     debug_assert_eq!(

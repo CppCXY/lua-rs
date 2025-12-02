@@ -286,6 +286,7 @@ dependencies = [
  "emmylua_parser",
  "itoa",
  "libloading",
+ "rowan",
  "ryu",
  "tempfile",
  "tokio",

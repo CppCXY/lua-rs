@@ -730,7 +730,7 @@ fn compile_table_expr_desc(c: &mut Compiler, expr: &LuaTableExpr) -> Result<ExpD
 
 /// NEW: Compile closure/function expression (stub)
 fn compile_closure_expr_desc(c: &mut Compiler, expr: &LuaClosureExpr) -> Result<ExpDesc, String> {
-    let reg = compile_closure_expr_to(c, expr, None, false)?;
+    let reg = compile_closure_expr_to(c, expr, None, false, None)?;
     Ok(ExpDesc::new_nonreloc(reg))
 }
 
@@ -749,7 +749,7 @@ pub fn compile_expr_to(c: &mut Compiler, expr: &LuaExpr, dest: Option<u32>) -> R
         LuaExpr::CallExpr(e) => compile_call_expr_to(c, e, dest),
         LuaExpr::IndexExpr(e) => compile_index_expr_to(c, e, dest),
         LuaExpr::TableExpr(e) => compile_table_expr_to(c, e, dest),
-        LuaExpr::ClosureExpr(e) => compile_closure_expr_to(c, e, dest, false),
+        LuaExpr::ClosureExpr(e) => compile_closure_expr_to(c, e, dest, false, None),
     }
 }
 
@@ -3224,19 +3224,12 @@ pub fn compile_var_expr(c: &mut Compiler, var: &LuaVarExpr, value_reg: u32) -> R
     }
 }
 
-pub fn compile_closure_expr(
-    c: &mut Compiler,
-    closure: &LuaClosureExpr,
-    is_method: bool,
-) -> Result<u32, String> {
-    compile_closure_expr_to(c, closure, None, is_method)
-}
-
 pub fn compile_closure_expr_to(
     c: &mut Compiler,
     closure: &LuaClosureExpr,
     dest: Option<u32>,
     is_method: bool,
+    func_name: Option<String>,
 ) -> Result<u32, String> {
     let params_list = closure
         .get_params_list()
@@ -3249,8 +3242,9 @@ pub fn compile_closure_expr_to(
 
     // Create a new compiler for the function body with parent scope chain
     // No need to sync anymore - scope_chain is already current
-    let mut func_compiler = Compiler::new_with_parent(c.scope_chain.clone(), c.vm_ptr);
-
+    let mut func_compiler =
+        Compiler::new_with_parent(c.scope_chain.clone(), c.vm_ptr, c.line_index, c.last_line);
+    func_compiler.chunk.source_name = func_name;
     // For methods (function defined with colon syntax), add implicit 'self' parameter
     let mut param_offset = 0;
     if is_method {
