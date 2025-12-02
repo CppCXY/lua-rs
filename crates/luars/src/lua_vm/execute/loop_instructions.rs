@@ -66,7 +66,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
 
             if count == 0 {
                 // Skip the entire loop body and FORLOOP
-                (*frame_ptr).pc += bx;
+                *pc += bx;
             } else {
                 // Store count-1 in R[A+1] (we'll execute count times, counter starts at count-1)
                 // because we already set R[A+3] = init for the first iteration
@@ -115,7 +115,7 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
             };
 
             if should_skip {
-                (*frame_ptr).pc += bx;
+                *pc += bx;
             } else {
                 // Prepare internal index
                 *reg_base = LuaValue::number(init_f - step_f);
@@ -156,14 +156,14 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
                 (*reg_base).secondary = new_idx as u64;   // idx += step
                 (*reg_base.add(3)).secondary = new_idx as u64; // control = idx
                 
-                (*frame_ptr).pc -= bx;
+                *pc -= bx;
             }
             // count == 0: loop ended, fall through
             return Ok(());
         }
 
         // Float loop - slower path
-        exec_forloop_float(vm, reg_base, bx, frame_ptr)
+        exec_forloop_float(vm, reg_base, bx, frame_ptr, pc)
     }
 }
 
@@ -175,6 +175,7 @@ fn exec_forloop_float(
     reg_base: *mut LuaValue,
     bx: usize,
     frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
 ) -> LuaResult<()> {
     unsafe {
         let idx = *reg_base;
@@ -219,7 +220,7 @@ fn exec_forloop_float(
         if should_continue {
             *reg_base = LuaValue::number(new_idx_f);
             *reg_base.add(3) = LuaValue::number(new_idx_f);
-            (*frame_ptr).pc -= bx;
+            *pc -= bx;
         }
     }
 
@@ -242,7 +243,7 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
         vm.register_stack[*base_ptr + a + 3] = state;
 
         // Jump to loop start
-        (*frame_ptr).pc += bx;
+        *pc += bx;
     }
 }
 
@@ -368,7 +369,7 @@ pub fn exec_tforloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
         if !value.is_nil() {
             // Continue loop
             vm.register_stack[*base_ptr + a] = value;
-            (*frame_ptr).pc -= bx;
+            *pc -= bx;
         }
     }
 }

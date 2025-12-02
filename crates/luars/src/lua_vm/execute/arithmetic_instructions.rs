@@ -32,7 +32,7 @@ fn exec_add_slow(
         };
 
         *reg_base.add(a) = result;
-        (*frame_ptr).pc += 1;
+        // pc increment handled by caller
     }
 }
 
@@ -76,7 +76,7 @@ fn exec_sub_slow(
     a: usize,
     left: LuaValue,
     right: LuaValue,
-    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
 ) {
     unsafe {
         let left_tag = left.primary & TYPE_MASK;
@@ -93,7 +93,7 @@ fn exec_sub_slow(
         };
 
         *reg_base.add(a) = result;
-        (*frame_ptr).pc += 1;
+        *pc += 1;
     }
 }
 
@@ -122,7 +122,7 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             return;
         }
 
-        exec_sub_slow(reg_base, a, left, right, frame_ptr);
+        exec_sub_slow(reg_base, a, left, right, pc);
     }
 }
 
@@ -151,7 +151,7 @@ fn exec_mul_slow(
         };
 
         *reg_base.add(a) = result;
-        (*frame_ptr).pc += 1;
+        // pc skip handled by caller
     }
 }
 
@@ -346,8 +346,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-    let value = vm.register_stack[base_ptr + b];
+    let value = vm.register_stack[*base_ptr + b];
 
     let result = if let Some(i) = value.as_integer() {
         if let Some(neg) = i.checked_neg() {
@@ -366,7 +365,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
                     let result = vm
                         .call_metamethod(&metamethod, &[value])?
                         .unwrap_or(LuaValue::nil());
-                    vm.register_stack[base_ptr + a] = result;
+                    vm.register_stack[*base_ptr + a] = result;
                     return Ok(());
                 }
             }
@@ -377,7 +376,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
         )));
     };
 
-    vm.register_stack[base_ptr + a] = result;
+    vm.register_stack[*base_ptr + a] = result;
     Ok(())
 }
 
@@ -955,11 +954,10 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-    let value = vm.register_stack[base_ptr + b];
+    let value = vm.register_stack[*base_ptr + b];
 
     if let Some(int_val) = value.as_integer() {
-        vm.register_stack[base_ptr + a] = LuaValue::integer(!int_val);
+        vm.register_stack[*base_ptr + a] = LuaValue::integer(!int_val);
         return Ok(());
     }
 
@@ -971,7 +969,7 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
                 let result = vm
                     .call_metamethod(&metamethod, &[value])?
                     .unwrap_or(LuaValue::nil());
-                vm.register_stack[base_ptr + a] = result;
+                vm.register_stack[*base_ptr + a] = result;
                 return Ok(());
             }
         }
@@ -1005,8 +1003,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-    let value = vm.register_stack[base_ptr + b];
+    let value = vm.register_stack[*base_ptr + b];
 
     // Check for __len metamethod first (for tables)
     if value.is_table() {
@@ -1018,7 +1015,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
                     let result = vm
                         .call_metamethod(&metamethod, &[value])?
                         .unwrap_or(LuaValue::nil());
-                    vm.register_stack[base_ptr + a] = result;
+                    vm.register_stack[*base_ptr + a] = result;
                     return Ok(());
                 }
             }
@@ -1043,7 +1040,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
     };
 
     let result = LuaValue::integer(len);
-    vm.register_stack[base_ptr + a] = result;
+    vm.register_stack[*base_ptr + a] = result;
     Ok(())
 }
 
@@ -1055,7 +1052,7 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let prev_pc = (*frame_ptr).pc - 1;
+        let prev_pc = *pc - 1;
 
         if prev_pc == 0 {
             return Ok(());
@@ -1100,7 +1097,7 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
     let k = Instruction::get_k(instr);
 
     unsafe {
-        let prev_pc = (*frame_ptr).pc - 1;
+        let prev_pc = *pc - 1;
 
         if prev_pc == 0 {
             return Ok(());
@@ -1141,7 +1138,7 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
     let k = Instruction::get_k(instr);
 
     unsafe {
-        let prev_pc = (*frame_ptr).pc - 1;
+        let prev_pc = *pc - 1;
 
         if prev_pc == 0 {
             return Ok(());

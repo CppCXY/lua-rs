@@ -144,7 +144,7 @@ pub fn exec_jmp(instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_p
 
     unsafe {
         // PC already incremented by dispatcher, so we add offset directly
-        *pc = ((*frame_ptr).pc as i32 + sj) as usize;
+        *pc = (*pc as i32 + sj) as usize;
     }
 }
 
@@ -353,7 +353,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
         }
 
         // Slow path: metamethod
-        exec_lt_metamethod(vm, left, right, k, frame_ptr)
+        exec_lt_metamethod(vm, left, right, k, frame_ptr, pc)
     }
 }
 
@@ -366,6 +366,7 @@ fn exec_lt_metamethod(
     right: crate::LuaValue,
     k: bool,
     frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
 ) -> LuaResult<()> {
     // Use pre-cached __lt StringId
     let mm_key = LuaValue::string(vm.object_pool.tm_lt);
@@ -378,7 +379,7 @@ fn exec_lt_metamethod(
                     let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                     if is_less_result != k {
                         unsafe {
-                            (*frame_ptr).pc += 1;
+                            *pc += 1;
                         }
                     }
                     return Ok(());
@@ -396,7 +397,7 @@ fn exec_lt_metamethod(
                         let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                         if is_less_result != k {
                             unsafe {
-                                (*frame_ptr).pc += 1;
+                                *pc += 1;
                             }
                         }
                         return Ok(());

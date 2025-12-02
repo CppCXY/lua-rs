@@ -13,7 +13,7 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
+    let func_value = unsafe { (*frame_ptr).function_value };
 
     // OPTIMIZED: Use unchecked access since we know the function is valid
     let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
@@ -24,7 +24,7 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
     // SAFETY: upvalue_id is from a valid function closure
     let value = unsafe { vm.read_upvalue_unchecked(upvalue_id) };
     unsafe {
-        *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
+        *vm.register_stack.get_unchecked_mut(*base_ptr + a) = value;
     }
 }
 
@@ -35,14 +35,14 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
+    let func_value = unsafe { (*frame_ptr).function_value };
 
     // OPTIMIZED: Use unchecked access since we know the function is valid
     let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
     let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
 
-    let value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+    let value = unsafe { *vm.register_stack.get_unchecked(*base_ptr + a) };
 
     // Set upvalue value using the helper method
     vm.write_upvalue(upvalue_id, value);
@@ -53,8 +53,7 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
 #[inline(always)]
 pub fn exec_close(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-    let close_from = base_ptr + a;
+    let close_from = *base_ptr + a;
 
     vm.close_upvalues_from(close_from);
 }
@@ -66,11 +65,11 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     use crate::gc::UpvalueId;
 
+
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
-
+    let func_value = unsafe { (*frame_ptr).function_value };
     // Get current function using ID-based lookup
     let func_id = func_value
         .as_function_id()
@@ -92,7 +91,7 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
     if proto.upvalue_descs.is_empty() {
         let closure = vm.create_function(proto, Vec::new());
         unsafe {
-            *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
+            *vm.register_stack.get_unchecked_mut(*base_ptr + a) = closure;
         }
         vm.check_gc();
         return Ok(());
@@ -109,7 +108,7 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
         if desc.is_local {
             // Upvalue refers to a register in current function
             // Calculate absolute stack index for this upvalue
-            let stack_index = base_ptr + desc.index as usize;
+            let stack_index = *base_ptr + desc.index as usize;
 
             // Check if this upvalue is already open
             let existing = vm.open_upvalues.iter().find(|uv_id| {
@@ -142,7 +141,7 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
 
     let closure = vm.create_function(proto, upvalue_ids);
     unsafe {
-        *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
+        *vm.register_stack.get_unchecked_mut(*base_ptr + a) = closure;
     }
 
     // GC checkpoint: closure now safely stored in register
@@ -211,8 +210,6 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-
     // ULTRA-OPTIMIZED: Build result string directly without intermediate allocations
     // Estimate total capacity and format numbers inline with itoa
     let mut total_capacity = 0usize;
@@ -220,7 +217,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
 
     // First pass: check types and estimate capacity
     for i in 0..=b {
-        let value = vm.register_stack[base_ptr + a + i];
+        let value = vm.register_stack[*base_ptr + a + i];
 
         if let Some(str_id) = value.as_string_id() {
             if let Some(s) = vm.object_pool.get_string(str_id) {
@@ -243,7 +240,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
         let mut float_buffer = ryu::Buffer::new();
 
         for i in 0..=b {
-            let value = vm.register_stack[base_ptr + a + i];
+            let value = vm.register_stack[*base_ptr + a + i];
 
             if let Some(str_id) = value.as_string_id() {
                 if let Some(s) = vm.object_pool.get_string(str_id) {
@@ -260,7 +257,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
 
         // OPTIMIZED: Use create_string_owned to avoid extra clone
         let result_value = vm.create_string_owned(result);
-        vm.register_stack[base_ptr + a] = result_value;
+        vm.register_stack[*base_ptr + a] = result_value;
 
         // No GC check for fast path - rely on debt mechanism
         // Only large allocations trigger automatic GC
@@ -268,10 +265,10 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
     }
 
     // Slow path: need to handle metamethods
-    let mut result_value = vm.register_stack[base_ptr + a];
+    let mut result_value = vm.register_stack[*base_ptr + a];
 
     for i in 1..=b {
-        let next_value = vm.register_stack[base_ptr + a + i];
+        let next_value = vm.register_stack[*base_ptr + a + i];
 
         // Try direct concatenation first
         let left_str = if let Some(str_id) = result_value.as_string_id() {
@@ -347,7 +344,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
         }
     }
 
-    vm.register_stack[base_ptr + a] = result_value;
+    vm.register_stack[*base_ptr + a] = result_value;
 
     // No GC check - rely on debt mechanism
     Ok(())
@@ -361,8 +358,8 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let (base_ptr, top) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).top) };
-    let table = vm.register_stack[base_ptr + a];
+    let top = unsafe { (*frame_ptr).top };
+    let table = vm.register_stack[*base_ptr + a];
 
     let start_idx = c * 50; // 0-based for array indexing
     let count = if b == 0 { top - a - 1 } else { b };
@@ -382,7 +379,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
         for i in 0..count {
             unsafe {
                 *t.array.get_unchecked_mut(start_idx + i) =
-                    *vm.register_stack.get_unchecked(base_ptr + a + 1 + i);
+                    *vm.register_stack.get_unchecked(*base_ptr + a + 1 + i);
             }
         }
         return;
@@ -391,7 +388,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
     // Slow path with metamethods
     for i in 0..count {
         let key = LuaValue::integer((start_idx + i + 1) as i64);
-        let value = vm.register_stack[base_ptr + a + i + 1];
+        let value = vm.register_stack[*base_ptr + a + i + 1];
         let _ = vm.table_set_with_meta(table, key, value);
     }
 }
@@ -402,8 +399,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
 #[inline(always)]
 pub fn exec_tbc(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
-    let base_ptr = unsafe { (*frame_ptr).base_ptr };
-    let reg_idx = base_ptr + a;
+    let reg_idx = *base_ptr + a;
 
     // Get the value to be marked as to-be-closed
     let value = vm.register_stack[reg_idx];
