@@ -69,13 +69,14 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame,
 /// LOADNIL A B
 /// R[A], R[A+1], ..., R[A+B] := nil
 #[inline(always)]
-pub fn exec_loadnil(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_loadnil(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
     unsafe {
         let nil_val = LuaValue::nil();
-        let reg_ptr = vm.register_stack.as_mut_ptr().add(*base_ptr);
+        let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
         for i in 0..=b {
             *reg_ptr.add(a + i) = nil_val;
         }
@@ -85,22 +86,24 @@ pub fn exec_loadnil(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
 /// LOADFALSE A
 /// R[A] := false
 #[inline(always)]
-pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
 
     unsafe {
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::boolean(false);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
     }
 }
 
 /// LFALSESKIP A
 /// R[A] := false; pc++
 #[inline(always)]
-pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
 
     unsafe {
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::boolean(false);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
         // Skip next instruction
         *pc += 1;
     }
@@ -109,35 +112,39 @@ pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame,
 /// LOADTRUE A
 /// R[A] := true
 #[inline(always)]
-pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
 
     unsafe {
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::boolean(true);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(true);
     }
 }
 
 /// LOADI A sBx
 /// R[A] := sBx (signed integer)
 #[inline(always)]
-pub fn exec_loadi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+#[allow(dead_code)]
+pub fn exec_loadi(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
 
     unsafe {
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::integer(sbx as i64);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
     }
 }
 
 /// LOADF A sBx
 /// R[A] := (lua_Number)sBx
 #[inline(always)]
-pub fn exec_loadf(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_loadf(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let sbx = Instruction::get_sbx(instr);
 
     unsafe {
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(sbx as f64);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(sbx as f64);
     }
 }
 
@@ -145,21 +152,23 @@ pub fn exec_loadf(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 /// R[A] := K[Bx]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_loadk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_loadk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
     unsafe {
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(bx);
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = constant;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
     }
 }
 
 /// LOADKX A
 /// R[A] := K[extra arg]
 #[inline(always)]
-pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
 
     unsafe {
@@ -172,7 +181,7 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
                 if let Some(&extra_instr) = func_ref.chunk.code.get(pc_val) {
                     let bx = Instruction::get_ax(extra_instr) as usize;
                     if let Some(&constant) = func_ref.chunk.constants.get(bx) {
-                        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = constant;
+                        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
                     }
                 }
             }
@@ -183,12 +192,13 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
 /// MOVE A B
 /// R[A] := R[B]
 #[inline(always)]
-pub fn exec_move(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+#[allow(dead_code)]
+pub fn exec_move(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
     unsafe {
-        let reg_ptr = vm.register_stack.as_mut_ptr().add(*base_ptr);
+        let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
         *reg_ptr.add(a) = *reg_ptr.add(b);
     }
 }

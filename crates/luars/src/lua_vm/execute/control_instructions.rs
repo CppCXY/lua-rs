@@ -138,14 +138,13 @@ pub fn exec_return(
 
 /// JMP sJ
 /// pc += sJ
+#[allow(dead_code)]
 #[inline(always)]
-pub fn exec_jmp(instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_jmp(instr: u32, pc: &mut usize) {
     let sj = Instruction::get_sj(instr);
 
-    unsafe {
-        // PC already incremented by dispatcher, so we add offset directly
-        *pc = (*pc as i32 + sj) as usize;
-    }
+    // PC already incremented by dispatcher, so we add offset directly
+    *pc = (*pc as i32 + sj) as usize;
 }
 
 // ============ Test Instructions ============
@@ -153,15 +152,15 @@ pub fn exec_jmp(instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_p
 /// TEST A k
 /// if (not R[A] == k) then pc++
 /// ULTRA-OPTIMIZED: Direct type tag check, single branch
+#[allow(dead_code)]
 #[inline(always)]
-pub fn exec_test(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_test(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let k = Instruction::get_k(instr);
 
     unsafe {
-
         // OPTIMIZATION: Direct unsafe access and type tag comparison
-        let value = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let value = *vm.register_stack.as_ptr().add(base_ptr + a);
 
         // OPTIMIZATION: Fast truthiness check using type tags
         // nil = TAG_NIL, false = VALUE_FALSE
@@ -180,15 +179,14 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// if (not R[B] == k) then R[A] := R[B] else pc++
 /// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[inline(always)]
-pub fn exec_testset(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
     unsafe {
-
         // OPTIMIZATION: Direct unsafe access
-        let reg_ptr = vm.register_stack.as_ptr().add(*base_ptr);
+        let reg_ptr = vm.register_stack.as_ptr().add(base_ptr);
         let value = *reg_ptr.add(b);
 
         // OPTIMIZATION: Fast truthiness check
@@ -197,7 +195,7 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
 
         // If (is_truthy == k), assign R[A] = R[B], otherwise skip next instruction
         if is_truthy == k {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = value;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
         } else {
             *pc += 1;
         }
@@ -210,7 +208,12 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc
 /// if ((R[A] == R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Fast path for common types (integers, floats, strings)
 #[inline(always)]
-pub fn exec_eq(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_eq(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -277,9 +280,7 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
 
     // If (left == right) != k, skip next instruction
     if is_equal != k {
-        unsafe {
-            *pc += 1;
-        }
+        *pc += 1;
     }
 
     Ok(())
@@ -289,7 +290,7 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
 /// if ((R[A] < R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Direct integer fast path like Lua C
 #[inline(always)]
-pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_lt(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -353,7 +354,7 @@ pub fn exec_lt(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
         }
 
         // Slow path: metamethod
-        exec_lt_metamethod(vm, left, right, k, frame_ptr, pc)
+        exec_lt_metamethod(vm, left, right, k, pc)
     }
 }
 
@@ -365,7 +366,6 @@ fn exec_lt_metamethod(
     left: crate::LuaValue,
     right: crate::LuaValue,
     k: bool,
-    frame_ptr: *mut LuaCallFrame,
     pc: &mut usize,
 ) -> LuaResult<()> {
     // Use pre-cached __lt StringId
@@ -378,9 +378,7 @@ fn exec_lt_metamethod(
                 if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                     let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                     if is_less_result != k {
-                        unsafe {
-                            *pc += 1;
-                        }
+                        *pc += 1;
                     }
                     return Ok(());
                 }
@@ -396,9 +394,7 @@ fn exec_lt_metamethod(
                     if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                         let is_less_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                         if is_less_result != k {
-                            unsafe {
-                                *pc += 1;
-                            }
+                            *pc += 1;
                         }
                         return Ok(());
                     }
@@ -422,7 +418,12 @@ fn exec_lt_metamethod(
 /// if ((R[A] <= R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Use combined_tags for fast path like LT
 #[inline(always)]
-pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_le(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -479,9 +480,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
                     if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                         let is_le_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                         if is_le_result != k {
-                            unsafe {
-                                *pc += 1;
-                            }
+                            *pc += 1;
                         }
                         return Ok(());
                     }
@@ -497,9 +496,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
                         if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
                             let is_le_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                             if is_le_result != k {
-                                unsafe {
-                                    *pc += 1;
-                                }
+                                *pc += 1;
                             }
                             return Ok(());
                         }
@@ -521,9 +518,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
                             let is_gt_result = !result.is_nil() && result.as_bool().unwrap_or(true);
                             let is_le_result = !is_gt_result; // a <= b is !(b < a)
                             if is_le_result != k {
-                                unsafe {
-                                    *pc += 1;
-                                }
+                                *pc += 1;
                             }
                             return Ok(());
                         }
@@ -541,9 +536,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
                                     !result.is_nil() && result.as_bool().unwrap_or(true);
                                 let is_le_result = !is_gt_result;
                                 if is_le_result != k {
-                                    unsafe {
-                                        *pc += 1;
-                                    }
+                                    *pc += 1;
                                 }
                                 return Ok(());
                             }
@@ -565,9 +558,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
     };
 
     if is_less_or_equal != k {
-        unsafe {
-            *pc += 1;
-        }
+        *pc += 1;
     }
 
     Ok(())
@@ -576,12 +567,18 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mu
 /// EQK A B k
 /// if ((R[A] == K[B]) ~= k) then pc++
 #[inline(always)]
-pub fn exec_eqk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_eqk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let (base_ptr, func_value) = unsafe { ((*frame_ptr).base_ptr, (*frame_ptr).function_value) };
+    let func_value = unsafe { (*frame_ptr).function_value };
 
     // Get function using new ID-based API
     let Some(func_id) = func_value.as_function_id() else {
@@ -599,9 +596,7 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
     let is_equal = left == constant;
 
     if is_equal != k {
-        unsafe {
-            *pc += 1;
-        }
+        *pc += 1;
     }
 
     Ok(())
@@ -610,13 +605,13 @@ pub fn exec_eqk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 /// EQI A sB k
 /// if ((R[A] == sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_eqi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_eqi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
@@ -636,13 +631,13 @@ pub fn exec_eqi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 /// LTI A sB k
 /// if ((R[A] < sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_lti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
         // OPTIMIZATION: Direct type tag comparison
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
@@ -669,13 +664,13 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 /// LEI A sB k
 /// if ((R[A] <= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_lei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_less_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
@@ -700,13 +695,13 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 /// GTI A sB k
 /// if ((R[A] > sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_gti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_greater = if (left.primary & TYPE_MASK) == TAG_INTEGER {
@@ -731,13 +726,13 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 /// GEI A sB k
 /// if ((R[A] >= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gei(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_gei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let k = Instruction::get_k(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_greater_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {

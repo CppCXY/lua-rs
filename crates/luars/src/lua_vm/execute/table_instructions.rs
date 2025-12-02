@@ -11,7 +11,7 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM};
 /// k = 1 means EXTRAARG follows with array_size / 256
 /// OPTIMIZED: Fast path for common empty/small table case
 #[inline(always)]
-pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr); // log2(hash_size) + 1
     let c = Instruction::get_c(instr); // array_size % 256
@@ -53,7 +53,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
 
     // Store in register - use unchecked for speed
     unsafe {
-        *vm.register_stack.get_unchecked_mut(*base_ptr + a) = table;
+        *vm.register_stack.get_unchecked_mut(base_ptr + a) = table;
     }
 
     // GC checkpoint disabled for testing
@@ -172,12 +172,12 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
 /// R[A] := R[B][C:integer]
 /// OPTIMIZED: Direct integer access using get_int_full() without creating LuaValue key
 #[inline(always)]
-pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_geti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as i64; // C is unsigned integer index
 
-    let table = unsafe { *vm.register_stack.get_unchecked(*base_ptr + b) };
+    let table = unsafe { *vm.register_stack.get_unchecked(base_ptr + b) };
 
     // FAST PATH: Direct integer access for tables using unchecked access
     if let Some(table_id) = table.as_table_id() {
@@ -187,13 +187,13 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Use get_int_full to check both array and hash parts
         // This is necessary because integer keys may be stored in hash if array wasn't pre-allocated
         if let Some(val) = lua_table.get_int_full(c) {
-            unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = val };
+            unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = val };
             return Ok(());
         }
 
         // Key not found - check if no metatable to skip metamethod handling
         if lua_table.get_metatable().is_none() {
-            unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
+            unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
             return Ok(());
         }
     }
@@ -203,7 +203,7 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
     let value = vm
         .table_get_with_meta(&table, &key)
         .unwrap_or(LuaValue::nil());
-    vm.register_stack[*base_ptr + a] = value;
+    vm.register_stack[base_ptr + a] = value;
 
     Ok(())
 }

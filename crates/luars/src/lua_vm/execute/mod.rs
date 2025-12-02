@@ -343,35 +343,35 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Comparisons (inline simple ones) ============
             OpCode::LtI => {
-                if let Err(e) = exec_lti(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_lti(vm, instr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::LeI => {
-                if let Err(e) = exec_lei(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_lei(vm, instr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::GtI => {
-                if let Err(e) = exec_gti(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_gti(vm, instr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::GeI => {
-                if let Err(e) = exec_gei(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_gei(vm, instr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::EqI => {
-                exec_eqi(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_eqi(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::EqK => {
-                if let Err(e) = exec_eqk(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_eqk(vm, instr, frame_ptr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
@@ -396,13 +396,13 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             OpCode::TestSet => {
-                exec_testset(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_testset(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
 
             // ============ Loop Instructions (inline FORLOOP) ============
             OpCode::ForPrep => {
-                if let Err(e) = exec_forprep(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_forprep(vm, instr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
@@ -429,28 +429,28 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         continue 'mainloop;
                     }
                     // Float loop
-                    if let Err(e) = exec_forloop(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                    if let Err(e) = exec_forloop_float(vm, reg_base, bx, &mut pc) {
                         return Err(e);
                     }
                 }
                 continue 'mainloop;
             }
             OpCode::TForPrep => {
-                exec_tforprep(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_tforprep(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::TForLoop => {
-                exec_tforloop(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_tforloop(vm, instr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
 
             // ============ Upvalue operations (inline simple ones) ============
             OpCode::GetUpval => {
-                exec_getupval(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_getupval(vm, instr, frame_ptr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::SetUpval => {
-                exec_setupval(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_setupval(vm, instr, frame_ptr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
 
@@ -524,7 +524,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Table operations ============
             OpCode::NewTable => {
-                exec_newtable(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_newtable(vm, instr, frame_ptr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::GetTable => {
@@ -540,7 +540,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             OpCode::GetI => {
-                if let Err(e) = exec_geti(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_geti(vm, instr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
@@ -596,25 +596,25 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             OpCode::Concat => {
-                if let Err(e) = exec_concat(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_concat(vm, instr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Eq => {
-                if let Err(e) = exec_eq(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_eq(vm, instr, frame_ptr, &mut pc) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Lt => {
-                if let Err(e) = exec_lt(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_lt(vm, instr, &mut pc, &mut base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Le => {
-                if let Err(e) = exec_le(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_le(vm, instr, frame_ptr, &mut pc) {
                     return Err(e);
                 }
                 continue 'mainloop;
@@ -622,7 +622,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ TForCall ============
             OpCode::TForCall => {
-                if let Err(e) = exec_tforcall(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_tforcall(vm, instr, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
@@ -630,27 +630,27 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Closure and special ============
             OpCode::Closure => {
-                if let Err(e) = exec_closure(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_closure(vm, instr, frame_ptr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::Vararg => {
-                if let Err(e) = exec_vararg(vm, instr, frame_ptr, &mut pc, &mut base_ptr) {
+                if let Err(e) = exec_vararg(vm, instr, frame_ptr, &mut pc, base_ptr) {
                     return Err(e);
                 }
                 continue 'mainloop;
             }
             OpCode::SetList => {
-                exec_setlist(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_setlist(vm, instr, frame_ptr, &mut pc, base_ptr);
                 continue 'mainloop;
             }
             OpCode::Close => {
-                exec_close(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_close(vm, instr, base_ptr);
                 continue 'mainloop;
             }
             OpCode::Tbc => {
-                exec_tbc(vm, instr, frame_ptr, &mut pc, &mut base_ptr);
+                exec_tbc(vm, instr, base_ptr);
                 continue 'mainloop;
             }
         }
