@@ -161,9 +161,15 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
 
     match vm.compile_with_name(&code, filename) {
         Ok(chunk) => {
-            vm.execute(Rc::new(chunk))
-                .map_err(|e| format!("{}: {}", e, vm.get_error_message()))?;
-            Ok(())
+            match vm.execute(Rc::new(chunk)) {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    // Generate traceback for uncaught runtime errors
+                    let error_msg = vm.get_error_message();
+                    let traceback = vm.generate_traceback(error_msg);
+                    Err(format!("Runtime Error: {}", traceback))
+                }
+            }
         }
         Err(e) => Err(format!("{}: {}: {}", filename, e, vm.get_error_message())),
     }

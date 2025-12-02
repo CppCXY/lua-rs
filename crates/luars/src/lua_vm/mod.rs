@@ -2327,24 +2327,42 @@ impl LuaVM {
     pub fn generate_traceback(&self, error_msg: &str) -> String {
         let mut trace = format!("{}\nstack traceback:", error_msg);
 
-        // Iterate through call frames from top to bottom (most recent first)
-        for frame in self.frames.iter().rev() {
-            // Dynamically resolve chunk for debug info
-            let (source, line) = if let Some(func_ref) = self.get_function(&frame.function_value) {
-                let chunk = &func_ref.chunk;
-
-                let source_str = chunk.source_name.as_deref().unwrap_or("[?]");
-
-                let pc = frame.pc.saturating_sub(1);
-                let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
-                    chunk.line_info[pc].to_string()
+        // Iterate through active call frames from innermost to outermost (most recent first)
+        // frame_count is the number of active frames
+        if self.frame_count == 0 {
+            return trace;
+        }
+        
+        // Traverse from innermost (frame_count - 1) to outermost (0)
+        for i in (0..self.frame_count).rev() {
+            let frame = &self.frames[i];
+            
+            // Get source location info
+            let (source, line) = if frame.is_lua() {
+                // Get function ID and chunk info
+                if let Some(func_id) = frame.get_function_id() {
+                    if let Some(func) = self.object_pool.get_function(func_id) {
+                        let chunk = &func.chunk;
+                        let source_str = chunk.source_name.as_deref().unwrap_or("?");
+                        
+                        // Get line number from pc (pc points to next instruction, so use pc-1)
+                        let pc = frame.pc.saturating_sub(1);
+                        let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
+                            chunk.line_info[pc].to_string()
+                        } else {
+                            "?".to_string()
+                        };
+                        
+                        (source_str.to_string(), line_str)
+                    } else {
+                        ("?".to_string(), "?".to_string())
+                    }
                 } else {
-                    "?".to_string()
-                };
-
-                (source_str.to_string(), line_str)
+                    ("?".to_string(), "?".to_string())
+                }
             } else {
-                ("[?]".to_string(), "?".to_string())
+                // C function
+                ("[C]".to_string(), "?".to_string())
             };
 
             trace.push_str(&format!("\n\t{}:{}: in function", source, line));
@@ -2416,18 +2434,23 @@ impl LuaVM {
             Ok(values) => Ok((true, values)),
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(_) => {
-                // Clean up frames created by the failed function call
+                // IMPORTANT: For xpcall, we call the error handler BEFORE cleaning up frames
+                // This allows the handler to access the full call stack for traceback generation
+                
+                // Get the error message (which already includes traceback)
+                let msg = self.error_message.clone();
+                let err_value = self.create_string(&msg);
+                let err_display = format!("Runtime Error: {}", msg);
+
+                // Call error handler with the error message BEFORE cleaning up frames
+                let handler_result = self.call_function_internal(err_handler, vec![err_value]);
+
+                // NOW clean up frames created by the failed function call
                 while self.frame_count > initial_frame_count {
                     let frame = self.pop_frame().unwrap();
                     // Close upvalues belonging to this frame
                     self.close_upvalues_from(frame.base_ptr);
                 }
-                // Get the actual error message
-                let msg = self.error_message.clone();
-                let err_value = self.create_string(&msg);
-                let err_display = format!("Runtime Error: {}", msg);
-
-                let handler_result = self.call_function_internal(err_handler, vec![err_value]);
 
                 match handler_result {
                     Ok(handler_values) => Ok((false, handler_values)),
