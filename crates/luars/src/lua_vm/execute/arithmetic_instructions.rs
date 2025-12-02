@@ -7,45 +7,16 @@ use crate::{
     lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
 };
 
-/// Slow path for ADD - separate function to hint branch predictor
-#[cold]
-#[inline(never)]
-fn exec_add_slow(
-    reg_base: *mut LuaValue,
-    a: usize,
-    left: LuaValue,
-    right: LuaValue,
-    frame_ptr: *mut LuaCallFrame,
-) {
-    unsafe {
-        let left_tag = left.primary & TYPE_MASK;
-        let right_tag = right.primary & TYPE_MASK;
-
-        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-            LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
-        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-            LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
-        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-            LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
-        } else {
-            return;
-        };
-
-        *reg_base.add(a) = result;
-        // pc increment handled by caller
-    }
-}
-
 /// ADD: R[A] = R[B] + R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior - always write both fields
 #[inline(always)]
-pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_add(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(*base_ptr);
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -63,22 +34,50 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             return;
         }
 
-        // Slow path: Float operations - in separate cold function
-        exec_add_slow(reg_base, a, left, right, frame_ptr);
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
+
+        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+            LuaValue::number(f64::from_bits(left.secondary) + f64::from_bits(right.secondary))
+        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+            LuaValue::number((left.secondary as i64) as f64 + f64::from_bits(right.secondary))
+        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+            LuaValue::number(f64::from_bits(left.secondary) + (right.secondary as i64) as f64)
+        } else {
+            return;
+        };
+
+        *reg_base.add(a) = result;
+        *pc += 1;
     }
 }
 
-/// Slow path for SUB
-#[cold]
-#[inline(never)]
-fn exec_sub_slow(
-    reg_base: *mut LuaValue,
-    a: usize,
-    left: LuaValue,
-    right: LuaValue,
-    pc: &mut usize,
-) {
+/// SUB: R[A] = R[B] - R[C]
+/// OPTIMIZED: Matches Lua C's setivalue behavior
+#[inline(always)]
+pub fn exec_sub(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+    let a = Instruction::get_a(instr) as usize;
+    let b = Instruction::get_b(instr) as usize;
+    let c = Instruction::get_c(instr) as usize;
+
     unsafe {
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+        let left = *reg_base.add(b);
+        let right = *reg_base.add(c);
+
+        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
+
+        if combined_tags == TAG_INTEGER {
+            let result = (left.secondary as i64).wrapping_sub(right.secondary as i64);
+            *reg_base.add(a) = LuaValue {
+                primary: TAG_INTEGER,
+                secondary: result as u64,
+            };
+            *pc += 1;
+            return;
+        }
+
+        // Slow path: mixed or float types
         let left_tag = left.primary & TYPE_MASK;
         let right_tag = right.primary & TYPE_MASK;
 
@@ -97,74 +96,16 @@ fn exec_sub_slow(
     }
 }
 
-/// SUB: R[A] = R[B] - R[C]
-/// OPTIMIZED: Matches Lua C's setivalue behavior
-#[inline(always)]
-pub fn exec_sub(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-
-    unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(*base_ptr);
-        let left = *reg_base.add(b);
-        let right = *reg_base.add(c);
-
-        let combined_tags = (left.primary | right.primary) & TYPE_MASK;
-
-        if combined_tags == TAG_INTEGER {
-            let result = (left.secondary as i64).wrapping_sub(right.secondary as i64);
-            *reg_base.add(a) = LuaValue {
-                primary: TAG_INTEGER,
-                secondary: result as u64,
-            };
-            *pc += 1;
-            return;
-        }
-
-        exec_sub_slow(reg_base, a, left, right, pc);
-    }
-}
-
-/// Slow path for MUL
-#[cold]
-#[inline(never)]
-fn exec_mul_slow(
-    reg_base: *mut LuaValue,
-    a: usize,
-    left: LuaValue,
-    right: LuaValue,
-    frame_ptr: *mut LuaCallFrame,
-) {
-    unsafe {
-        let left_tag = left.primary & TYPE_MASK;
-        let right_tag = right.primary & TYPE_MASK;
-
-        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
-            LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
-        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
-            LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
-        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
-            LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
-        } else {
-            return;
-        };
-
-        *reg_base.add(a) = result;
-        // pc skip handled by caller
-    }
-}
-
 /// MUL: R[A] = R[B] * R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
-pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_mul(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(*base_ptr);
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -180,19 +121,33 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             return;
         }
 
-        exec_mul_slow(reg_base, a, left, right, frame_ptr);
+        let left_tag = left.primary & TYPE_MASK;
+        let right_tag = right.primary & TYPE_MASK;
+
+        let result = if left_tag == TAG_FLOAT && right_tag == TAG_FLOAT {
+            LuaValue::number(f64::from_bits(left.secondary) * f64::from_bits(right.secondary))
+        } else if left_tag == TAG_INTEGER && right_tag == TAG_FLOAT {
+            LuaValue::number((left.secondary as i64) as f64 * f64::from_bits(right.secondary))
+        } else if left_tag == TAG_FLOAT && right_tag == TAG_INTEGER {
+            LuaValue::number(f64::from_bits(left.secondary) * (right.secondary as i64) as f64)
+        } else {
+            return;
+        };
+
+        *reg_base.add(a) = result;
+        *pc += 1;
     }
 }
 
 /// DIV: R[A] = R[B] / R[C]
 /// Division always returns float in Lua
-pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(*base_ptr);
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -215,19 +170,19 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             return;
         };
 
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(l_float / r_float);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
         *pc += 1;
     }
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
-pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_idiv(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(*base_ptr);
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -263,19 +218,19 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
             LuaValue::number((l_float / r_float).floor())
         };
 
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = result;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
         *pc += 1;
     }
 }
 
 /// MOD: R[A] = R[B] % R[C]
-pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(*base_ptr);
+        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -312,20 +267,20 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             LuaValue::number(result)
         };
 
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = result;
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
         *pc += 1;
     }
 }
 
 /// POW: R[A] = R[B] ^ R[C]
-pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_pow(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(*base_ptr + c);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
         let l_float = match left.as_number() {
             Some(n) => n,
@@ -336,17 +291,17 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             None => return,
         };
 
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(l_float.powf(r_float));
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
         *pc += 1;
     }
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
-pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_unm(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let value = vm.register_stack[*base_ptr + b];
+    let value = vm.register_stack[base_ptr + b];
 
     let result = if let Some(i) = value.as_integer() {
         if let Some(neg) = i.checked_neg() {
@@ -365,7 +320,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
                     let result = vm
                         .call_metamethod(&metamethod, &[value])?
                         .unwrap_or(LuaValue::nil());
-                    vm.register_stack[*base_ptr + a] = result;
+                    vm.register_stack[base_ptr + a] = result;
                     return Ok(());
                 }
             }
@@ -376,7 +331,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
         )));
     };
 
-    vm.register_stack[*base_ptr + a] = result;
+    vm.register_stack[base_ptr + a] = result;
     Ok(())
 }
 
@@ -385,13 +340,13 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 /// ADDI: R[A] = R[B] + sC
 /// OPTIMIZED: Minimal branches, inline integer path
 #[inline(always)]
-pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_addi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let sc = Instruction::get_sc(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(*base_ptr);
+        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
 
         if left.primary == TAG_INTEGER {
@@ -416,13 +371,19 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// ADDK: R[A] = R[B] + K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_addk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -430,7 +391,7 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Integer + Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_add(constant.secondary as i64);
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: result as u64,
             };
@@ -441,7 +402,7 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Float + Float fast path
         if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
             let result = f64::from_bits(left.secondary) + f64::from_bits(constant.secondary);
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_FLOAT,
                 secondary: result.to_bits(),
             };
@@ -451,7 +412,7 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 
         // Mixed types
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(l + r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l + r);
             *pc += 1;
         }
     }
@@ -460,13 +421,19 @@ pub fn exec_addk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// SUBK: R[A] = R[B] - K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_subk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -474,7 +441,7 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Integer - Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_sub(constant.secondary as i64);
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: result as u64,
             };
@@ -485,7 +452,7 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Float - Float fast path
         if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
             let result = f64::from_bits(left.secondary) - f64::from_bits(constant.secondary);
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_FLOAT,
                 secondary: result.to_bits(),
             };
@@ -495,7 +462,7 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 
         // Mixed types
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(l - r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l - r);
             *pc += 1;
         }
     }
@@ -504,13 +471,19 @@ pub fn exec_subk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// MULK: R[A] = R[B] * K[C]
 /// OPTIMIZED: Direct field writes, minimal branching
 #[inline(always)]
-pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_mulk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -518,7 +491,7 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Integer * Integer fast path FIRST (most common in benchmarks with integer loops)
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_mul(constant.secondary as i64);
-            let dest = vm.register_stack.as_mut_ptr().add(*base_ptr + a);
+            let dest = vm.register_stack.as_mut_ptr().add(base_ptr + a);
             (*dest).primary = TAG_INTEGER;
             (*dest).secondary = result as u64;
             *pc += 1;
@@ -528,7 +501,7 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Float * Float fast path
         if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
             let result = f64::from_bits(left.secondary) * f64::from_bits(constant.secondary);
-            let dest = vm.register_stack.as_mut_ptr().add(*base_ptr + a);
+            let dest = vm.register_stack.as_mut_ptr().add(base_ptr + a);
             (*dest).primary = TAG_FLOAT;
             (*dest).secondary = result.to_bits();
             *pc += 1;
@@ -538,14 +511,14 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Mixed types: Integer * Float or Float * Integer
         if left.primary == TAG_INTEGER && constant.primary == TAG_FLOAT {
             let result = (left.secondary as i64) as f64 * f64::from_bits(constant.secondary);
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::float(result);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
             *pc += 1;
             return;
         }
 
         if left.primary == TAG_FLOAT && constant.primary == TAG_INTEGER {
             let result = f64::from_bits(left.secondary) * (constant.secondary as i64) as f64;
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::float(result);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
             *pc += 1;
         }
     }
@@ -554,13 +527,19 @@ pub fn exec_mulk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// MODK: R[A] = R[B] % K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_modk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -572,7 +551,7 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
                 return;
             }
             let l = left.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: l.rem_euclid(r) as u64,
             };
@@ -583,7 +562,7 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         // Float % Float
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
             let result = l - (l / r).floor() * r;
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(result);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(result);
             *pc += 1;
         }
     }
@@ -592,13 +571,19 @@ pub fn exec_modk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// POWK: R[A] = R[B] ^ K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_powk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -612,7 +597,7 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
             None => return,
         };
 
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(l_float.powf(r_float));
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
         *pc += 1;
     }
 }
@@ -620,13 +605,19 @@ pub fn exec_powk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// DIVK: R[A] = R[B] / K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_divk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -640,7 +631,7 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
             None => return,
         };
 
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number(l_float / r_float);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
         *pc += 1;
     }
 }
@@ -648,13 +639,19 @@ pub fn exec_divk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// IDIVK: R[A] = R[B] // K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_idivk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -666,7 +663,7 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
                 return;
             }
             let l = left.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: l.div_euclid(r) as u64,
             };
@@ -676,7 +673,7 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 
         // Float // Float
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::number((l / r).floor());
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number((l / r).floor());
             *pc += 1;
         }
     }
@@ -686,17 +683,17 @@ pub fn exec_idivk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 
 /// BAND: R[A] = R[B] & R[C]
 #[inline(always)]
-pub fn exec_band(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(*base_ptr + c);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::integer(l & r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
             *pc += 1;
         }
     }
@@ -704,17 +701,17 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 
 /// BOR: R[A] = R[B] | R[C]
 #[inline(always)]
-pub fn exec_bor(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(*base_ptr + c);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::integer(l | r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
             *pc += 1;
         }
     }
@@ -722,17 +719,17 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 
 /// BXOR: R[A] = R[B] ~ R[C]
 #[inline(always)]
-pub fn exec_bxor(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(*base_ptr + c);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::integer(l ^ r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
             *pc += 1;
         }
     }
@@ -740,14 +737,14 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 
 /// SHL: R[A] = R[B] << R[C]
 #[inline(always)]
-pub fn exec_shl(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(*base_ptr + c);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             let result = if r >= 0 {
@@ -755,7 +752,7 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             } else {
                 LuaValue::integer(l >> ((-r) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -763,14 +760,14 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 
 /// SHR: R[A] = R[B] >> R[C]
 #[inline(always)]
-pub fn exec_shr(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(*base_ptr + c);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             let result = if r >= 0 {
@@ -778,7 +775,7 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
             } else {
                 LuaValue::integer(l << ((-r) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -787,13 +784,19 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
 /// BANDK: R[A] = R[B] & K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_bandk(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -818,7 +821,7 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
         });
 
         if let (Some(l), Some(r)) = (l_int, r_int) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::integer(l & r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
             *pc += 1;
         }
     }
@@ -827,13 +830,19 @@ pub fn exec_bandk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 /// BORK: R[A] = R[B] | K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_bork(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -858,7 +867,7 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
         });
 
         if let (Some(l), Some(r)) = (l_int, r_int) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::integer(l | r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
             *pc += 1;
         }
     }
@@ -867,13 +876,19 @@ pub fn exec_bork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 /// BXORK: R[A] = R[B] ~ K[C]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_bxork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_bxork(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -898,7 +913,7 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
         });
 
         if let (Some(l), Some(r)) = (l_int, r_int) {
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::integer(l ^ r);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
             *pc += 1;
         }
     }
@@ -906,13 +921,13 @@ pub fn exec_bxork(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 
 /// SHRI: R[A] = R[B] >> sC
 #[inline(always)]
-pub fn exec_shri(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let sc = Instruction::get_sc(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         if let Some(l) = left.as_integer() {
             let result = if sc >= 0 {
@@ -920,7 +935,7 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
             } else {
                 LuaValue::integer(l << ((-sc) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -928,13 +943,13 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 
 /// SHLI: R[A] = sC << R[B]
 #[inline(always)]
-pub fn exec_shli(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let sc = Instruction::get_sc(instr);
 
     unsafe {
-        let right = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let right = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         if let Some(r) = right.as_integer() {
             let result = if r >= 0 {
@@ -942,7 +957,7 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
             } else {
                 LuaValue::integer((sc as i64) >> ((-r) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -950,14 +965,14 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
 
 /// BNOT: R[A] = ~R[B]
 #[inline(always)]
-pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_bnot(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let value = vm.register_stack[*base_ptr + b];
+    let value = vm.register_stack[base_ptr + b];
 
     if let Some(int_val) = value.as_integer() {
-        vm.register_stack[*base_ptr + a] = LuaValue::integer(!int_val);
+        vm.register_stack[base_ptr + a] = LuaValue::integer(!int_val);
         return Ok(());
     }
 
@@ -969,7 +984,7 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
                 let result = vm
                     .call_metamethod(&metamethod, &[value])?
                     .unwrap_or(LuaValue::nil());
-                vm.register_stack[*base_ptr + a] = result;
+                vm.register_stack[base_ptr + a] = result;
                 return Ok(());
             }
         }
@@ -981,29 +996,30 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &
     )))
 }
 
+#[allow(dead_code)]
 /// NOT: R[A] = not R[B]
 #[inline(always)]
-pub fn exec_not(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
+pub fn exec_not(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
     unsafe {
-        let value = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let value = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // In Lua, only nil and false are falsy
         use crate::lua_value::{TAG_NIL, VALUE_FALSE};
         let is_falsy = value.primary == TAG_NIL || value.primary == VALUE_FALSE;
-        *vm.register_stack.as_mut_ptr().add(*base_ptr + a) = LuaValue::boolean(is_falsy);
+        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
     }
 }
 
 /// LEN: R[A] = #R[B]
 #[inline(always)]
-pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    let value = vm.register_stack[*base_ptr + b];
+    let value = vm.register_stack[base_ptr + b];
 
     // Check for __len metamethod first (for tables)
     if value.is_table() {
@@ -1015,7 +1031,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
                     let result = vm
                         .call_metamethod(&metamethod, &[value])?
                         .unwrap_or(LuaValue::nil());
-                    vm.register_stack[*base_ptr + a] = result;
+                    vm.register_stack[base_ptr + a] = result;
                     return Ok(());
                 }
             }
@@ -1040,13 +1056,19 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &m
     };
 
     let result = LuaValue::integer(len);
-    vm.register_stack[*base_ptr + a] = result;
+    vm.register_stack[base_ptr + a] = result;
     Ok(())
 }
 
 /// MmBin: Metamethod binary operation (register, register)
 #[inline(always)]
-pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_mmbin(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -1062,8 +1084,8 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
 
-        let ra = *vm.register_stack.as_ptr().add(*base_ptr + a);
-        let rb = *vm.register_stack.as_ptr().add(*base_ptr + b);
+        let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let rb = *vm.register_stack.as_ptr().add(base_ptr + b);
 
         // Use pre-cached metamethod StringId
         let mm_key = LuaValue::string(vm.object_pool.get_binop_tm(c as u8));
@@ -1080,7 +1102,7 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 
         if !metamethod.is_nil() {
             if let Some(result) = vm.call_metamethod(&metamethod, &[ra, rb])? {
-                *vm.register_stack.as_mut_ptr().add(*base_ptr + dest_reg) = result;
+                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
         // If no metamethod, leave the instruction result as-is (error will be caught elsewhere)
@@ -1090,7 +1112,13 @@ pub fn exec_mmbin(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: 
 
 /// MmBinI: Metamethod binary operation (register, immediate)
 #[inline(always)]
-pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_mmbini(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let sb = Instruction::get_sb(instr);
     let c = Instruction::get_c(instr);
@@ -1106,7 +1134,7 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
 
-        let rb = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let rb = *vm.register_stack.as_ptr().add(base_ptr + a);
         let rc = LuaValue::integer(sb as i64);
 
         // Use pre-cached metamethod StringId
@@ -1122,7 +1150,7 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
         if !metamethod.is_nil() {
             let args = if k { vec![rc, rb] } else { vec![rb, rc] };
             if let Some(result) = vm.call_metamethod(&metamethod, &args)? {
-                *vm.register_stack.as_mut_ptr().add(*base_ptr + dest_reg) = result;
+                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
     }
@@ -1131,7 +1159,13 @@ pub fn exec_mmbini(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
 
 /// MmBinK: Metamethod binary operation (register, constant)
 #[inline(always)]
-pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_mmbink(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -1147,7 +1181,7 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
         let prev_instr = (*frame_ptr).code_ptr.add(prev_pc - 1).read();
         let dest_reg = Instruction::get_a(prev_instr) as usize;
 
-        let ra = *vm.register_stack.as_ptr().add(*base_ptr + a);
+        let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
 
         // Get constant
         let kb = if let Some(func_id) = (*frame_ptr).function_value.as_function_id() {
@@ -1181,7 +1215,7 @@ pub fn exec_mmbink(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc:
 
         if !metamethod.is_nil() {
             if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
-                *vm.register_stack.as_mut_ptr().add(*base_ptr + dest_reg) = result;
+                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
     }
