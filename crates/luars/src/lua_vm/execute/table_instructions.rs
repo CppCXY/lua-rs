@@ -11,7 +11,7 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM};
 /// k = 1 means EXTRAARG follows with array_size / 256
 /// OPTIMIZED: Fast path for common empty/small table case
 #[inline(always)]
-pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr); // log2(hash_size) + 1
     let c = Instruction::get_c(instr); // array_size % 256
@@ -21,7 +21,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
     let hash_size = if b > 0 { 1usize << (b - 1) } else { 0 };
 
     let (base_ptr, func_value) = unsafe {
-        (*frame_ptr).pc += 1; // Skip EXTRAARG
+        *pc += 1; // Skip EXTRAARG
         ((*frame_ptr).base_ptr, (*frame_ptr).function_value)
     };
 
@@ -63,7 +63,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 /// R[A] := R[B][R[C]]
 /// OPTIMIZED: Fast path for integer keys and tables without metatable
 #[inline(always)]
-pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -120,7 +120,7 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// R[A][R[B]] := RK(C)
 /// OPTIMIZED: Fast path for integer keys and tables without metatable
 #[inline(always)]
-pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -128,16 +128,15 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 
     // Read all values using unchecked access
     let (table_value, key_value, set_value) = unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
 
-        let table = *vm.register_stack.get_unchecked(base_ptr + a);
-        let key = *vm.register_stack.get_unchecked(base_ptr + b);
+        let table = *vm.register_stack.get_unchecked(*base_ptr + a);
+        let key = *vm.register_stack.get_unchecked(*base_ptr + b);
 
         let value = if k {
             // Get constant via cached pointer
             *(*frame_ptr).constants_ptr.add(c)
         } else {
-            *vm.register_stack.get_unchecked(base_ptr + c)
+            *vm.register_stack.get_unchecked(*base_ptr + c)
         };
 
         (table, key, value)
@@ -174,7 +173,7 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// R[A] := R[B][C:integer]
 /// OPTIMIZED: Direct integer access using get_int_full() without creating LuaValue key
 #[inline(always)]
-pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as i64; // C is unsigned integer index
@@ -215,7 +214,7 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 /// R[A][B] := RK(C)
 /// OPTIMIZED: Direct integer key access using set_int()
 #[inline(always)]
-pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as i64; // B is unsigned integer key
     let c = Instruction::get_c(instr) as usize;
@@ -223,15 +222,14 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 
     // CRITICAL: Read all values BEFORE any metamethod calls
     let (table_value, set_value) = unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
 
-        let table = *vm.register_stack.get_unchecked(base_ptr + a);
+        let table = *vm.register_stack.get_unchecked(*base_ptr + a);
 
         let value = if k {
             // Get constant via cached pointer for speed
             *(*frame_ptr).constants_ptr.add(c)
         } else {
-            *vm.register_stack.get_unchecked(base_ptr + c)
+            *vm.register_stack.get_unchecked(*base_ptr + c)
         };
 
         (table, value)
@@ -264,7 +262,7 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> Lu
 /// GETFIELD A B C
 /// R[A] := R[B][K[C]:string]
 #[inline(always)]
-pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -318,7 +316,7 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// SETFIELD A B C k
 /// R[A][K[B]:string] := RK(C)
 #[inline(always)]
-pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -327,7 +325,6 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
     // CRITICAL: Read all values BEFORE any metamethod calls
     // because metamethods can modify the register stack
     let (table_value, key_value, set_value) = unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
         let func_value = (*frame_ptr).function_value;
 
         // Get key constant using new API
@@ -341,7 +338,7 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             return Err(vm.error(format!("Invalid constant index: {}", b)));
         };
 
-        let table = vm.register_stack[base_ptr + a];
+        let table = vm.register_stack[*base_ptr + a];
 
         let value = if k {
             let Some(constant) = func_ref.chunk.constants.get(c).copied() else {
@@ -349,7 +346,7 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
             };
             constant
         } else {
-            vm.register_stack[base_ptr + c]
+            vm.register_stack[*base_ptr + c]
         };
 
         (table, key, value)
@@ -379,7 +376,7 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// R[A] := UpValue[B][K[C]:string]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -437,7 +434,7 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// UpValue[A][K[B]:string] := RK(C)
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -493,7 +490,7 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// SELF A B C
 /// R[A+1] := R[B]; R[A] := R[B][RK(C):string]
 #[inline(always)]
-pub fn exec_self(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_self(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;

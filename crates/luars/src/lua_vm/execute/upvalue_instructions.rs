@@ -9,7 +9,7 @@ use crate::{
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
 #[inline(always)]
-pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -31,7 +31,7 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 /// SETUPVAL A B
 /// UpValue[B] := R[A]
 #[inline(always)]
-pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -51,7 +51,7 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 /// CLOSE A
 /// close all upvalues >= R[A]
 #[inline(always)]
-pub fn exec_close(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_close(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let base_ptr = unsafe { (*frame_ptr).base_ptr };
     let close_from = base_ptr + a;
@@ -63,7 +63,7 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 /// R[A] := closure(KPROTO[Bx])
 /// OPTIMIZED: Fast path for closures without upvalues
 #[inline(always)]
-pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     use crate::gc::UpvalueId;
 
     let a = Instruction::get_a(instr) as usize;
@@ -157,7 +157,7 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 /// Vararg arguments are stored at frame.vararg_start (set by VARARGPREP).
 /// This instruction copies them to the target registers.
 #[inline(always)]
-pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -207,7 +207,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
 /// R[A] := R[A].. ... ..R[A+B]
 /// OPTIMIZED: Pre-allocation for string/number combinations
 #[inline(always)]
-pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
@@ -356,7 +356,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> 
 /// SETLIST A B C k
 /// R[A][C+i] := R[A+i], 1 <= i <= B
 #[inline(always)]
-pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -400,7 +400,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 /// mark variable A as to-be-closed
 /// This marks a variable to have its __close metamethod called when it goes out of scope
 #[inline(always)]
-pub fn exec_tbc(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_tbc(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let base_ptr = unsafe { (*frame_ptr).base_ptr };
     let reg_idx = base_ptr + a;

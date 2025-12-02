@@ -13,13 +13,12 @@ use crate::{
 /// Prepare numeric for loop: R[A]-=R[A+2]; R[A+3]=R[A]; if (skip) pc+=Bx+1
 /// OPTIMIZED: Uses frame_ptr directly, no i128, unsafe register access
 #[inline(always)]
-pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
     unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+        let reg_base = vm.register_stack.as_mut_ptr().add(*base_ptr + a);
 
         let init = *reg_base;
         let limit = *reg_base.add(1);
@@ -133,13 +132,12 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) ->
 ///
 /// ULTRA-OPTIMIZED: Only check step type (like Lua C), use chgivalue pattern
 #[inline(always)]
-pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_forloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
     unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+        let reg_base = vm.register_stack.as_mut_ptr().add(*base_ptr + a);
 
         // Only check step type - like Lua C's ttisinteger(s2v(ra + 2))
         let step = *reg_base.add(2);
@@ -232,17 +230,16 @@ fn exec_forloop_float(
 /// create upvalue for R[A + 3]; pc+=Bx
 /// In Lua 5.4, this creates a to-be-closed variable for the state
 #[inline(always)]
-pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
     unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
 
         // In Lua 5.4, R[A+3] is the to-be-closed variable for the state
         // For now, we just copy the state value to ensure it's preserved
-        let state = vm.register_stack[base_ptr + a + 1];
-        vm.register_stack[base_ptr + a + 3] = state;
+        let state = vm.register_stack[*base_ptr + a + 1];
+        vm.register_stack[*base_ptr + a + 3] = state;
 
         // Jump to loop start
         (*frame_ptr).pc += bx;
@@ -252,7 +249,7 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
 /// TFORCALL A C
 /// R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);
 #[inline(always)]
-pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -> LuaResult<()> {
+pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -361,17 +358,16 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) -
 /// TFORLOOP A Bx
 /// if R[A+1] ~= nil then { R[A]=R[A+1]; pc -= Bx }
 #[inline(always)]
-pub fn exec_tforloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame) {
+pub fn exec_tforloop(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: &mut usize) {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
     unsafe {
-        let base_ptr = (*frame_ptr).base_ptr;
-        let value = vm.register_stack[base_ptr + a + 1];
+        let value = vm.register_stack[*base_ptr + a + 1];
 
         if !value.is_nil() {
             // Continue loop
-            vm.register_stack[base_ptr + a] = value;
+            vm.register_stack[*base_ptr + a] = value;
             (*frame_ptr).pc -= bx;
         }
     }
