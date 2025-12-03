@@ -390,17 +390,24 @@ impl LuaVM {
 
     // ============ Frame Management (Lua 5.4 style) ============
     // Uses pre-allocated Vec for O(1) operations
-    // Key optimization: Vec is pre-filled to MAX_CALL_DEPTH, so direct index access
+    // Key optimization: 
+    // - Main VM: pre-filled to MAX_CALL_DEPTH for direct index access
+    // - Coroutines: start small and grow on demand (like Lua's linked list CallInfo)
 
     /// Push a new frame onto the call stack and return stable pointer
-    /// ULTRA-OPTIMIZED: Direct index write to pre-filled Vec
+    /// OPTIMIZED: Direct index write when capacity allows, grow on demand otherwise
     #[inline(always)]
     pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) -> *mut LuaCallFrame {
         let idx = self.frame_count;
         debug_assert!(idx < MAX_CALL_DEPTH, "call stack overflow");
 
-        // Direct write - Vec is pre-filled to MAX_CALL_DEPTH
-        self.frames[idx] = frame;
+        // Fast path: direct write if Vec is pre-filled or has space
+        if idx < self.frames.len() {
+            self.frames[idx] = frame;
+        } else {
+            // Slow path: grow the Vec (for coroutines with on-demand allocation)
+            self.frames.push(frame);
+        }
         self.frame_count = idx + 1;
         &mut self.frames[idx] as *mut LuaCallFrame
     }
@@ -537,12 +544,15 @@ impl LuaVM {
     }
 
     // ============ Coroutine Support ============
+    
+    /// Initial call depth for coroutines (grows on demand, like Lua's linked list CallInfo)
+    const INITIAL_COROUTINE_CALL_DEPTH: usize = 8;
 
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
     pub fn create_thread_value(&mut self, func: LuaValue) -> LuaValue {
-        // Pre-allocate frames like the main VM does
-        let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
-        frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
+        // Only allocate capacity, don't pre-fill (unlike main VM)
+        // Coroutines typically have shallow call stacks, so we grow on demand
+        let frames = Vec::with_capacity(Self::INITIAL_COROUTINE_CALL_DEPTH);
 
         let mut thread = LuaThread {
             status: CoroutineStatus::Suspended,
@@ -572,9 +582,9 @@ impl LuaVM {
     /// Create a new thread (coroutine) - legacy version returning Rc<RefCell<>>
     /// This is still needed for internal VM state tracking (current_thread)
     pub fn create_thread(&mut self, func: LuaValue) -> Rc<RefCell<LuaThread>> {
-        // Pre-allocate frames like the main VM does
-        let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
-        frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
+        // Only allocate capacity, don't pre-fill (unlike main VM)
+        // Coroutines typically have shallow call stacks, so we grow on demand
+        let frames = Vec::with_capacity(Self::INITIAL_COROUTINE_CALL_DEPTH);
 
         let thread = LuaThread {
             status: CoroutineStatus::Suspended,
@@ -602,6 +612,7 @@ impl LuaVM {
     }
 
     /// Resume a coroutine using ThreadId-based LuaValue
+    /// OPTIMIZED: Uses swap instead of take to avoid repeated allocations
     pub fn resume_thread(
         &mut self,
         thread_val: LuaValue,
@@ -636,39 +647,29 @@ impl LuaVM {
             _ => {}
         }
 
-        // Save current VM state
-        let saved_frames = std::mem::take(&mut self.frames);
-        let saved_frame_count = self.frame_count;
-        self.frame_count = 0; // frames is now empty
-        let saved_stack = std::mem::take(&mut self.register_stack);
-        let saved_returns = std::mem::take(&mut self.return_values);
-        let saved_upvalues = std::mem::take(&mut self.open_upvalues);
-        let saved_frame_id = self.next_frame_id;
-        let saved_thread = self.current_thread.take();
-        let saved_thread_id = self.current_thread_id.take();
-
-        // Get thread state and check if first resume
-        let is_first_resume = {
-            let Some(thread) = self.object_pool.get_thread(thread_id) else {
-                return Err(self.error("invalid thread".to_string()));
-            };
-            thread.frame_count == 0 // Use frame_count instead of frames.is_empty()
-        };
-
-        // Load thread state into VM
+        // OPTIMIZED: Use swap to exchange state with thread
+        // This avoids allocation/deallocation overhead of take
+        let is_first_resume;
         {
             let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
                 return Err(self.error("invalid thread".to_string()));
             };
+            
+            is_first_resume = thread.frame_count == 0;
             thread.status = CoroutineStatus::Running;
-            self.frames = std::mem::take(&mut thread.frames);
-            self.frame_count = thread.frame_count; // Use thread's frame_count
-            self.register_stack = std::mem::take(&mut thread.register_stack);
-            self.return_values = std::mem::take(&mut thread.return_values);
-            self.open_upvalues = std::mem::take(&mut thread.open_upvalues);
-            self.next_frame_id = thread.next_frame_id;
+            
+            // Swap state between VM and thread (O(1) pointer swaps)
+            std::mem::swap(&mut self.frames, &mut thread.frames);
+            std::mem::swap(&mut self.register_stack, &mut thread.register_stack);
+            std::mem::swap(&mut self.return_values, &mut thread.return_values);
+            std::mem::swap(&mut self.open_upvalues, &mut thread.open_upvalues);
+            std::mem::swap(&mut self.frame_count, &mut thread.frame_count);
+            std::mem::swap(&mut self.next_frame_id, &mut thread.next_frame_id);
         }
 
+        // Save thread tracking info
+        let saved_thread = self.current_thread.take();
+        let saved_thread_id = self.current_thread_id.take();
         self.current_thread_id = Some(thread_id);
         self.current_thread_value = Some(thread_val.clone());
 
@@ -683,15 +684,13 @@ impl LuaVM {
             match self.call_function_internal(func, args) {
                 Ok(values) => Ok(values),
                 Err(LuaError::Yield) => {
-                    // Function yielded - this is expected
                     let values = self.take_yield_values();
                     Ok(values)
                 }
                 Err(e) => Err(e),
             }
         } else {
-            // Resumed from yield:
-            // Use saved CALL instruction info to properly store return values
+            // Resumed from yield: handle return values
             let (call_reg, call_nret) = {
                 let Some(thread) = self.object_pool.get_thread(thread_id) else {
                     return Err(self.error("invalid thread".to_string()));
@@ -700,31 +699,30 @@ impl LuaVM {
             };
 
             if let (Some(a), Some(num_expected)) = (call_reg, call_nret) {
-                let frame = &self.frames[self.frame_count - 1];
-                let base_ptr = frame.base_ptr;
-                let top = frame.top;
+                if self.frame_count > 0 {
+                    let frame = &self.frames[self.frame_count - 1];
+                    let base_ptr = frame.base_ptr;
+                    let top = frame.top;
 
-                // Store resume args as return values of the yield call
-                let num_returns = args.len();
-                let n = if num_expected == usize::MAX {
-                    num_returns
-                } else {
-                    num_expected.min(num_returns)
-                };
+                    let num_returns = args.len();
+                    let n = if num_expected == usize::MAX {
+                        num_returns
+                    } else {
+                        num_expected.min(num_returns)
+                    };
 
-                for (i, value) in args.iter().take(n).enumerate() {
-                    if base_ptr + a + i < self.register_stack.len() && a + i < top {
-                        self.register_stack[base_ptr + a + i] = value.clone();
+                    for (i, value) in args.iter().take(n).enumerate() {
+                        if base_ptr + a + i < self.register_stack.len() && a + i < top {
+                            self.register_stack[base_ptr + a + i] = *value;
+                        }
+                    }
+                    for i in num_returns..num_expected.min(top.saturating_sub(a)) {
+                        if base_ptr + a + i < self.register_stack.len() {
+                            self.register_stack[base_ptr + a + i] = LuaValue::nil();
+                        }
                     }
                 }
-                // Fill remaining expected registers with nil
-                for i in num_returns..num_expected.min(top - a) {
-                    if base_ptr + a + i < self.register_stack.len() {
-                        self.register_stack[base_ptr + a + i] = LuaValue::nil();
-                    }
-                }
 
-                // Clear the saved info
                 if let Some(thread) = self.object_pool.get_thread_mut(thread_id) {
                     thread.yield_call_reg = None;
                     thread.yield_call_nret = None;
@@ -733,89 +731,58 @@ impl LuaVM {
 
             self.return_values = args;
 
-            // Continue execution from where it yielded
             match self.run() {
-                Ok(_) => {
-                    // Normal completion - return the stored return values
-                    Ok(self.return_values.clone())
-                }
-                Err(LuaError::Yield) => {
-                    // Yield happened - this is expected, get the yield values
-                    Ok(self.take_yield_values())
-                }
+                Ok(_) => Ok(self.return_values.clone()),
+                Err(LuaError::Yield) => Ok(self.take_yield_values()),
                 Err(e) => Err(e),
             }
         };
 
-        // Check if thread yielded by examining the result
-        let did_yield = match &result {
-            Ok(_) if !self.frames_is_empty() => {
-                // If frames are not empty after execution, it means we yielded
-                true
-            }
-            _ => false,
-        };
+        // Check if thread yielded
+        let did_yield = matches!(&result, Ok(_) if self.frame_count > 0);
 
-        // Save thread state back
-        let final_result = if did_yield {
-            // Thread yielded - save state and return yield values
+        // Swap state back to thread
+        let final_result = {
             let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
                 return Err(self.error("invalid thread".to_string()));
             };
-            thread.frames = std::mem::take(&mut self.frames);
-            thread.frame_count = self.frame_count; // Save frame_count to thread
-            self.frame_count = 0; // Reset VM frame count
-            thread.register_stack = std::mem::take(&mut self.register_stack);
-            thread.return_values = std::mem::take(&mut self.return_values);
-            thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
-            thread.next_frame_id = self.next_frame_id;
-            thread.status = CoroutineStatus::Suspended;
+            
+            // Swap back (O(1) pointer swaps)
+            std::mem::swap(&mut self.frames, &mut thread.frames);
+            std::mem::swap(&mut self.register_stack, &mut thread.register_stack);
+            std::mem::swap(&mut self.return_values, &mut thread.return_values);
+            std::mem::swap(&mut self.open_upvalues, &mut thread.open_upvalues);
+            std::mem::swap(&mut self.frame_count, &mut thread.frame_count);
+            std::mem::swap(&mut self.next_frame_id, &mut thread.next_frame_id);
 
-            let values = thread.yield_values.clone();
-            thread.yield_values.clear();
-
-            Ok((true, values))
-        } else {
-            // Thread completed or error
-            let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
-                return Err(self.error("invalid thread".to_string()));
-            };
-            thread.frames = std::mem::take(&mut self.frames);
-            thread.frame_count = self.frame_count; // Save frame_count to thread
-            self.frame_count = 0; // Reset VM frame count
-            thread.register_stack = std::mem::take(&mut self.register_stack);
-            thread.return_values = std::mem::take(&mut self.return_values);
-            thread.open_upvalues = std::mem::take(&mut self.open_upvalues);
-            thread.next_frame_id = self.next_frame_id;
-
-            match result {
-                Ok(values) => {
-                    thread.status = CoroutineStatus::Dead;
-                    Ok((true, values))
-                }
-                Err(LuaError::Exit) => {
-                    // Normal exit - coroutine finished successfully
-                    thread.status = CoroutineStatus::Dead;
-                    Ok((true, thread.return_values.clone()))
-                }
-                Err(_) => {
-                    thread.status = CoroutineStatus::Dead;
-                    let error_msg = self.get_error_message().to_string();
-                    Ok((false, vec![self.create_string(&error_msg)]))
+            if did_yield {
+                thread.status = CoroutineStatus::Suspended;
+                let values = thread.yield_values.clone();
+                thread.yield_values.clear();
+                Ok((true, values))
+            } else {
+                match result {
+                    Ok(values) => {
+                        thread.status = CoroutineStatus::Dead;
+                        Ok((true, values))
+                    }
+                    Err(LuaError::Exit) => {
+                        thread.status = CoroutineStatus::Dead;
+                        Ok((true, thread.return_values.clone()))
+                    }
+                    Err(_) => {
+                        thread.status = CoroutineStatus::Dead;
+                        let error_msg = self.get_error_message().to_string();
+                        Ok((false, vec![self.create_string(&error_msg)]))
+                    }
                 }
             }
         };
 
-        // Restore VM state
-        self.frames = saved_frames;
-        self.frame_count = saved_frame_count; // CRITICAL: restore frame_count
-        self.register_stack = saved_stack;
-        self.return_values = saved_returns;
-        self.open_upvalues = saved_upvalues;
-        self.next_frame_id = saved_frame_id;
+        // Restore thread tracking
         self.current_thread = saved_thread;
         self.current_thread_id = saved_thread_id;
-        self.current_thread_value = None; // Clear after resume completes
+        self.current_thread_value = None;
 
         final_result
     }
