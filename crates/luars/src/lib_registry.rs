@@ -205,8 +205,8 @@ pub fn create_standard_registry() -> LibraryRegistry {
 /// Helper to get function arguments from VM registers
 pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
     let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    let top = frame.top;
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
     // Skip register 0 (the function itself), collect from 1 to top
     (1..top).map(|i| vm.register_stack[base_ptr + i]).collect()
@@ -217,8 +217,8 @@ pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
 #[inline(always)]
 pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
     let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    let top = frame.top;
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
     // Arguments use 1-based indexing (Lua convention)
     // Register 0 is the function itself
@@ -252,5 +252,5 @@ pub fn require_arg(vm: &mut LuaVM, index: usize, func_name: &str) -> LuaResult<L
 pub fn arg_count(vm: &LuaVM) -> usize {
     let frame = vm.current_frame();
     // Subtract 1 for the function itself
-    frame.top.saturating_sub(1)
+    frame.top.saturating_sub(1) as usize
 }

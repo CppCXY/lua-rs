@@ -284,7 +284,9 @@ fn string_sub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     // Use optimized create_substring
-    let result_id = vm.object_pool.create_substring(string_id, start_byte, end_byte);
+    let result_id = vm
+        .object_pool
+        .create_substring(string_id, start_byte, end_byte);
     Ok(MultiValue::single(LuaValue::string(result_id)))
 }
 

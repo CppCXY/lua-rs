@@ -142,21 +142,21 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 
         // Check idx type - FORPREP sets this to integer only if ALL of init/limit/step are integers
         let idx = *reg_base;
-        
+
         if (idx.primary & TYPE_MASK) == TAG_INTEGER {
             // Integer loop - idx and counter are integers (set by FORPREP)
             let count = (*reg_base.add(1)).secondary; // counter as u64
-            
+
             if count > 0 {
                 let idx_i = idx.secondary as i64;
                 let step_i = (*reg_base.add(2)).secondary as i64;
                 let new_idx = idx_i.wrapping_add(step_i);
-                
+
                 // chgivalue pattern - only update secondary (value), primary (type) stays same
                 (*reg_base.add(1)).secondary = count - 1; // counter--
-                (*reg_base).secondary = new_idx as u64;   // idx += step
+                (*reg_base).secondary = new_idx as u64; // idx += step
                 (*reg_base.add(3)).secondary = new_idx as u64; // control = idx
-                
+
                 *pc -= bx;
             }
             // count == 0: loop ended, fall through
@@ -181,7 +181,7 @@ pub fn exec_forloop_float(
         let idx = *reg_base;
         let limit = *reg_base.add(1);
         let step = *reg_base.add(2);
-        
+
         let idx_tag = idx.primary & TYPE_MASK;
         let limit_tag = limit.primary & TYPE_MASK;
         let step_tag = step.primary & TYPE_MASK;
@@ -248,7 +248,12 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize
 /// R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);
 /// Returns true if a Lua function was called and frame changed (needs updatestate)
 #[inline(always)]
-pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: &mut *mut LuaCallFrame, base_ptr: usize) -> LuaResult<bool> {
+pub fn exec_tforcall(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: &mut *mut LuaCallFrame,
+    base_ptr: usize,
+) -> LuaResult<bool> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -327,7 +332,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: &mut *mut LuaCallFra
             // Create new frame with correct nresults type
             let nresults = (c + 1) as i16;
             let new_frame = LuaCallFrame::new_lua_function(
-                func,
+                func_id,
                 code_ptr,
                 constants_ptr,
                 call_base,
@@ -341,9 +346,7 @@ pub fn exec_tforcall(vm: &mut LuaVM, instr: u32, frame_ptr: &mut *mut LuaCallFra
             *frame_ptr = vm.current_frame_ptr();
             Ok(true) // Frame changed, need updatestate
         }
-        _ => {
-            Err(vm.error("attempt to call a non-function value in for loop".to_string()))
-        }
+        _ => Err(vm.error("attempt to call a non-function value in for loop".to_string())),
     }
 }
 

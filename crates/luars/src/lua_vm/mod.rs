@@ -262,7 +262,7 @@ impl LuaVM {
         let constants_ptr = chunk.constants.as_ptr();
 
         let frame = LuaCallFrame::new_lua_function(
-            main_func_value,
+            main_func_value.as_function_id().unwrap(),
             code_ptr,
             constants_ptr,
             base_ptr,
@@ -336,7 +336,7 @@ impl LuaVM {
         }
 
         let frame = LuaCallFrame::new_lua_function(
-            func,
+            func_id,
             code_ptr,
             constants_ptr,
             base_ptr,
@@ -390,7 +390,7 @@ impl LuaVM {
 
     // ============ Frame Management (Lua 5.4 style) ============
     // Uses pre-allocated Vec for O(1) operations
-    // Key optimization: 
+    // Key optimization:
     // - Main VM: pre-filled to MAX_CALL_DEPTH for direct index access
     // - Coroutines: start small and grow on demand (like Lua's linked list CallInfo)
 
@@ -544,7 +544,7 @@ impl LuaVM {
     }
 
     // ============ Coroutine Support ============
-    
+
     /// Initial call depth for coroutines (grows on demand, like Lua's linked list CallInfo)
     const INITIAL_COROUTINE_CALL_DEPTH: usize = 8;
 
@@ -654,10 +654,10 @@ impl LuaVM {
             let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
                 return Err(self.error("invalid thread".to_string()));
             };
-            
+
             is_first_resume = thread.frame_count == 0;
             thread.status = CoroutineStatus::Running;
-            
+
             // Swap state between VM and thread (O(1) pointer swaps)
             std::mem::swap(&mut self.frames, &mut thread.frames);
             std::mem::swap(&mut self.register_stack, &mut thread.register_stack);
@@ -701,8 +701,8 @@ impl LuaVM {
             if let (Some(a), Some(num_expected)) = (call_reg, call_nret) {
                 if self.frame_count > 0 {
                     let frame = &self.frames[self.frame_count - 1];
-                    let base_ptr = frame.base_ptr;
-                    let top = frame.top;
+                    let base_ptr = frame.base_ptr as usize;
+                    let top = frame.top as usize;
 
                     let num_returns = args.len();
                     let n = if num_expected == usize::MAX {
@@ -746,7 +746,7 @@ impl LuaVM {
             let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
                 return Err(self.error("invalid thread".to_string()));
             };
-            
+
             // Swap back (O(1) pointer swaps)
             std::mem::swap(&mut self.frames, &mut thread.frames);
             std::mem::swap(&mut self.register_stack, &mut thread.register_stack);
@@ -1140,16 +1140,15 @@ impl LuaVM {
         // Calculate new base position - use current frame's top area
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr;
-            let caller_max_stack =
-                if let Some(func_id) = current_frame.function_value.as_function_id() {
-                    self.object_pool
-                        .get_function(func_id)
-                        .map(|f| f.chunk.max_stack_size)
-                        .unwrap_or(256)
-                } else {
-                    256
-                };
+            let caller_base = current_frame.base_ptr as usize;
+            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
+                self.object_pool
+                    .get_function(func_id)
+                    .map(|f| f.chunk.max_stack_size)
+                    .unwrap_or(256)
+            } else {
+                256
+            };
             caller_base + caller_max_stack
         } else {
             0
@@ -1193,16 +1192,15 @@ impl LuaVM {
     ) -> LuaResult<Option<LuaValue>> {
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr;
-            let caller_max_stack =
-                if let Some(func_id) = current_frame.function_value.as_function_id() {
-                    self.object_pool
-                        .get_function(func_id)
-                        .map(|f| f.chunk.max_stack_size)
-                        .unwrap_or(256)
-                } else {
-                    256
-                };
+            let caller_base = current_frame.base_ptr as usize;
+            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
+                self.object_pool
+                    .get_function(func_id)
+                    .map(|f| f.chunk.max_stack_size)
+                    .unwrap_or(256)
+            } else {
+                256
+            };
             caller_base + caller_max_stack
         } else {
             0
@@ -1244,16 +1242,15 @@ impl LuaVM {
     ) -> LuaResult<Option<LuaValue>> {
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr;
-            let caller_max_stack =
-                if let Some(func_id) = current_frame.function_value.as_function_id() {
-                    self.object_pool
-                        .get_function(func_id)
-                        .map(|f| f.chunk.max_stack_size)
-                        .unwrap_or(256)
-                } else {
-                    256
-                };
+            let caller_base = current_frame.base_ptr as usize;
+            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
+                self.object_pool
+                    .get_function(func_id)
+                    .map(|f| f.chunk.max_stack_size)
+                    .unwrap_or(256)
+            } else {
+                256
+            };
             caller_base + caller_max_stack
         } else {
             0
@@ -1751,52 +1748,6 @@ impl LuaVM {
         }
     }
 
-    /// Helper: Get chunk from current frame's function (for hot path)
-    #[inline]
-    #[allow(dead_code)]
-    fn get_current_chunk(&self) -> Result<std::rc::Rc<Chunk>, String> {
-        let frame = self.current_frame();
-        if let Some(func_ref) = self.get_function(&frame.function_value) {
-            Ok(func_ref.chunk.clone())
-        } else {
-            Err("Invalid function in current frame".to_string())
-        }
-    }
-
-    /// Get constant from current frame's function
-    /// This is a hot-path helper for instructions that need to load constants
-    #[inline]
-    pub fn get_frame_constant(&self, frame: &LuaCallFrame, index: usize) -> Option<LuaValue> {
-        let func_id = frame.function_value.as_function_id()?;
-        let func_ref = self.object_pool.get_function(func_id)?;
-        func_ref.chunk.constants.get(index).copied()
-    }
-
-    /// Get instruction from current frame's function code
-    /// This is needed for MMBIN/MMBINI/MMBINK which need to read the previous instruction
-    #[inline]
-    pub fn get_frame_instruction(&self, frame: &LuaCallFrame, index: usize) -> Option<u32> {
-        let func_id = frame.function_value.as_function_id()?;
-        let func_ref = self.object_pool.get_function(func_id)?;
-        func_ref.chunk.code.get(index).copied()
-    }
-
-    /// Helper: Get upvalue from current frame's function
-    #[inline]
-    #[allow(dead_code)]
-    fn get_current_upvalue_id(&self, index: usize) -> Result<UpvalueId, String> {
-        let frame = self.current_frame();
-        if let Some(func_ref) = self.get_function(&frame.function_value) {
-            if index < func_ref.upvalues.len() {
-                Ok(func_ref.upvalues[index])
-            } else {
-                Err(format!("Invalid upvalue index: {}", index))
-            }
-        } else {
-            Err("Invalid function in current frame".to_string())
-        }
-    }
-
     /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
     /// This is called after allocating new objects (strings, tables, functions)
     /// Uses GC debt mechanism: runs when debt > 0
@@ -1853,10 +1804,10 @@ impl LuaVM {
         // Also, the function being executed in each frame must be kept alive!
         for frame in &self.frames[..self.frame_count] {
             // Add the function value for this frame - this is CRITICAL!
-            roots.push(frame.function_value);
+            roots.push(frame.as_function_value());
 
-            let base_ptr = frame.base_ptr;
-            let top = frame.top;
+            let base_ptr = frame.base_ptr as usize;
+            let top = frame.top as usize;
             for i in 0..top {
                 if base_ptr + i < self.register_stack.len() {
                     roots.push(self.register_stack[base_ptr + i]);
@@ -1867,7 +1818,7 @@ impl LuaVM {
         // 4. All registers beyond the frames (temporary values)
         if self.frame_count > 0 {
             let last_frame = &self.frames[self.frame_count - 1];
-            let last_frame_end = last_frame.base_ptr + last_frame.top;
+            let last_frame_end = last_frame.base_ptr as usize + last_frame.top as usize;
             for i in last_frame_end..self.register_stack.len() {
                 roots.push(self.register_stack[i]);
             }
@@ -1894,7 +1845,7 @@ impl LuaVM {
 
         // Perform GC step with complete root set
         self.gc.step(&roots, &mut self.object_pool);
-        
+
         // Sync debt back from GC (it may have been reset to negative after collection)
         self.gc_debt_local = self.gc.gc_debt;
     }
@@ -1949,10 +1900,10 @@ impl LuaVM {
         // Add all frame registers AND function values as roots
         for frame in &self.frames[..self.frame_count] {
             // CRITICAL: Add the function being executed
-            roots.push(frame.function_value);
+            roots.push(frame.as_function_value());
 
-            let base_ptr = frame.base_ptr;
-            let top = frame.top;
+            let base_ptr = frame.base_ptr as usize;
+            let top = frame.top as usize;
             for i in 0..top {
                 if base_ptr + i < self.register_stack.len() {
                     roots.push(self.register_stack[base_ptr + i]);
@@ -2146,17 +2097,16 @@ impl LuaVM {
                 // This prevents register_stack from growing indefinitely
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr;
-                    let caller_max_stack = if let Some(caller_func_id) =
-                        current_frame.function_value.as_function_id()
-                    {
-                        self.object_pool
-                            .get_function(caller_func_id)
-                            .map(|f| f.chunk.max_stack_size)
-                            .unwrap_or(256)
-                    } else {
-                        256
-                    };
+                    let caller_base = current_frame.base_ptr as usize;
+                    let caller_max_stack =
+                        if let Some(caller_func_id) = current_frame.get_function_id() {
+                            self.object_pool
+                                .get_function(caller_func_id)
+                                .map(|f| f.chunk.max_stack_size)
+                                .unwrap_or(256)
+                        } else {
+                            256
+                        };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -2171,7 +2121,7 @@ impl LuaVM {
                 }
 
                 let temp_frame = LuaCallFrame::new_lua_function(
-                    metamethod,
+                    func_id,
                     code_ptr,
                     constants_ptr,
                     new_base,
@@ -2188,7 +2138,7 @@ impl LuaVM {
                 // Store result in the target register
                 if !self.frames_is_empty() {
                     let frame = self.current_frame();
-                    let base_ptr = frame.base_ptr;
+                    let base_ptr = frame.base_ptr as usize;
                     self.set_register(base_ptr, result_reg, result);
                 }
 
@@ -2202,17 +2152,16 @@ impl LuaVM {
                 // CRITICAL FIX: Calculate new base relative to current frame
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr;
-                    let caller_max_stack = if let Some(caller_func_id) =
-                        current_frame.function_value.as_function_id()
-                    {
-                        self.object_pool
-                            .get_function(caller_func_id)
-                            .map(|f| f.chunk.max_stack_size)
-                            .unwrap_or(256)
-                    } else {
-                        256
-                    };
+                    let caller_base = current_frame.base_ptr as usize;
+                    let caller_max_stack =
+                        if let Some(caller_func_id) = current_frame.get_function_id() {
+                            self.object_pool
+                                .get_function(caller_func_id)
+                                .map(|f| f.chunk.max_stack_size)
+                                .unwrap_or(256)
+                        } else {
+                            256
+                        };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -2238,7 +2187,7 @@ impl LuaVM {
                 let values = multi_result.all_values();
                 let result = values.first().cloned().unwrap_or(LuaValue::nil());
                 let frame = self.current_frame();
-                let base_ptr = frame.base_ptr;
+                let base_ptr = frame.base_ptr as usize;
                 self.set_register(base_ptr, result_reg, result);
 
                 Ok(true)
@@ -2327,11 +2276,11 @@ impl LuaVM {
         if self.frame_count == 0 {
             return trace;
         }
-        
+
         // Traverse from innermost (frame_count - 1) to outermost (0)
         for i in (0..self.frame_count).rev() {
             let frame = &self.frames[i];
-            
+
             // Get source location info
             let (source, line) = if frame.is_lua() {
                 // Get function ID and chunk info
@@ -2339,15 +2288,16 @@ impl LuaVM {
                     if let Some(func) = self.object_pool.get_function(func_id) {
                         let chunk = &func.chunk;
                         let source_str = chunk.source_name.as_deref().unwrap_or("?");
-                        
+
                         // Get line number from pc (pc points to next instruction, so use pc-1)
-                        let pc = frame.pc.saturating_sub(1);
-                        let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
+                        let pc = frame.pc.saturating_sub(1) as usize;
+                        let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len()
+                        {
                             chunk.line_info[pc].to_string()
                         } else {
                             "?".to_string()
                         };
-                        
+
                         (source_str.to_string(), line_str)
                     } else {
                         ("?".to_string(), "?".to_string())
@@ -2429,7 +2379,7 @@ impl LuaVM {
                 // This allows debug.traceback() to see the full call stack
                 let error_msg = self.error_message.clone();
                 let err_value = self.create_string(&error_msg);
-                
+
                 let handled_msg = match self.call_function_internal(err_handler, vec![err_value]) {
                     Ok(handler_results) => {
                         // Error handler succeeded, use its return value as the error message
@@ -2444,14 +2394,14 @@ impl LuaVM {
                         format!("error in error handling: {}", error_msg)
                     }
                 };
-                
+
                 // NOW clean up frames created by the failed function call
                 while self.frame_count > initial_frame_count {
                     let frame = self.pop_frame().unwrap();
                     // Close upvalues belonging to this frame
-                    self.close_upvalues_from(frame.base_ptr);
+                    self.close_upvalues_from(frame.base_ptr as usize);
                 }
-                
+
                 // Return the handled error message
                 let err_str = self.create_string(&handled_msg);
                 Ok((false, vec![err_str]))
@@ -2473,16 +2423,15 @@ impl LuaVM {
                 // Calculate new base position
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr;
-                    let caller_max_stack =
-                        if let Some(func_id) = current_frame.function_value.as_function_id() {
-                            self.object_pool
-                                .get_function(func_id)
-                                .map(|f| f.chunk.max_stack_size)
-                                .unwrap_or(256)
-                        } else {
-                            256
-                        };
+                    let caller_base = current_frame.base_ptr as usize;
+                    let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
+                        self.object_pool
+                            .get_function(func_id)
+                            .map(|f| f.chunk.max_stack_size)
+                            .unwrap_or(256)
+                    } else {
+                        256
+                    };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -2537,17 +2486,16 @@ impl LuaVM {
                 // Calculate new base
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr;
-                    let caller_max_stack = if let Some(caller_func_id) =
-                        current_frame.function_value.as_function_id()
-                    {
-                        self.object_pool
-                            .get_function(caller_func_id)
-                            .map(|f| f.chunk.max_stack_size)
-                            .unwrap_or(256)
-                    } else {
-                        256
-                    };
+                    let caller_base = current_frame.base_ptr as usize;
+                    let caller_max_stack =
+                        if let Some(caller_func_id) = current_frame.get_function_id() {
+                            self.object_pool
+                                .get_function(caller_func_id)
+                                .map(|f| f.chunk.max_stack_size)
+                                .unwrap_or(256)
+                        } else {
+                            256
+                        };
                     caller_base + caller_max_stack
                 } else {
                     0
@@ -2578,7 +2526,7 @@ impl LuaVM {
 
                 // Push Lua function frame
                 let new_frame = LuaCallFrame::new_lua_function(
-                    func,
+                    func_id,
                     code_ptr,
                     constants_ptr,
                     new_base,
@@ -2631,7 +2579,9 @@ impl LuaVM {
         args: Vec<LuaValue>,
         coroutine: LuaValue,
     ) -> LuaResult<u64> {
-        let task_id = self.async_executor.spawn_task(func_name, args, coroutine)
+        let task_id = self
+            .async_executor
+            .spawn_task(func_name, args, coroutine)
             .map_err(|e| self.error(e))?;
         Ok(task_id)
     }

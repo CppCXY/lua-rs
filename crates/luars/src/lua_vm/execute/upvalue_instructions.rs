@@ -15,10 +15,12 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
     let b = Instruction::get_b(instr) as usize;
 
     // Get the function's upvalue ID from its upvalue list
-    let func_value = unsafe { (*frame_ptr).function_value };
-    let func_id = func_value.as_function_id().expect("frame must have valid function");
+    let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
     let upvalue_id = unsafe {
-        vm.object_pool.get_function_unchecked(func_id).upvalues.get_unchecked(b)
+        vm.object_pool
+            .get_function_unchecked(func_id)
+            .upvalues
+            .get_unchecked(b)
     };
 
     // Read the upvalue value
@@ -37,10 +39,12 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
     let b = Instruction::get_b(instr) as usize;
 
     // Get the function's upvalue ID from its upvalue list
-    let func_value = unsafe { (*frame_ptr).function_value };
-    let func_id = func_value.as_function_id().expect("frame must have valid function");
+    let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
     let upvalue_id = unsafe {
-        *vm.object_pool.get_function_unchecked(func_id).upvalues.get_unchecked(b)
+        *vm.object_pool
+            .get_function_unchecked(func_id)
+            .upvalues
+            .get_unchecked(b)
     };
 
     let value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
@@ -65,19 +69,18 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 /// R[A] := closure(KPROTO[Bx])
 /// OPTIMIZED: Fast path for closures without upvalues
 #[inline(always)]
-pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_closure(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: usize,
+) -> LuaResult<()> {
     use crate::gc::UpvalueId;
-
 
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let func_value = unsafe { (*frame_ptr).function_value };
-    // Get current function using ID-based lookup
-    let func_id = func_value
-        .as_function_id()
-        .ok_or_else(|| vm.error("Not a Lua function".to_string()))?;
-
+    let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
     let func_ref = vm.object_pool.get_function(func_id);
     let (proto, parent_upvalues) = if let Some(f) = func_ref {
         let p = f.chunk.child_protos.get(bx).cloned();
@@ -159,7 +162,12 @@ pub fn exec_closure(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, ba
 /// Vararg arguments are stored at frame.vararg_start (set by VARARGPREP).
 /// This instruction copies them to the target registers.
 #[inline(always)]
-pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_vararg(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
@@ -168,7 +176,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, bas
         (
             frame.get_vararg_start(),
             frame.get_vararg_count(),
-            frame.top,
+            frame.top as usize,
         )
     };
 
@@ -177,7 +185,7 @@ pub fn exec_vararg(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, bas
         // Update frame top to accommodate all varargs
         let new_top = a + vararg_count;
         unsafe {
-            (*frame_ptr).top = new_top.max(top);
+            (*frame_ptr).top = (new_top.max(top)) as u32;
         }
 
         for i in 0..vararg_count {
@@ -360,7 +368,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, ba
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let top = unsafe { (*frame_ptr).top };
+    let top = unsafe { (*frame_ptr).top } as usize;
     let table = vm.register_stack[base_ptr + a];
 
     let start_idx = c * 50; // 0-based for array indexing

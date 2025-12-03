@@ -23,13 +23,11 @@ pub fn register_async_functions(vm: &mut LuaVM) {
     vm.async_executor.register_async_function(
         "sleep".to_string(),
         |args: Vec<LuaValue>| async move {
-            let ms = args.get(0)
-                .and_then(|v| v.as_number())
-                .unwrap_or(0.0) as u64;
+            let ms = args.get(0).and_then(|v| v.as_number()).unwrap_or(0.0) as u64;
 
             sleep(Duration::from_millis(ms)).await;
             Ok(vec![])
-        }
+        },
     );
 
     // TODO: Add more async functions as needed
@@ -53,7 +51,9 @@ fn async_sleep_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     // 启动异步任务
-    let task_id = vm.async_executor.spawn_task("sleep", args, coroutine)
+    let task_id = vm
+        .async_executor
+        .spawn_task("sleep", args, coroutine)
         .map_err(|e| vm.error(e))?;
 
     // Yield协程

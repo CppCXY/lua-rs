@@ -92,9 +92,7 @@ impl AsyncExecutor {
         let func = self
             .async_functions
             .get(func_name)
-            .ok_or_else(|| {
-                format!("Async function '{}' not registered", func_name)
-            })?
+            .ok_or_else(|| format!("Async function '{}' not registered", func_name))?
             .clone();
 
         let task_id = self.next_task_id;
@@ -192,7 +190,9 @@ pub fn create_async_wrapper(func_name: String) -> impl Fn(&mut LuaVM) -> LuaResu
         }
 
         // 启动异步任务
-        let task_id = vm.async_executor.spawn_task(&func_name, args, coroutine)
+        let task_id = vm
+            .async_executor
+            .spawn_task(&func_name, args, coroutine)
             .map_err(|e| vm.error(e))?;
 
         // Yield协程，返回task_id

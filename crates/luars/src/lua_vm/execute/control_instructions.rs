@@ -17,10 +17,10 @@ pub fn exec_return(
     let k = Instruction::get_k(instr);
 
     // Get frame info BEFORE popping
-    let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr };
+    let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr } as usize;
     let result_reg = unsafe { (**frame_ptr_ptr).get_result_reg() };
     let num_results = unsafe { (**frame_ptr_ptr).get_num_results() };
-    let top = unsafe { (**frame_ptr_ptr).top };
+    let top = unsafe { (**frame_ptr_ptr).top } as usize;
 
     // Calculate return count
     let return_count = if b == 0 { top.saturating_sub(a) } else { b - 1 };
@@ -55,7 +55,7 @@ pub fn exec_return(
         // Update frame_ptr to caller
         *frame_ptr_ptr = caller_ptr;
 
-        let caller_base = unsafe { (*caller_ptr).base_ptr };
+        let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
         let dest_base = caller_base + result_reg;
 
         // Ensure destination has enough space
@@ -95,7 +95,7 @@ pub fn exec_return(
                         );
                     }
                 }
-                (*caller_ptr).top = result_reg + return_count;
+                (*caller_ptr).top = (result_reg + return_count) as u32;
             } else {
                 // Fixed number of return values
                 let nil_val = LuaValue::nil();
@@ -107,7 +107,7 @@ pub fn exec_return(
                     };
                     *reg_ptr.add(dest_base + i) = val;
                 }
-                (*caller_ptr).top = result_reg + num_results;
+                (*caller_ptr).top = (result_reg + num_results) as u32;
             }
         }
 
@@ -208,12 +208,7 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 /// if ((R[A] == R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Fast path for common types (integers, floats, strings)
 #[inline(always)]
-pub fn exec_eq(
-    vm: &mut LuaVM,
-    instr: u32,
-    pc: &mut usize,
-    base_ptr: usize,
-) -> LuaResult<()> {
+pub fn exec_eq(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -416,12 +411,7 @@ fn exec_lt_metamethod(
 /// if ((R[A] <= R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Use combined_tags for fast path like LT
 #[inline(always)]
-pub fn exec_le(
-    vm: &mut LuaVM,
-    instr: u32,
-    pc: &mut usize,
-    base_ptr: usize,
-) -> LuaResult<()> {
+pub fn exec_le(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
@@ -574,10 +564,9 @@ pub fn exec_eqk(
     let b = Instruction::get_b(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let func_value = unsafe { (*frame_ptr).function_value };
-
+    let func_id = unsafe { (*frame_ptr).get_function_id() };
     // Get function using new ID-based API
-    let Some(func_id) = func_value.as_function_id() else {
+    let Some(func_id) = func_id else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
@@ -769,7 +758,7 @@ pub fn exec_call(
 
     // OPTIMIZATION: Use passed frame_ptr directly - avoid Vec lookup!
     let (base, func) = unsafe {
-        let base = (**frame_ptr_ptr).base_ptr;
+        let base = (**frame_ptr_ptr).base_ptr as usize;
         let func = *vm.register_stack.get_unchecked(base + a);
         (base, func)
     };
@@ -892,10 +881,10 @@ fn exec_call_lua_function(
 
     // Calculate argument count - use frame_ptr directly!
     let arg_count = if b == 0 {
-        unsafe { (**frame_ptr_ptr).top.saturating_sub(a + 1) }
+        unsafe { (**frame_ptr_ptr).top.saturating_sub((a + 1) as u32) as usize }
     } else {
         unsafe {
-            (**frame_ptr_ptr).top = a + b;
+            (**frame_ptr_ptr).top = (a + b) as u32;
         }
         b - 1
     };
@@ -931,7 +920,7 @@ fn exec_call_lua_function(
         // Create and push new frame - inline nresults calculation
         let nresults = if c == 0 { -1i16 } else { (c - 1) as i16 };
         let new_frame = LuaCallFrame::new_lua_function(
-            func,
+            func_id,
             code_ptr,
             constants_ptr,
             new_base,
@@ -999,7 +988,7 @@ fn exec_call_lua_function(
         return_count as i16
     };
     let new_frame = LuaCallFrame::new_lua_function(
-        func,
+        func_id,
         code_ptr,
         constants_ptr,
         new_base,
@@ -1031,13 +1020,13 @@ fn exec_call_cfunction(
     // Calculate argument count
     let arg_count = if b == 0 {
         let frame = vm.current_frame();
-        if frame.top > a + 1 {
-            frame.top - (a + 1)
+        if frame.top as usize > a + 1 {
+            (frame.top as usize) - (a + 1)
         } else {
             0
         }
     } else {
-        vm.current_frame_mut().top = a + b;
+        vm.current_frame_mut().top = (a + b) as u32;
         b - 1
     };
 
@@ -1136,7 +1125,7 @@ fn exec_call_cfunction(
         }
     }
 
-    vm.current_frame_mut().top = a + num_returns;
+    vm.current_frame_mut().top = (a + num_returns) as u32;
     Ok(())
 }
 
@@ -1153,13 +1142,12 @@ pub fn exec_tailcall(
     let b = Instruction::get_b(instr) as usize;
 
     // Extract all frame information we'll need BEFORE taking mutable references
-    let (base, return_count, result_reg, _function_value, _pc) = {
+    let (base, return_count, result_reg, _pc) = {
         let frame = &vm.frames[vm.frame_count - 1];
         (
-            frame.base_ptr,
+            frame.base_ptr as usize,
             frame.get_num_results(),
             frame.get_result_reg(),
-            frame.function_value,
             frame.pc,
         )
     };
@@ -1173,8 +1161,8 @@ pub fn exec_tailcall(
         // IMPORTANT: frame.top is RELATIVE to frame.base_ptr
         let frame = vm.current_frame();
         let args_start_rel = a + 1; // Relative to base
-        if frame.top > args_start_rel {
-            frame.top - args_start_rel
+        if (frame.top as usize) > args_start_rel {
+            (frame.top as usize) - args_start_rel
         } else {
             0 // No arguments
         }
@@ -1226,7 +1214,7 @@ pub fn exec_tailcall(
                 return_count as i16
             };
             let new_frame = LuaCallFrame::new_lua_function(
-                func,
+                func_id,
                 code_ptr,
                 constants_ptr,
                 old_base,
@@ -1285,7 +1273,7 @@ pub fn exec_tailcall(
                 // Update frame_ptr to point to parent frame
                 *frame_ptr_ptr = vm.current_frame_ptr();
 
-                let parent_base = vm.current_frame().base_ptr;
+                let parent_base = vm.current_frame().base_ptr as usize;
                 let vals = result.all_values();
                 let count = if return_count == usize::MAX {
                     vals.len()
@@ -1307,7 +1295,7 @@ pub fn exec_tailcall(
 
                 // CRITICAL: Update parent frame's top to reflect the number of return values
                 // This is essential for variable returns (return_count == usize::MAX)
-                vm.current_frame_mut().top = result_reg + count;
+                vm.current_frame_mut().top = (result_reg + count) as u32;
             }
 
             Ok(())
@@ -1328,7 +1316,7 @@ pub fn exec_return0(
     // FAST PATH: Use passed frame_ptr directly - get all info BEFORE popping
     let (base_ptr, result_reg, num_results) = unsafe {
         (
-            (**frame_ptr_ptr).base_ptr,
+            (**frame_ptr_ptr).base_ptr as usize,
             (**frame_ptr_ptr).get_result_reg(),
             (**frame_ptr_ptr).get_num_results(),
         )
@@ -1358,7 +1346,7 @@ pub fn exec_return0(
         *frame_ptr_ptr = caller_ptr;
 
         // Get caller's base_ptr
-        let caller_base = unsafe { (*caller_ptr).base_ptr };
+        let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
 
         // Fill expected return values with nil
         if num_results != usize::MAX && num_results > 0 {
@@ -1374,7 +1362,7 @@ pub fn exec_return0(
 
         // Update caller's top
         unsafe {
-            (*caller_ptr).top = result_reg;
+            (*caller_ptr).top = result_reg as u32;
         }
         Ok(())
     } else if has_caller {
@@ -1404,7 +1392,7 @@ pub fn exec_return1(
     // FAST PATH: Use passed frame_ptr directly - get all info we need
     let (base_ptr, result_reg) = unsafe {
         (
-            (**frame_ptr_ptr).base_ptr,
+            (**frame_ptr_ptr).base_ptr as usize,
             (**frame_ptr_ptr).get_result_reg(),
         )
     };
@@ -1436,12 +1424,12 @@ pub fn exec_return1(
         *frame_ptr_ptr = caller_ptr;
 
         // Get caller's base_ptr and write return value directly
-        let caller_base = unsafe { (*caller_ptr).base_ptr };
+        let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
         unsafe {
             *vm.register_stack
                 .get_unchecked_mut(caller_base + result_reg) = return_value;
             // Update top
-            (*caller_ptr).top = result_reg + 1;
+            (*caller_ptr).top = (result_reg + 1) as u32;
         }
 
         Ok(())

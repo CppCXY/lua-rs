@@ -256,7 +256,7 @@ fn lua_ipairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn ipairs_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // ULTRA-FAST PATH: Direct register access without get_arg overhead
     let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
+    let base_ptr = frame.base_ptr as usize;
 
     // Arguments are at base_ptr + 1 (table) and base_ptr + 2 (index)
     // Avoid bounds checking in hot path
@@ -307,8 +307,8 @@ fn lua_pairs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Fast path: direct register access
     let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr;
-    let top = frame.top;
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
     let table_val = unsafe { *vm.register_stack.get_unchecked(base_ptr + 1) };
     let index_val = if top > 2 {

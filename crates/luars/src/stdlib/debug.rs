@@ -67,7 +67,7 @@ fn debug_traceback(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         let source = chunk.source_name.as_deref().unwrap_or("?");
 
                         // Get line number from pc
-                        let pc = frame.pc.saturating_sub(1);
+                        let pc = frame.pc.saturating_sub(1) as usize;
                         let line = if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
                             chunk.line_info[pc]
                         } else {

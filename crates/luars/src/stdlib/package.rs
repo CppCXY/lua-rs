@@ -202,7 +202,7 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     if !std::fs::metadata(&filepath_str).is_ok() {
-        return Ok(MultiValue::empty())
+        return Ok(MultiValue::empty());
     }
 
     // Read the file
@@ -216,7 +216,7 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Compile it using VM's string pool with chunk name
     let chunkname = format!("@{}", filepath_str);
     let chunk = vm.compile_with_name(&source, &chunkname)?;
-    
+
     // Create a function from the chunk with _ENV upvalue
     let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);
     let func = vm.create_function(Rc::new(chunk), vec![env_upvalue_id]);

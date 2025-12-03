@@ -14,7 +14,7 @@
 
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{LuaString, LuaTable, LuaValue};
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use std::hash::Hash;
 use std::rc::Rc;
 
@@ -626,7 +626,7 @@ impl ObjectPool {
             strings: Arena::with_capacity(256),
             tables: Arena::with_capacity(64),
             functions: Arena::with_capacity(32),
-            upvalues: SlotMap::with_capacity_and_key(32),  // SlotMap for O(1) access
+            upvalues: SlotMap::with_capacity_and_key(32), // SlotMap for O(1) access
             userdata: Arena::new(),
             threads: Arena::with_capacity(8),
             string_intern: StringInternTable::with_capacity(256),
@@ -901,24 +901,24 @@ impl ObjectPool {
                 return self.create_string("");
             };
             let s = gs.data.as_str();
-            
+
             // Clamp indices
             let start = start.min(s.len());
             let end = end.min(s.len());
-            
+
             if start >= end {
                 return self.create_string("");
             }
-            
+
             // Fast path: return original if full range
             if start == 0 && end == s.len() {
                 return source_id;
             }
-            
+
             let slice = &s[start..end];
             let len = slice.len();
             let hash = Self::hash_string(slice);
-            
+
             // For short strings, check intern table first before allocating
             if len <= self.max_intern_length {
                 let compare = |id: StringId| -> bool {
@@ -943,7 +943,7 @@ impl ObjectPool {
                 Some((slice.to_string(), hash, usize::MAX))
             }
         };
-        
+
         // Second phase: allocate and insert (if needed)
         if let Some((substring, hash, insert_idx)) = intern_result {
             if insert_idx != usize::MAX {

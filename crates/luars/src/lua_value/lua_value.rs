@@ -151,6 +151,14 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn cfunction_ptr(f_ptr: usize) -> Self {
+        Self {
+            primary: TAG_CFUNCTION,
+            secondary: f_ptr as u64,
+        }
+    }
+
+    #[inline(always)]
     pub fn userdata(id: UserdataId) -> Self {
         Self {
             primary: TAG_USERDATA | (id.0 as u64),

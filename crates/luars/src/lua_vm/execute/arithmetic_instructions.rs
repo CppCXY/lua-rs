@@ -282,8 +282,11 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
             let float_result = l_float - (l_float / r_float).floor() * r_float;
             // Check if result is an integer
-            if float_result.fract() == 0.0 && float_result.is_finite() 
-                && float_result >= i64::MIN as f64 && float_result <= i64::MAX as f64 {
+            if float_result.fract() == 0.0
+                && float_result.is_finite()
+                && float_result >= i64::MIN as f64
+                && float_result <= i64::MAX as f64
+            {
                 LuaValue::integer(float_result as i64)
             } else {
                 LuaValue::number(float_result)
@@ -583,9 +586,13 @@ pub fn exec_modk(
         // Float % Float - check if result is integer
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
             let float_result = l - (l / r).floor() * r;
-            if float_result.fract() == 0.0 && float_result.is_finite()
-                && float_result >= i64::MIN as f64 && float_result <= i64::MAX as f64 {
-                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(float_result as i64);
+            if float_result.fract() == 0.0
+                && float_result.is_finite()
+                && float_result >= i64::MIN as f64
+                && float_result <= i64::MAX as f64
+            {
+                *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
+                    LuaValue::integer(float_result as i64);
             } else {
                 *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(float_result);
             }

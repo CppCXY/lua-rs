@@ -26,7 +26,7 @@ use crate::lua_vm::LuaCallFrame;
 macro_rules! savepc {
     ($frame_ptr:expr, $pc:expr) => {
         unsafe {
-            (*$frame_ptr).pc = $pc;
+            (*$frame_ptr).pc = $pc as u32;
         }
     };
 }
@@ -41,9 +41,9 @@ unsafe fn updatestate(
     base_ptr: &mut usize,
 ) {
     unsafe {
-        *pc = (*frame_ptr).pc;
+        *pc = (*frame_ptr).pc as usize;
         *code_ptr = (*frame_ptr).code_ptr;
-        *base_ptr = (*frame_ptr).base_ptr;
+        *base_ptr = (*frame_ptr).base_ptr as usize;
     }
 }
 
@@ -74,9 +74,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
     // Initial load from frame
     unsafe {
-        pc = (*frame_ptr).pc;
+        pc = (*frame_ptr).pc as usize;
         code_ptr = (*frame_ptr).code_ptr;
-        base_ptr = (*frame_ptr).base_ptr;
+        base_ptr = (*frame_ptr).base_ptr as usize;
     }
 
     'mainloop: loop {
@@ -414,7 +414,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 unsafe {
                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
                     let idx = *reg_base;
-                    
+
                     // Integer loop: check if idx is integer (FORPREP sets this correctly)
                     // If any of init/limit/step was float, FORPREP uses float mode
                     if (idx.primary & TYPE_MASK) == TAG_INTEGER {

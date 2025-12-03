@@ -11,7 +11,13 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM};
 /// k = 1 means EXTRAARG follows with array_size / 256
 /// OPTIMIZED: Fast path for common empty/small table case
 #[inline(always)]
-pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, pc: &mut usize, base_ptr: usize) {
+pub fn exec_newtable(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    pc: &mut usize,
+    base_ptr: usize,
+) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr); // log2(hash_size) + 1
     let c = Instruction::get_c(instr); // array_size % 256
@@ -22,7 +28,7 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
 
     let func_value = unsafe {
         *pc += 1; // Skip EXTRAARG
-        (*frame_ptr).function_value
+        (*frame_ptr).as_function_value()
     };
 
     // Calculate array size - C is low bits, EXTRAARG has high bits when k=1
@@ -63,7 +69,12 @@ pub fn exec_newtable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, p
 /// R[A] := R[B][R[C]]
 /// OPTIMIZED: Fast path for integer keys and tables without metatable
 #[inline(always)]
-pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_gettable(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -84,7 +95,9 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
         // Integer keys may be in array part, other keys are in hash part
         let result = if let Some(i) = key_value.as_integer() {
             // Integer key: try array first, then hash
-            lua_table.get_int(i).or_else(|| lua_table.get_from_hash(&key_value))
+            lua_table
+                .get_int(i)
+                .or_else(|| lua_table.get_from_hash(&key_value))
         } else {
             // Non-integer key: direct hash lookup (most common for string keys)
             lua_table.get_from_hash(&key_value)
@@ -110,7 +123,7 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
         .unwrap_or(LuaValue::nil());
 
     // Re-read base_ptr after metamethod call
-    *base_ptr = unsafe { (*frame_ptr).base_ptr };
+    *base_ptr = unsafe { (*frame_ptr).base_ptr } as usize;
     vm.register_stack[*base_ptr + a] = value;
 
     Ok(())
@@ -120,7 +133,12 @@ pub fn exec_gettable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// R[A][R[B]] := RK(C)
 /// OPTIMIZED: Fast path for integer keys and tables without metatable
 #[inline(always)]
-pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_settable(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -128,7 +146,6 @@ pub fn exec_settable(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 
     // Read all values using unchecked access
     let (table_value, key_value, set_value) = unsafe {
-
         let table = *vm.register_stack.get_unchecked(*base_ptr + a);
         let key = *vm.register_stack.get_unchecked(*base_ptr + b);
 
@@ -213,7 +230,12 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 /// R[A][B] := RK(C)
 /// OPTIMIZED: Direct integer key access using set_int()
 #[inline(always)]
-pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_seti(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as i64; // B is unsigned integer key
     let c = Instruction::get_c(instr) as usize;
@@ -221,7 +243,6 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_
 
     // CRITICAL: Read all values BEFORE any metamethod calls
     let (table_value, set_value) = unsafe {
-
         let table = *vm.register_stack.get_unchecked(*base_ptr + a);
 
         let value = if k {
@@ -262,7 +283,12 @@ pub fn exec_seti(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_
 /// R[A] := R[B][K[C]:string]
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_getfield(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -297,7 +323,7 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
         .unwrap_or(LuaValue::nil());
 
     // IMPORTANT: Re-read base_ptr after metamethod call in case frames changed
-    *base_ptr = unsafe { (*frame_ptr).base_ptr };
+    *base_ptr = unsafe { (*frame_ptr).base_ptr } as usize;
     unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = value };
 
     Ok(())
@@ -307,7 +333,12 @@ pub fn exec_getfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// R[A][K[B]:string] := RK(C)
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_setfield(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -350,7 +381,12 @@ pub fn exec_setfield(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 /// Note: Key is always a string from constant table per Lua 5.4 spec
 #[inline(always)]
-pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_gettabup(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
@@ -359,8 +395,7 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(c) };
 
     // OPTIMIZED: Use unchecked access for hot path
-    let func_value = unsafe { (*frame_ptr).function_value };
-    let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
+    let func_id = unsafe { (*frame_ptr).get_function_id().unwrap_unchecked() };
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
     let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
 
@@ -401,13 +436,18 @@ pub fn exec_gettabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// UpValue[A][K[B]:string] := RK(C)
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
-pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_settabup(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let func_value = unsafe { (*frame_ptr).function_value };
+    let func_id = unsafe { (*frame_ptr).get_function_id() };
 
     // FAST PATH: Direct constant access via cached pointer
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(b) };
@@ -420,7 +460,7 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
     };
 
     // Get function for upvalues access (still needed)
-    let Some(func_id) = func_value.as_function_id() else {
+    let Some(func_id) = func_id else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
@@ -457,16 +497,21 @@ pub fn exec_settabup(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// SELF A B C
 /// R[A+1] := R[B]; R[A] := R[B][RK(C):string]
 #[inline(always)]
-pub fn exec_self(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_self(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    let func_value = unsafe { (*frame_ptr).function_value };
+    let func_id = unsafe { (*frame_ptr).get_function_id() };
     let table = vm.register_stack[*base_ptr + b];
 
     // Get method key from constant using new API
-    let Some(func_id) = func_value.as_function_id() else {
+    let Some(func_id) = func_id else {
         return Err(vm.error("Not a Lua function".to_string()));
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {

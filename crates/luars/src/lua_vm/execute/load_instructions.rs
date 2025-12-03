@@ -10,15 +10,20 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
 ///
 /// This instruction moves vararg arguments to a safe location after max_stack_size,
 /// so they won't be overwritten by local variable operations.
-pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: &mut usize) {
+pub fn exec_varargprep(
+    vm: &mut LuaVM,
+    instr: u32,
+    frame_ptr: *mut LuaCallFrame,
+    base_ptr: &mut usize,
+) {
     let a = Instruction::get_a(instr) as usize; // number of fixed params
 
     let frame = vm.current_frame();
-    let frame_base = frame.base_ptr;
-    let top = frame.top;
+    let frame_base = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
     // Get max_stack_size from the function using new ObjectPool API
-    let Some(func_id) = frame.function_value.as_function_id() else {
+    let Some(func_id) = frame.get_function_id() else {
         return; // Invalid function - should not happen
     };
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
@@ -61,9 +66,11 @@ pub fn exec_varargprep(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame,
             vm.register_stack[frame_base + i] = LuaValue::nil();
         }
     }
-    
+
     // updatebase - frame operations may change base_ptr
-    unsafe { *base_ptr = (*frame_ptr).base_ptr; }
+    unsafe {
+        *base_ptr = (*frame_ptr).base_ptr as usize;
+    }
 }
 
 /// LOADNIL A B
@@ -172,9 +179,9 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, bas
     let a = Instruction::get_a(instr) as usize;
 
     unsafe {
-        let pc_val = (*frame_ptr).pc;
-        (*frame_ptr).pc = pc_val + 1; // Skip the extra arg instruction
-        let func_id = (*frame_ptr).function_value.as_function_id();
+        let pc_val = (*frame_ptr).pc as usize;
+        (*frame_ptr).pc = (pc_val + 1) as u32; // Skip the extra arg instruction
+        let func_id = (*frame_ptr).get_function_id();
 
         if let Some(fid) = func_id {
             if let Some(func_ref) = vm.object_pool.get_function(fid) {

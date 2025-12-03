@@ -96,7 +96,7 @@ impl LuaTable {
         // For floats: similar to integers
         // XOR gives good mixing without branch
         let raw = key.primary.wrapping_add(key.secondary);
-        
+
         // Fibonacci hashing - excellent distribution for sequential IDs
         // Golden ratio: 2^64 / phi ≈ 0x9e3779b97f4a7c15
         let hash = raw.wrapping_mul(0x9e3779b97f4a7c15);
