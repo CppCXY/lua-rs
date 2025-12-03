@@ -28,6 +28,9 @@ use crate::LuaValue;
 /// - 2 bytes: vararg_count (u16)
 /// - 1 byte: callstatus
 /// - 3 bytes: padding
+///
+/// Note: upvalues are accessed through function_value -> FunctionId -> GcFunction::upvalues
+/// This is fast because upvalue access uses SlotMap's O(1) lookup
 #[derive(Clone)]
 pub struct LuaCallFrame {
     pub function_value: LuaValue,       // 16 bytes

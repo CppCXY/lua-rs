@@ -8,21 +8,21 @@ use crate::{
 
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
+/// Get upvalue from the closure's upvalue list
 #[inline(always)]
 pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
+    // Get the function's upvalue ID from its upvalue list
     let func_value = unsafe { (*frame_ptr).function_value };
+    let func_id = func_value.as_function_id().expect("frame must have valid function");
+    let upvalue_id = unsafe {
+        vm.object_pool.get_function_unchecked(func_id).upvalues.get_unchecked(b)
+    };
 
-    // OPTIMIZED: Use unchecked access since we know the function is valid
-    let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
-    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-    let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
-
-    // OPTIMIZED: Use unchecked read for hot path
-    // SAFETY: upvalue_id is from a valid function closure
-    let value = unsafe { vm.read_upvalue_unchecked(upvalue_id) };
+    // Read the upvalue value
+    let value = unsafe { vm.read_upvalue_unchecked(*upvalue_id) };
     unsafe {
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
     }
@@ -30,22 +30,25 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 
 /// SETUPVAL A B
 /// UpValue[B] := R[A]
+/// Set upvalue in the closure's upvalue list
 #[inline(always)]
 pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
+    // Get the function's upvalue ID from its upvalue list
     let func_value = unsafe { (*frame_ptr).function_value };
-
-    // OPTIMIZED: Use unchecked access since we know the function is valid
-    let func_id = unsafe { func_value.as_function_id().unwrap_unchecked() };
-    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-    let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
+    let func_id = func_value.as_function_id().expect("frame must have valid function");
+    let upvalue_id = unsafe {
+        *vm.object_pool.get_function_unchecked(func_id).upvalues.get_unchecked(b)
+    };
 
     let value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
 
-    // Set upvalue value using the helper method
-    vm.write_upvalue(upvalue_id, value);
+    // Write to the upvalue
+    unsafe {
+        vm.write_upvalue_unchecked(upvalue_id, value);
+    }
 }
 
 /// CLOSE A

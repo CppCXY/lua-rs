@@ -2,21 +2,27 @@
 //
 // Key Design Principles:
 // 1. LuaValueV2 stores type tag + object ID (no pointers - Vec may relocate)
-// 2. All GC objects accessed via ID lookup in Arena
-// 3. ChunkedArena uses fixed-size chunks - never reallocates existing data!
+// 2. All GC objects accessed via ID lookup in Arena/SlotMap
+// 3. slotmap provides O(1) access with Vec-based storage (no chunking overhead)
 // 4. No Rc/RefCell overhead - direct access via &mut self
 // 5. GC headers embedded in objects for mark-sweep
 //
 // Memory Layout:
-// - ChunkedArena stores objects in fixed-size chunks (Box<[Option<T>; CHUNK_SIZE]>)
-// - Each chunk is allocated once and never moved
-// - New chunks are added as needed, existing chunks stay in place
-// - This eliminates Vec resize overhead and improves cache locality
+// - SlotMap stores objects in flat Vec with generational keys
+// - O(1) insert, access, and remove operations
+// - Arena still used for some types for compatibility
 
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{LuaString, LuaTable, LuaValue};
+use slotmap::{new_key_type, SlotMap};
 use std::hash::Hash;
 use std::rc::Rc;
+
+// Define custom key types for slotmap
+new_key_type! {
+    /// Key for upvalues in the slotmap
+    pub struct UpvalueKey;
+}
 
 // ============ GC Header ============
 
@@ -47,9 +53,17 @@ pub struct TableId(pub u32);
 #[repr(transparent)]
 pub struct FunctionId(pub u32);
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[repr(transparent)]
-pub struct UpvalueId(pub u32);
+/// UpvalueId now wraps slotmap's UpvalueKey for O(1) access
+/// The slotmap key provides generational safety and direct Vec indexing
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct UpvalueId(pub UpvalueKey);
+
+impl Default for UpvalueId {
+    fn default() -> Self {
+        // Create a null/invalid key - this should never be used for actual lookups
+        UpvalueId(UpvalueKey::default())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[repr(transparent)]
@@ -121,6 +135,25 @@ impl GcUpvalue {
         match &self.state {
             UpvalueState::Open { stack_index } => Some(*stack_index),
             _ => None,
+        }
+    }
+
+    /// Set closed upvalue value directly without checking state
+    /// SAFETY: Must only be called when upvalue is in Closed state
+    #[inline(always)]
+    pub unsafe fn set_closed_value_unchecked(&mut self, value: LuaValue) {
+        if let UpvalueState::Closed(ref mut v) = self.state {
+            *v = value;
+        }
+    }
+
+    /// Get closed value reference directly without Option
+    /// SAFETY: Must only be called when upvalue is in Closed state
+    #[inline(always)]
+    pub unsafe fn get_closed_value_ref_unchecked(&self) -> &LuaValue {
+        match &self.state {
+            UpvalueState::Closed(v) => v,
+            _ => unsafe { std::hint::unreachable_unchecked() },
         }
     }
 }
@@ -354,11 +387,12 @@ impl<T> Default for Arena<T> {
 
 /// High-performance object pool for the Lua VM
 /// All objects are stored in typed arenas and accessed by ID
-pub struct ObjectPoolV2 {
+pub struct ObjectPool {
     pub strings: Arena<GcString>,
     pub tables: Arena<GcTable>,
     pub functions: Arena<GcFunction>,
-    pub upvalues: Arena<GcUpvalue>,
+    /// Upvalues use SlotMap for O(1) access (no chunking overhead)
+    pub upvalues: SlotMap<UpvalueKey, GcUpvalue>,
     pub userdata: Arena<LuaUserdata>,
     pub threads: Arena<GcThread>,
 
@@ -586,13 +620,13 @@ impl StringInternTable {
     }
 }
 
-impl ObjectPoolV2 {
+impl ObjectPool {
     pub fn new() -> Self {
         let mut pool = Self {
             strings: Arena::with_capacity(256),
             tables: Arena::with_capacity(64),
             functions: Arena::with_capacity(32),
-            upvalues: Arena::with_capacity(32),
+            upvalues: SlotMap::with_capacity_and_key(32),  // SlotMap for O(1) access
             userdata: Arena::new(),
             threads: Arena::with_capacity(8),
             string_intern: StringInternTable::with_capacity(256),
@@ -1037,7 +1071,7 @@ impl ObjectPoolV2 {
         self.functions.get_mut(id.0)
     }
 
-    // ==================== Upvalue Operations ====================
+    // ==================== Upvalue Operations (using SlotMap) ====================
 
     #[inline]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
@@ -1045,7 +1079,7 @@ impl ObjectPoolV2 {
             header: GcHeader::default(),
             state: UpvalueState::Open { stack_index },
         };
-        UpvalueId(self.upvalues.alloc(gc_uv))
+        UpvalueId(self.upvalues.insert(gc_uv))
     }
 
     #[inline]
@@ -1054,7 +1088,7 @@ impl ObjectPoolV2 {
             header: GcHeader::default(),
             state: UpvalueState::Closed(value),
         };
-        UpvalueId(self.upvalues.alloc(gc_uv))
+        UpvalueId(self.upvalues.insert(gc_uv))
     }
 
     #[inline(always)]
@@ -1072,6 +1106,13 @@ impl ObjectPoolV2 {
     #[inline(always)]
     pub fn get_upvalue_mut(&mut self, id: UpvalueId) -> Option<&mut GcUpvalue> {
         self.upvalues.get_mut(id.0)
+    }
+
+    /// Get mutable upvalue without bounds checking
+    /// SAFETY: id must be a valid UpvalueId
+    #[inline(always)]
+    pub unsafe fn get_upvalue_mut_unchecked(&mut self, id: UpvalueId) -> &mut GcUpvalue {
+        unsafe { self.upvalues.get_unchecked_mut(id.0) }
     }
 
     // ==================== Userdata Operations ====================
@@ -1164,7 +1205,7 @@ impl ObjectPoolV2 {
             .filter(|(_, gf)| !gf.header.marked)
             .map(|(id, _)| id)
             .collect();
-        let upvalues_to_free: Vec<u32> = self
+        let upvalues_to_free: Vec<UpvalueKey> = self
             .upvalues
             .iter()
             .filter(|(_, gu)| !gu.header.marked)
@@ -1193,7 +1234,7 @@ impl ObjectPoolV2 {
             self.functions.free(id);
         }
         for id in upvalues_to_free {
-            self.upvalues.free(id);
+            self.upvalues.remove(id);
         }
         for id in threads_to_free {
             self.threads.free(id);
@@ -1204,7 +1245,7 @@ impl ObjectPoolV2 {
         self.strings.shrink_to_fit();
         self.tables.shrink_to_fit();
         self.functions.shrink_to_fit();
-        self.upvalues.shrink_to_fit();
+        // SlotMap doesn't have shrink_to_fit, skip upvalues
         self.threads.shrink_to_fit();
         self.string_intern.shrink_to_fit();
     }
@@ -1228,7 +1269,7 @@ impl ObjectPoolV2 {
 
     #[inline]
     pub fn remove_upvalue(&mut self, id: UpvalueId) {
-        self.upvalues.free(id.0);
+        self.upvalues.remove(id.0);
     }
 
     #[inline]
@@ -1269,7 +1310,7 @@ impl ObjectPoolV2 {
     }
 }
 
-impl Default for ObjectPoolV2 {
+impl Default for ObjectPool {
     fn default() -> Self {
         Self::new()
     }
@@ -1318,7 +1359,7 @@ mod tests {
 
     #[test]
     fn test_string_interning() {
-        let mut pool = ObjectPoolV2::new();
+        let mut pool = ObjectPool::new();
 
         let id1 = pool.create_string("hello");
         let id2 = pool.create_string("hello");
@@ -1336,7 +1377,7 @@ mod tests {
 
     #[test]
     fn test_table_operations() {
-        let mut pool = ObjectPoolV2::new();
+        let mut pool = ObjectPool::new();
 
         let tid = pool.create_table(4, 4);
 
@@ -1360,14 +1401,15 @@ mod tests {
         assert_eq!(std::mem::size_of::<StringId>(), 4);
         assert_eq!(std::mem::size_of::<TableId>(), 4);
         assert_eq!(std::mem::size_of::<FunctionId>(), 4);
-        assert_eq!(std::mem::size_of::<UpvalueId>(), 4);
+        // UpvalueId is now 8 bytes (slotmap key with version)
+        assert_eq!(std::mem::size_of::<UpvalueId>(), 8);
     }
 
     #[test]
     fn test_string_interning_many_strings() {
         // Test that many different strings with potential hash collisions
         // are all stored correctly
-        let mut pool = ObjectPoolV2::new();
+        let mut pool = ObjectPool::new();
         let mut ids = Vec::new();
 
         // Create 1000 different strings
@@ -1398,7 +1440,7 @@ mod tests {
     #[test]
     fn test_string_interning_similar_strings() {
         // Test strings that might have similar hashes
-        let mut pool = ObjectPoolV2::new();
+        let mut pool = ObjectPool::new();
 
         let strings = vec![
             "a", "b", "c", "aa", "ab", "ba", "bb", "aaa", "aab", "aba", "abb", "baa", "bab", "bba",

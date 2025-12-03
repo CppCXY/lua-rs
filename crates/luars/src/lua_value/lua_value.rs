@@ -19,7 +19,7 @@
 // │   - GC objects: unused (ID is in tag)            │
 // └──────────────────────────────────────────────────┘
 
-use crate::gc::{FunctionId, StringId, TableId, ThreadId, UpvalueId, UserdataId};
+use crate::gc::{FunctionId, StringId, TableId, ThreadId, UserdataId};
 use crate::lua_value::CFunction;
 
 // Type tags (high 16 bits of tag field)
@@ -158,13 +158,8 @@ impl LuaValue {
         }
     }
 
-    #[inline(always)]
-    pub fn upvalue(id: UpvalueId) -> Self {
-        Self {
-            primary: TAG_UPVALUE | (id.0 as u64),
-            secondary: 0,
-        }
-    }
+    // Note: LuaValue::upvalue removed - upvalues are never stored as LuaValues,
+    // they are only referenced via UpvalueId in GcFunction::upvalues
 
     #[inline(always)]
     pub fn thread(id: ThreadId) -> Self {
@@ -359,14 +354,7 @@ impl LuaValue {
         }
     }
 
-    #[inline(always)]
-    pub fn as_upvalue_id(&self) -> Option<UpvalueId> {
-        if (self.primary & TAG_MASK) == TAG_UPVALUE {
-            Some(UpvalueId((self.primary & ID_MASK) as u32))
-        } else {
-            None
-        }
-    }
+    // Note: as_upvalue_id removed - upvalues are never stored as LuaValues
 
     #[inline(always)]
     pub fn as_thread_id(&self) -> Option<ThreadId> {

@@ -1370,12 +1370,15 @@ impl LuaVM {
     pub unsafe fn read_upvalue_unchecked(&self, uv_id: UpvalueId) -> LuaValue {
         unsafe {
             let uv = self.object_pool.get_upvalue_unchecked(uv_id);
-            if let Some(stack_idx) = uv.get_stack_index() {
-                // Open upvalue - read directly from stack
-                *self.register_stack.get_unchecked(stack_idx)
-            } else {
-                // Closed upvalue - return stored value
-                uv.get_closed_value().unwrap_unchecked()
+            match &uv.state {
+                crate::gc::UpvalueState::Open { stack_index } => {
+                    // Open upvalue - read directly from stack
+                    *self.register_stack.get_unchecked(*stack_index)
+                }
+                crate::gc::UpvalueState::Closed(value) => {
+                    // Closed upvalue - return stored value (copy)
+                    *value
+                }
             }
         }
     }
@@ -1394,6 +1397,25 @@ impl LuaVM {
                 // Closed upvalue - update stored value
                 if let Some(uv_mut) = self.object_pool.get_upvalue_mut(uv_id) {
                     uv_mut.close(value);
+                }
+            }
+        }
+    }
+
+    /// Fast path for writing upvalue - no bounds checking
+    /// SAFETY: uv_id must be valid, and if open, stack_idx must be valid
+    #[inline(always)]
+    pub unsafe fn write_upvalue_unchecked(&mut self, uv_id: UpvalueId, value: LuaValue) {
+        unsafe {
+            let uv = self.object_pool.get_upvalue_mut_unchecked(uv_id);
+            match &mut uv.state {
+                crate::gc::UpvalueState::Open { stack_index } => {
+                    // Open upvalue - write directly to stack
+                    *self.register_stack.get_unchecked_mut(*stack_index) = value;
+                }
+                crate::gc::UpvalueState::Closed(v) => {
+                    // Closed upvalue - update stored value
+                    *v = value;
                 }
             }
         }
