@@ -1,28 +1,17 @@
-// Object Pool V2 - High-performance single-threaded design
+// Object Pool V3 - Simplified high-performance design
 //
 // Key Design Principles:
-// 1. LuaValueV2 stores type tag + object ID (no pointers - Vec may relocate)
-// 2. All GC objects accessed via ID lookup in Arena/SlotMap
-// 3. slotmap provides O(1) access with Vec-based storage (no chunking overhead)
-// 4. No Rc/RefCell overhead - direct access via &mut self
-// 5. GC headers embedded in objects for mark-sweep
-//
-// Memory Layout:
-// - SlotMap stores objects in flat Vec with generational keys
-// - O(1) insert, access, and remove operations
-// - Arena still used for some types for compatibility
+// 1. All IDs are u32 indices into Vec storage
+// 2. Small objects (String, Function, Upvalue) use Vec<Option<T>>
+// 3. Large objects (Table, Thread) use Vec<Option<Box<T>>> to avoid copy on resize
+// 4. No chunking overhead - direct Vec indexing for O(1) access
+// 5. Free list for slot reuse
+// 6. GC headers embedded in objects for mark-sweep
 
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{LuaString, LuaTable, LuaValue};
-use slotmap::{SlotMap, new_key_type};
 use std::hash::Hash;
 use std::rc::Rc;
-
-// Define custom key types for slotmap
-new_key_type! {
-    /// Key for upvalues in the slotmap
-    pub struct UpvalueKey;
-}
 
 // ============ GC Header ============
 
@@ -38,8 +27,7 @@ pub struct GcHeader {
 }
 
 // ============ Object IDs ============
-// These are just indices into the Arena storage
-// They are small (4 bytes) and can be embedded in LuaValueV2
+// All IDs are simple u32 indices - compact and efficient
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[repr(transparent)]
@@ -53,17 +41,9 @@ pub struct TableId(pub u32);
 #[repr(transparent)]
 pub struct FunctionId(pub u32);
 
-/// UpvalueId now wraps slotmap's UpvalueKey for O(1) access
-/// The slotmap key provides generational safety and direct Vec indexing
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct UpvalueId(pub UpvalueKey);
-
-impl Default for UpvalueId {
-    fn default() -> Self {
-        // Create a null/invalid key - this should never be used for actual lookups
-        UpvalueId(UpvalueKey::default())
-    }
-}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[repr(transparent)]
+pub struct UpvalueId(pub u32);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[repr(transparent)]
@@ -170,54 +150,35 @@ pub struct GcThread {
     pub data: LuaThread,
 }
 
-// ============ Chunked Arena Storage ============
+// ============ Pool Storage ============
 
-/// Chunk size for arena storage (power of 2 for fast division)
-const CHUNK_SIZE: usize = 256;
-const CHUNK_MASK: usize = CHUNK_SIZE - 1;
-const CHUNK_SHIFT: u32 = 8; // log2(256)
-
-/// High-performance chunked arena that NEVER reallocates existing data
-/// - Uses fixed-size chunks stored in a Vec of Box pointers
-/// - When Vec of chunks grows, only the pointer array moves, not the data
-/// - Each chunk is a Box<[Option<T>; CHUNK_SIZE]> - stable address
-/// - Free list enables O(1) allocation after initial growth
-pub struct Arena<T> {
-    chunks: Vec<Box<[Option<T>; CHUNK_SIZE]>>,
+/// Simple Vec-based pool for small objects
+/// - Direct O(1) indexing with no chunking overhead
+/// - Free list for slot reuse
+/// - Objects stored inline in Vec
+pub struct Pool<T> {
+    data: Vec<Option<T>>,
     free_list: Vec<u32>,
-    next_id: u32,
     count: usize,
 }
 
-impl<T> Arena<T> {
+impl<T> Pool<T> {
     #[inline]
     pub fn new() -> Self {
         Self {
-            chunks: Vec::new(),
+            data: Vec::new(),
             free_list: Vec::new(),
-            next_id: 0,
             count: 0,
         }
     }
 
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
-        let num_chunks = (cap + CHUNK_SIZE - 1) / CHUNK_SIZE;
         Self {
-            chunks: Vec::with_capacity(num_chunks),
+            data: Vec::with_capacity(cap),
             free_list: Vec::with_capacity(cap / 8),
-            next_id: 0,
             count: 0,
         }
-    }
-
-    /// Create a new empty chunk
-    #[inline]
-    fn new_chunk() -> Box<[Option<T>; CHUNK_SIZE]> {
-        // Use MaybeUninit to avoid initializing 256 Option<T>s one by one
-        // This is safe because Option<T> with None is just zeros for most T
-        let chunk: Box<[Option<T>; CHUNK_SIZE]> = Box::new(std::array::from_fn(|_| None));
-        chunk
     }
 
     /// Allocate a new object and return its ID
@@ -226,48 +187,28 @@ impl<T> Arena<T> {
         self.count += 1;
 
         if let Some(free_id) = self.free_list.pop() {
-            // Reuse a free slot
-            let chunk_idx = (free_id >> CHUNK_SHIFT) as usize;
-            let slot_idx = (free_id as usize) & CHUNK_MASK;
-            self.chunks[chunk_idx][slot_idx] = Some(value);
+            self.data[free_id as usize] = Some(value);
             return free_id;
         }
 
-        // Allocate new slot
-        let id = self.next_id;
-        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
-        let slot_idx = (id as usize) & CHUNK_MASK;
-
-        // Add new chunk if needed
-        if chunk_idx >= self.chunks.len() {
-            self.chunks.push(Self::new_chunk());
-        }
-
-        self.chunks[chunk_idx][slot_idx] = Some(value);
-        self.next_id += 1;
+        let id = self.data.len() as u32;
+        self.data.push(Some(value));
         id
     }
 
     /// Get immutable reference by ID
     #[inline(always)]
     pub fn get(&self, id: u32) -> Option<&T> {
-        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
-        let slot_idx = (id as usize) & CHUNK_MASK;
-        self.chunks
-            .get(chunk_idx)
-            .and_then(|chunk| chunk[slot_idx].as_ref())
+        self.data.get(id as usize).and_then(|opt| opt.as_ref())
     }
 
-    /// Get reference by ID without bounds checking (caller must ensure validity)
-    /// SAFETY: id must be a valid index returned from alloc() and not freed
+    /// Get reference by ID without bounds checking
+    /// SAFETY: id must be a valid index from alloc() and not freed
     #[inline(always)]
     pub unsafe fn get_unchecked(&self, id: u32) -> &T {
-        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
-        let slot_idx = (id as usize) & CHUNK_MASK;
         unsafe {
-            self.chunks
-                .get_unchecked(chunk_idx)
-                .get_unchecked(slot_idx)
+            self.data
+                .get_unchecked(id as usize)
                 .as_ref()
                 .unwrap_unchecked()
         }
@@ -276,23 +217,16 @@ impl<T> Arena<T> {
     /// Get mutable reference by ID
     #[inline(always)]
     pub fn get_mut(&mut self, id: u32) -> Option<&mut T> {
-        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
-        let slot_idx = (id as usize) & CHUNK_MASK;
-        self.chunks
-            .get_mut(chunk_idx)
-            .and_then(|chunk| chunk[slot_idx].as_mut())
+        self.data.get_mut(id as usize).and_then(|opt| opt.as_mut())
     }
 
-    /// Get mutable reference by ID without bounds checking (caller must ensure validity)
-    /// SAFETY: id must be a valid index returned from alloc() and not freed
+    /// Get mutable reference by ID without bounds checking
+    /// SAFETY: id must be a valid index from alloc() and not freed
     #[inline(always)]
     pub unsafe fn get_mut_unchecked(&mut self, id: u32) -> &mut T {
-        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
-        let slot_idx = (id as usize) & CHUNK_MASK;
         unsafe {
-            self.chunks
-                .get_unchecked_mut(chunk_idx)
-                .get_unchecked_mut(slot_idx)
+            self.data
+                .get_unchecked_mut(id as usize)
                 .as_mut()
                 .unwrap_unchecked()
         }
@@ -301,11 +235,9 @@ impl<T> Arena<T> {
     /// Free a slot (mark for reuse)
     #[inline]
     pub fn free(&mut self, id: u32) {
-        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
-        let slot_idx = (id as usize) & CHUNK_MASK;
-        if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
-            if chunk[slot_idx].is_some() {
-                chunk[slot_idx] = None;
+        if let Some(slot) = self.data.get_mut(id as usize) {
+            if slot.is_some() {
+                *slot = None;
                 self.free_list.push(id);
                 self.count -= 1;
             }
@@ -315,11 +247,9 @@ impl<T> Arena<T> {
     /// Check if a slot is occupied
     #[inline(always)]
     pub fn is_valid(&self, id: u32) -> bool {
-        let chunk_idx = (id >> CHUNK_SHIFT) as usize;
-        let slot_idx = (id as usize) & CHUNK_MASK;
-        self.chunks
-            .get(chunk_idx)
-            .map(|chunk| chunk[slot_idx].is_some())
+        self.data
+            .get(id as usize)
+            .map(|opt| opt.is_some())
             .unwrap_or(false)
     }
 
@@ -331,70 +261,203 @@ impl<T> Arena<T> {
 
     /// Iterate over all live objects
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
-        self.chunks
+        self.data
             .iter()
             .enumerate()
-            .flat_map(|(chunk_idx, chunk)| {
-                chunk.iter().enumerate().filter_map(move |(slot_idx, opt)| {
-                    opt.as_ref()
-                        .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
-                })
-            })
+            .filter_map(|(id, opt)| opt.as_ref().map(|v| (id as u32, v)))
     }
 
     /// Iterate over all live objects mutably
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
-        self.chunks
+        self.data
             .iter_mut()
             .enumerate()
-            .flat_map(|(chunk_idx, chunk)| {
-                chunk
-                    .iter_mut()
-                    .enumerate()
-                    .filter_map(move |(slot_idx, opt)| {
-                        opt.as_mut()
-                            .map(|v| (((chunk_idx as u32) << CHUNK_SHIFT) | (slot_idx as u32), v))
-                    })
-            })
+            .filter_map(|(id, opt)| opt.as_mut().map(|v| (id as u32, v)))
     }
 
-    /// Shrink internal storage (only shrinks chunk vector capacity, not individual chunks)
+    /// Shrink internal storage
     pub fn shrink_to_fit(&mut self) {
-        self.chunks.shrink_to_fit();
+        self.data.shrink_to_fit();
         self.free_list.shrink_to_fit();
     }
 
     /// Clear all objects
     pub fn clear(&mut self) {
-        for chunk in &mut self.chunks {
-            for slot in chunk.iter_mut() {
-                *slot = None;
-            }
-        }
+        self.data.clear();
         self.free_list.clear();
-        self.next_id = 0;
         self.count = 0;
     }
 }
 
-impl<T> Default for Arena<T> {
+impl<T> Default for Pool<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ============ Object Pool V2 ============
+/// Box-based pool for large objects
+/// - Objects stored as Box<T> to avoid copying on Vec resize
+/// - Same interface as Pool<T>
+pub struct BoxPool<T> {
+    data: Vec<Option<Box<T>>>,
+    free_list: Vec<u32>,
+    count: usize,
+}
+
+impl<T> BoxPool<T> {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            free_list: Vec::new(),
+            count: 0,
+        }
+    }
+
+    #[inline]
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(cap),
+            free_list: Vec::with_capacity(cap / 8),
+            count: 0,
+        }
+    }
+
+    /// Allocate a new object and return its ID
+    #[inline]
+    pub fn alloc(&mut self, value: T) -> u32 {
+        self.count += 1;
+
+        if let Some(free_id) = self.free_list.pop() {
+            self.data[free_id as usize] = Some(Box::new(value));
+            return free_id;
+        }
+
+        let id = self.data.len() as u32;
+        self.data.push(Some(Box::new(value)));
+        id
+    }
+
+    /// Get immutable reference by ID
+    #[inline(always)]
+    pub fn get(&self, id: u32) -> Option<&T> {
+        self.data
+            .get(id as usize)
+            .and_then(|opt| opt.as_ref().map(|b| b.as_ref()))
+    }
+
+    /// Get reference by ID without bounds checking
+    /// SAFETY: id must be a valid index from alloc() and not freed
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, id: u32) -> &T {
+        unsafe {
+            self.data
+                .get_unchecked(id as usize)
+                .as_ref()
+                .unwrap_unchecked()
+                .as_ref()
+        }
+    }
+
+    /// Get mutable reference by ID
+    #[inline(always)]
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut T> {
+        self.data
+            .get_mut(id as usize)
+            .and_then(|opt| opt.as_mut().map(|b| b.as_mut()))
+    }
+
+    /// Get mutable reference by ID without bounds checking
+    /// SAFETY: id must be a valid index from alloc() and not freed
+    #[inline(always)]
+    pub unsafe fn get_mut_unchecked(&mut self, id: u32) -> &mut T {
+        unsafe {
+            self.data
+                .get_unchecked_mut(id as usize)
+                .as_mut()
+                .unwrap_unchecked()
+                .as_mut()
+        }
+    }
+
+    /// Free a slot (mark for reuse)
+    #[inline]
+    pub fn free(&mut self, id: u32) {
+        if let Some(slot) = self.data.get_mut(id as usize) {
+            if slot.is_some() {
+                *slot = None;
+                self.free_list.push(id);
+                self.count -= 1;
+            }
+        }
+    }
+
+    /// Check if a slot is occupied
+    #[inline(always)]
+    pub fn is_valid(&self, id: u32) -> bool {
+        self.data
+            .get(id as usize)
+            .map(|opt| opt.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Current number of live objects
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Iterate over all live objects
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
+        self.data
+            .iter()
+            .enumerate()
+            .filter_map(|(id, opt)| opt.as_ref().map(|b| (id as u32, b.as_ref())))
+    }
+
+    /// Iterate over all live objects mutably
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
+        self.data
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(id, opt)| opt.as_mut().map(|b| (id as u32, b.as_mut())))
+    }
+
+    /// Shrink internal storage
+    pub fn shrink_to_fit(&mut self) {
+        self.data.shrink_to_fit();
+        self.free_list.shrink_to_fit();
+    }
+
+    /// Clear all objects
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.free_list.clear();
+        self.count = 0;
+    }
+}
+
+impl<T> Default for BoxPool<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Keep Arena as an alias for backward compatibility
+pub type Arena<T> = Pool<T>;
+
+// ============ Object Pool V3 ============
 
 /// High-performance object pool for the Lua VM
-/// All objects are stored in typed arenas and accessed by ID
+/// - Small objects (String, Function, Upvalue) use Pool<T> with direct Vec storage
+/// - Large objects (Table, Thread) use BoxPool<T> to avoid copy on resize
 pub struct ObjectPool {
-    pub strings: Arena<GcString>,
-    pub tables: Arena<GcTable>,
-    pub functions: Arena<GcFunction>,
-    /// Upvalues use SlotMap for O(1) access (no chunking overhead)
-    pub upvalues: SlotMap<UpvalueKey, GcUpvalue>,
-    pub userdata: Arena<LuaUserdata>,
-    pub threads: Arena<GcThread>,
+    pub strings: Pool<GcString>,
+    pub tables: BoxPool<GcTable>,
+    pub functions: Pool<GcFunction>,
+    pub upvalues: Pool<GcUpvalue>,
+    pub userdata: Pool<LuaUserdata>,
+    pub threads: BoxPool<GcThread>,
 
     // String interning table using Lua-style open addressing
     // Key: (hash, StringId) pairs in a flat array for cache efficiency
@@ -623,12 +686,12 @@ impl StringInternTable {
 impl ObjectPool {
     pub fn new() -> Self {
         let mut pool = Self {
-            strings: Arena::with_capacity(256),
-            tables: Arena::with_capacity(64),
-            functions: Arena::with_capacity(32),
-            upvalues: SlotMap::with_capacity_and_key(32), // SlotMap for O(1) access
-            userdata: Arena::new(),
-            threads: Arena::with_capacity(8),
+            strings: Pool::with_capacity(256),
+            tables: BoxPool::with_capacity(64),
+            functions: Pool::with_capacity(32),
+            upvalues: Pool::with_capacity(32),
+            userdata: Pool::new(),
+            threads: BoxPool::with_capacity(8),
             string_intern: StringInternTable::with_capacity(256),
             max_intern_length: 64, // Strings <= 64 bytes are interned
             // Placeholder values - will be initialized below
@@ -1071,7 +1134,7 @@ impl ObjectPool {
         self.functions.get_mut(id.0)
     }
 
-    // ==================== Upvalue Operations (using SlotMap) ====================
+    // ==================== Upvalue Operations ====================
 
     #[inline]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
@@ -1079,7 +1142,7 @@ impl ObjectPool {
             header: GcHeader::default(),
             state: UpvalueState::Open { stack_index },
         };
-        UpvalueId(self.upvalues.insert(gc_uv))
+        UpvalueId(self.upvalues.alloc(gc_uv))
     }
 
     #[inline]
@@ -1088,7 +1151,7 @@ impl ObjectPool {
             header: GcHeader::default(),
             state: UpvalueState::Closed(value),
         };
-        UpvalueId(self.upvalues.insert(gc_uv))
+        UpvalueId(self.upvalues.alloc(gc_uv))
     }
 
     #[inline(always)]
@@ -1112,7 +1175,7 @@ impl ObjectPool {
     /// SAFETY: id must be a valid UpvalueId
     #[inline(always)]
     pub unsafe fn get_upvalue_mut_unchecked(&mut self, id: UpvalueId) -> &mut GcUpvalue {
-        unsafe { self.upvalues.get_unchecked_mut(id.0) }
+        unsafe { self.upvalues.get_mut_unchecked(id.0) }
     }
 
     // ==================== Userdata Operations ====================
@@ -1205,7 +1268,7 @@ impl ObjectPool {
             .filter(|(_, gf)| !gf.header.marked)
             .map(|(id, _)| id)
             .collect();
-        let upvalues_to_free: Vec<UpvalueKey> = self
+        let upvalues_to_free: Vec<u32> = self
             .upvalues
             .iter()
             .filter(|(_, gu)| !gu.header.marked)
@@ -1234,7 +1297,7 @@ impl ObjectPool {
             self.functions.free(id);
         }
         for id in upvalues_to_free {
-            self.upvalues.remove(id);
+            self.upvalues.free(id);
         }
         for id in threads_to_free {
             self.threads.free(id);
@@ -1245,7 +1308,7 @@ impl ObjectPool {
         self.strings.shrink_to_fit();
         self.tables.shrink_to_fit();
         self.functions.shrink_to_fit();
-        // SlotMap doesn't have shrink_to_fit, skip upvalues
+        self.upvalues.shrink_to_fit();
         self.threads.shrink_to_fit();
         self.string_intern.shrink_to_fit();
     }
@@ -1269,7 +1332,7 @@ impl ObjectPool {
 
     #[inline]
     pub fn remove_upvalue(&mut self, id: UpvalueId) {
-        self.upvalues.remove(id.0);
+        self.upvalues.free(id.0);
     }
 
     #[inline]
@@ -1397,12 +1460,13 @@ mod tests {
 
     #[test]
     fn test_object_ids_size() {
-        // Verify IDs are compact
+        // Verify all IDs are compact 4 bytes
         assert_eq!(std::mem::size_of::<StringId>(), 4);
         assert_eq!(std::mem::size_of::<TableId>(), 4);
         assert_eq!(std::mem::size_of::<FunctionId>(), 4);
-        // UpvalueId is now 8 bytes (slotmap key with version)
-        assert_eq!(std::mem::size_of::<UpvalueId>(), 8);
+        assert_eq!(std::mem::size_of::<UpvalueId>(), 4);
+        assert_eq!(std::mem::size_of::<UserdataId>(), 4);
+        assert_eq!(std::mem::size_of::<ThreadId>(), 4);
     }
 
     #[test]

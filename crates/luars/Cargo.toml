@@ -17,4 +17,3 @@ itoa = "1.0"  # Fast integer formatting (10x faster than format!)
 ryu = "1.0"   # Fast float formatting
 tempfile = "3.10"  # For io.tmpfile()
 rowan = "0.16.1"
-slotmap = "1.0"  # Fast O(1) object pool with generational keys

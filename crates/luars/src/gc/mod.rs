@@ -13,8 +13,8 @@ mod object_pool;
 
 use crate::lua_value::LuaValue;
 pub use object_pool::{
-    Arena, FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, ObjectPool,
-    StringId, TableId, ThreadId, UpvalueId, UpvalueKey, UpvalueState, UserdataId,
+    Arena, BoxPool, FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue,
+    ObjectPool, Pool, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
 };
 
 // Re-export for compatibility
@@ -309,15 +309,15 @@ impl GC {
             self.record_deallocation(128);
         }
 
-        // Collect unmarked upvalues (skip fixed ones) - using SlotMap
-        let upvals_to_free: Vec<UpvalueKey> = pool
+        // Collect unmarked upvalues (skip fixed ones)
+        let upvals_to_free: Vec<u32> = pool
             .upvalues
             .iter()
             .filter(|(_, u)| !u.header.marked && !u.header.fixed)
             .map(|(id, _)| id)
             .collect();
         for id in upvals_to_free {
-            pool.upvalues.remove(id);
+            pool.upvalues.free(id);
             collected += 1;
         }
 
