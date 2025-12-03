@@ -446,13 +446,54 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
 
-            // ============ Upvalue operations (inline simple ones) ============
+            // ============ Upvalue operations (inline for performance) ============
             OpCode::GetUpval => {
-                exec_getupval(vm, instr, frame_ptr, base_ptr);
+                // INLINED GETUPVAL: R[A] := UpValue[B]
+                let a = Instruction::get_a(instr) as usize;
+                let b = Instruction::get_b(instr) as usize;
+                
+                unsafe {
+                    // Get function's upvalue list pointer
+                    let func_id = (*frame_ptr).get_function_id_unchecked();
+                    let func_ref = vm.object_pool.get_function_unchecked(func_id);
+                    let upvalue_id = *func_ref.upvalues.get_unchecked(b);
+                    
+                    // Read upvalue value directly
+                    let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
+                    let value = match &uv.state {
+                        crate::gc::UpvalueState::Open { stack_index } => {
+                            *vm.register_stack.get_unchecked(*stack_index)
+                        }
+                        crate::gc::UpvalueState::Closed(val) => *val,
+                    };
+                    
+                    *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
+                }
                 continue 'mainloop;
             }
             OpCode::SetUpval => {
-                exec_setupval(vm, instr, frame_ptr, base_ptr);
+                // INLINED SETUPVAL: UpValue[B] := R[A]
+                let a = Instruction::get_a(instr) as usize;
+                let b = Instruction::get_b(instr) as usize;
+                
+                unsafe {
+                    // Get the value to write
+                    let value = *vm.register_stack.get_unchecked(base_ptr + a);
+                    
+                    // Get function's upvalue list pointer
+                    let func_id = (*frame_ptr).get_function_id_unchecked();
+                    let func_ref = vm.object_pool.get_function_unchecked(func_id);
+                    let upvalue_id = *func_ref.upvalues.get_unchecked(b);
+                    
+                    // Write upvalue value directly
+                    let uv = vm.object_pool.get_upvalue_mut_unchecked(upvalue_id);
+                    match &mut uv.state {
+                        crate::gc::UpvalueState::Open { stack_index } => {
+                            *vm.register_stack.get_unchecked_mut(*stack_index) = value;
+                        }
+                        crate::gc::UpvalueState::Closed(val) => *val = value,
+                    };
+                }
                 continue 'mainloop;
             }
 

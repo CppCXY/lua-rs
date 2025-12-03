@@ -212,6 +212,17 @@ pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
     (1..top).map(|i| vm.register_stack[base_ptr + i]).collect()
 }
 
+/// Iterate over all arguments without allocation
+/// Returns an iterator that yields (1-based index, value) pairs
+#[inline(always)]
+pub fn args_iter(vm: &LuaVM) -> impl Iterator<Item = (usize, LuaValue)> + '_ {
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
+    
+    (1..top).map(move |i| (i, vm.register_stack[base_ptr + i]))
+}
+
 /// Helper to get a specific argument
 /// 1 based index
 #[inline(always)]
