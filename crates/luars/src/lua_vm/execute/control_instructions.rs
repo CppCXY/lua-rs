@@ -882,8 +882,9 @@ fn exec_call_lua_function(
     // Extract chunk info from ObjectPool - use unchecked for hot path
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
 
-    let (max_stack_size, is_vararg, code_ptr, constants_ptr) = (
+    let (max_stack_size, num_params, is_vararg, code_ptr, constants_ptr) = (
         func_ref.chunk.max_stack_size,
+        func_ref.chunk.param_count,
         func_ref.chunk.is_vararg,
         func_ref.chunk.code.as_ptr(),
         func_ref.chunk.constants.as_ptr(),
@@ -914,13 +915,14 @@ fn exec_call_lua_function(
             vm.register_stack.resize(required_capacity, LuaValue::nil());
         }
 
-        // Initialize locals beyond arguments (rare for simple functions)
-        // Only if there are more locals than arguments
-        if arg_count < max_stack_size {
+        // LIKE LUA C: Only fill missing arguments (arg_count < num_params)
+        // NOT all stack slots! This is the key optimization.
+        // For add(a,b) called with add(1,5): arg_count=2, num_params=2 → no fill!
+        if arg_count < num_params {
             unsafe {
                 let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
                 let nil_val = LuaValue::nil();
-                for i in arg_count..max_stack_size {
+                for i in arg_count..num_params {
                     *reg_ptr.add(i) = nil_val;
                 }
             }
