@@ -74,38 +74,42 @@ pub fn exec_return(
             let reg_ptr = vm.register_stack.as_mut_ptr();
 
             if num_results == usize::MAX {
-                // Return all values
+                // Return all values - use memcpy
                 if return_count > 0 {
                     let src_start = base_ptr + a;
-                    let src_end = src_start + return_count;
-                    let dst_start = dest_base;
-                    let dst_end = dst_start + return_count;
-
-                    if (src_start < dst_end) && (dst_start < src_end) {
-                        std::ptr::copy(
-                            reg_ptr.add(src_start),
-                            reg_ptr.add(dst_start),
-                            return_count,
-                        );
-                    } else {
-                        std::ptr::copy_nonoverlapping(
-                            reg_ptr.add(src_start),
-                            reg_ptr.add(dst_start),
-                            return_count,
-                        );
-                    }
+                    std::ptr::copy(
+                        reg_ptr.add(src_start),
+                        reg_ptr.add(dest_base),
+                        return_count,
+                    );
                 }
                 (*caller_ptr).top = (result_reg + return_count) as u32;
+            } else if num_results == 0 {
+                // No return values expected - nothing to do
+                (*caller_ptr).top = result_reg as u32;
+            } else if num_results == 1 {
+                // FAST PATH: Single return value (most common case)
+                let val = if return_count > 0 {
+                    *reg_ptr.add(base_ptr + a)
+                } else {
+                    LuaValue::nil()
+                };
+                *reg_ptr.add(dest_base) = val;
+                (*caller_ptr).top = (result_reg + 1) as u32;
             } else {
-                // Fixed number of return values
+                // Multiple fixed return values - use memcpy + nil fill
+                let copy_count = return_count.min(num_results);
+                if copy_count > 0 {
+                    std::ptr::copy(
+                        reg_ptr.add(base_ptr + a),
+                        reg_ptr.add(dest_base),
+                        copy_count,
+                    );
+                }
+                // Fill remaining with nil
                 let nil_val = LuaValue::nil();
-                for i in 0..num_results {
-                    let val = if i < return_count {
-                        *reg_ptr.add(base_ptr + a + i)
-                    } else {
-                        nil_val
-                    };
-                    *reg_ptr.add(dest_base + i) = val;
+                for i in copy_count..num_results {
+                    *reg_ptr.add(dest_base + i) = nil_val;
                 }
                 (*caller_ptr).top = (result_reg + num_results) as u32;
             }

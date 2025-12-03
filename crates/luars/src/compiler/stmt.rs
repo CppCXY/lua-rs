@@ -689,6 +689,13 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
             );
 
+            // After TAILCALL, emit RETURN 0 0 0 (all out) like Lua 5.4
+            // This handles the return value from the tail-called function
+            emit(
+                c,
+                Instruction::create_abck(OpCode::Return, base_reg, 0, 0, false),
+            );
+
             return Ok(());
         }
     }
