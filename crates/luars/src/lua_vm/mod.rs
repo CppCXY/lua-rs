@@ -2020,33 +2020,10 @@ impl LuaVM {
     /// Set runtime error and return lightweight error enum
     /// If an error handler is set (via xpcall), it will be called immediately
     pub fn error(&mut self, message: impl Into<String>) -> LuaError {
-        let msg = message.into();
-        
-        // Check if there's an error handler (set by xpcall)
-        if let Some(handler) = self.error_handler.clone() {
-            // Call the error handler with the error message
-            // Note: The call stack is still intact at this point
-            let err_value = self.create_string(&msg);
-            
-            match self.call_function_internal(handler, vec![err_value]) {
-                Ok(handler_results) => {
-                    // Error handler succeeded, use its return value as the new error message
-                    if let Some(result) = handler_results.first() {
-                        self.error_message = self.value_to_string_raw(result);
-                    } else {
-                        self.error_message = msg;
-                    }
-                }
-                Err(_) => {
-                    // Error handler itself failed, use original message
-                    self.error_message = format!("error in error handler: {}", msg);
-                }
-            }
-        } else {
-            // No error handler, just set the message
-            self.error_message = msg;
-        }
-        
+        // Simply set the error message - error handling is done by xpcall
+        // when the error propagates back through the Rust call stack.
+        // At that point, the Lua call stack is still intact.
+        self.error_message = message.into();
         LuaError::RuntimeError
     }
 
@@ -2450,33 +2427,44 @@ impl LuaVM {
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Save old error handler and set the new one
-        let old_handler = self.error_handler.clone();
-        self.error_handler = Some(err_handler.clone());
-
         let initial_frame_count = self.frame_count;
 
-        // Call the function - if it errors, error() will call the handler
+        // Call the function
         let result = self.call_function_internal(func, args);
-
-        // Restore old error handler
-        self.error_handler = old_handler;
 
         match result {
             Ok(values) => Ok((true, values)),
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(_) => {
-                // Error occurred (and handler was already called in error())
-                // Clean up frames created by the failed function call
+                // Error occurred - call the error handler NOW while the stack is still intact
+                // This allows debug.traceback() to see the full call stack
+                let error_msg = self.error_message.clone();
+                let err_value = self.create_string(&error_msg);
+                
+                let handled_msg = match self.call_function_internal(err_handler, vec![err_value]) {
+                    Ok(handler_results) => {
+                        // Error handler succeeded, use its return value as the error message
+                        if let Some(result) = handler_results.first() {
+                            self.value_to_string_raw(result)
+                        } else {
+                            error_msg
+                        }
+                    }
+                    Err(_) => {
+                        // Error handler itself failed
+                        format!("error in error handling: {}", error_msg)
+                    }
+                };
+                
+                // NOW clean up frames created by the failed function call
                 while self.frame_count > initial_frame_count {
                     let frame = self.pop_frame().unwrap();
                     // Close upvalues belonging to this frame
                     self.close_upvalues_from(frame.base_ptr);
                 }
                 
-                // Return the error message (which may have been modified by the handler)
-                let msg = self.error_message.clone();
-                let err_str = self.create_string(&msg);
+                // Return the handled error message
+                let err_str = self.create_string(&handled_msg);
                 Ok((false, vec![err_str]))
             }
         }
