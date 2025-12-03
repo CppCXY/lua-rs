@@ -2420,8 +2420,7 @@ impl LuaVM {
             }
             Err(LuaError::Yield) => {
                 // Yield is not an error - propagate it
-                let values = self.take_yield_values();
-                Err(self.do_yield(values))
+                Err(LuaError::Yield)
             }
             Err(_) => {
                 // Real error: clean up frames and return false with error message

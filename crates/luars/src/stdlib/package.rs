@@ -185,8 +185,11 @@ fn searcher_lua(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 // Loader function for Lua files (called by searcher_lua)
+// Called as: loader(modname, filepath)
 fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let filepath_val = require_arg(vm, 1, "Lua file loader")?;
+    // First arg is modname, second arg is filepath (passed by searcher)
+    let _modname_val = require_arg(vm, 1, "Lua file loader")?;
+    let filepath_val = require_arg(vm, 2, "Lua file loader")?;
 
     let Some(filepath_id) = filepath_val.as_string_id() else {
         return Err(vm.error("file path must be a string".to_string()));
@@ -198,21 +201,27 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         s.as_str().to_string()
     };
 
+    if !std::fs::metadata(&filepath_str).is_ok() {
+        return Ok(MultiValue::empty())
+    }
+
     // Read the file
     let source = match std::fs::read_to_string(&filepath_str) {
         Ok(s) => s,
-        Err(_) => {
-            return Ok(MultiValue::single(LuaValue::nil()));
+        Err(e) => {
+            return Err(vm.error(format!("cannot open file '{}': {}", filepath_str, e)));
         }
     };
 
     // Compile it using VM's string pool with chunk name
     let chunkname = format!("@{}", filepath_str);
     let chunk = vm.compile_with_name(&source, &chunkname)?;
-    // Create a function from the chunk
-    let func = vm.create_function(Rc::new(chunk), vec![]);
+    
+    // Create a function from the chunk with _ENV upvalue
+    let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);
+    let func = vm.create_function(Rc::new(chunk), vec![env_upvalue_id]);
 
-    // Call the function
+    // Call the function to execute the module
     let (success, results) = vm.protected_call(func, vec![])?;
 
     if !success {
@@ -228,7 +237,8 @@ fn lua_file_loader(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         )));
     }
 
-    // Get the result value
+    // Get the result value - if the module returns a value, use it
+    // Otherwise return true (standard Lua behavior)
     let module_value = if results.is_empty() || results[0].is_nil() {
         LuaValue::boolean(true)
     } else {

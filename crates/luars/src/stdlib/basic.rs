@@ -641,8 +641,8 @@ fn lua_version(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// require(modname) - Load a module  
 fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let modname_str = require_arg(vm, 1, "require")?;
-    if !modname_str.is_string() {
+    let modname_value = require_arg(vm, 1, "require")?;
+    if !modname_value.is_string() {
         return Err(vm.error("module name must be a string".to_string()));
     }
 
@@ -660,7 +660,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             if let Some(loaded_table) = package_ref.raw_get(&loaded_key) {
                 if let Some(loaded_id) = loaded_table.as_table_id() {
                     if let Some(loaded_ref) = vm.object_pool.get_table(loaded_id) {
-                        loaded_ref.raw_get(&modname_str)
+                        loaded_ref.raw_get(&modname_value)
                     } else {
                         None
                     }
@@ -721,7 +721,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Try each searcher (1-based indexing)
     for searcher in searchers_values {
         // Call searcher with module name
-        let (success, results) = vm.protected_call(searcher, vec![modname_str.clone()])?;
+        let (success, results) = vm.protected_call(searcher, vec![modname_value.clone()])?;
 
         if !success {
             let error_msg = results
@@ -745,15 +745,16 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             if first_result.is_function() || first_result.is_cfunction() {
                 // Call the loader
                 let loader_args = if results.len() > 1 {
-                    vec![modname_str.clone(), results[1].clone()]
+                    vec![modname_value.clone(), results[1].clone()]
                 } else {
-                    vec![modname_str.clone()]
+                    vec![modname_value.clone()]
                 };
 
                 let (load_success, load_results) =
                     vm.protected_call(first_result.clone(), loader_args)?;
 
                 if !load_success {
+                    let module_str = vm.value_to_string(&modname_value)?;
                     let error_msg = load_results
                         .first()
                         .and_then(|v| {
@@ -766,7 +767,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         .unwrap_or_else(|| "unknown error".to_string());
                     return Err(vm.error(format!(
                         "error loading module '{}': {}",
-                        modname_str, error_msg
+                        module_str, error_msg
                     )));
                 }
 
@@ -784,7 +785,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         if let Some(loaded_table) = package_ref.raw_get(&loaded_key) {
                             if let Some(loaded_id) = loaded_table.as_table_id() {
                                 if let Some(loaded_ref) = vm.object_pool.get_table_mut(loaded_id) {
-                                    loaded_ref.raw_set(modname_str, module_value.clone());
+                                    loaded_ref.raw_set(modname_value, module_value.clone());
                                 }
                             }
                         }
@@ -800,14 +801,15 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             }
         }
     }
+    let module_str = vm.value_to_string(&modname_value)?;
 
     // All searchers failed
     if error_messages.is_empty() {
-        Err(vm.error(format!("module '{}' not found", modname_str)))
+        Err(vm.error(format!("module '{}' not found", module_str)))
     } else {
         Err(vm.error(format!(
             "module '{}' not found:{}",
-            modname_str,
+            module_str,
             error_messages.join("")
         )))
     }
