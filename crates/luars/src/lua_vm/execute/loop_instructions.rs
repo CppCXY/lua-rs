@@ -246,6 +246,15 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize
 
 /// TFORCALL A C
 /// R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);
+/// 
+/// Lua 5.4 for-in loop layout:
+/// R[A]   = iter_func
+/// R[A+1] = state
+/// R[A+2] = control variable
+/// R[A+3] = to-be-closed variable (not used here)
+/// R[A+4] = first loop variable (first return value goes here)
+/// R[A+5] = second loop variable, etc.
+///
 /// Returns true if a Lua function was called and frame changed (needs updatestate)
 #[inline(always)]
 pub fn exec_tforcall(
@@ -270,8 +279,9 @@ pub fn exec_tforcall(
                 return Err(vm.error("Invalid CFunction".to_string()));
             };
 
-            // Set up call stack: func, state, control
-            let call_base = base_ptr + a + 3;
+            // Use a temporary position for the call setup (beyond result area)
+            let call_base = base_ptr + a + 4 + c + 1;
+            vm.ensure_stack_capacity(call_base + 3);
             vm.register_stack[call_base] = func;
             vm.register_stack[call_base + 1] = state;
             vm.register_stack[call_base + 2] = control;
@@ -285,24 +295,21 @@ pub fn exec_tforcall(
             let result = cfunc(vm)?;
             vm.pop_frame_discard();
 
-            // Store results starting at R[A+3]
+            // Store results starting at R[A+4]
             let values = result.all_values();
-            for (i, value) in values.iter().enumerate().take(c + 1) {
-                vm.register_stack[base_ptr + a + 3 + i] = *value;
+            for (i, value) in values.iter().enumerate().take(c) {
+                vm.register_stack[base_ptr + a + 4 + i] = *value;
             }
             // Fill remaining with nil
-            for i in values.len()..=c {
-                vm.register_stack[base_ptr + a + 3 + i] = LuaValue::nil();
+            for i in values.len()..c {
+                vm.register_stack[base_ptr + a + 4 + i] = LuaValue::nil();
             }
             Ok(false) // No frame change for C functions
         }
         LuaValueKind::Function => {
-            // For Lua functions, we need to use CALL instruction logic
-            // Set up registers for the call
-            vm.register_stack[base_ptr + a + 3] = func;
-            vm.register_stack[base_ptr + a + 4] = state;
-            vm.register_stack[base_ptr + a + 5] = control;
-
+            // For Lua functions, set up for a normal call
+            // We need to place function and arguments, then results go to R[A+4]
+            
             // Use new ID-based API to get function
             let Some(func_id) = func.as_function_id() else {
                 return Err(vm.error("Not a Lua function".to_string()));
@@ -315,30 +322,31 @@ pub fn exec_tforcall(
             let code_ptr = func_ref.chunk.code.as_ptr();
             let constants_ptr = func_ref.chunk.constants.as_ptr();
 
-            // CRITICAL FIX: Use proper call base relative to current frame
-            // Arguments are already at base_ptr + a + 4 and base_ptr + a + 5 (state, control)
-            // New frame base should be at base_ptr + a + 4 where we placed the first arg
+            // Set up arguments at base_ptr + a + 4 (first arg = state)
+            // Arguments: state, control
             let call_base = base_ptr + a + 4;
             vm.ensure_stack_capacity(call_base + max_stack_size);
+            
+            // Place arguments (overwriting result slots temporarily is OK)
+            vm.register_stack[call_base] = state;
+            vm.register_stack[call_base + 1] = control;
 
             // Initialize registers beyond arguments
             for i in 2..max_stack_size {
                 vm.register_stack[call_base + i] = LuaValue::nil();
             }
 
-            // Arguments are already in place (state at +0, control at +1)
-            // No need to copy them again
-
-            // Create new frame with correct nresults type
-            let nresults = (c + 1) as i16;
+            // Create new frame
+            // Result destination is a + 4 (relative to caller's base)
+            let nresults = c as i16;
             let new_frame = LuaCallFrame::new_lua_function(
                 func_id,
                 code_ptr,
                 constants_ptr,
                 call_base,
                 2,        // top = 2 (we have 2 arguments)
-                a + 3,    // result goes to R[A+3]
-                nresults, // expecting c+1 results
+                a + 4,    // result goes to R[A+4] relative to caller's base
+                nresults, // expecting c results
             );
 
             vm.push_frame(new_frame);
@@ -351,17 +359,25 @@ pub fn exec_tforcall(
 }
 
 /// TFORLOOP A Bx
-/// if R[A+1] ~= nil then { R[A]=R[A+1]; pc -= Bx }
+/// if R[A+4] ~= nil then { R[A+2]=R[A+4]; pc -= Bx }
+/// 
+/// Lua 5.4 for-in loop layout:
+/// R[A]   = iter_func
+/// R[A+1] = state
+/// R[A+2] = control variable (updated here when continuing)
+/// R[A+3] = to-be-closed variable
+/// R[A+4] = first loop variable (checked here)
 #[inline(always)]
 pub fn exec_tforloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
-    let value = vm.register_stack[base_ptr + a + 1];
+    // Check first loop variable at R[A+4]
+    let first_var = vm.register_stack[base_ptr + a + 4];
 
-    if !value.is_nil() {
-        // Continue loop
-        vm.register_stack[base_ptr + a] = value;
+    if !first_var.is_nil() {
+        // Continue loop: update control variable R[A+2] with first return value
+        vm.register_stack[base_ptr + a + 2] = first_var;
         *pc -= bx;
     }
 }

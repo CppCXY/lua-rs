@@ -790,6 +790,34 @@ pub fn exec_call(
         // New frame base = R[A+1]
         let new_base = base + a + 1;
 
+        // Check if this call would overwrite parent frame's vararg
+        // This is critical for for-in loops with vararg functions
+        let parent_frame = unsafe { &mut **frame_ptr_ptr };
+        let parent_vararg_start = parent_frame.get_vararg_start();
+        let parent_vararg_count = parent_frame.get_vararg_count();
+        
+        if parent_vararg_count > 0 {
+            let new_frame_end = new_base + max_stack_size;
+            if new_frame_end > parent_vararg_start {
+                // Vararg would be overwritten! Relocate it to after new frame's stack
+                let new_vararg_start = new_frame_end;
+                let required_capacity = new_vararg_start + parent_vararg_count;
+                vm.ensure_stack_capacity(required_capacity);
+                if vm.register_stack.len() < required_capacity {
+                    vm.register_stack.resize(required_capacity, LuaValue::nil());
+                }
+                
+                // Copy vararg values to new location
+                for i in 0..parent_vararg_count {
+                    vm.register_stack[new_vararg_start + i] = vm.register_stack[parent_vararg_start + i];
+                }
+                
+                // Update parent frame's vararg position
+                let parent_frame = unsafe { &mut **frame_ptr_ptr };
+                parent_frame.set_vararg(new_vararg_start, parent_vararg_count);
+            }
+        }
+
         // FAST PATH: No vararg (most common)
         if !is_vararg {
             // Ensure stack capacity
@@ -1014,6 +1042,36 @@ fn exec_call_lua_function(
 
     // Zero-copy: new frame base = R[A+1]
     let new_base = caller_base + a + 1;
+
+    // Check if this call would overwrite parent frame's vararg
+    // If the parent frame has vararg at vararg_start..vararg_start+vararg_count,
+    // and new_base + max_stack_size > vararg_start, we need to relocate vararg
+    let parent_frame = unsafe { &mut **frame_ptr_ptr };
+    let parent_vararg_start = parent_frame.get_vararg_start();
+    let parent_vararg_count = parent_frame.get_vararg_count();
+    
+    if parent_vararg_count > 0 {
+        let new_frame_end = new_base + max_stack_size;
+        if new_frame_end > parent_vararg_start {
+            // Vararg would be overwritten! Relocate it to after new frame's stack
+            let new_vararg_start = new_frame_end;
+            let required_capacity = new_vararg_start + parent_vararg_count;
+            vm.ensure_stack_capacity(required_capacity);
+            if vm.register_stack.len() < required_capacity {
+                vm.register_stack.resize(required_capacity, LuaValue::nil());
+            }
+            
+            // Copy vararg values to new location (copy forward, no overlap issue since new > old)
+            for i in 0..parent_vararg_count {
+                vm.register_stack[new_vararg_start + i] = vm.register_stack[parent_vararg_start + i];
+            }
+            
+            // Update parent frame's vararg position
+            // Need to get mutable reference again after potential reallocation
+            let parent_frame = unsafe { &mut **frame_ptr_ptr };
+            parent_frame.set_vararg(new_vararg_start, parent_vararg_count);
+        }
+    }
 
     // FAST PATH: No metamethod, no vararg (most common case)
     if !use_call_metamethod && !is_vararg {

@@ -2614,15 +2614,28 @@ fn compile_index_expr_to(
     let prefix_expr = expr
         .get_prefix_expr()
         .ok_or("Index expression missing table")?;
-    let table_reg = compile_expr(c, &prefix_expr)?;
 
-    // Lua optimization: reuse table_reg if:
-    // 1. No specific dest is requested
-    // 2. table_reg is a temporary register (>= nvarstack, meaning it's not a local variable)
-    // 3. table_reg is the last allocated register (freereg - 1)
-    // This generates GETFIELD A B C where A=B (overwrites the table with the result)
-    // CRITICAL: Never reuse a local variable's register as it would corrupt the variable!
+    // Lua 5.4 optimization: For chained indexing like a.b.c, we want to reuse registers
+    // When dest is specified and prefix is not a local variable, compile prefix to dest
+    // This way: a.b.c with dest=R2 becomes:
+    //   GETFIELD R2 R(a) "b"   ; a.b -> R2
+    //   GETFIELD R2 R2 "c"     ; R2.c -> R2
     let nvarstack = nvarstack(c);
+
+    // Check if prefix is a simple name (local/upvalue) that we shouldn't overwrite
+    let prefix_is_var = matches!(&prefix_expr, LuaExpr::NameExpr(_));
+
+    // Compile prefix with dest optimization for chained indexing
+    let table_reg = if dest.is_some() && !prefix_is_var {
+        // For chained indexing, compile intermediate result to dest
+        compile_expr_to(c, &prefix_expr, dest)?
+    } else {
+        compile_expr(c, &prefix_expr)?
+    };
+
+    // Determine result register
+    // If we compiled prefix to dest, result should also be dest
+    // Otherwise use the standard reuse-temp-register optimization
     let can_reuse_table = table_reg >= nvarstack && table_reg + 1 == c.freereg;
     let result_reg = dest.unwrap_or_else(|| {
         if can_reuse_table {

@@ -148,8 +148,13 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 // FORPREP uses unsigned Bx (forward jump distance to skip loop)
                 format!("FORPREP {} {}", a, bx)
             }
-            OpCode::TForPrep => format!("TFORPREP {} {}", a, sbx),
-            OpCode::TForLoop => format!("TFORLOOP {} {}", a, c),
+            OpCode::TForPrep => format!("TFORPREP {} {}", a, bx),
+            OpCode::TForLoop => format!("TFORLOOP {} {}", a, bx),
+            OpCode::TForCall => {
+                // TFORCALL A C: R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2])
+                // Lua 5.4 displays it as "TFORCALL A C" (no B parameter shown)
+                format!("TFORCALL {} {}", a, c)
+            }
             OpCode::MmBin => {
                 // MMBIN only shows 3 parameters (a, b, c) - k flag is not displayed
                 format!("MMBIN {} {} {}", a, b, c)

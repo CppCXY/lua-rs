@@ -7,7 +7,6 @@ use super::expr::{
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
 use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr_to};
-use crate::lua_value::LuaValue;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
     BinaryOperator, LuaAssignStat, LuaAstNode, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr,
@@ -864,6 +863,8 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
                 c,
                 Instruction::encode_abc(OpCode::Test, cond_reg, 0, test_c),
             );
+            // Reset freereg after condition - temp registers are no longer needed
+            reset_freereg(c);
 
             if invert {
                 // Same inverted optimization logic for Test instruction
@@ -1136,14 +1137,25 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     Ok(())
 }
 
-/// Compile generic for loop
+/// Compile generic for loop using TFORPREP/TFORCALL/TFORLOOP instructions
+/// 
+/// Lua 5.4 for-in register layout:
+/// R[A]   = iter_func (f)
+/// R[A+1] = state (s)
+/// R[A+2] = control variable (var, updated by TFORLOOP)
+/// R[A+3] = to-be-closed variable (copy of state, for cleanup)
+/// R[A+4] = first loop variable (var1)
+/// R[A+5] = second loop variable (var2)
+/// ...
+///
+/// Instruction sequence:
+/// TFORPREP A Bx   -> sets up R[A+3] = R[A+1], jumps forward to TFORCALL
+/// (loop body)
+/// TFORCALL A C    -> R[A+4], ..., R[A+3+C] := R[A](R[A+1], R[A+2])
+/// TFORLOOP A Bx   -> if R[A+4] ~= nil then { R[A+2]=R[A+4]; pc -= Bx }
 fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<(), String> {
     use super::expr::compile_call_expr_with_returns;
     use emmylua_parser::LuaExpr;
-
-    // Structure: for <var-list> in <expr-list> do <block> end
-    // Full iterator protocol: for var1, var2, ... in iter_func, state, init_val do ... end
-    // Also supports: for var1, var2 in pairs(t) do ... end
 
     // Get loop variable names
     let var_names = stat
@@ -1155,147 +1167,131 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
         return Err("for-in loop requires at least one variable".to_string());
     }
 
-    // Get iterator expressions (typically: iterator_func, state, initial_value)
+    // Get iterator expressions
     let iter_exprs = stat.get_expr_list().collect::<Vec<_>>();
     if iter_exprs.is_empty() {
         return Err("for-in loop requires iterator expression".to_string());
     }
 
-    // Check if we have a single call expression (like pairs(t) or ipairs(t))
-    // which returns multiple values
-    let (iter_func_reg, state_reg, control_var_reg) = if iter_exprs.len() == 1 {
+    // FIRST: Compile iterator expressions BEFORE allocating the for-in block
+    // This prevents the call results from overlapping with loop variables
+    let base = c.freereg;
+    
+    // Compile iterator expressions to get (iter_func, state, control_var, to-be-closed) at base
+    // Lua 5.4 for-in needs 4 control slots: iterator, state, control, closing value
+    if iter_exprs.len() == 1 {
         if let LuaExpr::CallExpr(call_expr) = &iter_exprs[0] {
-            // Single call expression - expect it to return (iter_func, state, control_var)
-            let base_reg = compile_call_expr_with_returns(c, call_expr, 3)?;
-            (base_reg, base_reg + 1, base_reg + 2)
+            // Single call expression - returns (iter_func, state, control_var, closing)
+            // Compile directly to base register, expecting 4 return values
+            let result_reg = compile_call_expr_with_returns(c, call_expr, 4)?;
+            // Move results to base if not already there
+            if result_reg != base {
+                emit_move(c, base, result_reg);
+                emit_move(c, base + 1, result_reg + 1);
+                emit_move(c, base + 2, result_reg + 2);
+                emit_move(c, base + 3, result_reg + 3);
+            }
         } else {
-            // Single non-call expression - not valid for for-in
-            return Err("for-in loop requires iterator function".to_string());
+            // Single non-call expression - use as iterator function, state and control are nil
+            let func_reg = compile_expr(c, &iter_exprs[0])?;
+            emit_move(c, base, func_reg);
+            emit_load_nil(c, base + 1);
+            emit_load_nil(c, base + 2);
+            emit_load_nil(c, base + 3);
         }
     } else {
-        // Multiple expressions: iter_func, state, control_var
-        let mut iter_regs = Vec::new();
-        for expr in &iter_exprs {
-            iter_regs.push(compile_expr(c, expr)?);
+        // Multiple expressions: iter_func, state, control_var, closing_value
+        for (i, expr) in iter_exprs.iter().enumerate().take(4) {
+            let reg = compile_expr(c, expr)?;
+            if reg != base + i as u32 {
+                emit_move(c, base + i as u32, reg);
+            }
         }
+        // Fill missing with nil (up to 4 control slots)
+        for i in iter_exprs.len()..4 {
+            emit_load_nil(c, base + i as u32);
+        }
+    }
 
-        let iter_func_reg = if !iter_regs.is_empty() {
-            iter_regs[0]
-        } else {
-            return Err("for-in loop requires iterator function".to_string());
-        };
-
-        let state_reg = if iter_regs.len() > 1 {
-            iter_regs[1]
-        } else {
-            let reg = alloc_register(c);
-            emit_load_nil(c, reg);
-            reg
-        };
-
-        let control_var_reg = if iter_regs.len() > 2 {
-            iter_regs[2]
-        } else {
-            let reg = alloc_register(c);
-            emit_load_nil(c, reg);
-            reg
-        };
-
-        (iter_func_reg, state_reg, control_var_reg)
-    };
+    // NOW set freereg to allocate the control block properly
+    // The first 3 registers (iter_func, state, control) are already at base
+    // We need to mark them as used and allocate the to-be-closed slot
+    c.freereg = base + 4; // base + 3 slots already used + 1 for to-be-closed
 
     // Begin scope for loop variables
     begin_scope(c);
 
-    // CRITICAL FIX: Register the iterator's hidden variables as internal locals
-    // This prevents the loop body from overwriting them with temporary registers.
-    // In Lua 5.4, for-in has 4 hidden variables: iter_func, state, control_var, and closing value
-    // We add them with special names that can't conflict with user variables.
-    add_local(c, "(for iterator)".to_string(), iter_func_reg);
-    add_local(c, "(for state)".to_string(), state_reg);
-    add_local(c, "(for control)".to_string(), control_var_reg);
+    // Register the iterator's hidden variables as internal locals
+    add_local(c, "(for state)".to_string(), base);
+    add_local(c, "(for state)".to_string(), base + 1);
+    add_local(c, "(for state)".to_string(), base + 2);
+    add_local(c, "(for state)".to_string(), base + 3);
 
-    // Ensure freereg is past the iterator registers
-    if c.freereg <= control_var_reg {
-        c.freereg = control_var_reg + 1;
-    }
-
-    // Allocate registers for loop variables
-    let mut var_regs = Vec::new();
+    // Allocate registers for loop variables (starting at base+4)
     for var_name in &var_names {
         let reg = alloc_register(c);
         add_local(c, var_name.clone(), reg);
-        var_regs.push(reg);
     }
 
-    // Begin loop
+    // Number of loop variables (C parameter for TFORCALL)
+    let num_vars = var_names.len();
+
+    // Emit TFORPREP: creates to-be-closed and jumps forward to TFORCALL
+    let tforprep_pc = c.chunk.code.len();
+    emit(c, Instruction::encode_abx(OpCode::TForPrep, base, 0)); // Will patch later
+
     begin_loop(c);
 
-    // Mark loop start
-    let loop_start = c.chunk.code.len();
-
-    // Call iterator function: var1, var2, ... = iter_func(state, control_var)
-    // Setup call: place function in a register, followed by arguments
-    let call_base = alloc_register(c);
-    emit_move(c, call_base, iter_func_reg);
-
-    let arg1 = alloc_register(c);
-    emit_move(c, arg1, state_reg);
-
-    let arg2 = alloc_register(c);
-    emit_move(c, arg2, control_var_reg);
-
-    // Call with 2 arguments, expect as many return values as we have loop variables
-    // OpCode::Call: A = func reg, B = num args + 1, C = num returns + 1
-    let num_returns = var_names.len();
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::Call, call_base, 3, (num_returns + 1) as u32),
-    );
-
-    // Move return values to loop variable registers
-    for i in 0..var_names.len() {
-        if i < var_regs.len() {
-            emit_move(c, var_regs[i], call_base + i as u32);
-        }
-    }
-
-    // Update control_var for next iteration (use first return value, which is the new index)
-    if !var_regs.is_empty() {
-        emit_move(c, control_var_reg, var_regs[0]);
-    }
-
-    // Check if first return value is nil (end of iteration)
-    let nil_const = add_constant(c, LuaValue::nil());
-
-    // Use EQK to compare with constant nil (k=1: skip if NOT equal)
-    // When i==nil, is_equal=TRUE, TRUE!=1 is FALSE, don't skip, execute JMP (exit)
-    // When i!=nil, is_equal=FALSE, FALSE!=1 is TRUE, skip JMP (continue loop)
-    emit(
-        c,
-        Instruction::create_abck(OpCode::EqK, var_regs[0], nil_const, 0, true),
-    );
-
-    // If equal (i.e., first value is nil), exit loop
-    let end_jump = emit_jump(c, OpCode::Jmp);
+    // Loop body starts here
+    let loop_body_start = c.chunk.code.len();
 
     // Compile loop body
     if let Some(body) = stat.get_block() {
         compile_block(c, &body)?;
     }
 
-    // Jump back to loop start
-    let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
-    emit(c, Instruction::create_sj(OpCode::Jmp, -jump_offset));
+    // Ensure max_stack_size is large enough to protect vararg area
+    // When a function call happens inside the loop, the called function may use
+    // registers beyond max_stack_size. If vararg is stored at max_stack_size,
+    // it can be overwritten. Add extra space to prevent this.
+    // This is a workaround - the proper fix would be in VARARGPREP to use
+    // a larger offset or track the maximum call depth.
+    let safe_stack_size = c.freereg as usize + 4; // Add 4 extra slots for safety
+    if safe_stack_size > c.chunk.max_stack_size {
+        c.chunk.max_stack_size = safe_stack_size;
+    }
 
-    // Patch end jump
-    patch_jump(c, end_jump);
+    // TFORCALL comes after the loop body
+    let tforcall_pc = c.chunk.code.len();
+    // TFORCALL A C: R[A+4], ..., R[A+3+C] := R[A](R[A+1], R[A+2])
+    emit(
+        c,
+        Instruction::encode_abc(OpCode::TForCall, base, 0, num_vars as u32),
+    );
 
-    // End loop (patches all break statements)
+    // TFORLOOP: if R[A+4] ~= nil then { R[A+2]=R[A+4]; pc -= Bx }
+    let tforloop_pc = c.chunk.code.len();
+    // Jump back to loop body start
+    // When TFORLOOP executes, PC is at tforloop_pc. After execution, PC increments.
+    // If continuing: PC = PC - Bx (before increment), then PC++.
+    // So we need: (tforloop_pc - Bx + 1) = loop_body_start
+    // Bx = tforloop_pc + 1 - loop_body_start
+    let tforloop_jump = tforloop_pc + 1 - loop_body_start;
+    emit(
+        c,
+        Instruction::encode_abx(OpCode::TForLoop, base, tforloop_jump as u32),
+    );
+
+    // Patch TFORPREP to jump to TFORCALL
+    // TFORPREP jumps forward by Bx
+    let tforprep_jump = tforcall_pc - tforprep_pc - 1;
+    c.chunk.code[tforprep_pc] = Instruction::encode_abx(OpCode::TForPrep, base, tforprep_jump as u32);
+
     end_loop(c);
-
-    // End scope
     end_scope(c);
+
+    // Free the loop control registers
+    c.freereg = base;
 
     Ok(())
 }

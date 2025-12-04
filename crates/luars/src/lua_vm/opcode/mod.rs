@@ -171,14 +171,23 @@ impl OpCode {
     }
 
     /// Get the instruction format mode for this opcode
+    /// Based on Lua 5.4 lopcodes.c luaP_opmodes table
     pub fn get_mode(self) -> OpMode {
         use OpCode::*;
         match self {
-            LoadI | LoadF | LoadK | LoadKX | Jmp | ForLoop | ForPrep | TForPrep | TForCall
-            | TForLoop | Closure => OpMode::IABx,
+            // iAsBx format (signed Bx)
+            LoadI | LoadF => OpMode::IAsBx,
 
+            // iABx format (unsigned Bx)
+            LoadK | LoadKX | ForLoop | ForPrep | TForPrep | TForLoop | Closure => OpMode::IABx,
+
+            // isJ format (signed jump)
+            Jmp => OpMode::IsJ,
+
+            // iAx format
             ExtraArg => OpMode::IAx,
 
+            // iABC format (everything else, including TFORCALL)
             _ => OpMode::IABC,
         }
     }
@@ -483,9 +492,12 @@ mod tests {
     fn test_opcode_mode() {
         assert_eq!(OpCode::Move.get_mode(), OpMode::IABC);
         assert_eq!(OpCode::LoadK.get_mode(), OpMode::IABx);
-        assert_eq!(OpCode::Jmp.get_mode(), OpMode::IABx);
+        assert_eq!(OpCode::Jmp.get_mode(), OpMode::IsJ);  // JMP uses sJ format (signed jump)
         assert_eq!(OpCode::ExtraArg.get_mode(), OpMode::IAx);
         assert_eq!(OpCode::Add.get_mode(), OpMode::IABC);
+        assert_eq!(OpCode::TForCall.get_mode(), OpMode::IABC);  // TFORCALL uses ABC format
+        assert_eq!(OpCode::TForLoop.get_mode(), OpMode::IABx);  // TFORLOOP uses ABx format
+        assert_eq!(OpCode::LoadI.get_mode(), OpMode::IAsBx);  // LOADI uses signed sBx
     }
 
     #[test]
