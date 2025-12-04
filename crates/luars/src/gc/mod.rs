@@ -170,7 +170,11 @@ pub struct GC {
     // GC state
     state: GcState,
     current_white: u8, // 0 or 1, flips each cycle
-
+    
+    // Incremental sweep state
+    sweep_index: usize,        // Current position in sweep phase
+    propagate_work: usize,     // Work done in propagate phase
+    
     // GC parameters
     gc_pause: usize,     // Pause parameter (default 200 = 200%)
     gc_stepmul: usize,   // Step multiplier (default 100)
@@ -209,6 +213,8 @@ impl GC {
             total_bytes: 0,
             state: GcState::Pause,
             current_white: 0,
+            sweep_index: 0,
+            propagate_work: 0,
             gc_pause: 200,    // Like Lua: 200 = wait until memory doubles
             gc_stepmul: 100,  // Step multiplier
             check_counter: 0,
@@ -274,14 +280,331 @@ impl GC {
     }
 
     /// Perform GC step - like Lua's luaC_step
+    /// This does incremental work instead of full collection
     pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         // Like Lua: run GC when debt > 0
         if self.gc_debt <= 0 {
             return;
         }
-
-        // Perform collection
-        self.collect(roots, pool);
+        
+        // Calculate work budget for this step
+        // Like Lua's gettotalbytes(g) / WORK2MEM
+        const WORK_PER_STEP: usize = 4096; // Do 4KB worth of work per step
+        let mut work = 0;
+        
+        // State machine for incremental GC
+        loop {
+            match self.state {
+                GcState::Pause => {
+                    // Start new cycle: mark roots and transition to propagate
+                    self.start_cycle(roots, pool);
+                    self.state = GcState::Propagate;
+                    work += 100; // Small fixed cost
+                }
+                
+                GcState::Propagate => {
+                    // Incremental marking: process some gray objects
+                    let marked = self.propagate_step(pool, WORK_PER_STEP - work);
+                    work += marked;
+                    
+                    if self.gray.is_empty() && self.grayagain.is_empty() {
+                        // All marking done, go to atomic phase
+                        self.state = GcState::Atomic;
+                    }
+                }
+                
+                GcState::Atomic => {
+                    // Atomic phase - must finish marking (like Lua's atomic)
+                    // Process any grayagain objects
+                    while let Some(gc_id) = self.grayagain.pop() {
+                        self.mark_one(gc_id, pool);
+                    }
+                    // Start sweep
+                    self.sweep_index = 0;
+                    self.state = GcState::Sweep;
+                    work += 50;
+                }
+                
+                GcState::Sweep => {
+                    // Incremental sweeping
+                    let swept = self.sweep_step(pool, WORK_PER_STEP - work);
+                    work += swept;
+                    
+                    if self.sweep_index >= self.allgc.len() {
+                        // Sweep complete, finish cycle
+                        self.finish_cycle();
+                        self.state = GcState::Pause;
+                        break;
+                    }
+                }
+            }
+            
+            // Check if we've done enough work for this step
+            if work >= WORK_PER_STEP {
+                break;
+            }
+        }
+        
+        // Reduce debt by work done (convert work to "bytes paid off")
+        self.gc_debt -= (work as isize) * 2;
+    }
+    
+    /// Start a new GC cycle - mark roots and build gray list
+    fn start_cycle(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+        self.stats.collection_count += 1;
+        self.gray.clear();
+        self.grayagain.clear();
+        self.propagate_work = 0;
+        
+        // Make all tracked objects white
+        for &gc_id in &self.allgc {
+            self.make_white(gc_id, pool);
+        }
+        
+        // Mark roots and add to gray list
+        for value in roots {
+            self.mark_value(value, pool);
+        }
+    }
+    
+    /// Make an object white (for start of cycle)
+    #[inline]
+    fn make_white(&self, gc_id: GcId, pool: &mut ObjectPool) {
+        match gc_id.gc_type() {
+            GcType::Table => {
+                if let Some(t) = pool.tables.get_mut(gc_id.index()) {
+                    if !t.header.is_fixed() {
+                        t.header.make_white(self.current_white);
+                    }
+                }
+            }
+            GcType::Function => {
+                if let Some(f) = pool.functions.get_mut(gc_id.index()) {
+                    if !f.header.is_fixed() {
+                        f.header.make_white(self.current_white);
+                    }
+                }
+            }
+            GcType::Upvalue => {
+                if let Some(u) = pool.upvalues.get_mut(gc_id.index()) {
+                    if !u.header.is_fixed() {
+                        u.header.make_white(self.current_white);
+                    }
+                }
+            }
+            GcType::Thread => {
+                if let Some(t) = pool.threads.get_mut(gc_id.index()) {
+                    if !t.header.is_fixed() {
+                        t.header.make_white(self.current_white);
+                    }
+                }
+            }
+            GcType::String => {
+                if let Some(s) = pool.strings.get_mut(gc_id.index()) {
+                    if !s.header.is_fixed() {
+                        s.header.make_white(self.current_white);
+                    }
+                }
+            }
+            GcType::Userdata => {}
+        }
+    }
+    
+    /// Mark a value and add to gray list if needed
+    fn mark_value(&mut self, value: &LuaValue, pool: &mut ObjectPool) {
+        match value.kind() {
+            crate::lua_value::LuaValueKind::Table => {
+                if let Some(id) = value.as_table_id() {
+                    if let Some(t) = pool.tables.get_mut(id.0) {
+                        if t.header.is_white() {
+                            t.header.make_gray();
+                            self.gray.push(GcId::from_table(id));
+                        }
+                    }
+                }
+            }
+            crate::lua_value::LuaValueKind::Function => {
+                if let Some(id) = value.as_function_id() {
+                    if let Some(f) = pool.functions.get_mut(id.0) {
+                        if f.header.is_white() {
+                            f.header.make_gray();
+                            self.gray.push(GcId::from_function(id));
+                        }
+                    }
+                }
+            }
+            crate::lua_value::LuaValueKind::Thread => {
+                if let Some(id) = value.as_thread_id() {
+                    if let Some(t) = pool.threads.get_mut(id.0) {
+                        if t.header.is_white() {
+                            t.header.make_gray();
+                            self.gray.push(GcId::from_thread(id));
+                        }
+                    }
+                }
+            }
+            crate::lua_value::LuaValueKind::String => {
+                if let Some(id) = value.as_string_id() {
+                    if let Some(s) = pool.strings.get_mut(id.0) {
+                        // Strings are leaves - mark black directly
+                        s.header.make_black();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    /// Do one step of propagation - process some gray objects
+    fn propagate_step(&mut self, pool: &mut ObjectPool, max_work: usize) -> usize {
+        let mut work = 0;
+        
+        while work < max_work {
+            if let Some(gc_id) = self.gray.pop() {
+                work += self.mark_one(gc_id, pool);
+            } else {
+                break;
+            }
+        }
+        
+        work
+    }
+    
+    /// Mark one gray object and its references
+    fn mark_one(&mut self, gc_id: GcId, pool: &mut ObjectPool) -> usize {
+        let mut work = 1;
+        
+        match gc_id.gc_type() {
+            GcType::Table => {
+                if let Some(table) = pool.tables.get_mut(gc_id.index()) {
+                    if table.header.is_gray() {
+                        table.header.make_black();
+                        work += table.data.len();
+                        
+                        // Collect references to mark
+                        let refs: Vec<LuaValue> = table.data.iter_all()
+                            .into_iter()
+                            .flat_map(|(k, v)| [k, v])
+                            .collect();
+                        let mt = table.data.get_metatable();
+                        
+                        // Mark references
+                        for v in refs {
+                            self.mark_value(&v, pool);
+                        }
+                        if let Some(mt) = mt {
+                            self.mark_value(&mt, pool);
+                        }
+                    }
+                }
+            }
+            GcType::Function => {
+                if let Some(func) = pool.functions.get(gc_id.index()) {
+                    let upvalue_ids = func.upvalues.clone();
+                    let constants = func.chunk.constants.clone();
+                    
+                    if let Some(f) = pool.functions.get_mut(gc_id.index()) {
+                        if f.header.is_gray() {
+                            f.header.make_black();
+                            work += upvalue_ids.len() + constants.len();
+                        }
+                    }
+                    
+                    // Mark upvalues
+                    for upval_id in upvalue_ids {
+                        if let Some(upval) = pool.upvalues.get_mut(upval_id.0) {
+                            if upval.header.is_white() {
+                                upval.header.make_gray();
+                                self.gray.push(GcId::from_upvalue(upval_id));
+                            }
+                        }
+                    }
+                    
+                    // Mark constants
+                    for c in constants {
+                        self.mark_value(&c, pool);
+                    }
+                }
+            }
+            GcType::Upvalue => {
+                if let Some(upval) = pool.upvalues.get_mut(gc_id.index()) {
+                    if upval.header.is_gray() {
+                        upval.header.make_black();
+                        if let UpvalueState::Closed(v) = upval.state {
+                            self.mark_value(&v, pool);
+                        }
+                    }
+                }
+            }
+            GcType::Thread => {
+                if let Some(thread) = pool.threads.get(gc_id.index()) {
+                    let stack = thread.data.register_stack.clone();
+                    
+                    if let Some(t) = pool.threads.get_mut(gc_id.index()) {
+                        if t.header.is_gray() {
+                            t.header.make_black();
+                            work += stack.len();
+                        }
+                    }
+                    
+                    for v in stack {
+                        self.mark_value(&v, pool);
+                    }
+                }
+            }
+            GcType::String => {
+                // Strings are leaves, just make black
+                if let Some(s) = pool.strings.get_mut(gc_id.index()) {
+                    s.header.make_black();
+                }
+            }
+            GcType::Userdata => {}
+        }
+        
+        work
+    }
+    
+    /// Do one step of sweeping
+    fn sweep_step(&mut self, pool: &mut ObjectPool, max_work: usize) -> usize {
+        let mut work = 0;
+        let mut write_idx = self.sweep_index;
+        let len = self.allgc.len();
+        
+        while self.sweep_index < len && work < max_work {
+            let gc_id = self.allgc[self.sweep_index];
+            let (is_marked, is_fixed) = self.get_object_state(gc_id, pool);
+            
+            if is_marked || is_fixed {
+                // Object survives
+                self.allgc[write_idx] = gc_id;
+                write_idx += 1;
+            } else {
+                // Object is dead - free it
+                self.free_object(gc_id, pool);
+                self.stats.objects_collected += 1;
+            }
+            
+            self.sweep_index += 1;
+            work += 1;
+        }
+        
+        // If sweep is complete, truncate allgc
+        if self.sweep_index >= len {
+            self.allgc.truncate(write_idx);
+        }
+        
+        work
+    }
+    
+    /// Finish the GC cycle
+    fn finish_cycle(&mut self) {
+        // Flip white bit for next cycle
+        self.current_white ^= 1;
+        
+        // Set debt based on memory and pause factor
+        let estimate = self.total_bytes;
+        let threshold = (estimate as isize * self.gc_pause as isize) / 100;
+        self.gc_debt = self.total_bytes as isize - threshold;
     }
 
     /// Main collection - mark and sweep using allgc list
@@ -317,36 +640,36 @@ impl GC {
             match gc_id.gc_type() {
                 GcType::Table => {
                     if let Some(t) = pool.tables.get_mut(gc_id.index()) {
-                        if !t.header.fixed {
-                            t.header.marked = false;
+                        if !t.header.is_fixed() {
+                            t.header.make_white(0);
                         }
                     }
                 }
                 GcType::Function => {
                     if let Some(f) = pool.functions.get_mut(gc_id.index()) {
-                        if !f.header.fixed {
-                            f.header.marked = false;
+                        if !f.header.is_fixed() {
+                            f.header.make_white(0);
                         }
                     }
                 }
                 GcType::Upvalue => {
                     if let Some(u) = pool.upvalues.get_mut(gc_id.index()) {
-                        if !u.header.fixed {
-                            u.header.marked = false;
+                        if !u.header.is_fixed() {
+                            u.header.make_white(0);
                         }
                     }
                 }
                 GcType::Thread => {
                     if let Some(t) = pool.threads.get_mut(gc_id.index()) {
-                        if !t.header.fixed {
-                            t.header.marked = false;
+                        if !t.header.is_fixed() {
+                            t.header.make_white(0);
                         }
                     }
                 }
                 GcType::String => {
                     if let Some(s) = pool.strings.get_mut(gc_id.index()) {
-                        if !s.header.fixed {
-                            s.header.marked = false;
+                        if !s.header.is_fixed() {
+                            s.header.make_white(0);
                         }
                     }
                 }
@@ -365,8 +688,8 @@ impl GC {
                 crate::lua_value::LuaValueKind::Table => {
                     if let Some(id) = value.as_table_id() {
                         if let Some(table) = pool.tables.get_mut(id.0) {
-                            if !table.header.marked {
-                                table.header.marked = true;
+                            if table.header.is_white() {
+                                table.header.make_black();
                                 // Add table contents to worklist
                                 for (k, v) in table.data.iter_all() {
                                     worklist.push(k);
@@ -384,7 +707,7 @@ impl GC {
                         // First, collect data we need without holding mutable borrow
                         let (should_mark, upvalue_ids, constants) = {
                             if let Some(func) = pool.functions.get(id.0) {
-                                if !func.header.marked {
+                                if func.header.is_white() {
                                     (true, func.upvalues.clone(), func.chunk.constants.clone())
                                 } else {
                                     (false, vec![], vec![])
@@ -397,14 +720,14 @@ impl GC {
                         if should_mark {
                             // Now we can safely mark
                             if let Some(func) = pool.functions.get_mut(id.0) {
-                                func.header.marked = true;
+                                func.header.make_black();
                             }
 
                             // Mark upvalues separately
                             for upval_id in upvalue_ids {
                                 if let Some(upval) = pool.upvalues.get_mut(upval_id.0) {
-                                    if !upval.header.marked {
-                                        upval.header.marked = true;
+                                    if upval.header.is_white() {
+                                        upval.header.make_black();
                                         if let UpvalueState::Closed(v) = &upval.state {
                                             worklist.push(*v);
                                         }
@@ -422,7 +745,7 @@ impl GC {
                         // Collect stack values first
                         let stack_values = {
                             if let Some(thread) = pool.threads.get(id.0) {
-                                if !thread.header.marked {
+                                if thread.header.is_white() {
                                     Some(thread.data.register_stack.clone())
                                 } else {
                                     None
@@ -434,7 +757,7 @@ impl GC {
 
                         if let Some(values) = stack_values {
                             if let Some(thread) = pool.threads.get_mut(id.0) {
-                                thread.header.marked = true;
+                                thread.header.make_black();
                             }
                             worklist.extend(values);
                         }
@@ -447,7 +770,7 @@ impl GC {
                     // Mark strings (they can be collected if not fixed)
                     if let Some(id) = value.as_string_id() {
                         if let Some(string) = pool.strings.get_mut(id.0) {
-                            string.header.marked = true;
+                            string.header.make_black();
                         }
                     }
                 }
@@ -484,41 +807,41 @@ impl GC {
         collected
     }
 
-    /// Get marked and fixed state for an object
+    /// Get marked (not white) and fixed state for an object
     #[inline]
     fn get_object_state(&self, gc_id: GcId, pool: &ObjectPool) -> (bool, bool) {
         match gc_id.gc_type() {
             GcType::Table => {
                 if let Some(t) = pool.tables.get(gc_id.index()) {
-                    (t.header.marked, t.header.fixed)
+                    (!t.header.is_white(), t.header.is_fixed())
                 } else {
                     (false, false)
                 }
             }
             GcType::Function => {
                 if let Some(f) = pool.functions.get(gc_id.index()) {
-                    (f.header.marked, f.header.fixed)
+                    (!f.header.is_white(), f.header.is_fixed())
                 } else {
                     (false, false)
                 }
             }
             GcType::Upvalue => {
                 if let Some(u) = pool.upvalues.get(gc_id.index()) {
-                    (u.header.marked, u.header.fixed)
+                    (!u.header.is_white(), u.header.is_fixed())
                 } else {
                     (false, false)
                 }
             }
             GcType::Thread => {
                 if let Some(t) = pool.threads.get(gc_id.index()) {
-                    (t.header.marked, t.header.fixed)
+                    (!t.header.is_white(), t.header.is_fixed())
                 } else {
                     (false, false)
                 }
             }
             GcType::String => {
                 if let Some(s) = pool.strings.get(gc_id.index()) {
-                    (s.header.marked, s.header.fixed)
+                    (!s.header.is_white(), s.header.is_fixed())
                 } else {
                     (false, false)
                 }
