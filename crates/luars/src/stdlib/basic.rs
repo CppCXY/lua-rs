@@ -194,17 +194,26 @@ fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// select(index, ...) - Return subset of arguments
+/// OPTIMIZED: Avoid Vec allocation for common case
 fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let index_arg = require_arg(vm, 1, "select")?;
-    let args = get_args(vm);
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
+    
+    // Get index argument (at register 1)
+    let index_arg = if base_ptr + 1 < vm.register_stack.len() && 1 < top {
+        vm.register_stack[base_ptr + 1]
+    } else {
+        return Err(vm.error("bad argument #1 to 'select' (value expected)".to_string()));
+    };
 
-    // Handle "#" special case
+    // Handle "#" special case - return count of varargs
     if let Some(string_id) = index_arg.as_string_id() {
         if let Some(s) = vm.object_pool.get_string(string_id) {
             if s.as_str() == "#" {
-                return Ok(MultiValue::single(LuaValue::integer(
-                    (args.len() - 1) as i64,
-                )));
+                // Count of extra arguments (excluding index itself)
+                let count = top.saturating_sub(2); // top - 1 (index) - 1 (function)
+                return Ok(MultiValue::single(LuaValue::integer(count as i64)));
             }
         }
     }
@@ -217,18 +226,28 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("bad argument #1 to 'select' (index out of range)".to_string()));
     }
 
+    let arg_count = top.saturating_sub(1); // Exclude function register
+    
     let start = if index > 0 {
-        (index - 1) as usize
+        index as usize
     } else {
-        (args.len() as i64 + index) as usize
+        (arg_count as i64 + index) as usize
     };
 
-    if start >= args.len() - 1 {
+    if start >= arg_count {
         return Ok(MultiValue::empty());
     }
 
-    // Return args from start+1 onwards (skip the index argument itself)
-    let result: Vec<LuaValue> = args.iter().skip(start + 1).cloned().collect();
+    // Collect result directly from registers
+    let result_count = arg_count - start;
+    let mut result = Vec::with_capacity(result_count);
+    for i in 0..result_count {
+        let reg_idx = base_ptr + 1 + start + i;
+        if reg_idx < vm.register_stack.len() {
+            result.push(vm.register_stack[reg_idx]);
+        }
+    }
+    
     Ok(MultiValue::multiple(result))
 }
 

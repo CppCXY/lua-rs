@@ -37,6 +37,9 @@ pub struct LuaVM {
     // This is updated on every allocation and checked frequently
     pub(crate) gc_debt_local: isize,
 
+    // GC roots buffer - pre-allocated to avoid allocation during GC
+    gc_roots_buffer: Vec<LuaValue>,
+
     // Call stack - Pre-allocated Vec with fixed capacity
     // Using Vec<LuaCallFrame> directly (no Box indirection) for cache efficiency
     // Vec is pre-allocated to MAX_CALL_DEPTH and never reallocated
@@ -117,6 +120,7 @@ impl LuaVM {
             global_value: LuaValue::nil(),
             registry: LuaValue::nil(),    // Will be initialized below
             gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
+            gc_roots_buffer: Vec::with_capacity(512), // Pre-allocate roots buffer
             frames,
             frame_count: 0,
             register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
@@ -1772,10 +1776,10 @@ impl LuaVM {
     #[inline(always)]
     fn check_gc(&mut self) {
         // Fast path: check if gc_debt_local > threshold
-        // Lua uses incremental GC with GCSTEPSIZE = 8KB, but our GC is stop-the-world
-        // So we use a larger threshold to reduce GC frequency
-        // 256KB threshold = about 4000 small object allocations before GC
-        const GC_THRESHOLD: isize = 256 * 1024;
+        // Use a larger threshold to reduce GC frequency
+        // 1MB threshold = about 16000 small object allocations before GC
+        // The incremental GC will catch up during collection anyway
+        const GC_THRESHOLD: isize = 1024 * 1024;
         if self.gc_debt_local <= GC_THRESHOLD {
             return;
         }
@@ -1797,66 +1801,66 @@ impl LuaVM {
         // Sync local debt to GC
         self.gc.gc_debt = self.gc_debt_local;
 
-        // Collect roots: all reachable objects from VM state
-        let mut roots = Vec::new();
+        // Collect roots using pre-allocated buffer (avoid allocation)
+        self.gc_roots_buffer.clear();
 
         // 1. Global table
-        roots.push(self.global_value);
+        self.gc_roots_buffer.push(self.global_value);
 
         // 2. Registry table (persistent objects storage)
-        roots.push(self.registry);
+        self.gc_roots_buffer.push(self.registry);
 
         // 3. String metatable
         if let Some(mt) = &self.string_metatable {
-            roots.push(*mt);
+            self.gc_roots_buffer.push(*mt);
         }
 
-        // 3. ALL frame registers AND function values (not just current frame)
+        // 4. ALL frame registers AND function values (not just current frame)
         // This is critical - any register in any active frame must be kept alive
         // Also, the function being executed in each frame must be kept alive!
         for frame in &self.frames[..self.frame_count] {
             // Add the function value for this frame - this is CRITICAL!
-            roots.push(frame.as_function_value());
+            self.gc_roots_buffer.push(frame.as_function_value());
 
             let base_ptr = frame.base_ptr as usize;
             let top = frame.top as usize;
             for i in 0..top {
                 if base_ptr + i < self.register_stack.len() {
-                    roots.push(self.register_stack[base_ptr + i]);
+                    self.gc_roots_buffer.push(self.register_stack[base_ptr + i]);
                 }
             }
         }
 
-        // 4. All registers beyond the frames (temporary values)
+        // 5. All registers beyond the frames (temporary values)
         if self.frame_count > 0 {
             let last_frame = &self.frames[self.frame_count - 1];
             let last_frame_end = last_frame.base_ptr as usize + last_frame.top as usize;
             for i in last_frame_end..self.register_stack.len() {
-                roots.push(self.register_stack[i]);
+                self.gc_roots_buffer.push(self.register_stack[i]);
             }
         } else {
             // No frames? Collect all registers
             for reg in &self.register_stack {
-                roots.push(*reg);
+                self.gc_roots_buffer.push(*reg);
             }
         }
 
-        // 5. Return values
+        // 6. Return values
         for value in &self.return_values {
-            roots.push(*value);
+            self.gc_roots_buffer.push(*value);
         }
 
-        // 6. Open upvalues - these point to stack locations that must stay alive
+        // 7. Open upvalues - these point to stack locations that must stay alive
         for upval_id in &self.open_upvalues {
             if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
                 if let Some(val) = uv.get_closed_value() {
-                    roots.push(val);
+                    self.gc_roots_buffer.push(val);
                 }
             }
         }
 
         // Perform GC step with complete root set
-        self.gc.step(&roots, &mut self.object_pool);
+        self.gc.step(&self.gc_roots_buffer, &mut self.object_pool);
 
         // Sync debt back from GC (it may have been reset to negative after collection)
         self.gc_debt_local = self.gc.gc_debt;

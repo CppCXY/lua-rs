@@ -178,6 +178,9 @@ pub fn exec_vararg(
         )
     };
 
+    let dest_base = base_ptr + a;
+    let reg_ptr = vm.register_stack.as_mut_ptr();
+
     if c == 0 {
         // Variable number of results - copy all varargs
         // Update frame top to accommodate all varargs
@@ -186,24 +189,50 @@ pub fn exec_vararg(
             (*frame_ptr).top = (new_top.max(top)) as u32;
         }
 
-        for i in 0..vararg_count {
-            let value = if vararg_start + i < vm.register_stack.len() {
-                vm.register_stack[vararg_start + i]
-            } else {
-                LuaValue::nil()
-            };
-            vm.register_stack[base_ptr + a + i] = value;
+        // OPTIMIZED: Use ptr::copy for bulk transfer when possible
+        if vararg_count > 0 && vararg_start + vararg_count <= vm.register_stack.len() {
+            unsafe {
+                std::ptr::copy(
+                    reg_ptr.add(vararg_start),
+                    reg_ptr.add(dest_base),
+                    vararg_count,
+                );
+            }
+        } else {
+            // Fallback: copy with bounds checking
+            let nil_val = LuaValue::nil();
+            for i in 0..vararg_count {
+                let value = if vararg_start + i < vm.register_stack.len() {
+                    unsafe { *reg_ptr.add(vararg_start + i) }
+                } else {
+                    nil_val
+                };
+                unsafe { *reg_ptr.add(dest_base + i) = value; }
+            }
         }
     } else {
         // Fixed number of results (c-1 values)
         let count = c - 1;
-        for i in 0..count {
-            let value = if i < vararg_count && vararg_start + i < vm.register_stack.len() {
-                vm.register_stack[vararg_start + i]
-            } else {
-                LuaValue::nil()
-            };
-            vm.register_stack[base_ptr + a + i] = value;
+        let copy_count = count.min(vararg_count);
+        let nil_count = count.saturating_sub(vararg_count);
+        
+        // OPTIMIZED: Bulk copy available varargs
+        if copy_count > 0 && vararg_start + copy_count <= vm.register_stack.len() {
+            unsafe {
+                std::ptr::copy(
+                    reg_ptr.add(vararg_start),
+                    reg_ptr.add(dest_base),
+                    copy_count,
+                );
+            }
+        }
+        
+        // Fill remaining with nil
+        if nil_count > 0 {
+            let nil_val = LuaValue::nil();
+            for i in copy_count..count {
+                unsafe { *reg_ptr.add(dest_base + i) = nil_val; }
+            }
         }
     }
 
