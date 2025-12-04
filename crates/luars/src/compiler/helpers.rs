@@ -123,6 +123,25 @@ pub fn ensure_register(c: &mut Compiler, reg: u32) {
     }
 }
 
+/// Get a register for result: use dest if provided, otherwise allocate new
+/// This is the CORRECT way to handle dest parameter - always ensures max_stack_size is updated
+/// and freereg is protected so subsequent allocations don't overwrite dest
+#[inline]
+pub fn get_result_reg(c: &mut Compiler, dest: Option<u32>) -> u32 {
+    match dest {
+        Some(reg) => {
+            ensure_register(c, reg);
+            // CRITICAL: Also update freereg to protect this register from being overwritten
+            // by subsequent allocations within the same expression
+            if c.freereg <= reg {
+                c.freereg = reg + 1;
+            }
+            reg
+        }
+        None => alloc_register(c),
+    }
+}
+
 /// Free a register (only if >= nactvar)
 /// Lua equivalent: freereg(fs, reg)
 #[allow(dead_code)]

@@ -759,10 +759,7 @@ fn compile_literal_expr(
     expr: &LuaLiteralExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    let reg = dest.unwrap_or_else(|| alloc_register(c));
-
-    // Ensure max_stack_size can accommodate this register
-    ensure_register(c, reg);
+    let reg = get_result_reg(c, dest);
 
     let literal_token = expr
         .get_literal()
@@ -838,14 +835,14 @@ fn compile_name_expr_to(
 
     // Try to resolve as upvalue from parent scope chain
     if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
-        let reg = dest.unwrap_or_else(|| alloc_register(c));
+        let reg = get_result_reg(c, dest);
         let instr = Instruction::encode_abc(OpCode::GetUpval, reg, upvalue_index as u32, 0);
         c.chunk.code.push(instr);
         return Ok(reg);
     }
 
     // It's a global variable
-    let reg = dest.unwrap_or_else(|| alloc_register(c));
+    let reg = get_result_reg(c, dest);
     emit_get_global(c, &name, reg);
     Ok(reg)
 }
@@ -922,7 +919,7 @@ fn compile_binary_expr_to(
         // Check if left operand is a boolean literal
         if let LuaExpr::LiteralExpr(left_lit) = &left {
             if let Some(LuaLiteralToken::Bool(b)) = left_lit.get_literal() {
-                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                let result_reg = get_result_reg(c, dest);
 
                 if op_kind == BinaryOperator::OpAnd {
                     // true and X -> X, false and X -> false
@@ -996,7 +993,7 @@ fn compile_binary_expr_to(
             };
 
             if let Some(result) = result_opt {
-                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                let result_reg = get_result_reg(c, dest);
 
                 // Emit the folded constant as LOADI or LOADF
                 let result_int = result as i64;
@@ -1080,7 +1077,7 @@ fn compile_binary_expr_to(
             };
 
             if let Some(result) = result_opt {
-                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                let result_reg = get_result_reg(c, dest);
 
                 // Emit the folded constant as LOADI or LOADK
                 let result_int = result as i64;
@@ -1128,6 +1125,7 @@ fn compile_binary_expr_to(
                         BinaryOperator::OpAdd => {
                             // CRITICAL: Protect freereg if dest specified
                             if let Some(d) = dest {
+                                ensure_register(c, d);
                                 if c.freereg < d + 1 {
                                     c.freereg = d + 1;
                                 }
@@ -1164,6 +1162,7 @@ fn compile_binary_expr_to(
                         }
                         BinaryOperator::OpSub => {
                             if let Some(d) = dest {
+                                ensure_register(c, d);
                                 if c.freereg < d + 1 {
                                     c.freereg = d + 1;
                                 }
@@ -1392,6 +1391,7 @@ fn compile_binary_expr_to(
                         }
                         BinaryOperator::OpShr => {
                             if let Some(d) = dest {
+                                ensure_register(c, d);
                                 if c.freereg < d + 1 {
                                     c.freereg = d + 1;
                                 }
@@ -1427,6 +1427,7 @@ fn compile_binary_expr_to(
                         }
                         BinaryOperator::OpShl => {
                             if let Some(d) = dest {
+                                ensure_register(c, d);
                                 if c.freereg < d + 1 {
                                     c.freereg = d + 1;
                                 }
@@ -1484,7 +1485,7 @@ fn compile_binary_expr_to(
                                 let left_reg = compile_expr(c, &left)?;
                                 // Allocate a new register for the boolean result
                                 // (can't reuse left_reg because comparison needs the original value)
-                                let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                                let result_reg = get_result_reg(c, dest);
 
                                 // Use immediate comparison instruction with boolean result pattern
                                 return compile_comparison_imm_to_bool(
@@ -1535,12 +1536,13 @@ fn compile_binary_expr_to(
                     let const_idx = add_constant_dedup(c, const_val);
                     // CRITICAL: Protect freereg if dest specified
                     if let Some(d) = dest {
+                        ensure_register(c, d);
                         if c.freereg < d + 1 {
                             c.freereg = d + 1;
                         }
                     }
                     let left_reg = compile_expr(c, &left)?;
-                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    let result_reg = get_result_reg(c, dest);
                     emit(
                         c,
                         Instruction::encode_abc(OpCode::MulK, result_reg, left_reg, const_idx),
@@ -1561,12 +1563,13 @@ fn compile_binary_expr_to(
                     let const_idx = add_constant_dedup(c, const_val);
                     // CRITICAL: Protect freereg if dest specified
                     if let Some(d) = dest {
+                        ensure_register(c, d);
                         if c.freereg < d + 1 {
                             c.freereg = d + 1;
                         }
                     }
                     let left_reg = compile_expr(c, &left)?;
-                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    let result_reg = get_result_reg(c, dest);
                     emit(
                         c,
                         Instruction::encode_abc(OpCode::DivK, result_reg, left_reg, const_idx),
@@ -1587,12 +1590,13 @@ fn compile_binary_expr_to(
                     let const_idx = add_constant_dedup(c, const_val);
                     // CRITICAL: Protect freereg if dest specified
                     if let Some(d) = dest {
+                        ensure_register(c, d);
                         if c.freereg < d + 1 {
                             c.freereg = d + 1;
                         }
                     }
                     let left_reg = compile_expr(c, &left)?;
-                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    let result_reg = get_result_reg(c, dest);
                     emit(
                         c,
                         Instruction::encode_abc(OpCode::ModK, result_reg, left_reg, const_idx),
@@ -1613,12 +1617,13 @@ fn compile_binary_expr_to(
                     let const_idx = add_constant_dedup(c, const_val);
                     // CRITICAL: Protect freereg if dest specified
                     if let Some(d) = dest {
+                        ensure_register(c, d);
                         if c.freereg < d + 1 {
                             c.freereg = d + 1;
                         }
                     }
                     let left_reg = compile_expr(c, &left)?;
-                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    let result_reg = get_result_reg(c, dest);
                     emit(
                         c,
                         Instruction::encode_abc(OpCode::PowK, result_reg, left_reg, const_idx),
@@ -1640,12 +1645,13 @@ fn compile_binary_expr_to(
                     let const_idx = add_constant_dedup(c, const_val);
                     // CRITICAL: Protect freereg if dest specified
                     if let Some(d) = dest {
+                        ensure_register(c, d);
                         if c.freereg < d + 1 {
                             c.freereg = d + 1;
                         }
                     }
                     let left_reg = compile_expr(c, &left)?;
-                    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+                    let result_reg = get_result_reg(c, dest);
                     emit(
                         c,
                         Instruction::encode_abc(OpCode::IDivK, result_reg, left_reg, const_idx),
@@ -1673,6 +1679,7 @@ fn compile_binary_expr_to(
     // CRITICAL: If dest is specified, protect freereg BEFORE compiling operands
     // This prevents nested expressions from allocating temps that conflict with dest
     if let Some(d) = dest {
+        ensure_register(c, d); // Ensure max_stack_size is updated
         if c.freereg < d + 1 {
             c.freereg = d + 1;
         }
@@ -1688,7 +1695,7 @@ fn compile_binary_expr_to(
 
     let right_reg = compile_expr(c, &right)?;
     // Then allocate result register
-    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+    let result_reg = get_result_reg(c, dest);
 
     // Determine opcode and metamethod event (TM)
     let (opcode, mm_event_opt) = match op_kind {
@@ -1974,7 +1981,7 @@ fn compile_unary_expr_to(
     expr: &LuaUnaryExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    let result_reg = dest.unwrap_or_else(|| alloc_register(c));
+    let result_reg = get_result_reg(c, dest);
 
     // Get operator from text
     let op_token = expr.get_op_token().ok_or("error")?;
@@ -2153,7 +2160,7 @@ pub fn compile_call_expr_with_returns_and_dest(
             // Method call: obj:method(args) → SELF instruction
             // SELF A B C: R(A+1) = R(B); R(A) = R(B)[C]
             // A = function register, A+1 = self parameter
-            let func_reg = dest.unwrap_or_else(|| alloc_register(c));
+            let func_reg = get_result_reg(c, dest);
 
             // Ensure func_reg+1 is allocated for self parameter
             while c.freereg <= func_reg + 1 {
@@ -2728,7 +2735,7 @@ fn compile_table_expr_to(
     expr: &LuaTableExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    let reg = dest.unwrap_or_else(|| alloc_register(c));
+    let reg = get_result_reg(c, dest);
 
     // Get all fields
     let fields: Vec<_> = expr.get_fields().collect();

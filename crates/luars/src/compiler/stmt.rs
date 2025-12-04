@@ -716,13 +716,20 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     if last_is_multret && num_exprs > 0 {
         let last_expr = exprs.last().unwrap();
 
-        // First, compile all expressions except the last
+        // First, compile all expressions except the last directly to target registers
         for (i, expr) in exprs.iter().take(num_exprs - 1).enumerate() {
-            alloc_register(c);
             let target_reg = base_reg + i as u32;
-            let src_reg = compile_expr(c, expr)?;
+            
+            // Try to compile expression directly to target register
+            let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
+            
+            // If expression couldn't be placed in target, emit a MOVE
             if src_reg != target_reg {
                 emit_move(c, target_reg, src_reg);
+            }
+            
+            if target_reg >= c.freereg {
+                c.freereg = target_reg + 1;
             }
         }
 
@@ -758,13 +765,22 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     }
 
     // Normal return with fixed number of values
-    // Reserve registers and compile expressions
+    // Compile expressions directly to target registers when possible
     for i in 0..num_exprs {
-        alloc_register(c);
         let target_reg = base_reg + i as u32;
-        let src_reg = compile_expr(c, &exprs[i])?;
+        
+        // Try to compile expression directly to target register
+        // compile_expr_to will use get_result_reg which ensures max_stack_size is updated
+        let src_reg = compile_expr_to(c, &exprs[i], Some(target_reg))?;
+        
+        // If expression couldn't be placed in target, emit a MOVE
         if src_reg != target_reg {
             emit_move(c, target_reg, src_reg);
+        }
+        
+        // Update freereg to account for this register
+        if target_reg >= c.freereg {
+            c.freereg = target_reg + 1;
         }
     }
 

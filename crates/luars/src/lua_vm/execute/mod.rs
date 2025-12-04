@@ -504,28 +504,27 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Return Instructions (update state after frame change) ============
             OpCode::Return0 => {
-                // INLINED RETURN0 for maximum performance
-                // Fast path: Lua function returning to Lua function with no results expected
-
-                // Close upvalues before popping the frame (if any are open)
+                // OPTIMIZED RETURN0
+                // Close upvalues if any are open
                 if !vm.open_upvalues.is_empty() {
                     vm.close_upvalues_from(base_ptr);
                 }
 
                 if vm.frame_count > 1 {
+                    // Get result info BEFORE decrementing frame_count
+                    let result_reg = unsafe { (*frame_ptr).get_result_reg() };
+                    let num_results = unsafe { (*frame_ptr).get_num_results() };
                     let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+
+                    // Pop frame
                     vm.frame_count -= 1;
 
                     // Check if caller is Lua function
                     if unsafe { (*caller_ptr).is_lua() } {
-                        // Get result info
-                        let result_reg = unsafe { (*frame_ptr).get_result_reg() };
-                        let num_results = unsafe { (*frame_ptr).get_num_results() };
-
                         // Read caller's state
                         let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
 
-                        // Only fill nil if caller expects results
+                        // Only fill nil if caller expects results (rare case)
                         if num_results > 0 && num_results != usize::MAX {
                             unsafe {
                                 let reg_ptr = vm.register_stack.as_mut_ptr();
@@ -557,40 +556,39 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 return Err(LuaError::Exit);
             }
             OpCode::Return1 => {
-                // INLINED RETURN1 for maximum performance
-                // Fast path: Lua function returning to Lua function (most common)
-                let a = Instruction::get_a(instr) as usize;
-
-                // Close upvalues before popping the frame (if any are open)
+                // OPTIMIZED RETURN1
+                // Close upvalues if any are open
                 if !vm.open_upvalues.is_empty() {
                     vm.close_upvalues_from(base_ptr);
                 }
 
-                // Get return value FIRST (before frame manipulation)
+                let a = Instruction::get_a(instr) as usize;
+
+                // Get return value early
                 let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
 
-                // Check if we have a Lua caller
+                // Fast path: have Lua caller
                 if vm.frame_count > 1 {
+                    // Get caller info BEFORE decrementing frame_count
+                    let result_reg = unsafe { (*frame_ptr).get_result_reg() };
                     let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+
+                    // Pop frame
                     vm.frame_count -= 1;
 
-                    // Check if caller is Lua function
+                    // Check if caller is Lua function (most common)
                     if unsafe { (*caller_ptr).is_lua() } {
-                        let result_reg = unsafe { (*frame_ptr).get_result_reg() };
-
-                        // Update frame_ptr to caller
-                        frame_ptr = caller_ptr;
-
-                        // Read caller's state
+                        // Read caller's base
                         let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
 
-                        // Write return value to caller's register
+                        // Always write return value (caller may or may not use it)
                         unsafe {
                             *vm.register_stack
                                 .get_unchecked_mut(caller_base + result_reg) = return_value;
                         }
 
-                        // Update local state
+                        // Update frame_ptr and local state
+                        frame_ptr = caller_ptr;
                         unsafe {
                             pc = (*caller_ptr).pc as usize;
                             code_ptr = (*caller_ptr).code_ptr;
@@ -598,14 +596,14 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         }
                         continue 'mainloop;
                     } else {
-                        // C function caller - exit and return value
+                        // C function caller
                         vm.return_values.clear();
                         vm.return_values.push(return_value);
                         return Err(LuaError::Exit);
                     }
                 }
 
-                // No caller - exit VM
+                // No caller - exit VM with return value
                 vm.frame_count -= 1;
                 vm.return_values.clear();
                 vm.return_values.push(return_value);
