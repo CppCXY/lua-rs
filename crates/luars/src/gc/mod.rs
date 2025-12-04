@@ -202,14 +202,17 @@ impl GC {
             allgc: Vec::with_capacity(1024),
             gray: Vec::with_capacity(256),
             grayagain: Vec::with_capacity(64),
-            gc_debt: -(200 * 1024), // Start with 200KB credit
+            // Start with negative debt like Lua
+            // gc_debt < 0 means "credit" before next collection
+            // Lua uses -GCSTEPSIZE (8KB by default)
+            gc_debt: -(8 * 1024), // 8KB credit before first GC
             total_bytes: 0,
             state: GcState::Pause,
             current_white: 0,
-            gc_pause: 200,
-            gc_stepmul: 100,
+            gc_pause: 200,    // Like Lua: 200 = wait until memory doubles
+            gc_stepmul: 100,  // Step multiplier
             check_counter: 0,
-            check_interval: 1, // Run GC every check_gc_slow call
+            check_interval: 1, // Check every time (Lua doesn't use interval)
             stats: GCStats::default(),
         }
     }
@@ -270,20 +273,19 @@ impl GC {
         self.check_counter >= self.check_interval
     }
 
-    /// Perform GC step
+    /// Perform GC step - like Lua's luaC_step
     pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        // Run GC if debt is high OR if allgc has grown too large
-        // This prevents allgc from growing unbounded even if gc_debt is reset
-        let should_run = self.should_collect() || self.allgc.len() > 50000;
-        if !should_run {
+        // Like Lua: run GC when debt > 0
+        if self.gc_debt <= 0 {
             return;
         }
 
-        self.check_counter = 0;
+        // Perform collection
         self.collect(roots, pool);
     }
 
     /// Main collection - mark and sweep using allgc list
+    /// Like Lua's full GC cycle
     pub fn collect(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) -> usize {
         self.stats.collection_count += 1;
         self.stats.major_collections += 1;
@@ -297,9 +299,13 @@ impl GC {
         // Phase 3: Sweep (only traverse allgc, not entire pools!)
         let collected = self.sweep(pool);
 
-        // Update debt based on survivors
-        let alive_bytes = self.allgc.len() * 128; // Average size estimate
-        self.gc_debt = -((alive_bytes * self.gc_pause / 100) as isize);
+        // Like Lua's setpause: set debt based on memory and pause factor
+        // gc_pause = 200 means wait until memory doubles (200% of current)
+        // debt = current_memory - (estimate * pause / 100)
+        // Since estimate ≈ current_memory after GC, debt becomes negative
+        let estimate = self.total_bytes;
+        let threshold = (estimate as isize * self.gc_pause as isize) / 100;
+        self.gc_debt = self.total_bytes as isize - threshold;
 
         self.stats.objects_collected += collected;
         collected

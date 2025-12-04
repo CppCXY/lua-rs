@@ -62,7 +62,8 @@ pub fn exec_newtable(
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = table;
     }
 
-    // GC checkpoint disabled for testing
+    // GC checkpoint - Lua checks GC after NEWTABLE
+    vm.check_gc();
 }
 
 /// GETTABLE A B C

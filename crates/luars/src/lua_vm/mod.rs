@@ -1766,15 +1766,17 @@ impl LuaVM {
 
     /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
     /// This is called after allocating new objects (strings, tables, functions)
-    /// Uses GC debt mechanism: runs when debt > 0
+    /// Uses GC debt mechanism like Lua: runs when debt > threshold
     ///
     /// OPTIMIZATION: Fast path is inlined, slow path is separate function
     #[inline(always)]
     fn check_gc(&mut self) {
-        // Ultra-fast path: single integer comparison with local debt counter
-        // Only check if debt exceeds threshold (256KB)
-        // Lower threshold means more frequent GC but prevents memory bloat
-        if self.gc_debt_local <= 256 * 1024 {
+        // Fast path: check if gc_debt_local > threshold
+        // Lua uses incremental GC with GCSTEPSIZE = 8KB, but our GC is stop-the-world
+        // So we use a larger threshold to reduce GC frequency
+        // 256KB threshold = about 4000 small object allocations before GC
+        const GC_THRESHOLD: isize = 256 * 1024;
+        if self.gc_debt_local <= GC_THRESHOLD {
             return;
         }
         // Slow path: actual GC work
@@ -1794,12 +1796,6 @@ impl LuaVM {
     fn check_gc_slow(&mut self) {
         // Sync local debt to GC
         self.gc.gc_debt = self.gc_debt_local;
-
-        // Incremental GC: only collect every N checks to reduce overhead
-        self.gc.increment_check_counter();
-        if !self.gc.should_run_collection() {
-            return;
-        }
 
         // Collect roots: all reachable objects from VM state
         let mut roots = Vec::new();
