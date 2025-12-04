@@ -1510,11 +1510,7 @@ impl LuaVM {
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let id = self.object_pool.create_string(s);
-
-        // Track object in GC allgc list
-        self.gc.allgc.push(GcId::from_string(id));
         self.gc_debt_local += (32 + s.len()) as isize;
-
         LuaValue::string(id)
     }
 
@@ -1523,11 +1519,7 @@ impl LuaVM {
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let len = s.len();
         let id = self.object_pool.create_string_owned(s);
-
-        // Track object in GC allgc list
-        self.gc.allgc.push(GcId::from_string(id));
         self.gc_debt_local += (32 + len) as isize;
-
         LuaValue::string(id)
     }
 
@@ -1541,15 +1533,11 @@ impl LuaVM {
     }
 
     /// Create a new table in object pool
-    /// Tracks the object in GC's allgc list for efficient sweep
+    /// GC tracks objects via ObjectPool iteration, no allgc list needed
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
-
-        // Track object in GC allgc list
-        self.gc.allgc.push(GcId::from_table(id));
         self.gc_debt_local += 256;
-
         LuaValue::table(id)
     }
 
@@ -1651,11 +1639,7 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         let id = self.object_pool.create_function(chunk, upvalue_ids);
-
-        // Track object in GC allgc list
-        self.gc.allgc.push(GcId::from_function(id));
         self.gc_debt_local += 128;
-
         LuaValue::function(id)
     }
 
@@ -1663,7 +1647,6 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let id = self.object_pool.create_upvalue_open(stack_index);
-        self.gc.allgc.push(GcId::from_upvalue(id));
         self.gc_debt_local += 64;
         id
     }
@@ -1672,7 +1655,6 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let id = self.object_pool.create_upvalue_closed(value);
-        self.gc.allgc.push(GcId::from_upvalue(id));
         self.gc_debt_local += 64;
         id
     }

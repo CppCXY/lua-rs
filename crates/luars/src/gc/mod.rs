@@ -156,13 +156,9 @@ pub enum GcState {
 
 /// Main GC structure
 pub struct GC {
-    // Object tracking (like Lua's allgc list but using Vec)
-    pub(crate) allgc: Vec<GcId>,
-    
     // Gray list for incremental marking
     gray: Vec<GcId>,
     grayagain: Vec<GcId>,
-    
     // Lua 5.4 GC debt mechanism
     pub(crate) gc_debt: isize,
     pub(crate) total_bytes: usize,
@@ -203,7 +199,6 @@ pub struct GCStats {
 impl GC {
     pub fn new() -> Self {
         GC {
-            allgc: Vec::with_capacity(1024),
             gray: Vec::with_capacity(256),
             grayagain: Vec::with_capacity(64),
             // Start with negative debt like Lua
@@ -223,11 +218,9 @@ impl GC {
         }
     }
 
-    /// Register a new object for GC tracking
-    /// This is called when an object is allocated
+    /// Register a new object for GC tracking (no-op, pools are scanned directly)
     #[inline(always)]
-    pub fn track_object(&mut self, gc_id: GcId, size: usize) {
-        self.allgc.push(gc_id);
+    pub fn track_object(&mut self, _gc_id: GcId, size: usize) {
         self.total_bytes += size;
         self.gc_debt += size as isize;
     }
@@ -326,16 +319,11 @@ impl GC {
                 }
                 
                 GcState::Sweep => {
-                    // Incremental sweeping
+                    // Complete sweep in one step (pools are iterated directly)
                     let swept = self.sweep_step(pool, WORK_PER_STEP - work);
                     work += swept;
-                    
-                    if self.sweep_index >= self.allgc.len() {
-                        // Sweep complete, finish cycle
-                        self.finish_cycle();
-                        self.state = GcState::Pause;
-                        break;
-                    }
+                    // sweep_step handles state transition and finish_cycle
+                    break;
                 }
             }
             
@@ -356,9 +344,31 @@ impl GC {
         self.grayagain.clear();
         self.propagate_work = 0;
         
-        // Make all tracked objects white
-        for &gc_id in &self.allgc {
-            self.make_white(gc_id, pool);
+        // Make all objects white by iterating pools directly
+        for (_id, table) in pool.tables.iter_mut() {
+            if !table.header.is_fixed() {
+                table.header.make_white(self.current_white);
+            }
+        }
+        for (_id, func) in pool.functions.iter_mut() {
+            if !func.header.is_fixed() {
+                func.header.make_white(self.current_white);
+            }
+        }
+        for (_id, upval) in pool.upvalues.iter_mut() {
+            if !upval.header.is_fixed() {
+                upval.header.make_white(self.current_white);
+            }
+        }
+        for (_id, thread) in pool.threads.iter_mut() {
+            if !thread.header.is_fixed() {
+                thread.header.make_white(self.current_white);
+            }
+        }
+        for (_id, string) in pool.strings.iter_mut() {
+            if !string.header.is_fixed() {
+                string.header.make_white(self.current_white);
+            }
         }
         
         // Mark roots and add to gray list
@@ -564,36 +574,90 @@ impl GC {
         work
     }
     
-    /// Do one step of sweeping
-    fn sweep_step(&mut self, pool: &mut ObjectPool, max_work: usize) -> usize {
-        let mut work = 0;
-        let mut write_idx = self.sweep_index;
-        let len = self.allgc.len();
+    /// Do one step of sweeping - sweep all pools in one step
+    /// This is acceptable because sweep is much faster than marking
+    fn sweep_step(&mut self, pool: &mut ObjectPool, _max_work: usize) -> usize {
+        // Sweep all pools in one step (much faster than incremental)
+        let collected = self.sweep_pools(pool);
+        self.stats.objects_collected += collected;
         
-        while self.sweep_index < len && work < max_work {
-            let gc_id = self.allgc[self.sweep_index];
-            let (is_marked, is_fixed) = self.get_object_state(gc_id, pool);
-            
-            if is_marked || is_fixed {
-                // Object survives
-                self.allgc[write_idx] = gc_id;
-                write_idx += 1;
-            } else {
-                // Object is dead - free it
-                self.free_object(gc_id, pool);
-                self.stats.objects_collected += 1;
+        // Sweeping done - transition to finished
+        self.state = GcState::Pause;
+        self.finish_cycle();
+        
+        collected
+    }
+    
+    /// Sweep all pools directly
+    fn sweep_pools(&mut self, pool: &mut ObjectPool) -> usize {
+        let mut collected = 0;
+
+        // Sweep tables
+        let mut dead_tables: Vec<u32> = Vec::with_capacity(64);
+        for (id, table) in pool.tables.iter() {
+            if !table.header.is_fixed() && table.header.is_white() {
+                dead_tables.push(id);
             }
-            
-            self.sweep_index += 1;
-            work += 1;
         }
-        
-        // If sweep is complete, truncate allgc
-        if self.sweep_index >= len {
-            self.allgc.truncate(write_idx);
+        for id in dead_tables {
+            pool.tables.free(id);
+            self.record_deallocation(256);
+            collected += 1;
         }
-        
-        work
+
+        // Sweep functions
+        let mut dead_funcs: Vec<u32> = Vec::with_capacity(64);
+        for (id, func) in pool.functions.iter() {
+            if !func.header.is_fixed() && func.header.is_white() {
+                dead_funcs.push(id);
+            }
+        }
+        for id in dead_funcs {
+            pool.functions.free(id);
+            self.record_deallocation(128);
+            collected += 1;
+        }
+
+        // Sweep upvalues
+        let mut dead_upvals: Vec<u32> = Vec::with_capacity(64);
+        for (id, upval) in pool.upvalues.iter() {
+            if !upval.header.is_fixed() && upval.header.is_white() {
+                dead_upvals.push(id);
+            }
+        }
+        for id in dead_upvals {
+            pool.upvalues.free(id);
+            self.record_deallocation(64);
+            collected += 1;
+        }
+
+        // Sweep strings
+        let mut dead_strings: Vec<u32> = Vec::with_capacity(64);
+        for (id, string) in pool.strings.iter() {
+            if !string.header.is_fixed() && string.header.is_white() {
+                dead_strings.push(id);
+            }
+        }
+        for id in dead_strings {
+            pool.strings.free(id);
+            self.record_deallocation(64);
+            collected += 1;
+        }
+
+        // Sweep threads
+        let mut dead_threads: Vec<u32> = Vec::with_capacity(8);
+        for (id, thread) in pool.threads.iter() {
+            if !thread.header.is_fixed() && thread.header.is_white() {
+                dead_threads.push(id);
+            }
+        }
+        for id in dead_threads {
+            pool.threads.free(id);
+            self.record_deallocation(512);
+            collected += 1;
+        }
+
+        collected
     }
     
     /// Finish the GC cycle
@@ -634,46 +698,40 @@ impl GC {
         collected
     }
 
-    /// Clear marks only for tracked objects (much faster than iterating all pools)
+    /// Clear marks by iterating pools directly (no allgc needed)
     fn clear_marks(&self, pool: &mut ObjectPool) {
-        for &gc_id in &self.allgc {
-            match gc_id.gc_type() {
-                GcType::Table => {
-                    if let Some(t) = pool.tables.get_mut(gc_id.index()) {
-                        if !t.header.is_fixed() {
-                            t.header.make_white(0);
-                        }
-                    }
-                }
-                GcType::Function => {
-                    if let Some(f) = pool.functions.get_mut(gc_id.index()) {
-                        if !f.header.is_fixed() {
-                            f.header.make_white(0);
-                        }
-                    }
-                }
-                GcType::Upvalue => {
-                    if let Some(u) = pool.upvalues.get_mut(gc_id.index()) {
-                        if !u.header.is_fixed() {
-                            u.header.make_white(0);
-                        }
-                    }
-                }
-                GcType::Thread => {
-                    if let Some(t) = pool.threads.get_mut(gc_id.index()) {
-                        if !t.header.is_fixed() {
-                            t.header.make_white(0);
-                        }
-                    }
-                }
-                GcType::String => {
-                    if let Some(s) = pool.strings.get_mut(gc_id.index()) {
-                        if !s.header.is_fixed() {
-                            s.header.make_white(0);
-                        }
-                    }
-                }
-                GcType::Userdata => {} // Rc handles this
+        // Clear tables
+        for (_id, table) in pool.tables.iter_mut() {
+            if !table.header.is_fixed() {
+                table.header.make_white(0);
+            }
+        }
+
+        // Clear functions
+        for (_id, func) in pool.functions.iter_mut() {
+            if !func.header.is_fixed() {
+                func.header.make_white(0);
+            }
+        }
+
+        // Clear upvalues
+        for (_id, upval) in pool.upvalues.iter_mut() {
+            if !upval.header.is_fixed() {
+                upval.header.make_white(0);
+            }
+        }
+
+        // Clear threads
+        for (_id, thread) in pool.threads.iter_mut() {
+            if !thread.header.is_fixed() {
+                thread.header.make_white(0);
+            }
+        }
+
+        // Clear strings (but leave interned strings fixed)
+        for (_id, string) in pool.strings.iter_mut() {
+            if !string.header.is_fixed() {
+                string.header.make_white(0);
             }
         }
     }
@@ -779,30 +837,75 @@ impl GC {
         }
     }
 
-    /// Sweep phase - only traverse allgc list, not entire pools!
-    /// This is the key optimization: we only look at objects we're tracking
+    /// Sweep phase - iterate pools directly instead of allgc
+    /// This is much faster for allocation (no allgc.push) at cost of sweep traversal
     fn sweep(&mut self, pool: &mut ObjectPool) -> usize {
         let mut collected = 0;
-        let mut write_idx = 0;
 
-        // Sweep using allgc - only traverse tracked objects
-        for read_idx in 0..self.allgc.len() {
-            let gc_id = self.allgc[read_idx];
-            let (is_marked, is_fixed) = self.get_object_state(gc_id, pool);
-
-            if is_marked || is_fixed {
-                // Object survives - keep it in allgc
-                self.allgc[write_idx] = gc_id;
-                write_idx += 1;
-            } else {
-                // Object is dead - free it
-                self.free_object(gc_id, pool);
-                collected += 1;
+        // Sweep tables
+        let mut dead_tables: Vec<u32> = Vec::with_capacity(64);
+        for (id, table) in pool.tables.iter() {
+            if !table.header.is_fixed() && table.header.is_white() {
+                dead_tables.push(id);
             }
         }
+        for id in dead_tables {
+            pool.tables.free(id);
+            self.record_deallocation(256);
+            collected += 1;
+        }
 
-        // Truncate allgc to remove dead entries
-        self.allgc.truncate(write_idx);
+        // Sweep functions
+        let mut dead_funcs: Vec<u32> = Vec::with_capacity(64);
+        for (id, func) in pool.functions.iter() {
+            if !func.header.is_fixed() && func.header.is_white() {
+                dead_funcs.push(id);
+            }
+        }
+        for id in dead_funcs {
+            pool.functions.free(id);
+            self.record_deallocation(128);
+            collected += 1;
+        }
+
+        // Sweep upvalues
+        let mut dead_upvals: Vec<u32> = Vec::with_capacity(64);
+        for (id, upval) in pool.upvalues.iter() {
+            if !upval.header.is_fixed() && upval.header.is_white() {
+                dead_upvals.push(id);
+            }
+        }
+        for id in dead_upvals {
+            pool.upvalues.free(id);
+            self.record_deallocation(64);
+            collected += 1;
+        }
+
+        // Sweep strings - but leave interned strings (short strings are usually fixed)
+        let mut dead_strings: Vec<u32> = Vec::with_capacity(64);
+        for (id, string) in pool.strings.iter() {
+            if !string.header.is_fixed() && string.header.is_white() {
+                dead_strings.push(id);
+            }
+        }
+        for id in dead_strings {
+            pool.strings.free(id);
+            self.record_deallocation(64);
+            collected += 1;
+        }
+
+        // Sweep threads
+        let mut dead_threads: Vec<u32> = Vec::with_capacity(8);
+        for (id, thread) in pool.threads.iter() {
+            if !thread.header.is_fixed() && thread.header.is_white() {
+                dead_threads.push(id);
+            }
+        }
+        for id in dead_threads {
+            pool.threads.free(id);
+            self.record_deallocation(512);
+            collected += 1;
+        }
 
         collected
     }

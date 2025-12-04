@@ -62,8 +62,12 @@ pub fn exec_newtable(
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = table;
     }
 
-    // GC checkpoint - Lua checks GC after NEWTABLE
-    vm.check_gc();
+    // GC checkpoint - inline fast path to avoid function call overhead
+    // Only call slow path when debt exceeds 1MB threshold
+    const GC_THRESHOLD: isize = 1024 * 1024;
+    if vm.gc_debt_local > GC_THRESHOLD {
+        vm.check_gc_slow_pub();
+    }
 }
 
 /// GETTABLE A B C
