@@ -9,6 +9,7 @@ use crate::{
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
 /// Get upvalue from the closure's upvalue list
+#[allow(dead_code)]
 #[inline(always)]
 pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
@@ -33,6 +34,7 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// SETUPVAL A B
 /// UpValue[B] := R[A]
 /// Set upvalue in the closure's upvalue list
+#[allow(dead_code)]
 #[inline(always)]
 pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
@@ -67,7 +69,7 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 
 /// CLOSURE A Bx
 /// R[A] := closure(KPROTO[Bx])
-/// OPTIMIZED: Fast path for closures without upvalues
+/// OPTIMIZED: Fast path for closures without upvalues, avoid unnecessary clones
 #[inline(always)]
 pub fn exec_closure(
     vm: &mut LuaVM,
@@ -80,21 +82,19 @@ pub fn exec_closure(
     let a = Instruction::get_a(instr) as usize;
     let bx = Instruction::get_bx(instr) as usize;
 
+    // Get prototype and parent upvalues without cloning upvalues early
     let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
-    let func_ref = vm.object_pool.get_function(func_id);
-    let (proto, parent_upvalues) = if let Some(f) = func_ref {
-        let p = f.chunk.child_protos.get(bx).cloned();
-        if let Some(proto) = p {
-            (proto, f.upvalues.clone())
-        } else {
-            return Err(vm.error(format!("Invalid prototype index: {}", bx)));
-        }
-    } else {
-        return Err(vm.error("Invalid function reference".to_string()));
+    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+    
+    let proto = func_ref.chunk.child_protos.get(bx).cloned();
+    let proto = match proto {
+        Some(p) => p,
+        None => return Err(vm.error(format!("Invalid prototype index: {}", bx))),
     };
 
     // FAST PATH: No upvalues (most common for simple lambdas)
-    if proto.upvalue_descs.is_empty() {
+    let upvalue_count = proto.upvalue_descs.len();
+    if upvalue_count == 0 {
         let closure = vm.create_function(proto, Vec::new());
         unsafe {
             *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
@@ -103,47 +103,45 @@ pub fn exec_closure(
         return Ok(());
     }
 
-    // Get upvalue descriptors from the prototype
-    let upvalue_descs = proto.upvalue_descs.clone();
+    // Pre-allocate upvalue_ids with exact capacity (no separate new_open_upvalue_ids Vec)
+    let mut upvalue_ids: Vec<UpvalueId> = Vec::with_capacity(upvalue_count);
 
-    // Create upvalues for the new closure based on descriptors
-    let mut upvalue_ids: Vec<UpvalueId> = Vec::with_capacity(upvalue_descs.len());
-    let mut new_open_upvalue_ids: Vec<UpvalueId> = Vec::new();
-
-    for desc in upvalue_descs.iter() {
+    // Process upvalue descriptors without cloning
+    for desc in proto.upvalue_descs.iter() {
         if desc.is_local {
             // Upvalue refers to a register in current function
-            // Calculate absolute stack index for this upvalue
             let stack_index = base_ptr + desc.index as usize;
 
-            // Check if this upvalue is already open
-            let existing = vm.open_upvalues.iter().find(|uv_id| {
-                vm.object_pool
-                    .get_upvalue(**uv_id)
-                    .map(|uv| uv.points_to_index(stack_index))
-                    .unwrap_or(false)
-            });
+            // Check if this upvalue is already open - use linear search (usually small list)
+            let mut found = None;
+            for &uv_id in vm.open_upvalues.iter() {
+                // SAFETY: upvalue IDs in open_upvalues are always valid
+                let uv = unsafe { vm.object_pool.get_upvalue_unchecked(uv_id) };
+                if uv.points_to_index(stack_index) {
+                    found = Some(uv_id);
+                    break;
+                }
+            }
 
-            if let Some(&existing_uv_id) = existing {
+            if let Some(existing_uv_id) = found {
                 upvalue_ids.push(existing_uv_id);
             } else {
-                // Create new open upvalue using absolute stack index
+                // Create new open upvalue and add to open list directly
                 let new_uv_id = vm.object_pool.create_upvalue_open(stack_index);
                 upvalue_ids.push(new_uv_id);
-                new_open_upvalue_ids.push(new_uv_id);
+                vm.open_upvalues.push(new_uv_id);
             }
         } else {
             // Upvalue refers to an upvalue in the enclosing function
-            if let Some(&parent_uv_id) = parent_upvalues.get(desc.index as usize) {
+            // Need to get parent upvalues again (func_ref may be invalidated by alloc)
+            let parent_func = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+            if let Some(&parent_uv_id) = parent_func.upvalues.get(desc.index as usize) {
                 upvalue_ids.push(parent_uv_id);
             } else {
                 return Err(vm.error(format!("Invalid upvalue index in parent: {}", desc.index)));
             }
         }
     }
-
-    // Add all new upvalues to the open list
-    vm.open_upvalues.extend(new_open_upvalue_ids);
 
     let closure = vm.create_function(proto, upvalue_ids);
     unsafe {

@@ -446,13 +446,54 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
 
-            // ============ Upvalue operations (inline simple ones) ============
+            // ============ Upvalue operations (inline for performance) ============
             OpCode::GetUpval => {
-                exec_getupval(vm, instr, frame_ptr, base_ptr);
+                // INLINED GETUPVAL: R[A] := UpValue[B]
+                let a = Instruction::get_a(instr) as usize;
+                let b = Instruction::get_b(instr) as usize;
+                
+                unsafe {
+                    // Get function's upvalue list pointer
+                    let func_id = (*frame_ptr).get_function_id_unchecked();
+                    let func_ref = vm.object_pool.get_function_unchecked(func_id);
+                    let upvalue_id = *func_ref.upvalues.get_unchecked(b);
+                    
+                    // Read upvalue value directly
+                    let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
+                    let value = match &uv.state {
+                        crate::gc::UpvalueState::Open { stack_index } => {
+                            *vm.register_stack.get_unchecked(*stack_index)
+                        }
+                        crate::gc::UpvalueState::Closed(val) => *val,
+                    };
+                    
+                    *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
+                }
                 continue 'mainloop;
             }
             OpCode::SetUpval => {
-                exec_setupval(vm, instr, frame_ptr, base_ptr);
+                // INLINED SETUPVAL: UpValue[B] := R[A]
+                let a = Instruction::get_a(instr) as usize;
+                let b = Instruction::get_b(instr) as usize;
+                
+                unsafe {
+                    // Get the value to write
+                    let value = *vm.register_stack.get_unchecked(base_ptr + a);
+                    
+                    // Get function's upvalue list pointer
+                    let func_id = (*frame_ptr).get_function_id_unchecked();
+                    let func_ref = vm.object_pool.get_function_unchecked(func_id);
+                    let upvalue_id = *func_ref.upvalues.get_unchecked(b);
+                    
+                    // Write upvalue value directly
+                    let uv = vm.object_pool.get_upvalue_mut_unchecked(upvalue_id);
+                    match &mut uv.state {
+                        crate::gc::UpvalueState::Open { stack_index } => {
+                            *vm.register_stack.get_unchecked_mut(*stack_index) = value;
+                        }
+                        crate::gc::UpvalueState::Closed(val) => *val = value,
+                    };
+                }
                 continue 'mainloop;
             }
 
@@ -463,28 +504,112 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Return Instructions (update state after frame change) ============
             OpCode::Return0 => {
-                match exec_return0(vm, instr, &mut frame_ptr) {
-                    Ok(()) => {
-                        // Reload state from new frame (like Lua C)
+                // INLINED RETURN0 for maximum performance
+                // Fast path: Lua function returning to Lua function with no results expected
+                
+                // Close upvalues before popping the frame (if any are open)
+                if !vm.open_upvalues.is_empty() {
+                    vm.close_upvalues_from(base_ptr);
+                }
+                
+                if vm.frame_count > 1 {
+                    let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+                    vm.frame_count -= 1;
+                    
+                    // Check if caller is Lua function
+                    if unsafe { (*caller_ptr).is_lua() } {
+                        // Get result info
+                        let result_reg = unsafe { (*frame_ptr).get_result_reg() };
+                        let num_results = unsafe { (*frame_ptr).get_num_results() };
+                        
+                        // Read caller's state
+                        let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
+                        
+                        // Only fill nil if caller expects results
+                        if num_results > 0 && num_results != usize::MAX {
+                            unsafe {
+                                let reg_ptr = vm.register_stack.as_mut_ptr();
+                                let nil_val = LuaValue::nil();
+                                for i in 0..num_results {
+                                    *reg_ptr.add(caller_base + result_reg + i) = nil_val;
+                                }
+                            }
+                        }
+                        
+                        // Update frame_ptr and local state
+                        frame_ptr = caller_ptr;
                         unsafe {
-                            updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
+                            pc = (*caller_ptr).pc as usize;
+                            code_ptr = (*caller_ptr).code_ptr;
+                            base_ptr = caller_base;
                         }
                         continue 'mainloop;
+                    } else {
+                        // C function caller - exit and return values
+                        vm.return_values.clear();
+                        return Err(LuaError::Exit);
                     }
-                    Err(LuaError::Exit) => return Err(LuaError::Exit),
-                    Err(e) => return Err(e),
                 }
+                
+                // No caller - exit VM
+                vm.frame_count -= 1;
+                vm.return_values.clear();
+                return Err(LuaError::Exit);
             }
-            OpCode::Return1 => match exec_return1(vm, instr, &mut frame_ptr) {
-                Ok(()) => {
-                    unsafe {
-                        updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
-                    }
-                    continue 'mainloop;
+            OpCode::Return1 => {
+                // INLINED RETURN1 for maximum performance
+                // Fast path: Lua function returning to Lua function (most common)
+                let a = Instruction::get_a(instr) as usize;
+                
+                // Close upvalues before popping the frame (if any are open)
+                if !vm.open_upvalues.is_empty() {
+                    vm.close_upvalues_from(base_ptr);
                 }
-                Err(LuaError::Exit) => return Err(LuaError::Exit),
-                Err(e) => return Err(e),
-            },
+                
+                // Get return value FIRST (before frame manipulation)
+                let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+                
+                // Check if we have a Lua caller
+                if vm.frame_count > 1 {
+                    let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+                    vm.frame_count -= 1;
+                    
+                    // Check if caller is Lua function
+                    if unsafe { (*caller_ptr).is_lua() } {
+                        let result_reg = unsafe { (*frame_ptr).get_result_reg() };
+                        
+                        // Update frame_ptr to caller
+                        frame_ptr = caller_ptr;
+                        
+                        // Read caller's state
+                        let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
+                        
+                        // Write return value to caller's register
+                        unsafe {
+                            *vm.register_stack.get_unchecked_mut(caller_base + result_reg) = return_value;
+                        }
+                        
+                        // Update local state
+                        unsafe {
+                            pc = (*caller_ptr).pc as usize;
+                            code_ptr = (*caller_ptr).code_ptr;
+                            base_ptr = caller_base;
+                        }
+                        continue 'mainloop;
+                    } else {
+                        // C function caller - exit and return value
+                        vm.return_values.clear();
+                        vm.return_values.push(return_value);
+                        return Err(LuaError::Exit);
+                    }
+                }
+                
+                // No caller - exit VM
+                vm.frame_count -= 1;
+                vm.return_values.clear();
+                vm.return_values.push(return_value);
+                return Err(LuaError::Exit);
+            }
             OpCode::Return => match exec_return(vm, instr, &mut frame_ptr) {
                 Ok(()) => {
                     unsafe {
@@ -498,11 +623,87 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Function calls (update state after frame change) ============
             OpCode::Call => {
-                // Save current pc to frame before call (so return knows where to resume)
+                // INLINED CALL for Lua->Lua (most common case)
+                let a = Instruction::get_a(instr) as usize;
+                let b = Instruction::get_b(instr) as usize;
+                let c = Instruction::get_c(instr) as usize;
+                
+                let func = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+                
+                // Fast path: Lua function (most common)
+                use crate::lua_value::TAG_FUNCTION;
+                if (func.primary & crate::lua_value::TYPE_MASK) == TAG_FUNCTION {
+                    // Get function ID - FAST PATH
+                    let func_id = unsafe { func.as_function_id().unwrap_unchecked() };
+                    
+                    // Get function info
+                    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+                    let chunk = &func_ref.chunk;
+                    let max_stack_size = chunk.max_stack_size;
+                    let num_params = chunk.param_count;
+                    let is_vararg = chunk.is_vararg;
+                    let new_code_ptr = chunk.code.as_ptr();
+                    let new_constants_ptr = chunk.constants.as_ptr();
+                    
+                    // Calculate argument count
+                    let arg_count = if b == 0 {
+                        unsafe { (*frame_ptr).top.saturating_sub((a + 1) as u32) as usize }
+                    } else {
+                        unsafe { (*frame_ptr).top = (a + b) as u32; }
+                        b - 1
+                    };
+                    
+                    // New frame base = R[A+1]
+                    let new_base = base_ptr + a + 1;
+                    
+                    // FAST PATH: No vararg (most common)
+                    if !is_vararg {
+                        // Ensure stack capacity
+                        let required_capacity = new_base + max_stack_size;
+                        if vm.register_stack.len() < required_capacity {
+                            vm.register_stack.resize(required_capacity, LuaValue::nil());
+                        }
+                        
+                        // Fill missing arguments with nil
+                        if arg_count < num_params {
+                            unsafe {
+                                let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
+                                let nil_val = LuaValue::nil();
+                                for i in arg_count..num_params {
+                                    *reg_ptr.add(i) = nil_val;
+                                }
+                            }
+                        }
+                        
+                        // Save pc to current frame
+                        unsafe { (*frame_ptr).pc = pc as u32; }
+                        
+                        // Push new frame
+                        let nresults = if c == 0 { -1i16 } else { (c - 1) as i16 };
+                        let new_frame = LuaCallFrame::new_lua_function(
+                            func_id,
+                            new_code_ptr,
+                            new_constants_ptr,
+                            new_base,
+                            arg_count,
+                            a,
+                            nresults,
+                        );
+                        
+                        frame_ptr = vm.push_frame(new_frame);
+                        
+                        // Update local state
+                        pc = 0;
+                        code_ptr = new_code_ptr;
+                        base_ptr = new_base;
+                        continue 'mainloop;
+                    }
+                }
+                
+                // Slow path: C function, metamethod, or vararg
                 savepc!(frame_ptr, pc);
                 match exec_call(vm, instr, &mut frame_ptr) {
                     Ok(_) => {
-                        // Lua function: frame changed, reload state from new frame
                         unsafe {
                             updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
                         }
