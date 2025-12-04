@@ -5,7 +5,7 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
-use crate::gc::{GC, GcFunction, ThreadId, UpvalueId};
+use crate::gc::{GcFunction, GcId, GcType, ThreadId, UpvalueId, GC};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
@@ -246,7 +246,7 @@ impl LuaVM {
 
         // Create upvalue for _ENV (global table)
         // Main chunks in Lua 5.4 always have _ENV as upvalue[0]
-        let env_upvalue_id = self.object_pool.create_upvalue_closed(self.global_value);
+        let env_upvalue_id = self.create_upvalue_closed(self.global_value);
         let upvalues = vec![env_upvalue_id];
 
         // Create main function in object pool with _ENV upvalue
@@ -1507,13 +1507,9 @@ impl LuaVM {
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let id = self.object_pool.create_string(s);
 
-        // Estimate memory cost: string data + LuaString struct overhead
-        // LuaString: ~32 bytes base + string length
-        let estimated_bytes = 32 + s.len();
-        self.gc.record_allocation(estimated_bytes);
-
-        // GC check MUST NOT happen here - object not yet protected!
-        // Caller must call check_gc() AFTER storing value in register
+        // Track object in GC allgc list
+        self.gc.allgc.push(GcId::from_string(id));
+        self.gc_debt_local += (32 + s.len()) as isize;
 
         LuaValue::string(id)
     }
@@ -1524,8 +1520,9 @@ impl LuaVM {
         let len = s.len();
         let id = self.object_pool.create_string_owned(s);
 
-        let estimated_bytes = 32 + len;
-        self.gc.record_allocation(estimated_bytes);
+        // Track object in GC allgc list
+        self.gc.allgc.push(GcId::from_string(id));
+        self.gc_debt_local += (32 + len) as isize;
 
         LuaValue::string(id)
     }
@@ -1540,13 +1537,13 @@ impl LuaVM {
     }
 
     /// Create a new table in object pool
-    /// OPTIMIZATION: Only update local debt counter, no function calls
+    /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
 
-        // Lightweight GC tracking: just increment debt
-        // This is a single integer add, should be very fast
+        // Track object in GC allgc list
+        self.gc.allgc.push(GcId::from_table(id));
         self.gc_debt_local += 256;
 
         LuaValue::table(id)
@@ -1646,15 +1643,34 @@ impl LuaVM {
     }
 
     /// Create a function in object pool
+    /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         let id = self.object_pool.create_function(chunk, upvalue_ids);
 
-        // Register with GC - ultra-lightweight
-        self.gc
-            .register_object(id.0, crate::gc::GcObjectType::Function);
+        // Track object in GC allgc list
+        self.gc.allgc.push(GcId::from_function(id));
+        self.gc_debt_local += 128;
 
         LuaValue::function(id)
+    }
+
+    /// Create an open upvalue pointing to a stack index
+    #[inline(always)]
+    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
+        let id = self.object_pool.create_upvalue_open(stack_index);
+        self.gc.allgc.push(GcId::from_upvalue(id));
+        self.gc_debt_local += 64;
+        id
+    }
+
+    /// Create a closed upvalue with a value
+    #[inline(always)]
+    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
+        let id = self.object_pool.create_upvalue_closed(value);
+        self.gc.allgc.push(GcId::from_upvalue(id));
+        self.gc_debt_local += 64;
+        id
     }
 
     /// Get function by LuaValue (resolves ID from object pool)
@@ -1756,9 +1772,9 @@ impl LuaVM {
     #[inline(always)]
     fn check_gc(&mut self) {
         // Ultra-fast path: single integer comparison with local debt counter
-        // Only check if debt exceeds a significant threshold (1MB)
-        // This reduces the overhead of frequent checks dramatically
-        if self.gc_debt_local <= 1024 * 1024 {
+        // Only check if debt exceeds threshold (256KB)
+        // Lower threshold means more frequent GC but prevents memory bloat
+        if self.gc_debt_local <= 256 * 1024 {
             return;
         }
         // Slow path: actual GC work

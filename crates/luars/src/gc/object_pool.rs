@@ -244,6 +244,24 @@ impl<T> Pool<T> {
         }
     }
 
+    /// Get number of free slots in the free list
+    #[inline]
+    pub fn free_slots_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    /// Trim trailing None values from the pool to reduce iteration overhead
+    /// This removes None values from the end of the data vec
+    pub fn trim_tail(&mut self) {
+        // Remove trailing None values
+        while self.data.last().map_or(false, |v| v.is_none()) {
+            self.data.pop();
+        }
+        // Remove free list entries that are now out of bounds
+        let max_valid = self.data.len() as u32;
+        self.free_list.retain(|&id| id < max_valid);
+    }
+
     /// Check if a slot is occupied
     #[inline(always)]
     pub fn is_valid(&self, id: u32) -> bool {
@@ -390,6 +408,21 @@ impl<T> BoxPool<T> {
                 self.count -= 1;
             }
         }
+    }
+
+    /// Get number of free slots in the free list
+    #[inline]
+    pub fn free_slots_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    /// Trim trailing None values from the pool to reduce iteration overhead
+    pub fn trim_tail(&mut self) {
+        while self.data.last().map_or(false, |v| v.is_none()) {
+            self.data.pop();
+        }
+        let max_valid = self.data.len() as u32;
+        self.free_list.retain(|&id| id < max_valid);
     }
 
     /// Check if a slot is occupied

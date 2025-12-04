@@ -861,9 +861,9 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             // Create upvalue for _ENV (global table)
             // Loaded chunks need _ENV as upvalue[0]
             let env_upvalue_id = if let Some(env) = env {
-                vm.object_pool.create_upvalue_closed(env)
+                vm.create_upvalue_closed(env)
             } else {
-                vm.object_pool.create_upvalue_closed(vm.global_value)
+                vm.create_upvalue_closed(vm.global_value)
             };
             let upvalues = vec![env_upvalue_id];
 
@@ -905,7 +905,7 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);
+            let env_upvalue_id = vm.create_upvalue_closed(vm.global_value);
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
             Ok(MultiValue::single(func))
@@ -945,7 +945,7 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);
+            let env_upvalue_id = vm.create_upvalue_closed(vm.global_value);
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
 

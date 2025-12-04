@@ -127,7 +127,7 @@ pub fn exec_closure(
                 upvalue_ids.push(existing_uv_id);
             } else {
                 // Create new open upvalue and add to open list directly
-                let new_uv_id = vm.object_pool.create_upvalue_open(stack_index);
+                let new_uv_id = vm.create_upvalue_open(stack_index);
                 upvalue_ids.push(new_uv_id);
                 vm.open_upvalues.push(new_uv_id);
             }

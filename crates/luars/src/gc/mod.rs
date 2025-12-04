@@ -1,13 +1,14 @@
-// Simplified Garbage Collector for Lua VM
+// Garbage Collector for Lua VM
 //
-// Key insight: Objects are already stored in Arena with GcHeader.
-// We don't need a separate HashMap to track them!
+// Design based on Lua 5.4 but adapted for Rust:
+// - GcId: Unified object identifier (type tag + pool index)
+// - allgc: Vec<GcId> tracking all collectable objects (like Lua's allgc list)
+// - Tri-color marking: white (unmarked), gray (marked, refs not scanned), black (fully scanned)
+// - Generational collection: objects have ages (NEW, SURVIVAL, OLD)
+// - Sweep only traverses allgc, not entire pools
 //
-// Design:
-// - Arena<GcTable>, Arena<GcFunction>, etc. store all objects
-// - GcHeader.marked is used for mark-sweep
-// - GC directly iterates over Arena, no extra tracking needed
-// - Lua 5.4 style debt mechanism for triggering GC
+// Key difference from Lua C: We use Vec<GcId> instead of linked list
+// because Rust ownership makes linked lists impractical
 
 mod object_pool;
 
@@ -17,6 +18,101 @@ pub use object_pool::{
     ObjectPool, Pool, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
 };
 
+// ============ GcId: Unified Object Identifier ============
+
+/// Object type tags (3 bits, supports up to 8 types)
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcType {
+    String = 0,
+    Table = 1,
+    Function = 2,
+    Upvalue = 3,
+    Thread = 4,
+    Userdata = 5,
+}
+
+/// Unified GC object identifier
+/// Layout: [type: 3 bits][index: 29 bits]
+/// Supports up to 536 million objects per type
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[repr(transparent)]
+pub struct GcId(u32);
+
+impl GcId {
+    const TYPE_BITS: u32 = 3;
+    const TYPE_MASK: u32 = (1 << Self::TYPE_BITS) - 1;
+    const INDEX_SHIFT: u32 = Self::TYPE_BITS;
+
+    #[inline(always)]
+    pub fn new(gc_type: GcType, index: u32) -> Self {
+        debug_assert!(index < (1 << 29), "Index overflow");
+        GcId((index << Self::INDEX_SHIFT) | (gc_type as u32))
+    }
+
+    #[inline(always)]
+    pub fn gc_type(self) -> GcType {
+        unsafe { std::mem::transmute((self.0 & Self::TYPE_MASK) as u8) }
+    }
+
+    #[inline(always)]
+    pub fn index(self) -> u32 {
+        self.0 >> Self::INDEX_SHIFT
+    }
+
+    #[inline(always)]
+    pub fn from_string(id: StringId) -> Self {
+        Self::new(GcType::String, id.0)
+    }
+
+    #[inline(always)]
+    pub fn from_table(id: TableId) -> Self {
+        Self::new(GcType::Table, id.0)
+    }
+
+    #[inline(always)]
+    pub fn from_function(id: FunctionId) -> Self {
+        Self::new(GcType::Function, id.0)
+    }
+
+    #[inline(always)]
+    pub fn from_upvalue(id: UpvalueId) -> Self {
+        Self::new(GcType::Upvalue, id.0)
+    }
+
+    #[inline(always)]
+    pub fn from_thread(id: ThreadId) -> Self {
+        Self::new(GcType::Thread, id.0)
+    }
+
+    #[inline(always)]
+    pub fn as_string_id(self) -> Option<StringId> {
+        if self.gc_type() == GcType::String {
+            Some(StringId(self.index()))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_table_id(self) -> Option<TableId> {
+        if self.gc_type() == GcType::Table {
+            Some(TableId(self.index()))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_function_id(self) -> Option<FunctionId> {
+        if self.gc_type() == GcType::Function {
+            Some(FunctionId(self.index()))
+        } else {
+            None
+        }
+    }
+}
+
 // Re-export for compatibility
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GcObjectType {
@@ -25,16 +121,60 @@ pub enum GcObjectType {
     Function,
 }
 
-/// Simplified GC state - no HashMap tracking!
+/// Object age for generational GC (like Lua 5.4)
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GcAge {
+    New = 0,      // Created in current cycle
+    Survival = 1, // Survived one collection
+    Old0 = 2,     // Marked old by barrier in this cycle
+    Old1 = 3,     // First full cycle as old
+    Old = 4,      // Really old (rarely visited)
+    Touched1 = 5, // Old object touched this cycle
+    Touched2 = 6, // Old object touched in previous cycle
+}
+
+/// GC color for tri-color marking
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcColor {
+    White0 = 0, // Unmarked (current white)
+    White1 = 1, // Unmarked (other white, for flip)
+    Gray = 2,   // Marked, refs not yet scanned
+    Black = 3,  // Fully marked
+}
+
+/// GC state machine phases
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcState {
+    Pause = 0,     // Between cycles
+    Propagate = 1, // Marking phase
+    Atomic = 2,    // Atomic finish of marking
+    Sweep = 3,     // Sweeping dead objects
+}
+
+/// Main GC structure
 pub struct GC {
+    // Object tracking (like Lua's allgc list but using Vec)
+    pub(crate) allgc: Vec<GcId>,
+    
+    // Gray list for incremental marking
+    gray: Vec<GcId>,
+    grayagain: Vec<GcId>,
+    
     // Lua 5.4 GC debt mechanism
     pub(crate) gc_debt: isize,
     pub(crate) total_bytes: usize,
 
-    // GC parameters
-    gc_pause: usize, // Pause parameter (default 200 = 200%)
-    // gc_step_mul: usize,       // Step multiplier
+    // GC state
+    state: GcState,
+    current_white: u8, // 0 or 1, flips each cycle
 
+    // GC parameters
+    gc_pause: usize,     // Pause parameter (default 200 = 200%)
+    gc_stepmul: usize,   // Step multiplier (default 100)
+    
     // Collection throttling
     check_counter: u32,
     check_interval: u32,
@@ -59,16 +199,31 @@ pub struct GCStats {
 impl GC {
     pub fn new() -> Self {
         GC {
+            allgc: Vec::with_capacity(1024),
+            gray: Vec::with_capacity(256),
+            grayagain: Vec::with_capacity(64),
             gc_debt: -(200 * 1024), // Start with 200KB credit
             total_bytes: 0,
+            state: GcState::Pause,
+            current_white: 0,
             gc_pause: 200,
+            gc_stepmul: 100,
             check_counter: 0,
-            check_interval: 10000,
+            check_interval: 1, // Run GC every check_gc_slow call
             stats: GCStats::default(),
         }
     }
 
-    /// Record allocation - just update debt, no HashMap insertion!
+    /// Register a new object for GC tracking
+    /// This is called when an object is allocated
+    #[inline(always)]
+    pub fn track_object(&mut self, gc_id: GcId, size: usize) {
+        self.allgc.push(gc_id);
+        self.total_bytes += size;
+        self.gc_debt += size as isize;
+    }
+
+    /// Record allocation - compatibility with old API
     #[inline(always)]
     pub fn register_object(&mut self, _obj_id: u32, obj_type: GcObjectType) {
         let size = match obj_type {
@@ -117,7 +272,10 @@ impl GC {
 
     /// Perform GC step
     pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        if !self.should_collect() {
+        // Run GC if debt is high OR if allgc has grown too large
+        // This prevents allgc from growing unbounded even if gc_debt is reset
+        let should_run = self.should_collect() || self.allgc.len() > 50000;
+        if !should_run {
             return;
         }
 
@@ -125,57 +283,70 @@ impl GC {
         self.collect(roots, pool);
     }
 
-    /// Main collection - mark and sweep directly on Arena
+    /// Main collection - mark and sweep using allgc list
     pub fn collect(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) -> usize {
         self.stats.collection_count += 1;
         self.stats.major_collections += 1;
 
-        // Phase 1: Clear all marks
+        // Phase 1: Clear all marks (only for tracked objects)
         self.clear_marks(pool);
 
         // Phase 2: Mark from roots
         self.mark_roots(roots, pool);
 
-        // Phase 3: Sweep (free unmarked objects)
+        // Phase 3: Sweep (only traverse allgc, not entire pools!)
         let collected = self.sweep(pool);
 
-        // Update debt
-        let alive_estimate =
-            pool.tables.len() * 256 + pool.functions.len() * 128 + pool.strings.len() * 64;
-        self.gc_debt = -((alive_estimate * self.gc_pause / 100) as isize);
+        // Update debt based on survivors
+        let alive_bytes = self.allgc.len() * 128; // Average size estimate
+        self.gc_debt = -((alive_bytes * self.gc_pause / 100) as isize);
 
         self.stats.objects_collected += collected;
         collected
     }
 
-    /// Clear all marks in all arenas (skip fixed objects - they stay marked)
+    /// Clear marks only for tracked objects (much faster than iterating all pools)
     fn clear_marks(&self, pool: &mut ObjectPool) {
-        for (_, table) in pool.tables.iter_mut() {
-            if !table.header.fixed {
-                table.header.marked = false;
+        for &gc_id in &self.allgc {
+            match gc_id.gc_type() {
+                GcType::Table => {
+                    if let Some(t) = pool.tables.get_mut(gc_id.index()) {
+                        if !t.header.fixed {
+                            t.header.marked = false;
+                        }
+                    }
+                }
+                GcType::Function => {
+                    if let Some(f) = pool.functions.get_mut(gc_id.index()) {
+                        if !f.header.fixed {
+                            f.header.marked = false;
+                        }
+                    }
+                }
+                GcType::Upvalue => {
+                    if let Some(u) = pool.upvalues.get_mut(gc_id.index()) {
+                        if !u.header.fixed {
+                            u.header.marked = false;
+                        }
+                    }
+                }
+                GcType::Thread => {
+                    if let Some(t) = pool.threads.get_mut(gc_id.index()) {
+                        if !t.header.fixed {
+                            t.header.marked = false;
+                        }
+                    }
+                }
+                GcType::String => {
+                    if let Some(s) = pool.strings.get_mut(gc_id.index()) {
+                        if !s.header.fixed {
+                            s.header.marked = false;
+                        }
+                    }
+                }
+                GcType::Userdata => {} // Rc handles this
             }
         }
-        for (_, func) in pool.functions.iter_mut() {
-            if !func.header.fixed {
-                func.header.marked = false;
-            }
-        }
-        for (_, upval) in pool.upvalues.iter_mut() {
-            if !upval.header.fixed {
-                upval.header.marked = false;
-            }
-        }
-        for (_, thread) in pool.threads.iter_mut() {
-            if !thread.header.fixed {
-                thread.header.marked = false;
-            }
-        }
-        for (_, string) in pool.strings.iter_mut() {
-            if !string.header.fixed {
-                string.header.marked = false;
-            }
-        }
-        // Note: userdata uses Rc internally, no GcHeader
     }
 
     /// Mark phase - traverse from roots
@@ -279,77 +450,103 @@ impl GC {
         }
     }
 
-    /// Sweep phase - free unmarked objects (skip fixed objects)
+    /// Sweep phase - only traverse allgc list, not entire pools!
+    /// This is the key optimization: we only look at objects we're tracking
     fn sweep(&mut self, pool: &mut ObjectPool) -> usize {
         let mut collected = 0;
+        let mut write_idx = 0;
 
-        // Collect unmarked tables (skip fixed ones)
-        let tables_to_free: Vec<u32> = pool
-            .tables
-            .iter()
-            .filter(|(_, t)| !t.header.marked && !t.header.fixed)
-            .map(|(id, _)| id)
-            .collect();
-        for id in tables_to_free {
-            pool.tables.free(id);
-            collected += 1;
-            self.record_deallocation(256);
+        // Sweep using allgc - only traverse tracked objects
+        for read_idx in 0..self.allgc.len() {
+            let gc_id = self.allgc[read_idx];
+            let (is_marked, is_fixed) = self.get_object_state(gc_id, pool);
+
+            if is_marked || is_fixed {
+                // Object survives - keep it in allgc
+                self.allgc[write_idx] = gc_id;
+                write_idx += 1;
+            } else {
+                // Object is dead - free it
+                self.free_object(gc_id, pool);
+                collected += 1;
+            }
         }
 
-        // Collect unmarked functions (skip fixed ones)
-        let funcs_to_free: Vec<u32> = pool
-            .functions
-            .iter()
-            .filter(|(_, f)| !f.header.marked && !f.header.fixed)
-            .map(|(id, _)| id)
-            .collect();
-        for id in funcs_to_free {
-            pool.functions.free(id);
-            collected += 1;
-            self.record_deallocation(128);
-        }
-
-        // Collect unmarked upvalues (skip fixed ones)
-        let upvals_to_free: Vec<u32> = pool
-            .upvalues
-            .iter()
-            .filter(|(_, u)| !u.header.marked && !u.header.fixed)
-            .map(|(id, _)| id)
-            .collect();
-        for id in upvals_to_free {
-            pool.upvalues.free(id);
-            collected += 1;
-        }
-
-        // Collect unmarked threads (skip fixed ones)
-        let threads_to_free: Vec<u32> = pool
-            .threads
-            .iter()
-            .filter(|(_, t)| !t.header.marked && !t.header.fixed)
-            .map(|(id, _)| id)
-            .collect();
-        for id in threads_to_free {
-            pool.threads.free(id);
-            collected += 1;
-        }
-
-        // Collect unmarked strings (skip fixed ones)
-        // Note: interned strings are usually kept, but this handles non-interned long strings
-        let strings_to_free: Vec<u32> = pool
-            .strings
-            .iter()
-            .filter(|(_, s)| !s.header.marked && !s.header.fixed)
-            .map(|(id, _)| id)
-            .collect();
-        for id in strings_to_free {
-            pool.strings.free(id);
-            collected += 1;
-            self.record_deallocation(64);
-        }
-
-        // Note: userdata uses Rc internally, no sweep needed
+        // Truncate allgc to remove dead entries
+        self.allgc.truncate(write_idx);
 
         collected
+    }
+
+    /// Get marked and fixed state for an object
+    #[inline]
+    fn get_object_state(&self, gc_id: GcId, pool: &ObjectPool) -> (bool, bool) {
+        match gc_id.gc_type() {
+            GcType::Table => {
+                if let Some(t) = pool.tables.get(gc_id.index()) {
+                    (t.header.marked, t.header.fixed)
+                } else {
+                    (false, false)
+                }
+            }
+            GcType::Function => {
+                if let Some(f) = pool.functions.get(gc_id.index()) {
+                    (f.header.marked, f.header.fixed)
+                } else {
+                    (false, false)
+                }
+            }
+            GcType::Upvalue => {
+                if let Some(u) = pool.upvalues.get(gc_id.index()) {
+                    (u.header.marked, u.header.fixed)
+                } else {
+                    (false, false)
+                }
+            }
+            GcType::Thread => {
+                if let Some(t) = pool.threads.get(gc_id.index()) {
+                    (t.header.marked, t.header.fixed)
+                } else {
+                    (false, false)
+                }
+            }
+            GcType::String => {
+                if let Some(s) = pool.strings.get(gc_id.index()) {
+                    (s.header.marked, s.header.fixed)
+                } else {
+                    (false, false)
+                }
+            }
+            GcType::Userdata => (true, true), // Userdata uses Rc, always "alive"
+        }
+    }
+
+    /// Free an object from its pool
+    #[inline]
+    fn free_object(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
+        match gc_id.gc_type() {
+            GcType::Table => {
+                pool.tables.free(gc_id.index());
+                self.record_deallocation(256);
+            }
+            GcType::Function => {
+                pool.functions.free(gc_id.index());
+                self.record_deallocation(128);
+            }
+            GcType::Upvalue => {
+                pool.upvalues.free(gc_id.index());
+                self.record_deallocation(64);
+            }
+            GcType::Thread => {
+                pool.threads.free(gc_id.index());
+                self.record_deallocation(512);
+            }
+            GcType::String => {
+                pool.strings.free(gc_id.index());
+                self.record_deallocation(64);
+            }
+            GcType::Userdata => {} // Rc handles this
+        }
     }
 
     /// Write barrier - no-op in simple mark-sweep
