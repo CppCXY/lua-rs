@@ -1,9 +1,9 @@
 /// Control flow instructions
 ///
 /// These instructions handle function calls, returns, jumps, and coroutine operations.
-use crate::LuaValue;
 use crate::lua_value::LuaValueKind;
 use crate::lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM};
+use crate::{FunctionId, LuaValue};
 
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
@@ -747,42 +747,98 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 
 /// CALL A B C
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
-/// ULTRA-OPTIMIZED: Minimize overhead for the common case (Lua function, no metamethod)
-/// Returns Ok(true) if frame changed (Lua function) and updatestate is needed
-/// Returns Ok(false) if frame unchanged (C function) and no updatestate needed
+/// ULTRA-OPTIMIZED: Inline fast path for Lua function calls
 #[inline(always)]
 pub fn exec_call(
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
+    base: usize,
 ) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
     let c = Instruction::get_c(instr) as usize;
 
-    // OPTIMIZATION: Use passed frame_ptr directly - avoid Vec lookup!
-    let (base, func) = unsafe {
-        let base = (**frame_ptr_ptr).base_ptr as usize;
-        let func = *vm.register_stack.get_unchecked(base + a);
-        (base, func)
-    };
+    // Get function value
+    let func = unsafe { *vm.register_stack.get_unchecked(base + a) };
 
-    // OPTIMIZATION: Fast path for Lua functions (most common case)
-    // Check type tag directly without full pattern match
+    // FAST PATH: Lua function (most common case)
     use crate::lua_value::TAG_FUNCTION;
     if (func.primary & crate::lua_value::TYPE_MASK) == TAG_FUNCTION {
-        exec_call_lua_function(
+        // Get function ID
+        let func_id = unsafe { func.as_function_id().unwrap_unchecked() };
+
+        // Get function info
+        let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+        let chunk = &func_ref.chunk;
+        let max_stack_size = chunk.max_stack_size;
+        let num_params = chunk.param_count;
+        let is_vararg = chunk.is_vararg;
+        let code_ptr = chunk.code.as_ptr();
+        let constants_ptr = chunk.constants.as_ptr();
+
+        // Calculate argument count
+        let arg_count = if b == 0 {
+            unsafe { (**frame_ptr_ptr).top.saturating_sub((a + 1) as u32) as usize }
+        } else {
+            unsafe {
+                (**frame_ptr_ptr).top = (a + b) as u32;
+            }
+            b - 1
+        };
+
+        // New frame base = R[A+1]
+        let new_base = base + a + 1;
+
+        // FAST PATH: No vararg (most common)
+        if !is_vararg {
+            // Ensure stack capacity
+            let required_capacity = new_base + max_stack_size;
+            if vm.register_stack.len() < required_capacity {
+                vm.register_stack.resize(required_capacity, LuaValue::nil());
+            }
+
+            // Fill missing arguments with nil
+            if arg_count < num_params {
+                unsafe {
+                    let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
+                    let nil_val = LuaValue::nil();
+                    for i in arg_count..num_params {
+                        *reg_ptr.add(i) = nil_val;
+                    }
+                }
+            }
+
+            // Push new frame
+            let nresults = if c == 0 { -1i16 } else { (c - 1) as i16 };
+            let new_frame = LuaCallFrame::new_lua_function(
+                func_id,
+                code_ptr,
+                constants_ptr,
+                new_base,
+                arg_count,
+                a,
+                nresults,
+            );
+
+            *frame_ptr_ptr = vm.push_frame(new_frame);
+            return Ok(());
+        }
+
+        // Vararg slow path
+        return exec_call_lua_vararg(
             vm,
-            func,
+            func_id,
             a,
             b,
             c,
             base,
-            false,
-            LuaValue::nil(),
+            max_stack_size,
+            num_params,
+            code_ptr,
+            constants_ptr,
             frame_ptr_ptr,
-        )?;
-        return Ok(()); // Frame changed, need updatestate
+        );
     }
 
     // Check for CFunction
@@ -798,7 +854,7 @@ pub fn exec_call(
             LuaValue::nil(),
             frame_ptr_ptr,
         )?;
-        return Ok(()); // Frame unchanged, no updatestate needed
+        return Ok(());
     }
 
     // Slow path: Check for __call metamethod
@@ -826,7 +882,7 @@ pub fn exec_call(
                             func,
                             frame_ptr_ptr,
                         )?;
-                        return Ok(()); // C function, no updatestate
+                        return Ok(());
                     } else {
                         exec_call_lua_function(
                             vm,
@@ -839,7 +895,7 @@ pub fn exec_call(
                             func,
                             frame_ptr_ptr,
                         )?;
-                        return Ok(()); // Lua function, need updatestate
+                        return Ok(());
                     }
                 }
             }
@@ -849,7 +905,74 @@ pub fn exec_call(
     Err(vm.error(format!("attempt to call a {} value", func.type_name())))
 }
 
-/// Fast path for Lua function calls
+/// Slow path for vararg Lua function calls
+#[inline(never)]
+fn exec_call_lua_vararg(
+    vm: &mut LuaVM,
+    func_id: FunctionId,
+    a: usize,
+    _b: usize,
+    c: usize,
+    caller_base: usize,
+    max_stack_size: usize,
+    _num_params: usize,
+    code_ptr: *const u32,
+    constants_ptr: *const LuaValue,
+    frame_ptr_ptr: &mut *mut LuaCallFrame,
+) -> LuaResult<()> {
+    // Get argument count from top
+    let arg_count = unsafe { (**frame_ptr_ptr).top.saturating_sub((a + 1) as u32) as usize };
+    let new_base = caller_base + a + 1;
+
+    let actual_stack_size = max_stack_size.max(arg_count);
+    let total_stack_size = if arg_count > 0 {
+        actual_stack_size + arg_count
+    } else {
+        actual_stack_size
+    };
+
+    // Ensure stack capacity
+    let required_capacity = new_base + total_stack_size;
+    if vm.register_stack.len() < required_capacity {
+        vm.ensure_stack_capacity(required_capacity);
+        vm.register_stack.resize(required_capacity, LuaValue::nil());
+    }
+
+    // Initialize registers
+    unsafe {
+        let reg_ptr = vm.register_stack.as_mut_ptr();
+        let nil_val = LuaValue::nil();
+
+        // Initialize local variable slots beyond arguments
+        for i in arg_count..actual_stack_size {
+            *reg_ptr.add(new_base + i) = nil_val;
+        }
+
+        // Vararg extra space
+        if arg_count > 0 {
+            for i in actual_stack_size..total_stack_size {
+                *reg_ptr.add(new_base + i) = nil_val;
+            }
+        }
+    }
+
+    // Create and push new frame
+    let nresults = if c == 0 { -1i16 } else { (c - 1) as i16 };
+    let new_frame = LuaCallFrame::new_lua_function(
+        func_id,
+        code_ptr,
+        constants_ptr,
+        new_base,
+        arg_count,
+        a,
+        nresults,
+    );
+
+    *frame_ptr_ptr = vm.push_frame(new_frame);
+    Ok(())
+}
+
+/// Slow path for Lua function calls with metamethod
 /// OPTIMIZED: Minimize branches and memory operations for common case
 #[inline(always)]
 fn exec_call_lua_function(
