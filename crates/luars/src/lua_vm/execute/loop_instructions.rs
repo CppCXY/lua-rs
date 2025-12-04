@@ -267,45 +267,68 @@ pub fn exec_tforcall(
     let c = Instruction::get_c(instr) as usize;
 
     // Get iterator function and state
-    let func = vm.register_stack[base_ptr + a];
-    let state = vm.register_stack[base_ptr + a + 1];
-    let control = vm.register_stack[base_ptr + a + 2];
+    let func = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+    let state = unsafe { *vm.register_stack.get_unchecked(base_ptr + a + 1) };
+    let control = unsafe { *vm.register_stack.get_unchecked(base_ptr + a + 2) };
 
-    // Call func(state, control)
-    // This is similar to CALL instruction but with fixed arguments
-    match func.kind() {
-        LuaValueKind::CFunction => {
-            let Some(cfunc) = func.as_cfunction() else {
-                return Err(vm.error("Invalid CFunction".to_string()));
-            };
+    // FAST PATH: Check if it's a CFunction (most common for ipairs/pairs)
+    use crate::lua_value::TAG_CFUNCTION;
+    if func.primary == TAG_CFUNCTION {
+        let cfunc = unsafe { func.as_cfunction().unwrap_unchecked() };
 
-            // Use a temporary position for the call setup (beyond result area)
-            let call_base = base_ptr + a + 4 + c + 1;
-            vm.ensure_stack_capacity(call_base + 3);
-            vm.register_stack[call_base] = func;
-            vm.register_stack[call_base + 1] = state;
-            vm.register_stack[call_base + 2] = control;
-
-            // Create temporary frame for the call
-            let temp_frame = LuaCallFrame::new_c_function(
-                call_base, 3, // func + 2 args (top)
-            );
-
-            vm.push_frame(temp_frame);
-            let result = cfunc(vm)?;
-            vm.pop_frame_discard();
-
-            // Store results starting at R[A+4]
-            let values = result.all_values();
-            for (i, value) in values.iter().enumerate().take(c) {
-                vm.register_stack[base_ptr + a + 4 + i] = *value;
-            }
-            // Fill remaining with nil
-            for i in values.len()..c {
-                vm.register_stack[base_ptr + a + 4 + i] = LuaValue::nil();
-            }
-            Ok(false) // No frame change for C functions
+        // Set up temporary call frame position (beyond result area)
+        let call_base = base_ptr + a + 4 + c + 1;
+        vm.ensure_stack_capacity(call_base + 3);
+        
+        unsafe {
+            *vm.register_stack.get_unchecked_mut(call_base) = func;
+            *vm.register_stack.get_unchecked_mut(call_base + 1) = state;
+            *vm.register_stack.get_unchecked_mut(call_base + 2) = control;
         }
+
+        // Create minimal temporary frame for the call
+        let temp_frame = LuaCallFrame::new_c_function(call_base, 3);
+        vm.push_frame(temp_frame);
+        let result = cfunc(vm)?;
+        vm.pop_frame_discard();
+
+        // OPTIMIZED: Direct inline access without Vec allocation
+        // ipairs/pairs typically return 2 values (index, value) or nil
+        let result_base = base_ptr + a + 4;
+        
+        if result.overflow.is_some() {
+            // Rare case: more than 2 values
+            let values = result.overflow.unwrap();
+            let count = values.len().min(c);
+            for i in 0..count {
+                unsafe { *vm.register_stack.get_unchecked_mut(result_base + i) = values[i]; }
+            }
+            for i in count..c {
+                unsafe { *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil(); }
+            }
+        } else {
+            // Common case: 0-2 inline values
+            let inline_count = result.inline_count as usize;
+            unsafe {
+                if c >= 1 {
+                    *vm.register_stack.get_unchecked_mut(result_base) = 
+                        if inline_count >= 1 { result.inline[0] } else { LuaValue::nil() };
+                }
+                if c >= 2 {
+                    *vm.register_stack.get_unchecked_mut(result_base + 1) = 
+                        if inline_count >= 2 { result.inline[1] } else { LuaValue::nil() };
+                }
+                // Fill any remaining slots with nil
+                for i in 2..c {
+                    *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
+                }
+            }
+        }
+        return Ok(false);
+    }
+
+    // Lua function path
+    match func.kind() {
         LuaValueKind::Function => {
             // For Lua functions, set up for a normal call
             // We need to place function and arguments, then results go to R[A+4]
