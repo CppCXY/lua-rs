@@ -20,18 +20,12 @@ pub fn exec_varargprep(
 ) {
     let a = get_a!(instr); // number of fixed params
 
-    let frame = vm.current_frame();
+    let frame = unsafe { &*frame_ptr };
     let frame_base = frame.base_ptr as usize;
     let top = frame.top as usize;
 
-    // Get max_stack_size from the function using new ObjectPool API
-    let Some(func_id) = frame.get_function_id() else {
-        return; // Invalid function - should not happen
-    };
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return; // Invalid function ID - should not happen
-    };
-    let max_stack_size = func_ref.chunk.max_stack_size;
+    // OPTIMIZED: Use cached max_stack from frame instead of object_pool lookup
+    let max_stack_size = frame.max_stack as usize;
 
     // Arguments were placed starting at frame_base by CALL instruction
     // Fixed parameters are at frame_base + 0 to frame_base + a - 1
@@ -69,11 +63,10 @@ pub fn exec_varargprep(
         }
 
         // Set vararg info in frame
-        vm.current_frame_mut().set_vararg(vararg_dest, vararg_count);
+        unsafe { &mut *frame_ptr }.set_vararg(vararg_dest, vararg_count);
     } else {
         // No varargs passed
-        vm.current_frame_mut()
-            .set_vararg(frame_base + max_stack_size, 0);
+        unsafe { &mut *frame_ptr }.set_vararg(frame_base + max_stack_size, 0);
     }
 
     // Initialize local variables (registers from a to max_stack_size) with nil

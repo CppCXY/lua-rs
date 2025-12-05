@@ -280,6 +280,7 @@ impl LuaVM {
             chunk.max_stack_size, // top
             0,                    // result_reg
             0,                    // nresults
+            chunk.max_stack_size, // max_stack_size
         );
 
         self.push_frame(frame);
@@ -356,6 +357,7 @@ impl LuaVM {
             max_stack,
             0,
             0,
+            max_stack,
         );
 
         self.push_frame(frame);
@@ -1217,6 +1219,7 @@ impl LuaVM {
             max_stack_size,
             0,
             -1,
+            max_stack_size,
         );
         self.push_frame(new_frame);
 
@@ -1286,6 +1289,7 @@ impl LuaVM {
             max_stack_size,
             0,
             -1,
+            max_stack_size,
         );
         self.push_frame(new_frame);
 
@@ -2355,6 +2359,7 @@ impl LuaVM {
                     max_stack_size, // top
                     result_reg,
                     1, // expect 1 result
+                    max_stack_size,
                 );
 
                 self.push_frame(temp_frame);
@@ -2721,6 +2726,7 @@ impl LuaVM {
                     max_stack_size,
                     0,
                     -1,
+                    max_stack_size,
                 );
                 self.push_frame(new_frame);
 
@@ -2901,6 +2907,7 @@ impl LuaVM {
                     max_stack_size,
                     0,  // result_reg unused
                     -1, // LUA_MULTRET
+                    max_stack_size,
                 );
                 self.push_frame(new_frame);
 

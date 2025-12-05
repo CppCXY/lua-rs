@@ -54,6 +54,7 @@ pub struct LuaCallFrame {
     vararg_start: u32,        // 4 bytes - vararg start position (absolute index)
     nresults: i16,            // 2 bytes - expected return count (-1 = LUA_MULTRET)
     vararg_count: u16,        // 2 bytes - number of vararg arguments
+    pub max_stack: u16,       // 2 bytes - max stack size (for VARARGPREP optimization)
 }
 
 // ============================================================================
@@ -92,6 +93,7 @@ impl Default for LuaCallFrame {
             vararg_start: 0,
             nresults: 0,
             vararg_count: 0,
+            max_stack: 0,
         }
     }
 }
@@ -142,6 +144,7 @@ impl LuaCallFrame {
         top: usize,
         result_reg: usize,
         nresults: i16,
+        max_stack: usize,
     ) -> Self {
         LuaCallFrame {
             func_id_ptr: Self::pack_lua_function(func_id),
@@ -155,6 +158,7 @@ impl LuaCallFrame {
             vararg_start: 0,
             nresults,
             vararg_count: 0,
+            max_stack: max_stack as u16,
         }
     }
 
@@ -173,6 +177,7 @@ impl LuaCallFrame {
             vararg_start: 0,
             nresults: 0,
             vararg_count: 0,
+            max_stack: 0,
         }
     }
 
@@ -335,8 +340,8 @@ mod tests {
 
     #[test]
     fn test_lua_call_frame_size() {
-        // Verify frame size is compact
-        assert_eq!(std::mem::size_of::<LuaCallFrame>(), 56);
+        // Verify frame size is compact (added max_stack u16 + _padding u16)
+        assert_eq!(std::mem::size_of::<LuaCallFrame>(), 64);
     }
 
     #[test]
@@ -351,6 +356,7 @@ mod tests {
             0,
             0,
             0,
+            16,
         );
 
         assert!(frame.is_lua());
@@ -382,6 +388,7 @@ mod tests {
             0,
             0,
             0,
+            16,
         );
 
         // Test fresh flag
@@ -420,6 +427,7 @@ mod tests {
             0,
             0,
             0,
+            16,
         );
 
         // Set all flags

@@ -865,6 +865,7 @@ pub fn exec_call(
                 arg_count,
                 a,
                 nresults,
+                max_stack_size,
             );
 
             *frame_ptr_ptr = vm.push_frame(new_frame);
@@ -1015,6 +1016,7 @@ fn exec_call_lua_vararg(
         arg_count,
         a,
         nresults,
+        max_stack_size,
     );
 
     *frame_ptr_ptr = vm.push_frame(new_frame);
@@ -1130,6 +1132,7 @@ fn exec_call_lua_function(
             arg_count, // top = number of arguments
             a,         // result_reg
             nresults,
+            max_stack_size,
         );
 
         *frame_ptr_ptr = vm.push_frame(new_frame);
@@ -1199,6 +1202,7 @@ fn exec_call_lua_function(
         actual_arg_count, // top = number of arguments
         a,                // result_reg
         nresults,
+        max_stack_size,
     );
 
     *frame_ptr_ptr = vm.push_frame(new_frame);
@@ -1427,6 +1431,7 @@ pub fn exec_tailcall(
                 arg_count,  // top = number of arguments passed
                 result_reg, // result_reg from the CALLER (not 0!)
                 nresults,
+                max_stack_size,
             );
 
             *frame_ptr_ptr = vm.push_frame(new_frame);

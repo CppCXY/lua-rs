@@ -382,6 +382,7 @@ pub fn exec_tforcall(
                 2,        // top = 2 (we have 2 arguments)
                 a + 4,    // result goes to R[A+4] relative to caller's base
                 nresults, // expecting c results
+                max_stack_size,
             );
 
             vm.push_frame(new_frame);
