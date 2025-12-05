@@ -3,20 +3,20 @@
 /// These instructions handle arithmetic operations, bitwise operations, and comparisons.
 use crate::{
     LuaValue, get_a, get_b, get_c, get_k, get_sb, get_sc,
-    lua_value::{TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
+    lua_value::{LuaThread, TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
     lua_vm::{LuaCallFrame, LuaResult, LuaVM},
 };
 
 /// ADD: R[A] = R[B] + R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior - always write both fields
 #[inline(always)]
-pub fn exec_add(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_add(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -55,13 +55,13 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// SUB: R[A] = R[B] - R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
-pub fn exec_sub(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_sub(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -99,13 +99,13 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// MUL: R[A] = R[B] * R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
-pub fn exec_mul(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_mul(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -141,13 +141,13 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// DIV: R[A] = R[B] / R[C]
 /// OPTIMIZED: If both are integers and division is exact, return integer
-pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_div(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -159,7 +159,7 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             let r = right.secondary as i64;
             if r != 0 && l % r == 0 {
                 // Exact division - return integer
-                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l / r);
+                *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l / r);
                 *pc += 1;
                 return;
             }
@@ -185,19 +185,19 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             return;
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
+        *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
         *pc += 1;
     }
 }
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
-pub fn exec_idiv(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_idiv(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -233,20 +233,20 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             LuaValue::number((l_float / r_float).floor())
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        *thread.register_stack.as_mut_ptr().add(base_ptr + a) = result;
         *pc += 1;
     }
 }
 
 /// MOD: R[A] = R[B] % R[C]
 /// OPTIMIZED: Returns integer when both operands are integers
-pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_mod(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_ptr().add(base_ptr);
         let left = *reg_base.add(b);
         let right = *reg_base.add(c);
 
@@ -293,20 +293,20 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             }
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+        *thread.register_stack.as_mut_ptr().add(base_ptr + a) = result;
         *pc += 1;
     }
 }
 
 /// POW: R[A] = R[B] ^ R[C]
-pub fn exec_pow(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_pow(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
+        let right = *thread.register_stack.as_ptr().add(base_ptr + c);
 
         let l_float = match left.as_number() {
             Some(n) => n,
@@ -317,17 +317,17 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             None => return,
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
+        *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
         *pc += 1;
     }
 }
 
 /// UNM: R[A] = -R[B] (unary minus)
-pub fn exec_unm(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_unm(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let b = get_b!(instr);
 
-    let value = vm.register_stack[base_ptr + b];
+    let value = thread.register_stack[base_ptr + b];
 
     let result = if let Some(i) = value.as_integer() {
         if let Some(neg) = i.checked_neg() {
@@ -346,7 +346,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
                     let result = vm
                         .call_metamethod(&metamethod, &[value])?
                         .unwrap_or(LuaValue::nil());
-                    vm.register_stack[base_ptr + a] = result;
+                    thread.register_stack[base_ptr + a] = result;
                     return Ok(());
                 }
             }
@@ -357,7 +357,7 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
         )));
     };
 
-    vm.register_stack[base_ptr + a] = result;
+    thread.register_stack[base_ptr + a] = result;
     Ok(())
 }
 
@@ -366,13 +366,13 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 /// ADDI: R[A] = R[B] + sC
 /// OPTIMIZED: Minimal branches, inline integer path
 #[inline(always)]
-pub fn exec_addi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_addi(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let sc = get_sc!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr);
         let left = *reg_base.add(b);
 
         if left.primary == TAG_INTEGER {
@@ -398,6 +398,7 @@ pub fn exec_addi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_addk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -409,7 +410,7 @@ pub fn exec_addk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -417,7 +418,7 @@ pub fn exec_addk(
         // Integer + Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_add(constant.secondary as i64);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: result as u64,
             };
@@ -428,7 +429,7 @@ pub fn exec_addk(
         // Float + Float fast path
         if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
             let result = f64::from_bits(left.secondary) + f64::from_bits(constant.secondary);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_FLOAT,
                 secondary: result.to_bits(),
             };
@@ -438,7 +439,7 @@ pub fn exec_addk(
 
         // Mixed types
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l + r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l + r);
             *pc += 1;
         }
     }
@@ -448,6 +449,7 @@ pub fn exec_addk(
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_subk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -459,7 +461,7 @@ pub fn exec_subk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -467,7 +469,7 @@ pub fn exec_subk(
         // Integer - Integer fast path
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_sub(constant.secondary as i64);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: result as u64,
             };
@@ -478,7 +480,7 @@ pub fn exec_subk(
         // Float - Float fast path
         if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
             let result = f64::from_bits(left.secondary) - f64::from_bits(constant.secondary);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_FLOAT,
                 secondary: result.to_bits(),
             };
@@ -488,7 +490,7 @@ pub fn exec_subk(
 
         // Mixed types
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l - r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l - r);
             *pc += 1;
         }
     }
@@ -498,6 +500,7 @@ pub fn exec_subk(
 /// OPTIMIZED: Direct field writes, minimal branching
 #[inline(always)]
 pub fn exec_mulk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -509,7 +512,7 @@ pub fn exec_mulk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -517,7 +520,7 @@ pub fn exec_mulk(
         // Integer * Integer fast path FIRST (most common in benchmarks with integer loops)
         if left.primary == TAG_INTEGER && constant.primary == TAG_INTEGER {
             let result = (left.secondary as i64).wrapping_mul(constant.secondary as i64);
-            let dest = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+            let dest = thread.register_stack.as_mut_ptr().add(base_ptr + a);
             (*dest).primary = TAG_INTEGER;
             (*dest).secondary = result as u64;
             *pc += 1;
@@ -527,7 +530,7 @@ pub fn exec_mulk(
         // Float * Float fast path
         if left.primary == TAG_FLOAT && constant.primary == TAG_FLOAT {
             let result = f64::from_bits(left.secondary) * f64::from_bits(constant.secondary);
-            let dest = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+            let dest = thread.register_stack.as_mut_ptr().add(base_ptr + a);
             (*dest).primary = TAG_FLOAT;
             (*dest).secondary = result.to_bits();
             *pc += 1;
@@ -537,14 +540,14 @@ pub fn exec_mulk(
         // Mixed types: Integer * Float or Float * Integer
         if left.primary == TAG_INTEGER && constant.primary == TAG_FLOAT {
             let result = (left.secondary as i64) as f64 * f64::from_bits(constant.secondary);
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
             *pc += 1;
             return;
         }
 
         if left.primary == TAG_FLOAT && constant.primary == TAG_INTEGER {
             let result = f64::from_bits(left.secondary) * (constant.secondary as i64) as f64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::float(result);
             *pc += 1;
         }
     }
@@ -554,6 +557,7 @@ pub fn exec_mulk(
 /// OPTIMIZED: Returns integer when result is integer
 #[inline(always)]
 pub fn exec_modk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -565,7 +569,7 @@ pub fn exec_modk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
         // Integer % Integer fast path - always returns integer
@@ -575,7 +579,7 @@ pub fn exec_modk(
                 return;
             }
             let l = left.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: l.rem_euclid(r) as u64,
             };
@@ -591,10 +595,10 @@ pub fn exec_modk(
                 && float_result >= i64::MIN as f64
                 && float_result <= i64::MAX as f64
             {
-                *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
+                *thread.register_stack.as_mut_ptr().add(base_ptr + a) =
                     LuaValue::integer(float_result as i64);
             } else {
-                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(float_result);
+                *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(float_result);
             }
             *pc += 1;
         }
@@ -605,6 +609,7 @@ pub fn exec_modk(
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_powk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -616,7 +621,7 @@ pub fn exec_powk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -630,7 +635,7 @@ pub fn exec_powk(
             None => return,
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
+        *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float.powf(r_float));
         *pc += 1;
     }
 }
@@ -639,6 +644,7 @@ pub fn exec_powk(
 /// OPTIMIZED: Returns integer when division is exact
 #[inline(always)]
 pub fn exec_divk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -650,7 +656,7 @@ pub fn exec_divk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
         // Fast path: both integers - check if division is exact
@@ -658,7 +664,7 @@ pub fn exec_divk(
             let l = left.secondary as i64;
             let r = constant.secondary as i64;
             if r != 0 && l % r == 0 {
-                *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l / r);
+                *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l / r);
                 *pc += 1;
                 return;
             }
@@ -673,7 +679,7 @@ pub fn exec_divk(
             None => return,
         };
 
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
+        *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(l_float / r_float);
         *pc += 1;
     }
 }
@@ -682,6 +688,7 @@ pub fn exec_divk(
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_idivk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -693,7 +700,7 @@ pub fn exec_idivk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -705,7 +712,7 @@ pub fn exec_idivk(
                 return;
             }
             let l = left.secondary as i64;
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue {
                 primary: TAG_INTEGER,
                 secondary: l.div_euclid(r) as u64,
             };
@@ -715,7 +722,7 @@ pub fn exec_idivk(
 
         // Float // Float
         if let (Some(l), Some(r)) = (left.as_number(), constant.as_number()) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number((l / r).floor());
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number((l / r).floor());
             *pc += 1;
         }
     }
@@ -725,17 +732,17 @@ pub fn exec_idivk(
 
 /// BAND: R[A] = R[B] & R[C]
 #[inline(always)]
-pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_band(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
+        let right = *thread.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
             *pc += 1;
         }
     }
@@ -743,17 +750,17 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// BOR: R[A] = R[B] | R[C]
 #[inline(always)]
-pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_bor(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
+        let right = *thread.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
             *pc += 1;
         }
     }
@@ -761,17 +768,17 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// BXOR: R[A] = R[B] ~ R[C]
 #[inline(always)]
-pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_bxor(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
+        let right = *thread.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
             *pc += 1;
         }
     }
@@ -779,14 +786,14 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// SHL: R[A] = R[B] << R[C]
 #[inline(always)]
-pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_shl(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
+        let right = *thread.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             let result = if r >= 0 {
@@ -794,7 +801,7 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             } else {
                 LuaValue::integer(l >> ((-r) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -802,14 +809,14 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// SHR: R[A] = R[B] >> R[C]
 #[inline(always)]
-pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_shr(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-        let right = *vm.register_stack.as_ptr().add(base_ptr + c);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
+        let right = *thread.register_stack.as_ptr().add(base_ptr + c);
 
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             let result = if r >= 0 {
@@ -817,7 +824,7 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             } else {
                 LuaValue::integer(l << ((-r) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -827,6 +834,7 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_bandk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -838,7 +846,7 @@ pub fn exec_bandk(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -863,7 +871,7 @@ pub fn exec_bandk(
         });
 
         if let (Some(l), Some(r)) = (l_int, r_int) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
             *pc += 1;
         }
     }
@@ -873,6 +881,7 @@ pub fn exec_bandk(
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_bork(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -884,7 +893,7 @@ pub fn exec_bork(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -909,7 +918,7 @@ pub fn exec_bork(
         });
 
         if let (Some(l), Some(r)) = (l_int, r_int) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
             *pc += 1;
         }
     }
@@ -919,6 +928,7 @@ pub fn exec_bork(
 /// OPTIMIZED: Uses cached constants_ptr for direct constant access
 #[inline(always)]
 pub fn exec_bxork(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -930,7 +940,7 @@ pub fn exec_bxork(
     let c = get_c!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
@@ -955,7 +965,7 @@ pub fn exec_bxork(
         });
 
         if let (Some(l), Some(r)) = (l_int, r_int) {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
             *pc += 1;
         }
     }
@@ -963,13 +973,13 @@ pub fn exec_bxork(
 
 /// SHRI: R[A] = R[B] >> sC
 #[inline(always)]
-pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_shri(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let sc = get_sc!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         if let Some(l) = left.as_integer() {
             let result = if sc >= 0 {
@@ -977,7 +987,7 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             } else {
                 LuaValue::integer(l << ((-sc) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -985,13 +995,13 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// SHLI: R[A] = sC << R[B]
 #[inline(always)]
-pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_shli(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let sc = get_sc!(instr);
 
     unsafe {
-        let right = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let right = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         if let Some(r) = right.as_integer() {
             let result = if r >= 0 {
@@ -999,7 +1009,7 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             } else {
                 LuaValue::integer((sc as i64) >> ((-r) & 63))
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = result;
             *pc += 1;
         }
     }
@@ -1007,14 +1017,14 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// BNOT: R[A] = ~R[B]
 #[inline(always)]
-pub fn exec_bnot(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_bnot(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let b = get_b!(instr);
 
-    let value = vm.register_stack[base_ptr + b];
+    let value = thread.register_stack[base_ptr + b];
 
     if let Some(int_val) = value.as_integer() {
-        vm.register_stack[base_ptr + a] = LuaValue::integer(!int_val);
+        thread.register_stack[base_ptr + a] = LuaValue::integer(!int_val);
         return Ok(());
     }
 
@@ -1026,7 +1036,7 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
                 let result = vm
                     .call_metamethod(&metamethod, &[value])?
                     .unwrap_or(LuaValue::nil());
-                vm.register_stack[base_ptr + a] = result;
+                thread.register_stack[base_ptr + a] = result;
                 return Ok(());
             }
         }
@@ -1041,33 +1051,33 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 #[allow(dead_code)]
 /// NOT: R[A] = not R[B]
 #[inline(always)]
-pub fn exec_not(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
+pub fn exec_not(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
 
     unsafe {
-        let value = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let value = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // In Lua, only nil and false are falsy
         use crate::lua_value::{TAG_NIL, VALUE_FALSE};
         let is_falsy = value.primary == TAG_NIL || value.primary == VALUE_FALSE;
-        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
+        *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
     }
 }
 
 /// LEN: R[A] = #R[B]
 /// OPTIMIZED: Fast path for tables without __len metamethod
 #[inline(always)]
-pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_len(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let b = get_b!(instr);
 
-    let value = vm.register_stack[base_ptr + b];
+    let value = thread.register_stack[base_ptr + b];
 
     // Fast path: string length - no metamethod
     if let Some(string_id) = value.as_string_id() {
         if let Some(s) = vm.object_pool.get_string(string_id) {
-            vm.register_stack[base_ptr + a] = LuaValue::integer(s.as_str().len() as i64);
+            thread.register_stack[base_ptr + a] = LuaValue::integer(s.as_str().len() as i64);
             return Ok(());
         }
     }
@@ -1086,7 +1096,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
         let mt_val = match table.get_metatable() {
             None => {
                 let len = table.len() as i64;
-                vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+                thread.register_stack[base_ptr + a] = LuaValue::integer(len);
                 return Ok(());
             }
             Some(mt) => mt,
@@ -1097,7 +1107,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
             Some(id) => id,
             None => {
                 let len = table.len() as i64;
-                vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+                thread.register_stack[base_ptr + a] = LuaValue::integer(len);
                 return Ok(());
             }
         };
@@ -1109,7 +1119,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
                 None => {
                     let len = table.len() as i64;
                     return Ok({
-                        vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+                        thread.register_stack[base_ptr + a] = LuaValue::integer(len);
                     });
                 }
             };
@@ -1131,13 +1141,13 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
             let result = vm
                 .call_metamethod(&metamethod, &[value])?
                 .unwrap_or(LuaValue::nil());
-            vm.register_stack[base_ptr + a] = result;
+            thread.register_stack[base_ptr + a] = result;
         } else {
             // Cache __len absence for future lookups
             if let Some(mt_table) = vm.object_pool.get_table_mut(mt_id) {
                 mt_table.set_tm_absent(tm_flags::TM_LEN);
             }
-            vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+            thread.register_stack[base_ptr + a] = LuaValue::integer(len);
         }
         return Ok(());
     }
@@ -1149,6 +1159,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 /// OPTIMIZED: Uses passed code_ptr instead of dereferencing frame_ptr
 #[inline(always)]
 pub fn exec_mmbin(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     code_ptr: *const u32,
@@ -1170,8 +1181,8 @@ pub fn exec_mmbin(
         let prev_instr = code_ptr.add(prev_pc - 1).read();
         let dest_reg = get_a!(prev_instr);
 
-        let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
-        let rb = *vm.register_stack.as_ptr().add(base_ptr + b);
+        let ra = *thread.register_stack.as_ptr().add(base_ptr + a);
+        let rb = *thread.register_stack.as_ptr().add(base_ptr + b);
 
         // Use pre-cached metamethod StringId
         let mm_key = LuaValue::string(vm.object_pool.get_binop_tm(c as u8));
@@ -1188,7 +1199,7 @@ pub fn exec_mmbin(
 
         if !metamethod.is_nil() {
             if let Some(result) = vm.call_metamethod(&metamethod, &[ra, rb])? {
-                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
+                *thread.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
         // If no metamethod, leave the instruction result as-is (error will be caught elsewhere)
@@ -1200,6 +1211,7 @@ pub fn exec_mmbin(
 /// OPTIMIZED: Uses passed code_ptr instead of dereferencing frame_ptr
 #[inline(always)]
 pub fn exec_mmbini(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     code_ptr: *const u32,
@@ -1221,7 +1233,7 @@ pub fn exec_mmbini(
         let prev_instr = code_ptr.add(prev_pc - 1).read();
         let dest_reg = get_a!(prev_instr);
 
-        let rb = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let rb = *thread.register_stack.as_ptr().add(base_ptr + a);
         let rc = LuaValue::integer(sb as i64);
 
         // Use pre-cached metamethod StringId
@@ -1237,7 +1249,7 @@ pub fn exec_mmbini(
         if !metamethod.is_nil() {
             let args = if k { vec![rc, rb] } else { vec![rb, rc] };
             if let Some(result) = vm.call_metamethod(&metamethod, &args)? {
-                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
+                *thread.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
     }
@@ -1248,6 +1260,7 @@ pub fn exec_mmbini(
 /// OPTIMIZED: Uses passed code_ptr and constants_ptr instead of dereferencing frame_ptr
 #[inline(always)]
 pub fn exec_mmbink(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     code_ptr: *const u32,
@@ -1270,7 +1283,7 @@ pub fn exec_mmbink(
         let prev_instr = code_ptr.add(prev_pc - 1).read();
         let dest_reg = get_a!(prev_instr);
 
-        let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let ra = *thread.register_stack.as_ptr().add(base_ptr + a);
 
         // Get constant via passed constants_ptr
         let kb = *constants_ptr.add(b);
@@ -1292,9 +1305,10 @@ pub fn exec_mmbink(
 
         if !metamethod.is_nil() {
             if let Some(result) = vm.call_metamethod(&metamethod, &[left, right])? {
-                *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
+                *thread.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
         }
     }
     Ok(())
 }
+

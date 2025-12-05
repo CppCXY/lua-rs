@@ -3,6 +3,7 @@
 /// These instructions handle upvalues, closures, and variable captures.
 use crate::{
     LuaValue, get_a, get_b, get_bx, get_c,
+    lua_value::LuaThread,
     lua_vm::{LuaCallFrame, LuaResult, LuaVM},
 };
 
@@ -12,7 +13,7 @@ use crate::{
 /// OPTIMIZED: Uses cached upvalues_ptr in frame for direct access
 #[allow(dead_code)]
 #[inline(always)]
-pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
+pub fn exec_getupval(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
 
@@ -22,7 +23,7 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
     // Read the upvalue value
     let value = unsafe { vm.read_upvalue_unchecked(upvalue_id) };
     unsafe {
-        *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
+        *thread.register_stack.get_unchecked_mut(base_ptr + a) = value;
     }
 }
 
@@ -32,14 +33,14 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// OPTIMIZED: Uses cached upvalues_ptr in frame for direct access
 #[allow(dead_code)]
 #[inline(always)]
-pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
+pub fn exec_setupval(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
 
     // FAST PATH: Use cached upvalues_ptr for direct access
     let upvalue_id = unsafe { *(*frame_ptr).upvalues_ptr.add(b) };
 
-    let value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+    let value = unsafe { *thread.register_stack.get_unchecked(base_ptr + a) };
 
     // Write to the upvalue
     unsafe {
@@ -50,7 +51,7 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// CLOSE A
 /// close all upvalues >= R[A]
 #[inline(always)]
-pub fn exec_close(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
+pub fn exec_close(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = get_a!(instr);
     let close_from = base_ptr + a;
 
@@ -62,6 +63,7 @@ pub fn exec_close(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 /// OPTIMIZED: Fast path for closures without upvalues, avoid unnecessary clones
 #[inline(always)]
 pub fn exec_closure(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -87,7 +89,7 @@ pub fn exec_closure(
     if upvalue_count == 0 {
         let closure = vm.create_function(proto, Vec::new());
         unsafe {
-            *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
+            *thread.register_stack.get_unchecked_mut(base_ptr + a) = closure;
         }
         vm.check_gc();
         return Ok(());
@@ -104,7 +106,7 @@ pub fn exec_closure(
 
             // Check if this upvalue is already open - use linear search (usually small list)
             let mut found = None;
-            for &uv_id in vm.open_upvalues.iter() {
+            for &uv_id in thread.open_upvalues.iter() {
                 // SAFETY: upvalue IDs in open_upvalues are always valid
                 let uv = unsafe { vm.object_pool.get_upvalue_unchecked(uv_id) };
                 if uv.points_to_index(stack_index) {
@@ -119,7 +121,7 @@ pub fn exec_closure(
                 // Create new open upvalue and add to open list directly
                 let new_uv_id = vm.create_upvalue_open(stack_index);
                 upvalue_ids.push(new_uv_id);
-                vm.open_upvalues.push(new_uv_id);
+                thread.open_upvalues.push(new_uv_id);
             }
         } else {
             // Upvalue refers to an upvalue in the enclosing function
@@ -135,7 +137,7 @@ pub fn exec_closure(
 
     let closure = vm.create_function(proto, upvalue_ids);
     unsafe {
-        *vm.register_stack.get_unchecked_mut(base_ptr + a) = closure;
+        *thread.register_stack.get_unchecked_mut(base_ptr + a) = closure;
     }
 
     // GC checkpoint: closure now safely stored in register
@@ -151,6 +153,7 @@ pub fn exec_closure(
 /// This instruction copies them to the target registers.
 #[inline(always)]
 pub fn exec_vararg(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -169,7 +172,7 @@ pub fn exec_vararg(
     };
 
     let dest_base = base_ptr + a;
-    let reg_ptr = vm.register_stack.as_mut_ptr();
+    let reg_ptr = thread.register_stack.as_mut_ptr();
 
     if c == 0 {
         // Variable number of results - copy all varargs
@@ -180,7 +183,7 @@ pub fn exec_vararg(
         }
 
         // OPTIMIZED: Use ptr::copy for bulk transfer when possible
-        if vararg_count > 0 && vararg_start + vararg_count <= vm.register_stack.len() {
+        if vararg_count > 0 && vararg_start + vararg_count <= thread.register_stack.len() {
             unsafe {
                 std::ptr::copy(
                     reg_ptr.add(vararg_start),
@@ -192,7 +195,7 @@ pub fn exec_vararg(
             // Fallback: copy with bounds checking
             let nil_val = LuaValue::nil();
             for i in 0..vararg_count {
-                let value = if vararg_start + i < vm.register_stack.len() {
+                let value = if vararg_start + i < thread.register_stack.len() {
                     unsafe { *reg_ptr.add(vararg_start + i) }
                 } else {
                     nil_val
@@ -209,7 +212,7 @@ pub fn exec_vararg(
         let nil_count = count.saturating_sub(vararg_count);
 
         // OPTIMIZED: Bulk copy available varargs
-        if copy_count > 0 && vararg_start + copy_count <= vm.register_stack.len() {
+        if copy_count > 0 && vararg_start + copy_count <= thread.register_stack.len() {
             unsafe {
                 std::ptr::copy(
                     reg_ptr.add(vararg_start),
@@ -237,7 +240,7 @@ pub fn exec_vararg(
 /// R[A] := R[A].. ... ..R[A+B]
 /// OPTIMIZED: Pre-allocation for string/number combinations
 #[inline(always)]
-pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_concat(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let b = get_b!(instr);
 
@@ -248,7 +251,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
 
     // First pass: check types and estimate capacity
     for i in 0..=b {
-        let value = vm.register_stack[base_ptr + a + i];
+        let value = thread.register_stack[base_ptr + a + i];
 
         if let Some(str_id) = value.as_string_id() {
             if let Some(s) = vm.object_pool.get_string(str_id) {
@@ -271,7 +274,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
         let mut float_buffer = ryu::Buffer::new();
 
         for i in 0..=b {
-            let value = vm.register_stack[base_ptr + a + i];
+            let value = thread.register_stack[base_ptr + a + i];
 
             if let Some(str_id) = value.as_string_id() {
                 if let Some(s) = vm.object_pool.get_string(str_id) {
@@ -288,7 +291,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
 
         // OPTIMIZED: Use create_string_owned to avoid extra clone
         let result_value = vm.create_string_owned(result);
-        vm.register_stack[base_ptr + a] = result_value;
+        thread.register_stack[base_ptr + a] = result_value;
 
         // GC checkpoint - Lua checks GC after CONCAT
         vm.check_gc();
@@ -296,10 +299,10 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
     }
 
     // Slow path: need to handle metamethods
-    let mut result_value = vm.register_stack[base_ptr + a];
+    let mut result_value = thread.register_stack[base_ptr + a];
 
     for i in 1..=b {
-        let next_value = vm.register_stack[base_ptr + a + i];
+        let next_value = thread.register_stack[base_ptr + a + i];
 
         // Try direct concatenation first
         let left_str = if let Some(str_id) = result_value.as_string_id() {
@@ -375,7 +378,7 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
         }
     }
 
-    vm.register_stack[base_ptr + a] = result_value;
+    thread.register_stack[base_ptr + a] = result_value;
 
     // GC checkpoint - Lua checks GC after CONCAT
     vm.check_gc();
@@ -385,13 +388,13 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
 /// SETLIST A B C k
 /// R[A][C+i] := R[A+i], 1 <= i <= B
 #[inline(always)]
-pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
+pub fn exec_setlist(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let c = get_c!(instr);
 
     let top = unsafe { (*frame_ptr).top } as usize;
-    let table = vm.register_stack[base_ptr + a];
+    let table = thread.register_stack[base_ptr + a];
 
     let start_idx = c * 50; // 0-based for array indexing
     let count = if b == 0 { top - a - 1 } else { b };
@@ -411,7 +414,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, ba
         for i in 0..count {
             unsafe {
                 *t.array.get_unchecked_mut(start_idx + i) =
-                    *vm.register_stack.get_unchecked(base_ptr + a + 1 + i);
+                    *thread.register_stack.get_unchecked(base_ptr + a + 1 + i);
             }
         }
         return;
@@ -420,7 +423,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, ba
     // Slow path with metamethods
     for i in 0..count {
         let key = LuaValue::integer((start_idx + i + 1) as i64);
-        let value = vm.register_stack[base_ptr + a + i + 1];
+        let value = thread.register_stack[base_ptr + a + i + 1];
         let _ = vm.table_set_with_meta(table, key, value);
     }
 }
@@ -429,14 +432,15 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, ba
 /// mark variable A as to-be-closed
 /// This marks a variable to have its __close metamethod called when it goes out of scope
 #[inline(always)]
-pub fn exec_tbc(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
+pub fn exec_tbc(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, base_ptr: usize) {
     let a = get_a!(instr);
     let reg_idx = base_ptr + a;
 
     // Get the value to be marked as to-be-closed
-    let value = vm.register_stack[reg_idx];
+    let value = thread.register_stack[reg_idx];
 
     // Add to to_be_closed stack (will be processed in LIFO order)
     // Store absolute register index for later closing
     vm.to_be_closed.push((reg_idx, value));
 }
+

@@ -974,6 +974,14 @@ impl ObjectPool {
         }
     }
 
+    #[inline]
+    pub fn fix_thread(&mut self, id: ThreadId) {
+        if let Some(gt) = self.threads.get_mut(id.0) {
+            gt.header.set_fixed();
+            gt.header.make_black();
+        }
+    }
+
     // ==================== Table Operations ====================
 
     #[inline]

@@ -1,7 +1,7 @@
 /// Control flow instructions
 ///
 /// These instructions handle function calls, returns, jumps, and coroutine operations.
-use crate::lua_value::LuaValueKind;
+use crate::lua_value::{LuaThread, LuaValueKind};
 use crate::lua_vm::{LuaCallFrame, LuaError, LuaResult, LuaVM};
 use crate::{FunctionId, LuaValue};
 use crate::{get_a, get_b, get_c, get_k, get_sb, get_sj};
@@ -9,6 +9,7 @@ use crate::{get_a, get_b, get_c, get_k, get_sb, get_sj};
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
 pub fn exec_return(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
@@ -27,7 +28,7 @@ pub fn exec_return(
     let return_count = if b == 0 { top.saturating_sub(a) } else { b - 1 };
 
     // Close upvalues before popping the frame
-    if !vm.open_upvalues.is_empty() {
+    if !thread.open_upvalues.is_empty() {
         vm.close_upvalues_from(base_ptr);
     }
 
@@ -39,9 +40,9 @@ pub fn exec_return(
     }
 
     // Calculate caller info BEFORE pop
-    let has_caller = vm.frame_count > 1;
+    let has_caller = thread.frame_count > 1;
     let (caller_ptr, caller_is_lua) = if has_caller {
-        let ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+        let ptr = unsafe { thread.frames.as_mut_ptr().add(thread.frame_count - 2) };
         let is_lua = unsafe { (*ptr).is_lua() };
         (ptr, is_lua)
     } else {
@@ -49,7 +50,7 @@ pub fn exec_return(
     };
 
     // Pop frame - decrement counter
-    vm.frame_count -= 1;
+    thread.frame_count -= 1;
 
     // Check if caller is a Lua function
     if has_caller && caller_is_lua {
@@ -66,13 +67,13 @@ pub fn exec_return(
             } else {
                 num_results
             });
-        if vm.register_stack.len() < dest_end {
-            vm.ensure_stack_capacity(dest_end);
-            vm.register_stack.resize(dest_end, LuaValue::nil());
+        if thread.register_stack.len() < dest_end {
+            thread.ensure_stack_capacity(dest_end);
+            thread.register_stack.resize(dest_end, LuaValue::nil());
         }
 
         unsafe {
-            let reg_ptr = vm.register_stack.as_mut_ptr();
+            let reg_ptr = thread.register_stack.as_mut_ptr();
 
             if num_results == usize::MAX {
                 // Return all values - use memcpy
@@ -116,19 +117,19 @@ pub fn exec_return(
     } else if has_caller {
         // Caller is C function - write return values to return_values
         *frame_ptr_ptr = caller_ptr;
-        vm.return_values.clear();
+        thread.return_values.clear();
         for i in 0..return_count {
-            if base_ptr + a + i < vm.register_stack.len() {
-                vm.return_values.push(vm.register_stack[base_ptr + a + i]);
+            if base_ptr + a + i < thread.register_stack.len() {
+                thread.return_values.push(thread.register_stack[base_ptr + a + i]);
             }
         }
         Err(LuaError::Exit)
     } else {
         // No caller - exit VM
-        vm.return_values.clear();
+        thread.return_values.clear();
         for i in 0..return_count {
-            if base_ptr + a + i < vm.register_stack.len() {
-                vm.return_values.push(vm.register_stack[base_ptr + a + i]);
+            if base_ptr + a + i < thread.register_stack.len() {
+                thread.return_values.push(thread.register_stack[base_ptr + a + i]);
             }
         }
         Err(LuaError::Exit)
@@ -155,13 +156,13 @@ pub fn exec_jmp(instr: u32, pc: &mut usize) {
 /// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[allow(dead_code)]
 #[inline(always)]
-pub fn exec_test(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_test(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let k = get_k!(instr);
 
     unsafe {
         // OPTIMIZATION: Direct unsafe access and type tag comparison
-        let value = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let value = *thread.register_stack.as_ptr().add(base_ptr + a);
 
         // OPTIMIZATION: Fast truthiness check using type tags
         // nil = TAG_NIL, false = VALUE_FALSE
@@ -180,14 +181,14 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// if (not R[B] == k) then R[A] := R[B] else pc++
 /// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[inline(always)]
-pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_testset(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let k = get_k!(instr);
 
     unsafe {
         // OPTIMIZATION: Direct unsafe access
-        let reg_ptr = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_ptr = thread.register_stack.as_ptr().add(base_ptr);
         let value = *reg_ptr.add(b);
 
         // OPTIMIZATION: Fast truthiness check
@@ -196,7 +197,7 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 
         // If (is_truthy == k), assign R[A] = R[B], otherwise skip next instruction
         if is_truthy == k {
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
+            *thread.register_stack.as_mut_ptr().add(base_ptr + a) = value;
         } else {
             *pc += 1;
         }
@@ -209,14 +210,14 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 /// if ((R[A] == R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Fast path for common types (integers, floats, strings)
 #[inline(always)]
-pub fn exec_eq(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_eq(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let k = get_k!(instr);
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_ptr().add(base_ptr);
         (*reg_base.add(a), *reg_base.add(b))
     };
 
@@ -284,13 +285,13 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> L
 /// if ((R[A] < R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Direct integer fast path like Lua C
 #[inline(always)]
-pub fn exec_lt(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
+pub fn exec_lt(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let k = get_k!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(*base_ptr);
+        let reg_base = thread.register_stack.as_ptr().add(*base_ptr);
         let left = *reg_base.add(a);
         let right = *reg_base.add(b);
 
@@ -412,14 +413,14 @@ fn exec_lt_metamethod(
 /// if ((R[A] <= R[B]) ~= k) then pc++
 /// ULTRA-OPTIMIZED: Use combined_tags for fast path like LT
 #[inline(always)]
-pub fn exec_le(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_le(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let b = get_b!(instr);
     let k = get_k!(instr);
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {
-        let reg_base = vm.register_stack.as_ptr().add(base_ptr);
+        let reg_base = thread.register_stack.as_ptr().add(base_ptr);
         (*reg_base.add(a), *reg_base.add(b))
     };
 
@@ -555,6 +556,7 @@ pub fn exec_le(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> L
 /// if ((R[A] == K[B]) ~= k) then pc++
 #[inline(always)]
 pub fn exec_eqk(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: *mut LuaCallFrame,
@@ -580,7 +582,7 @@ pub fn exec_eqk(
         return Err(vm.error(format!("Invalid constant index: {}", b)));
     };
 
-    let left = unsafe { *vm.register_stack.as_ptr().add(base_ptr + a) };
+    let left = unsafe { *thread.register_stack.as_ptr().add(base_ptr + a) };
 
     let is_equal = left == constant;
 
@@ -594,13 +596,13 @@ pub fn exec_eqk(
 /// EQI A sB k
 /// if ((R[A] == sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_eqi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_eqi(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let sb = get_sb!(instr);
     let k = get_k!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
@@ -620,13 +622,13 @@ pub fn exec_eqi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// LTI A sB k
 /// if ((R[A] < sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_lti(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let sb = get_sb!(instr);
     let k = get_k!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + a);
 
         // OPTIMIZATION: Direct type tag comparison
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
@@ -653,13 +655,13 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 /// LEI A sB k
 /// if ((R[A] <= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_lei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_lei(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let sb = get_sb!(instr);
     let k = get_k!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_less_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
@@ -684,13 +686,13 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 /// GTI A sB k
 /// if ((R[A] > sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_gti(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let sb = get_sb!(instr);
     let k = get_k!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_greater = if (left.primary & TYPE_MASK) == TAG_INTEGER {
@@ -715,13 +717,13 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 /// GEI A sB k
 /// if ((R[A] >= sB) ~= k) then pc++
 #[inline(always)]
-pub fn exec_gei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_gei(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let sb = get_sb!(instr);
     let k = get_k!(instr);
 
     unsafe {
-        let left = *vm.register_stack.as_ptr().add(base_ptr + a);
+        let left = *thread.register_stack.as_ptr().add(base_ptr + a);
 
         use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
         let is_greater_equal = if (left.primary & TYPE_MASK) == TAG_INTEGER {
@@ -749,6 +751,7 @@ pub fn exec_gei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 #[cold]
 #[inline(never)]
 fn relocate_parent_vararg(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
     new_frame_end: usize,
@@ -757,14 +760,14 @@ fn relocate_parent_vararg(
 ) {
     let new_vararg_start = new_frame_end;
     let required_capacity = new_vararg_start + parent_vararg_count;
-    vm.ensure_stack_capacity(required_capacity);
-    if vm.register_stack.len() < required_capacity {
-        vm.register_stack.resize(required_capacity, LuaValue::nil());
+    thread.ensure_stack_capacity(required_capacity);
+    if thread.register_stack.len() < required_capacity {
+        thread.register_stack.resize(required_capacity, LuaValue::nil());
     }
 
     // Copy vararg values to new location
     for i in 0..parent_vararg_count {
-        vm.register_stack[new_vararg_start + i] = vm.register_stack[parent_vararg_start + i];
+        thread.register_stack[new_vararg_start + i] = thread.register_stack[parent_vararg_start + i];
     }
 
     // Update parent frame's vararg position
@@ -777,6 +780,7 @@ fn relocate_parent_vararg(
 /// ULTRA-OPTIMIZED: Inline fast path for Lua function calls
 #[inline(always)]
 pub fn exec_call(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
@@ -787,7 +791,7 @@ pub fn exec_call(
     let c = get_c!(instr);
 
     // Get function value
-    let func = unsafe { *vm.register_stack.get_unchecked(base + a) };
+    let func = unsafe { *thread.register_stack.get_unchecked(base + a) };
 
     // FAST PATH: Function object (can be Lua function or C closure)
     use crate::lua_value::TAG_FUNCTION;
@@ -863,12 +867,12 @@ pub fn exec_call(
 
             // Ensure stack capacity
             let required_size = new_base + max_stack_size;
-            vm.ensure_stack_capacity(required_size);
+            thread.ensure_stack_capacity(required_size);
 
             // Fill missing arguments with nil (non-vararg fast path)
             if arg_count < num_params {
                 unsafe {
-                    let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
+                    let reg_ptr = thread.register_stack.as_mut_ptr().add(new_base);
                     let nil_val = LuaValue::nil();
                     for i in arg_count..num_params {
                         *reg_ptr.add(i) = nil_val;
@@ -895,7 +899,7 @@ pub fn exec_call(
                 max_stack_size,
             );
 
-            *frame_ptr_ptr = vm.push_frame(new_frame);
+            *frame_ptr_ptr = thread.push_frame(new_frame);
             return Ok(());
         }
 
@@ -1002,6 +1006,7 @@ pub fn exec_call(
 /// Slow path for vararg Lua function calls
 #[inline(never)]
 fn exec_call_lua_vararg(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     func_id: FunctionId,
     a: usize,
@@ -1028,14 +1033,14 @@ fn exec_call_lua_vararg(
 
     // Ensure stack capacity
     let required_capacity = new_base + total_stack_size;
-    if vm.register_stack.len() < required_capacity {
-        vm.ensure_stack_capacity(required_capacity);
-        vm.register_stack.resize(required_capacity, LuaValue::nil());
+    if thread.register_stack.len() < required_capacity {
+        thread.ensure_stack_capacity(required_capacity);
+        thread.register_stack.resize(required_capacity, LuaValue::nil());
     }
 
     // Initialize registers
     unsafe {
-        let reg_ptr = vm.register_stack.as_mut_ptr();
+        let reg_ptr = thread.register_stack.as_mut_ptr();
         let nil_val = LuaValue::nil();
 
         // Initialize local variable slots beyond arguments
@@ -1065,7 +1070,7 @@ fn exec_call_lua_vararg(
         max_stack_size,
     );
 
-    *frame_ptr_ptr = vm.push_frame(new_frame);
+    *frame_ptr_ptr = thread.push_frame(new_frame);
     Ok(())
 }
 
@@ -1073,6 +1078,7 @@ fn exec_call_lua_vararg(
 /// OPTIMIZED: Minimize branches and memory operations for common case
 #[inline(always)]
 fn exec_call_lua_function(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     func: LuaValue,
     a: usize,
@@ -1127,15 +1133,15 @@ fn exec_call_lua_function(
             // Vararg would be overwritten! Relocate it to after new frame's stack
             let new_vararg_start = new_frame_end;
             let required_capacity = new_vararg_start + parent_vararg_count;
-            vm.ensure_stack_capacity(required_capacity);
-            if vm.register_stack.len() < required_capacity {
-                vm.register_stack.resize(required_capacity, LuaValue::nil());
+            thread.ensure_stack_capacity(required_capacity);
+            if thread.register_stack.len() < required_capacity {
+                thread.register_stack.resize(required_capacity, LuaValue::nil());
             }
 
             // Copy vararg values to new location (copy forward, no overlap issue since new > old)
             for i in 0..parent_vararg_count {
-                vm.register_stack[new_vararg_start + i] =
-                    vm.register_stack[parent_vararg_start + i];
+                thread.register_stack[new_vararg_start + i] =
+                    thread.register_stack[parent_vararg_start + i];
             }
 
             // Update parent frame's vararg position
@@ -1151,8 +1157,8 @@ fn exec_call_lua_function(
         let required_capacity = new_base + max_stack_size;
 
         // Ensure capacity - single branch
-        if vm.register_stack.len() < required_capacity {
-            vm.register_stack.resize(required_capacity, LuaValue::nil());
+        if thread.register_stack.len() < required_capacity {
+            thread.register_stack.resize(required_capacity, LuaValue::nil());
         }
 
         // LIKE LUA C: Only fill missing arguments (arg_count < num_params)
@@ -1160,7 +1166,7 @@ fn exec_call_lua_function(
         // For add(a,b) called with add(1,5): arg_count=2, num_params=2 → no fill!
         if arg_count < num_params {
             unsafe {
-                let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
+                let reg_ptr = thread.register_stack.as_mut_ptr().add(new_base);
                 let nil_val = LuaValue::nil();
                 for i in arg_count..num_params {
                     *reg_ptr.add(i) = nil_val;
@@ -1182,7 +1188,7 @@ fn exec_call_lua_function(
             max_stack_size,
         );
 
-        *frame_ptr_ptr = vm.push_frame(new_frame);
+        *frame_ptr_ptr = thread.push_frame(new_frame);
         return Ok(());
     }
 
@@ -1201,14 +1207,14 @@ fn exec_call_lua_function(
 
     // Ensure stack capacity
     let required_capacity = new_base + total_stack_size;
-    if vm.register_stack.len() < required_capacity {
-        vm.ensure_stack_capacity(required_capacity);
-        vm.register_stack.resize(required_capacity, LuaValue::nil());
+    if thread.register_stack.len() < required_capacity {
+        thread.ensure_stack_capacity(required_capacity);
+        thread.register_stack.resize(required_capacity, LuaValue::nil());
     }
 
     // Initialize registers
     unsafe {
-        let reg_ptr = vm.register_stack.as_mut_ptr();
+        let reg_ptr = thread.register_stack.as_mut_ptr();
         let nil_val = LuaValue::nil();
 
         // Initialize local variable slots beyond arguments
@@ -1252,13 +1258,14 @@ fn exec_call_lua_function(
         max_stack_size,
     );
 
-    *frame_ptr_ptr = vm.push_frame(new_frame);
+    *frame_ptr_ptr = thread.push_frame(new_frame);
     Ok(())
 }
 
 /// Execute a C closure call (native function with upvalues)
 #[inline(always)]
 fn exec_call_c_closure(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     func: LuaValue,
     c_func: crate::gc::CFunction,
@@ -1274,14 +1281,14 @@ fn exec_call_c_closure(
 ) -> LuaResult<()> {
     // Calculate argument count
     let arg_count = if b == 0 {
-        let frame = vm.current_frame();
+        let frame = thread.current_frame();
         if frame.top as usize > a + 1 {
             (frame.top as usize) - (a + 1)
         } else {
             0
         }
     } else {
-        vm.current_frame_mut().top = (a + b) as u32;
+        thread.current_frame_mut().top = (a + b) as u32;
         b - 1
     };
 
@@ -1293,11 +1300,11 @@ fn exec_call_c_closure(
     if use_call_metamethod {
         if arg_count > 0 {
             for i in (0..arg_count).rev() {
-                vm.register_stack[call_base + 2 + i] = vm.register_stack[call_base + 1 + i];
+                thread.register_stack[call_base + 2 + i] = thread.register_stack[call_base + 1 + i];
             }
         }
-        vm.register_stack[call_base + 1] = call_metamethod_self;
-        vm.register_stack[call_base] = func;
+        thread.register_stack[call_base + 1] = call_metamethod_self;
+        thread.register_stack[call_base] = func;
     }
 
     let actual_arg_count = if use_call_metamethod {
@@ -1308,11 +1315,11 @@ fn exec_call_c_closure(
 
     // Ensure stack capacity
     let required_top = call_base + actual_arg_count + 1 + 20;
-    vm.ensure_stack_capacity(required_top);
+    thread.ensure_stack_capacity(required_top);
 
     // Push C function frame
     let temp_frame = LuaCallFrame::new_c_function(call_base, actual_arg_count + 1);
-    vm.push_frame(temp_frame);
+    thread.push_frame(temp_frame);
 
     // Store C closure upvalues in VM state for access during call
     let old_upvalues_ptr = vm.c_closure_upvalues_ptr;
@@ -1331,26 +1338,26 @@ fn exec_call_c_closure(
         Err(LuaError::Yield) => {
             vm.c_closure_upvalues_ptr = old_upvalues_ptr;
             vm.c_closure_upvalues_len = old_upvalues_len;
-            vm.pop_frame_discard();
-            if vm.frame_count > 0 {
-                *frame_ptr_ptr = vm.current_frame_ptr();
+            thread.pop_frame_discard();
+            if thread.frame_count > 0 {
+                *frame_ptr_ptr = thread.current_frame_ptr();
             }
             return Err(LuaError::Yield);
         }
         Err(e) => {
             vm.c_closure_upvalues_ptr = old_upvalues_ptr;
             vm.c_closure_upvalues_len = old_upvalues_len;
-            vm.pop_frame_discard();
-            if vm.frame_count > 0 {
-                *frame_ptr_ptr = vm.current_frame_ptr();
+            thread.pop_frame_discard();
+            if thread.frame_count > 0 {
+                *frame_ptr_ptr = thread.current_frame_ptr();
             }
             return Err(e);
         }
     };
 
-    vm.pop_frame_discard();
-    if vm.frame_count > 0 {
-        *frame_ptr_ptr = vm.current_frame_ptr();
+    thread.pop_frame_discard();
+    if thread.frame_count > 0 {
+        *frame_ptr_ptr = thread.current_frame_ptr();
     }
 
     // Copy return values
@@ -1363,10 +1370,10 @@ fn exec_call_c_closure(
 
     if result.overflow.is_none() {
         if num_returns > 0 {
-            vm.register_stack[call_base] = result.inline[0];
+            thread.register_stack[call_base] = result.inline[0];
         }
         if num_returns > 1 {
-            vm.register_stack[call_base + 1] = result.inline[1];
+            thread.register_stack[call_base + 1] = result.inline[1];
         }
     } else {
         let values = result.all_values();
@@ -1374,7 +1381,7 @@ fn exec_call_c_closure(
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     values.as_ptr(),
-                    vm.register_stack.as_mut_ptr().add(call_base),
+                    thread.register_stack.as_mut_ptr().add(call_base),
                     num_returns,
                 );
             }
@@ -1383,11 +1390,11 @@ fn exec_call_c_closure(
 
     if return_count != usize::MAX {
         for i in num_returns..return_count {
-            vm.register_stack[call_base + i] = crate::LuaValue::nil();
+            thread.register_stack[call_base + i] = crate::LuaValue::nil();
         }
     }
 
-    vm.current_frame_mut().top = (a + num_returns) as u32;
+    thread.current_frame_mut().top = (a + num_returns) as u32;
     Ok(())
 }
 
@@ -1396,6 +1403,7 @@ fn exec_call_c_closure(
 /// No upvalue indirection, no pointer setup, direct value access
 #[inline(always)]
 fn exec_call_c_closure_inline1(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     c_func: crate::gc::CFunction,
     inline_upvalue: LuaValue,
@@ -1407,14 +1415,14 @@ fn exec_call_c_closure_inline1(
 ) -> LuaResult<()> {
     // Calculate argument count
     let arg_count = if b == 0 {
-        let frame = vm.current_frame();
+        let frame = thread.current_frame();
         if frame.top as usize > a + 1 {
             (frame.top as usize) - (a + 1)
         } else {
             0
         }
     } else {
-        vm.current_frame_mut().top = (a + b) as u32;
+        thread.current_frame_mut().top = (a + b) as u32;
         b - 1
     };
 
@@ -1423,11 +1431,11 @@ fn exec_call_c_closure_inline1(
 
     // Ensure stack capacity
     let required_top = call_base + arg_count + 1 + 20;
-    vm.ensure_stack_capacity(required_top);
+    thread.ensure_stack_capacity(required_top);
 
     // Push C function frame
     let temp_frame = LuaCallFrame::new_c_function(call_base, arg_count + 1);
-    vm.push_frame(temp_frame);
+    thread.push_frame(temp_frame);
 
     // Store inline upvalue in VM state for access during call
     let old_inline_upvalue = vm.c_closure_inline_upvalue;
@@ -1452,9 +1460,9 @@ fn exec_call_c_closure_inline1(
             vm.c_closure_inline_upvalue = old_inline_upvalue;
             vm.c_closure_upvalues_ptr = old_upvalues_ptr;
             vm.c_closure_upvalues_len = old_upvalues_len;
-            vm.pop_frame_discard();
-            if vm.frame_count > 0 {
-                *frame_ptr_ptr = vm.current_frame_ptr();
+            thread.pop_frame_discard();
+            if thread.frame_count > 0 {
+                *frame_ptr_ptr = thread.current_frame_ptr();
             }
             return Err(LuaError::Yield);
         }
@@ -1462,17 +1470,17 @@ fn exec_call_c_closure_inline1(
             vm.c_closure_inline_upvalue = old_inline_upvalue;
             vm.c_closure_upvalues_ptr = old_upvalues_ptr;
             vm.c_closure_upvalues_len = old_upvalues_len;
-            vm.pop_frame_discard();
-            if vm.frame_count > 0 {
-                *frame_ptr_ptr = vm.current_frame_ptr();
+            thread.pop_frame_discard();
+            if thread.frame_count > 0 {
+                *frame_ptr_ptr = thread.current_frame_ptr();
             }
             return Err(e);
         }
     };
 
-    vm.pop_frame_discard();
-    if vm.frame_count > 0 {
-        *frame_ptr_ptr = vm.current_frame_ptr();
+    thread.pop_frame_discard();
+    if thread.frame_count > 0 {
+        *frame_ptr_ptr = thread.current_frame_ptr();
     }
 
     // Copy return values
@@ -1485,10 +1493,10 @@ fn exec_call_c_closure_inline1(
 
     if result.overflow.is_none() {
         if num_returns > 0 {
-            vm.register_stack[call_base] = result.inline[0];
+            thread.register_stack[call_base] = result.inline[0];
         }
         if num_returns > 1 {
-            vm.register_stack[call_base + 1] = result.inline[1];
+            thread.register_stack[call_base + 1] = result.inline[1];
         }
     } else {
         let values = result.all_values();
@@ -1496,7 +1504,7 @@ fn exec_call_c_closure_inline1(
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     values.as_ptr(),
-                    vm.register_stack.as_mut_ptr().add(call_base),
+                    thread.register_stack.as_mut_ptr().add(call_base),
                     num_returns,
                 );
             }
@@ -1505,11 +1513,11 @@ fn exec_call_c_closure_inline1(
 
     if return_count != usize::MAX {
         for i in num_returns..return_count {
-            vm.register_stack[call_base + i] = crate::LuaValue::nil();
+            thread.register_stack[call_base + i] = crate::LuaValue::nil();
         }
     }
 
-    vm.current_frame_mut().top = (a + num_returns) as u32;
+    thread.current_frame_mut().top = (a + num_returns) as u32;
     Ok(())
 }
 
@@ -1517,6 +1525,7 @@ fn exec_call_c_closure_inline1(
 /// Note: Must update frame_ptr_ptr after return because C functions may recursively call Lua
 #[inline(always)]
 fn exec_call_cfunction(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     func: LuaValue,
     a: usize,
@@ -1531,14 +1540,14 @@ fn exec_call_cfunction(
 
     // Calculate argument count
     let arg_count = if b == 0 {
-        let frame = vm.current_frame();
+        let frame = thread.current_frame();
         if frame.top as usize > a + 1 {
             (frame.top as usize) - (a + 1)
         } else {
             0
         }
     } else {
-        vm.current_frame_mut().top = (a + b) as u32;
+        thread.current_frame_mut().top = (a + b) as u32;
         b - 1
     };
 
@@ -1550,11 +1559,11 @@ fn exec_call_cfunction(
     if use_call_metamethod {
         if arg_count > 0 {
             for i in (0..arg_count).rev() {
-                vm.register_stack[call_base + 2 + i] = vm.register_stack[call_base + 1 + i];
+                thread.register_stack[call_base + 2 + i] = thread.register_stack[call_base + 1 + i];
             }
         }
-        vm.register_stack[call_base + 1] = call_metamethod_self;
-        vm.register_stack[call_base] = func;
+        thread.register_stack[call_base + 1] = call_metamethod_self;
+        thread.register_stack[call_base] = func;
     }
 
     let actual_arg_count = if use_call_metamethod {
@@ -1565,38 +1574,38 @@ fn exec_call_cfunction(
 
     // Ensure stack capacity
     let required_top = call_base + actual_arg_count + 1 + 20;
-    vm.ensure_stack_capacity(required_top);
+    thread.ensure_stack_capacity(required_top);
 
     // Push C function frame
     let temp_frame = LuaCallFrame::new_c_function(call_base, actual_arg_count + 1);
 
-    vm.push_frame(temp_frame);
+    thread.push_frame(temp_frame);
 
     // Call C function
     let result = match cfunc(vm) {
         Ok(r) => r,
         Err(LuaError::Yield) => {
-            vm.pop_frame_discard();
+            thread.pop_frame_discard();
             // Update frame_ptr after pop (safely check for empty frames)
-            if vm.frame_count > 0 {
-                *frame_ptr_ptr = vm.current_frame_ptr();
+            if thread.frame_count > 0 {
+                *frame_ptr_ptr = thread.current_frame_ptr();
             }
             return Err(LuaError::Yield);
         }
         Err(e) => {
-            vm.pop_frame_discard();
+            thread.pop_frame_discard();
             // Update frame_ptr after pop (safely check for empty frames)
-            if vm.frame_count > 0 {
-                *frame_ptr_ptr = vm.current_frame_ptr();
+            if thread.frame_count > 0 {
+                *frame_ptr_ptr = thread.current_frame_ptr();
             }
             return Err(e);
         }
     };
-    vm.pop_frame_discard();
+    thread.pop_frame_discard();
     // CRITICAL: Update frame_ptr after C function call returns
     // The C function may have called Lua code which could have reallocated the frames Vec
-    if vm.frame_count > 0 {
-        *frame_ptr_ptr = vm.current_frame_ptr();
+    if thread.frame_count > 0 {
+        *frame_ptr_ptr = thread.current_frame_ptr();
     }
 
     // OPTIMIZED: Copy return values without heap allocation for common cases
@@ -1611,10 +1620,10 @@ fn exec_call_cfunction(
     if result.overflow.is_none() {
         // Values are stored inline
         if num_returns > 0 {
-            vm.register_stack[call_base] = result.inline[0];
+            thread.register_stack[call_base] = result.inline[0];
         }
         if num_returns > 1 {
-            vm.register_stack[call_base + 1] = result.inline[1];
+            thread.register_stack[call_base + 1] = result.inline[1];
         }
     } else {
         // Slow path: overflow to Vec
@@ -1623,7 +1632,7 @@ fn exec_call_cfunction(
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     values.as_ptr(),
-                    vm.register_stack.as_mut_ptr().add(call_base),
+                    thread.register_stack.as_mut_ptr().add(call_base),
                     num_returns,
                 );
             }
@@ -1633,17 +1642,18 @@ fn exec_call_cfunction(
     // Fill remaining with nil
     if return_count != usize::MAX {
         for i in num_returns..return_count {
-            vm.register_stack[call_base + i] = crate::LuaValue::nil();
+            thread.register_stack[call_base + i] = crate::LuaValue::nil();
         }
     }
 
-    vm.current_frame_mut().top = (a + num_returns) as u32;
+    thread.current_frame_mut().top = (a + num_returns) as u32;
     Ok(())
 }
 
 /// TAILCALL A B C k
 /// return R[A](R[A+1], ... ,R[A+B-1])
 pub fn exec_tailcall(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
@@ -1655,7 +1665,7 @@ pub fn exec_tailcall(
 
     // Extract all frame information we'll need BEFORE taking mutable references
     let (base, return_count, result_reg, _pc) = {
-        let frame = &vm.frames[vm.frame_count - 1];
+        let frame = &thread.frames[thread.frame_count - 1];
         (
             frame.base_ptr as usize,
             frame.get_num_results(),
@@ -1665,13 +1675,13 @@ pub fn exec_tailcall(
     };
 
     // Get function from R[A]
-    let func = vm.register_stack[base + a];
+    let func = thread.register_stack[base + a];
 
     // Determine argument count
     let arg_count = if b == 0 {
         // Use all values from R[A+1] to top
         // IMPORTANT: frame.top is RELATIVE to frame.base_ptr
-        let frame = vm.current_frame();
+        let frame = thread.current_frame();
         let args_start_rel = a + 1; // Relative to base
         if (frame.top as usize) > args_start_rel {
             (frame.top as usize) - args_start_rel
@@ -1685,7 +1695,7 @@ pub fn exec_tailcall(
     // Copy arguments to temporary buffer
     let mut args = Vec::with_capacity(arg_count);
     for i in 0..arg_count {
-        args.push(vm.register_stack[base + a + 1 + i]);
+        args.push(thread.register_stack[base + a + 1 + i]);
     }
 
     // Check if function is Lua or C function
@@ -1712,13 +1722,13 @@ pub fn exec_tailcall(
             // Pop current frame (tail call optimization)
             let old_base = base; // Already extracted
             // return_count already extracted
-            vm.pop_frame_discard();
+            thread.pop_frame_discard();
 
-            vm.ensure_stack_capacity(old_base + max_stack_size);
+            thread.ensure_stack_capacity(old_base + max_stack_size);
 
             // Copy arguments to frame base
             for (i, arg) in args.iter().enumerate() {
-                vm.register_stack[old_base + i] = *arg;
+                thread.register_stack[old_base + i] = *arg;
             }
 
             // Create new frame at same location
@@ -1739,7 +1749,7 @@ pub fn exec_tailcall(
                 max_stack_size,
             );
 
-            *frame_ptr_ptr = vm.push_frame(new_frame);
+            *frame_ptr_ptr = thread.push_frame(new_frame);
 
             Ok(())
         }
@@ -1764,32 +1774,32 @@ pub fn exec_tailcall(
             // This avoids growing register_stack infinitely on repeated tail calls
             // The current frame's stack space is being reused since this is a tail call
             let call_base = base;
-            vm.ensure_stack_capacity(call_base + args_len + 1);
+            thread.ensure_stack_capacity(call_base + args_len + 1);
 
-            vm.register_stack[call_base] = func;
+            thread.register_stack[call_base] = func;
             for (i, arg) in args.iter().enumerate() {
-                vm.register_stack[call_base + 1 + i] = *arg;
+                thread.register_stack[call_base + 1 + i] = *arg;
             }
 
             // Create temporary C function frame
             let temp_frame = LuaCallFrame::new_c_function(call_base, args_len + 1);
 
             // Push temp frame and call C function
-            vm.push_frame(temp_frame);
+            thread.push_frame(temp_frame);
             // Note: We don't update frame_ptr_ptr here since this is a temporary frame
             let result = c_func(vm)?;
-            vm.pop_frame_discard(); // Pop temp frame
+            thread.pop_frame_discard(); // Pop temp frame
 
             // NOW pop the tail-calling function's frame
-            vm.pop_frame_discard();
+            thread.pop_frame_discard();
 
             // Write return values to PARENT frame
             // CRITICAL: result_reg is relative to PARENT's base_ptr!
-            if !vm.frames_is_empty() {
+            if !thread.frames_is_empty() {
                 // Update frame_ptr to point to parent frame
-                *frame_ptr_ptr = vm.current_frame_ptr();
+                *frame_ptr_ptr = thread.current_frame_ptr();
 
-                let parent_base = vm.current_frame().base_ptr as usize;
+                let parent_base = thread.current_frame().base_ptr as usize;
                 let vals = result.all_values();
                 let count = if return_count == usize::MAX {
                     vals.len()
@@ -1799,19 +1809,19 @@ pub fn exec_tailcall(
 
                 // Write return values
                 for i in 0..count {
-                    vm.register_stack[parent_base + result_reg + i] = vals[i];
+                    thread.register_stack[parent_base + result_reg + i] = vals[i];
                 }
 
                 // Fill remaining expected values with nil
                 if return_count != usize::MAX {
                     for i in count..return_count {
-                        vm.register_stack[parent_base + result_reg + i] = LuaValue::nil();
+                        thread.register_stack[parent_base + result_reg + i] = LuaValue::nil();
                     }
                 }
 
                 // CRITICAL: Update parent frame's top to reflect the number of return values
                 // This is essential for variable returns (return_count == usize::MAX)
-                vm.current_frame_mut().top = (result_reg + count) as u32;
+                thread.current_frame_mut().top = (result_reg + count) as u32;
             }
 
             Ok(())
@@ -1827,17 +1837,18 @@ pub fn exec_tailcall(
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_return0(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     _instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
 ) -> LuaResult<()> {
     // Like Lua C: check if we have a Lua caller (most common case)
-    if vm.frame_count > 1 {
+    if thread.frame_count > 1 {
         // FAST PATH: Calculate caller frame pointer BEFORE pop
-        let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+        let caller_ptr = unsafe { thread.frames.as_mut_ptr().add(thread.frame_count - 2) };
 
         // Pop frame - just decrement counter (like Lua C: L->ci = ci->previous)
-        vm.frame_count -= 1;
+        thread.frame_count -= 1;
 
         // Check if caller is Lua function
         if unsafe { (*caller_ptr).is_lua() } {
@@ -1858,7 +1869,7 @@ pub fn exec_return0(
                 let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
                 let dest_base = caller_base + result_reg;
                 unsafe {
-                    let reg_ptr = vm.register_stack.as_mut_ptr();
+                    let reg_ptr = thread.register_stack.as_mut_ptr();
                     let nil_val = LuaValue::nil();
                     for i in 0..num_results {
                         *reg_ptr.add(dest_base + i) = nil_val;
@@ -1870,14 +1881,14 @@ pub fn exec_return0(
         } else {
             // C function caller
             *frame_ptr_ptr = caller_ptr;
-            vm.return_values.clear();
+            thread.return_values.clear();
             return Err(LuaError::Exit);
         }
     }
 
     // No caller - exit VM
-    vm.frame_count -= 1;
-    vm.return_values.clear();
+    thread.frame_count -= 1;
+    thread.return_values.clear();
     Err(LuaError::Exit)
 }
 
@@ -1888,6 +1899,7 @@ pub fn exec_return0(
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_return1(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
@@ -1896,15 +1908,15 @@ pub fn exec_return1(
 
     // Get base_ptr and return value FIRST
     let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr } as usize;
-    let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+    let return_value = unsafe { *thread.register_stack.get_unchecked(base_ptr + a) };
 
     // Like Lua C: check if we have a Lua caller (most common case)
-    if vm.frame_count > 1 {
+    if thread.frame_count > 1 {
         // FAST PATH: Calculate caller frame pointer BEFORE pop
-        let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+        let caller_ptr = unsafe { thread.frames.as_mut_ptr().add(thread.frame_count - 2) };
 
         // Pop frame - just decrement counter
-        vm.frame_count -= 1;
+        thread.frame_count -= 1;
 
         // Check if caller is Lua function
         if unsafe { (*caller_ptr).is_lua() } {
@@ -1916,7 +1928,7 @@ pub fn exec_return1(
             // Write return value directly to caller's register
             let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
             unsafe {
-                *vm.register_stack
+                *thread.register_stack
                     .get_unchecked_mut(caller_base + result_reg) = return_value;
             }
 
@@ -1924,15 +1936,16 @@ pub fn exec_return1(
         } else {
             // C function caller
             *frame_ptr_ptr = caller_ptr;
-            vm.return_values.clear();
-            vm.return_values.push(return_value);
+            thread.return_values.clear();
+            thread.return_values.push(return_value);
             return Err(LuaError::Exit);
         }
     }
 
     // No caller - exit VM
-    vm.frame_count -= 1;
-    vm.return_values.clear();
-    vm.return_values.push(return_value);
+    thread.frame_count -= 1;
+    thread.return_values.clear();
+    thread.return_values.push(return_value);
     Err(LuaError::Exit)
 }
+

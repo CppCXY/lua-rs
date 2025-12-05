@@ -3,7 +3,7 @@
 /// These instructions handle for loops (numeric and generic iterators).
 use crate::{
     LuaValue, get_a, get_bx, get_c,
-    lua_value::{LuaValueKind, TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
+    lua_value::{LuaThread, LuaValueKind, TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
     lua_vm::{LuaCallFrame, LuaResult, LuaVM},
 };
 
@@ -13,12 +13,12 @@ use crate::{
 /// Prepare numeric for loop: R[A]-=R[A+2]; R[A+3]=R[A]; if (skip) pc+=Bx+1
 /// OPTIMIZED: Uses frame_ptr directly, no i128, unsafe register access
 #[inline(always)]
-pub fn exec_forprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_forprep(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let bx = get_bx!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+        let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr + a);
 
         let init = *reg_base;
         let limit = *reg_base.add(1);
@@ -133,12 +133,12 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 /// ULTRA-OPTIMIZED: Check idx type (set by FORPREP), use chgivalue pattern
 #[inline(always)]
 #[allow(dead_code)]
-pub fn exec_forloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
+pub fn exec_forloop(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
     let a = get_a!(instr);
     let bx = get_bx!(instr);
 
     unsafe {
-        let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+        let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr + a);
 
         // Check idx type - FORPREP sets this to integer only if ALL of init/limit/step are integers
         let idx = *reg_base;
@@ -172,6 +172,7 @@ pub fn exec_forloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 #[cold]
 #[inline(never)]
 pub fn exec_forloop_float(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     reg_base: *mut LuaValue,
     bx: usize,
@@ -231,14 +232,14 @@ pub fn exec_forloop_float(
 /// create upvalue for R[A + 3]; pc+=Bx
 /// In Lua 5.4, this creates a to-be-closed variable for the state
 #[inline(always)]
-pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_tforprep(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let bx = get_bx!(instr);
 
     // In Lua 5.4, R[A+3] is the to-be-closed variable for the state
     // For now, we just copy the state value to ensure it's preserved
-    let state = vm.register_stack[base_ptr + a + 1];
-    vm.register_stack[base_ptr + a + 3] = state;
+    let state = thread.register_stack[base_ptr + a + 1];
+    thread.register_stack[base_ptr + a + 3] = state;
 
     // Jump to loop start
     *pc += bx;
@@ -258,6 +259,7 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize
 /// Returns true if a Lua function was called and frame changed (needs updatestate)
 #[inline(always)]
 pub fn exec_tforcall(
+    thread: &mut LuaThread,
     vm: &mut LuaVM,
     instr: u32,
     frame_ptr: &mut *mut LuaCallFrame,
@@ -267,9 +269,9 @@ pub fn exec_tforcall(
     let c = get_c!(instr);
 
     // Get iterator function and state
-    let func = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
-    let state = unsafe { *vm.register_stack.get_unchecked(base_ptr + a + 1) };
-    let control = unsafe { *vm.register_stack.get_unchecked(base_ptr + a + 2) };
+    let func = unsafe { *thread.register_stack.get_unchecked(base_ptr + a) };
+    let state = unsafe { *thread.register_stack.get_unchecked(base_ptr + a + 1) };
+    let control = unsafe { *thread.register_stack.get_unchecked(base_ptr + a + 2) };
 
     // FAST PATH: Check if it's a CFunction (most common for ipairs/pairs)
     use crate::lua_value::TAG_CFUNCTION;
@@ -278,19 +280,19 @@ pub fn exec_tforcall(
 
         // Set up temporary call frame position (beyond result area)
         let call_base = base_ptr + a + 4 + c + 1;
-        vm.ensure_stack_capacity(call_base + 3);
+        thread.ensure_stack_capacity(call_base + 3);
 
         unsafe {
-            *vm.register_stack.get_unchecked_mut(call_base) = func;
-            *vm.register_stack.get_unchecked_mut(call_base + 1) = state;
-            *vm.register_stack.get_unchecked_mut(call_base + 2) = control;
+            *thread.register_stack.get_unchecked_mut(call_base) = func;
+            *thread.register_stack.get_unchecked_mut(call_base + 1) = state;
+            *thread.register_stack.get_unchecked_mut(call_base + 2) = control;
         }
 
         // Create minimal temporary frame for the call
         let temp_frame = LuaCallFrame::new_c_function(call_base, 3);
-        vm.push_frame(temp_frame);
+        thread.push_frame(temp_frame);
         let result = cfunc(vm)?;
-        vm.pop_frame_discard();
+        thread.pop_frame_discard();
 
         // OPTIMIZED: Direct inline access without Vec allocation
         // ipairs/pairs typically return 2 values (index, value) or nil
@@ -302,12 +304,12 @@ pub fn exec_tforcall(
             let count = values.len().min(c);
             for i in 0..count {
                 unsafe {
-                    *vm.register_stack.get_unchecked_mut(result_base + i) = values[i];
+                    *thread.register_stack.get_unchecked_mut(result_base + i) = values[i];
                 }
             }
             for i in count..c {
                 unsafe {
-                    *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
+                    *thread.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
                 }
             }
         } else {
@@ -315,14 +317,14 @@ pub fn exec_tforcall(
             let inline_count = result.inline_count as usize;
             unsafe {
                 if c >= 1 {
-                    *vm.register_stack.get_unchecked_mut(result_base) = if inline_count >= 1 {
+                    *thread.register_stack.get_unchecked_mut(result_base) = if inline_count >= 1 {
                         result.inline[0]
                     } else {
                         LuaValue::nil()
                     };
                 }
                 if c >= 2 {
-                    *vm.register_stack.get_unchecked_mut(result_base + 1) = if inline_count >= 2 {
+                    *thread.register_stack.get_unchecked_mut(result_base + 1) = if inline_count >= 2 {
                         result.inline[1]
                     } else {
                         LuaValue::nil()
@@ -330,7 +332,7 @@ pub fn exec_tforcall(
                 }
                 // Fill any remaining slots with nil
                 for i in 2..c {
-                    *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
+                    *thread.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
                 }
             }
         }
@@ -360,15 +362,15 @@ pub fn exec_tforcall(
             // Set up arguments at base_ptr + a + 4 (first arg = state)
             // Arguments: state, control
             let call_base = base_ptr + a + 4;
-            vm.ensure_stack_capacity(call_base + max_stack_size);
+            thread.ensure_stack_capacity(call_base + max_stack_size);
 
             // Place arguments (overwriting result slots temporarily is OK)
-            vm.register_stack[call_base] = state;
-            vm.register_stack[call_base + 1] = control;
+            thread.register_stack[call_base] = state;
+            thread.register_stack[call_base + 1] = control;
 
             // Initialize registers beyond arguments
             for i in 2..max_stack_size {
-                vm.register_stack[call_base + i] = LuaValue::nil();
+                thread.register_stack[call_base + i] = LuaValue::nil();
             }
 
             // Create new frame
@@ -386,9 +388,9 @@ pub fn exec_tforcall(
                 max_stack_size,
             );
 
-            vm.push_frame(new_frame);
+            thread.push_frame(new_frame);
             // Update frame_ptr to point to new frame
-            *frame_ptr = vm.current_frame_ptr();
+            *frame_ptr = thread.current_frame_ptr();
             Ok(true) // Frame changed, need updatestate
         }
         _ => Err(vm.error("attempt to call a non-function value in for loop".to_string())),
@@ -405,16 +407,17 @@ pub fn exec_tforcall(
 /// R[A+3] = to-be-closed variable
 /// R[A+4] = first loop variable (checked here)
 #[inline(always)]
-pub fn exec_tforloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
+pub fn exec_tforloop(thread: &mut LuaThread, vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let bx = get_bx!(instr);
 
     // Check first loop variable at R[A+4]
-    let first_var = vm.register_stack[base_ptr + a + 4];
+    let first_var = thread.register_stack[base_ptr + a + 4];
 
     if !first_var.is_nil() {
         // Continue loop: update control variable R[A+2] with first return value
-        vm.register_stack[base_ptr + a + 2] = first_var;
+        thread.register_stack[base_ptr + a + 2] = first_var;
         *pc -= bx;
     }
 }
+

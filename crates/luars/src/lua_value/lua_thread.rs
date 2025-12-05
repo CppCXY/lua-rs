@@ -51,7 +51,32 @@ pub struct LuaThread {
     pub yield_call_nret: Option<usize>,
 }
 
+/// Maximum call stack depth (similar to LUAI_MAXCCALLS in Lua)
+pub const MAX_CALL_DEPTH: usize = 256;
+
 impl LuaThread {
+    /// Create a new thread with pre-allocated stacks
+    pub fn new(status: CoroutineStatus) -> Self {
+        let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
+        frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
+        
+        LuaThread {
+            status,
+            frames,
+            frame_count: 0,
+            register_stack: Vec::with_capacity(1024),
+            return_values: Vec::new(),
+            open_upvalues: Vec::new(),
+            next_frame_id: 0,
+            yield_values: Vec::new(),
+            resume_values: Vec::new(),
+            yield_pc: None,
+            yield_frame_id: None,
+            yield_call_reg: None,
+            yield_call_nret: None,
+        }
+    }
+
     /// Check if this coroutine can be resumed
     pub fn can_resume(&self) -> bool {
         matches!(self.status, CoroutineStatus::Suspended)
@@ -89,6 +114,77 @@ impl LuaThread {
         self.yield_frame_id = None;
         self.yield_call_reg = None;
         self.yield_call_nret = None;
+    }
+
+    // ============ Frame Management ============
+    
+    /// Push a new frame onto the call stack and return stable pointer
+    #[inline(always)]
+    pub fn push_frame(&mut self, frame: LuaCallFrame) -> *mut LuaCallFrame {
+        let idx = self.frame_count;
+        debug_assert!(idx < MAX_CALL_DEPTH, "call stack overflow");
+
+        if idx < self.frames.len() {
+            self.frames[idx] = frame;
+        } else {
+            self.frames.push(frame);
+        }
+        self.frame_count = idx + 1;
+        &mut self.frames[idx] as *mut LuaCallFrame
+    }
+
+    /// Pop frame without returning it
+    #[inline(always)]
+    pub fn pop_frame_discard(&mut self) {
+        debug_assert!(self.frame_count > 0, "pop from empty call stack");
+        self.frame_count -= 1;
+    }
+
+    /// Pop the current frame from the call stack
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub fn pop_frame(&mut self) -> Option<LuaCallFrame> {
+        if self.frame_count > 0 {
+            self.frame_count -= 1;
+            Some(unsafe { std::ptr::read(self.frames.as_ptr().add(self.frame_count)) })
+        } else {
+            None
+        }
+    }
+
+    /// Check if call stack is empty
+    #[inline(always)]
+    pub fn frames_is_empty(&self) -> bool {
+        self.frame_count == 0
+    }
+
+    /// Get current frame reference
+    #[inline(always)]
+    pub fn current_frame(&self) -> &LuaCallFrame {
+        debug_assert!(self.frame_count > 0);
+        unsafe { self.frames.get_unchecked(self.frame_count - 1) }
+    }
+
+    /// Get current frame mutable reference
+    #[inline(always)]
+    pub fn current_frame_mut(&mut self) -> &mut LuaCallFrame {
+        debug_assert!(self.frame_count > 0);
+        unsafe { self.frames.get_unchecked_mut(self.frame_count - 1) }
+    }
+
+    /// Get stable pointer to current frame
+    #[inline(always)]
+    pub fn current_frame_ptr(&mut self) -> *mut LuaCallFrame {
+        debug_assert!(self.frame_count > 0);
+        unsafe { self.frames.as_mut_ptr().add(self.frame_count - 1) }
+    }
+
+    /// Ensure register stack has capacity for at least `size` elements
+    #[inline(always)]
+    pub fn ensure_stack_capacity(&mut self, size: usize) {
+        if self.register_stack.len() < size {
+            self.register_stack.resize(size, LuaValue::nil());
+        }
     }
 }
 

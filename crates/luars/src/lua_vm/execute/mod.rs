@@ -17,7 +17,7 @@ pub use table_instructions::*;
 pub use upvalue_instructions::*;
 
 use super::{LuaError, LuaResult, LuaVM, OpCode};
-use crate::lua_value::{TAG_FALSE, TAG_FLOAT, TAG_INTEGER, TAG_NIL, TAG_TRUE, TYPE_MASK};
+use crate::lua_value::{LuaThread, TAG_FALSE, TAG_FLOAT, TAG_INTEGER, TAG_NIL, TAG_TRUE, TYPE_MASK};
 use crate::lua_vm::LuaCallFrame;
 use crate::{LuaValue, UpvalueState, get_a, get_ax, get_b, get_bx, get_k, get_op, get_sbx, get_sj};
 
@@ -57,14 +57,14 @@ unsafe fn updatestate(
 ///
 /// Returns: Ok(LuaValue) on success, Err on runtime error
 #[inline(never)] // Don't inline this - it's the main loop, let it stay in cache
-pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
+pub fn luavm_execute(thread: &mut LuaThread, vm: &mut LuaVM) -> LuaResult<LuaValue> {
     // Safety check: must have at least one frame to execute
-    if vm.frame_count == 0 {
+    if thread.frame_count == 0 {
         return Err(LuaError::Exit);
     }
 
     // Initialize frame pointer - Box ensures pointer stability across Vec reallocs
-    let mut frame_ptr = vm.current_frame_ptr();
+    let mut frame_ptr = thread.current_frame_ptr();
 
     // Like Lua C: cache hot variables as locals (register allocated)
     // This avoids dereferencing frame_ptr on each instruction
@@ -94,7 +94,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = get_a!(instr);
                 let b = get_b!(instr);
                 unsafe {
-                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+                    let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr);
                     *reg_base.add(a) = *reg_base.add(b);
                 }
                 continue 'mainloop;
@@ -105,7 +105,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = get_a!(instr);
                 let sbx = get_sbx!(instr);
                 unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let dst = thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     (*dst).primary = TAG_INTEGER;
                     (*dst).secondary = sbx as i64 as u64;
                 }
@@ -117,7 +117,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = get_a!(instr);
                 let sbx = get_sbx!(instr);
                 unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let dst = thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     (*dst).primary = TAG_FLOAT;
                     (*dst).secondary = (sbx as f64).to_bits();
                 }
@@ -128,7 +128,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             OpCode::LoadTrue => {
                 let a = get_a!(instr);
                 unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let dst = thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     (*dst).primary = TAG_TRUE;
                 }
                 continue 'mainloop;
@@ -138,7 +138,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             OpCode::LoadFalse => {
                 let a = get_a!(instr);
                 unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let dst = thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     (*dst).primary = TAG_FALSE;
                 }
                 continue 'mainloop;
@@ -148,7 +148,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             OpCode::LFalseSkip => {
                 let a = get_a!(instr);
                 unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let dst = thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     (*dst).primary = TAG_FALSE;
                 }
                 pc += 1;
@@ -160,7 +160,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = get_a!(instr);
                 let b = get_b!(instr);
                 unsafe {
-                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     for i in 0..=b {
                         (*reg_base.add(i)).primary = TAG_NIL;
                     }
@@ -174,7 +174,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let bx = get_bx!(instr);
                 unsafe {
                     let constant = *(*frame_ptr).constants_ptr.add(bx);
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                    *thread.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
                 }
                 continue 'mainloop;
             }
@@ -187,7 +187,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                     pc += 1;
                     let ax = get_ax!(extra_instr);
                     let constant = *(*frame_ptr).constants_ptr.add(ax);
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                    *thread.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
                 }
                 continue 'mainloop;
             }
@@ -315,9 +315,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = get_a!(instr);
                 let b = get_b!(instr);
                 unsafe {
-                    let value = *vm.register_stack.as_ptr().add(base_ptr + b);
+                    let value = *thread.register_stack.as_ptr().add(base_ptr + b);
                     let is_falsy = !value.is_truthy();
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
+                    *thread.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
                 }
                 continue 'mainloop;
             }
@@ -392,7 +392,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = get_a!(instr);
                 let k = get_k!(instr);
                 unsafe {
-                    let val = *vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let val = *thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     let is_truthy = val.is_truthy();
                     if !is_truthy == k {
                         pc += 1;
@@ -416,7 +416,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = get_a!(instr);
                 let bx = get_bx!(instr);
                 unsafe {
-                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    let reg_base = thread.register_stack.as_mut_ptr().add(base_ptr + a);
                     let idx = *reg_base;
 
                     // Integer loop: check if idx is integer (FORPREP sets this correctly)
@@ -462,12 +462,12 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                     let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
                     let value = match &uv.state {
                         UpvalueState::Open { stack_index } => {
-                            *vm.register_stack.as_ptr().add(*stack_index)
+                            *thread.register_stack.as_ptr().add(*stack_index)
                         }
                         UpvalueState::Closed(val) => *val,
                     };
 
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
+                    *thread.register_stack.as_mut_ptr().add(base_ptr + a) = value;
                 }
                 continue 'mainloop;
             }
@@ -478,7 +478,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
                 unsafe {
                     // Get the value to write
-                    let value = *vm.register_stack.as_ptr().add(base_ptr + a);
+                    let value = *thread.register_stack.as_ptr().add(base_ptr + a);
 
                     // Get upvalue
                     let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
@@ -487,7 +487,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                     let uv = vm.object_pool.get_upvalue_mut_unchecked(upvalue_id);
                     match &mut uv.state {
                         UpvalueState::Open { stack_index } => {
-                            *vm.register_stack.as_mut_ptr().add(*stack_index) = value;
+                            *thread.register_stack.as_mut_ptr().add(*stack_index) = value;
                         }
                         UpvalueState::Closed(val) => *val = value,
                     };
@@ -507,18 +507,18 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             OpCode::Return0 => {
                 // OPTIMIZED RETURN0
                 // Close upvalues if any are open
-                if !vm.open_upvalues.is_empty() {
+                if !thread.open_upvalues.is_empty() {
                     vm.close_upvalues_from(base_ptr);
                 }
 
-                if vm.frame_count > 1 {
+                if thread.frame_count > 1 {
                     // Get result info BEFORE decrementing frame_count
                     let result_reg = unsafe { (*frame_ptr).get_result_reg() };
                     let num_results = unsafe { (*frame_ptr).get_num_results() };
-                    let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+                    let caller_ptr = unsafe { thread.frames.as_mut_ptr().add(thread.frame_count - 2) };
 
                     // Pop frame
-                    vm.frame_count -= 1;
+                    thread.frame_count -= 1;
 
                     // Check if caller is Lua function
                     if unsafe { (*caller_ptr).is_lua() } {
@@ -528,7 +528,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         // Only fill nil if caller expects results (rare case)
                         if num_results > 0 && num_results != usize::MAX {
                             unsafe {
-                                let reg_ptr = vm.register_stack.as_mut_ptr();
+                                let reg_ptr = thread.register_stack.as_mut_ptr();
                                 let nil_val = LuaValue::nil();
                                 for i in 0..num_results {
                                     *reg_ptr.add(caller_base + result_reg + i) = nil_val;
@@ -552,30 +552,30 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
 
                 // No caller - exit VM
-                vm.frame_count -= 1;
+                thread.frame_count -= 1;
                 vm.return_values.clear();
                 return Err(LuaError::Exit);
             }
             OpCode::Return1 => {
                 // OPTIMIZED RETURN1
                 // Close upvalues if any are open
-                if !vm.open_upvalues.is_empty() {
+                if !thread.open_upvalues.is_empty() {
                     vm.close_upvalues_from(base_ptr);
                 }
 
                 let a = get_a!(instr);
 
                 // Get return value early
-                let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+                let return_value = unsafe { *thread.register_stack.get_unchecked(base_ptr + a) };
 
                 // Fast path: have Lua caller
-                if vm.frame_count > 1 {
+                if thread.frame_count > 1 {
                     // Get caller info BEFORE decrementing frame_count
                     let result_reg = unsafe { (*frame_ptr).get_result_reg() };
-                    let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+                    let caller_ptr = unsafe { thread.frames.as_mut_ptr().add(thread.frame_count - 2) };
 
                     // Pop frame
-                    vm.frame_count -= 1;
+                    thread.frame_count -= 1;
 
                     // Check if caller is Lua function (most common)
                     if unsafe { (*caller_ptr).is_lua() } {
@@ -584,7 +584,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
                         // Always write return value (caller may or may not use it)
                         unsafe {
-                            *vm.register_stack
+                            *thread.register_stack
                                 .get_unchecked_mut(caller_base + result_reg) = return_value;
                         }
 
@@ -605,7 +605,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 }
 
                 // No caller - exit VM with return value
-                vm.frame_count -= 1;
+                thread.frame_count -= 1;
                 vm.return_values.clear();
                 vm.return_values.push(return_value);
                 return Err(LuaError::Exit);

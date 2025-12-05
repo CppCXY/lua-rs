@@ -5,6 +5,7 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
+
 use crate::gc::{FunctionId, GC, GcFunction, TableId, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
@@ -40,30 +41,12 @@ pub struct LuaVM {
     // GC roots buffer - pre-allocated to avoid allocation during GC
     gc_roots_buffer: Vec<LuaValue>,
 
-    // Call stack - Pre-allocated Vec with fixed capacity
-    // Using Vec<LuaCallFrame> directly (no Box indirection) for cache efficiency
-    // Vec is pre-allocated to MAX_CALL_DEPTH and never reallocated
-    pub frames: Vec<LuaCallFrame>,
-
-    // Current frame index (0 = empty, 1 = first frame, etc.)
-    // This replaces the linked-list traversal in Lua's L->ci
-    pub(crate) frame_count: usize,
-
-    // Global register stack (unified stack architecture, like Lua 5.4)
-    pub register_stack: Vec<LuaValue>,
-
     // Object pool for unified object management (new architecture)
     // Placed near top for cache locality with hot operations
     pub(crate) object_pool: ObjectPool,
 
     // Garbage collector (cold path - only accessed during actual GC)
     pub(crate) gc: GC,
-
-    // Multi-return value buffer (temporary storage for function returns)
-    pub return_values: Vec<LuaValue>,
-
-    // Open upvalues list (for closing when frames exit) - uses UpvalueId for new architecture
-    pub(crate) open_upvalues: Vec<UpvalueId>,
 
     // To-be-closed variables stack (for __close metamethod)
     // Stores (register_index, value) pairs that need __close called when they go out of scope
@@ -72,24 +55,15 @@ pub struct LuaVM {
     // Next frame ID (for tracking frames)
     pub(crate) next_frame_id: usize,
 
-    // Error handling state
-    pub error_handler: Option<LuaValue>, // Current error handler for xpcall
-
     // FFI state
     #[cfg(feature = "loadlib")]
     pub(crate) ffi_state: crate::ffi::FFIState,
 
     // Current running thread (for coroutine.running()) - legacy Rc-based
-    pub current_thread: Option<Rc<RefCell<LuaThread>>>,
+    pub main_thread_id: ThreadId,
 
     // Current running thread ID (for new ObjectPool-based architecture)
-    pub current_thread_id: Option<ThreadId>,
-
-    // Current thread as LuaValue (for comparison in coroutine.running())
-    pub current_thread_value: Option<LuaValue>,
-
-    // Main thread representation (for coroutine.running() in main thread)
-    pub main_thread_value: Option<LuaValue>,
+    pub current_thread_id: ThreadId,
 
     // String metatable (shared by all strings) - stored as TableId in LuaValue
     pub(crate) string_metatable: Option<LuaValue>,
@@ -129,22 +103,14 @@ impl LuaVM {
             registry: TableId(1),                     // Will be initialized below
             gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
             gc_roots_buffer: Vec::with_capacity(512), // Pre-allocate roots buffer
-            frames,
-            frame_count: 0,
-            register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
             object_pool: ObjectPool::new(),
             gc: GC::new(),
-            return_values: Vec::with_capacity(16),
-            open_upvalues: Vec::new(),
             to_be_closed: Vec::new(),
             next_frame_id: 0,
-            error_handler: None,
             #[cfg(feature = "loadlib")]
             ffi_state: crate::ffi::FFIState::new(),
-            current_thread: None,
-            current_thread_id: None,
-            current_thread_value: None,
-            main_thread_value: None, // Will be initialized lazily
+            main_thread_id: ThreadId::default(),
+            current_thread_id: ThreadId::default(),
             string_metatable: None,
             c_closure_upvalues_ptr: std::ptr::null(),
             c_closure_upvalues_len: 0,
@@ -179,7 +145,32 @@ impl LuaVM {
         // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
         vm.registry_set_integer(1, globals_value);
 
+        let main_thread_id = vm.create_main_thread();
+        vm.main_thread_id = main_thread_id;
+        vm.current_thread_id = main_thread_id;
+        vm.object_pool.fix_thread(main_thread_id);
+
         vm
+    }
+
+    fn create_main_thread(&mut self) -> ThreadId {
+        let thread = LuaThread {
+            status: CoroutineStatus::Main,
+            frames: Vec::with_capacity(MAX_CALL_DEPTH),
+            frame_count: 0,
+            register_stack: Vec::with_capacity(1024),
+            return_values: Vec::new(),
+            open_upvalues: Vec::new(),
+            next_frame_id: 0,
+            yield_values: Vec::new(),
+            resume_values: Vec::new(),
+            yield_pc: None,
+            yield_frame_id: None,
+            yield_call_reg: None,
+            yield_call_nret: None,
+        };
+
+        self.object_pool.create_thread(thread)
     }
 
     /// Set a value in the registry by integer key
