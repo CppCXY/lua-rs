@@ -889,8 +889,14 @@ impl LuaVM {
             // Use pre-cached __index StringId - avoids hash computation and intern lookup
             let index_key = LuaValue::string(self.object_pool.tm_index);
 
+            // Single table lookup: check tm_flags AND get __index value together
             let index_value = {
                 let metatable = self.object_pool.get_table(meta_id)?;
+                // FAST PATH: Check tm_flags first (like Lua 5.4's fasttm)
+                // If flag is set, __index is known to be absent - skip lookup
+                if metatable.tm_absent(crate::lua_value::tm_flags::TM_INDEX) {
+                    return None;
+                }
                 metatable.raw_get(&index_key)
             };
 
@@ -916,6 +922,11 @@ impl LuaVM {
                         }
                     }
                     _ => {}
+                }
+            } else {
+                // __index not found - cache this fact for future lookups
+                if let Some(metatable) = self.object_pool.get_table_mut(meta_id) {
+                    metatable.set_tm_absent(crate::lua_value::tm_flags::TM_INDEX);
                 }
             }
         }

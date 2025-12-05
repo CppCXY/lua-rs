@@ -1,4 +1,4 @@
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaValue, tm_flags};
 /// Table operations
 ///
 /// These instructions handle table creation, access, and manipulation.
@@ -115,10 +115,24 @@ pub fn exec_gettable(
             }
         }
 
-        // Key not found - check if no metatable to skip metamethod handling
-        if lua_table.get_metatable().is_none() {
+        // Key not found - check metatable for __index
+        let metatable = lua_table.get_metatable();
+        if metatable.is_none() {
+            // No metatable - just return nil
             unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
             return Ok(());
+        }
+        
+        // FAST PATH: fasttm optimization - check if __index is known to be absent
+        if let Some(mt_val) = metatable
+            && let Some(mt_id) = mt_val.as_table_id()
+        {
+            let mt_table = unsafe { vm.object_pool.get_table_unchecked(mt_id) };
+            if mt_table.tm_absent(tm_flags::TM_INDEX) {
+                // __index is known to be absent - skip slow path
+                unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
+                return Ok(());
+            }
         }
     }
 
@@ -215,10 +229,24 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
             return Ok(());
         }
 
-        // Key not found - check if no metatable to skip metamethod handling
-        if lua_table.get_metatable().is_none() {
+        // Key not found - check for metatable and fasttm
+        let metatable = lua_table.get_metatable();
+        if metatable.is_none() {
+            // No metatable - return nil directly
             unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
             return Ok(());
+        }
+        
+        // FAST PATH: fasttm optimization - check if __index is known to be absent
+        if let Some(mt_val) = metatable
+            && let Some(mt_id) = mt_val.as_table_id()
+        {
+            let mt_table = unsafe { vm.object_pool.get_table_unchecked(mt_id) };
+            if mt_table.tm_absent(tm_flags::TM_INDEX) {
+                // __index is known to be absent - skip slow path
+                unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
+                return Ok(());
+            }
         }
     }
 
@@ -316,10 +344,24 @@ pub fn exec_getfield(
             }
         }
 
-        // Check if no metatable - can return nil directly
-        if table_ref.get_metatable().is_none() {
+        // Check for metatable and fasttm optimization
+        let metatable = table_ref.get_metatable();
+        if metatable.is_none() {
+            // No metatable - return nil directly
             unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
             return Ok(());
+        }
+        
+        // FAST PATH: fasttm optimization - check if __index is known to be absent
+        if let Some(mt_val) = metatable
+            && let Some(mt_id) = mt_val.as_table_id()
+        {
+            let mt_table = unsafe { vm.object_pool.get_table_unchecked(mt_id) };
+            if mt_table.tm_absent(tm_flags::TM_INDEX) {
+                // __index is known to be absent - skip slow path
+                unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
+                return Ok(());
+            }
         }
     }
 
