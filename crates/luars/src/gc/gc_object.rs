@@ -165,11 +165,78 @@ pub struct GcTable {
     pub data: LuaTable,
 }
 
-/// Lua function with embedded GC header
+/// C Function type - Rust function callable from Lua
+pub type CFunction = fn(&mut crate::lua_vm::LuaVM) -> crate::lua_vm::LuaResult<crate::lua_value::MultiValue>;
+
+/// Function body - either Lua bytecode or C function
+pub enum FunctionBody {
+    /// Lua function with bytecode chunk
+    Lua(Rc<Chunk>),
+    /// C function (native Rust function) - no upvalues
+    C(CFunction),
+    /// C closure with single inline upvalue (fast path for common case)
+    /// Used by coroutine.wrap, ipairs iterator, etc.
+    CClosureInline1(CFunction, LuaValue),
+}
+
+/// Unified function with embedded GC header
+/// Supports both Lua closures and C closures (with upvalues)
 pub struct GcFunction {
     pub header: GcHeader,
-    pub chunk: Rc<Chunk>,
-    pub upvalues: Vec<UpvalueId>, // Upvalue IDs, not Rc
+    pub body: FunctionBody,
+    pub upvalues: Vec<UpvalueId>, // Upvalue IDs - used for Lua closures and C closures with >1 upvalue
+}
+
+impl GcFunction {
+    /// Check if this is a C function (any C variant)
+    #[inline(always)]
+    pub fn is_c_function(&self) -> bool {
+        matches!(self.body, FunctionBody::C(_) | FunctionBody::CClosureInline1(_, _))
+    }
+    
+    /// Check if this is a Lua function
+    #[inline(always)]
+    pub fn is_lua_function(&self) -> bool {
+        matches!(self.body, FunctionBody::Lua(_))
+    }
+    
+    /// Get the chunk if this is a Lua function
+    #[inline(always)]
+    pub fn chunk(&self) -> Option<&Rc<Chunk>> {
+        match &self.body {
+            FunctionBody::Lua(chunk) => Some(chunk),
+            _ => None,
+        }
+    }
+    
+    /// Get the chunk reference for Lua functions (panics if C function)
+    /// Use this in contexts where we know it's a Lua function
+    #[inline(always)]
+    pub fn lua_chunk(&self) -> &Rc<Chunk> {
+        match &self.body {
+            FunctionBody::Lua(chunk) => chunk,
+            _ => panic!("Called lua_chunk() on a C function"),
+        }
+    }
+    
+    /// Get the C function pointer if this is any C function variant
+    #[inline(always)]
+    pub fn c_function(&self) -> Option<CFunction> {
+        match &self.body {
+            FunctionBody::C(f) => Some(*f),
+            FunctionBody::CClosureInline1(f, _) => Some(*f),
+            FunctionBody::Lua(_) => None,
+        }
+    }
+    
+    /// Get inline upvalue 1 for CClosureInline1
+    #[inline(always)]
+    pub fn inline_upvalue1(&self) -> Option<LuaValue> {
+        match &self.body {
+            FunctionBody::CClosureInline1(_, uv) => Some(*uv),
+            _ => None,
+        }
+    }
 }
 
 /// Upvalue state - uses absolute stack index like Lua C implementation

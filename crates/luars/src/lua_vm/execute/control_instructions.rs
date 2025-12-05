@@ -573,7 +573,10 @@ pub fn exec_eqk(
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
         return Err(vm.error("Invalid function ID".to_string()));
     };
-    let Some(constant) = func_ref.chunk.constants.get(b).copied() else {
+    let Some(chunk) = func_ref.chunk() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
+    let Some(constant) = chunk.constants.get(b).copied() else {
         return Err(vm.error(format!("Invalid constant index: {}", b)));
     };
 
@@ -786,76 +789,133 @@ pub fn exec_call(
     // Get function value
     let func = unsafe { *vm.register_stack.get_unchecked(base + a) };
 
-    // FAST PATH: Lua function (most common case)
+    // FAST PATH: Function object (can be Lua function or C closure)
     use crate::lua_value::TAG_FUNCTION;
     if (func.primary & crate::lua_value::TYPE_MASK) == TAG_FUNCTION {
         // Get function ID
         let func_id = unsafe { func.as_function_id().unwrap_unchecked() };
 
-        // Get function info
+        // Get function info - check if Lua or C closure
         let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-        let chunk = &func_ref.chunk;
-        let max_stack_size = chunk.max_stack_size;
-        let num_params = chunk.param_count;
-        let is_vararg = chunk.is_vararg;
-        let code_ptr = chunk.code.as_ptr();
-        let constants_ptr = chunk.constants.as_ptr();
-        let upvalues_ptr = func_ref.upvalues.as_ptr();
+        
+        // FAST PATH: Lua function (most common case) - check first!
+        if let crate::gc::FunctionBody::Lua(chunk) = &func_ref.body {
+            // Lua function path - inline for speed
+            let max_stack_size = chunk.max_stack_size;
+            let num_params = chunk.param_count;
+            let is_vararg = chunk.is_vararg;
+            let code_ptr = chunk.code.as_ptr();
+            let constants_ptr = chunk.constants.as_ptr();
+            let upvalues_ptr = func_ref.upvalues.as_ptr();
 
-        // Calculate argument count
-        let arg_count = if b == 0 {
-            unsafe { (**frame_ptr_ptr).top.saturating_sub((a + 1) as u32) as usize }
-        } else {
-            unsafe {
-                (**frame_ptr_ptr).top = (a + b) as u32;
-            }
-            b - 1
-        };
-
-        // New frame base = R[A+1]
-        let new_base = base + a + 1;
-
-        // FAST PATH: No vararg in parent frame (most common case)
-        // Only check parent vararg if function uses significant stack
-        let parent_frame = unsafe { &**frame_ptr_ptr };
-        let parent_vararg_count = parent_frame.get_vararg_count();
-
-        // Cold path: parent has vararg that might be overwritten
-        if parent_vararg_count > 0 {
-            let parent_vararg_start = parent_frame.get_vararg_start();
-            let new_frame_end = new_base + max_stack_size;
-            if new_frame_end > parent_vararg_start {
-                relocate_parent_vararg(
-                    vm,
-                    frame_ptr_ptr,
-                    new_frame_end,
-                    parent_vararg_start,
-                    parent_vararg_count,
-                );
-            }
-        }
-
-        // FAST PATH: No vararg (most common)
-        if !is_vararg {
-            // Ensure stack capacity
-            let required_capacity = new_base + max_stack_size;
-            if vm.register_stack.len() < required_capacity {
-                vm.register_stack.resize(required_capacity, LuaValue::nil());
-            }
-
-            // Fill missing arguments with nil
-            if arg_count < num_params {
+            // Calculate argument count
+            let arg_count = if b == 0 {
+                unsafe { (**frame_ptr_ptr).top.saturating_sub((a + 1) as u32) as usize }
+            } else {
                 unsafe {
-                    let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
-                    let nil_val = LuaValue::nil();
-                    for i in arg_count..num_params {
-                        *reg_ptr.add(i) = nil_val;
+                    (**frame_ptr_ptr).top = (a + b) as u32;
+                }
+                b - 1
+            };
+
+            // New frame base = R[A+1]
+            let new_base = base + a + 1;
+
+            // FAST PATH: No vararg in parent frame (most common case)
+            let parent_frame = unsafe { &**frame_ptr_ptr };
+            let parent_vararg_count = parent_frame.get_vararg_count();
+
+            // Cold path: parent has vararg that might be overwritten
+            if parent_vararg_count > 0 {
+                let parent_vararg_start = parent_frame.get_vararg_start();
+                let new_frame_end = new_base + max_stack_size;
+
+                if new_frame_end > parent_vararg_start {
+                    relocate_parent_vararg(
+                        vm,
+                        frame_ptr_ptr,
+                        new_frame_end,
+                        parent_vararg_start,
+                        parent_vararg_count,
+                    );
+                }
+            }
+
+            let return_count = if c == 0 { usize::MAX } else { c - 1 };
+
+            // Ensure stack capacity
+            let required_size = new_base + max_stack_size;
+            vm.ensure_stack_capacity(required_size);
+
+            // Setup stack for new frame (without allocation)
+            let actual_stack_size = if is_vararg {
+                num_params
+            } else {
+                max_stack_size
+            };
+
+            // Initialize stack in one pass using unsafe for maximum speed
+            let nil_val = LuaValue::nil();
+            let reg_ptr = vm.register_stack.as_mut_ptr();
+
+            unsafe {
+                // Fill undefined parameters with nil
+                if arg_count < num_params {
+                    for i in arg_count..actual_stack_size {
+                        *reg_ptr.add(new_base + i) = nil_val;
+                    }
+                } else if !is_vararg {
+                    // Fill unused stack slots with nil (no vararg case)
+                    let fill_start = num_params.max(arg_count);
+                    for i in fill_start..actual_stack_size {
+                        *reg_ptr.add(new_base + i) = nil_val;
+                    }
+                }
+
+                // Handle vararg: store extra arguments after fixed parameters
+                if is_vararg && arg_count > num_params {
+                    let vararg_count = arg_count - num_params;
+                    let vararg_start = new_base + max_stack_size;
+                    let total_stack_size = max_stack_size + vararg_count;
+
+                    // Ensure capacity for varargs
+                    if new_base + total_stack_size > vm.register_stack.len() {
+                        vm.ensure_stack_capacity(new_base + total_stack_size);
+                    }
+
+                    // Move varargs to after max_stack
+                    let reg_ptr = vm.register_stack.as_mut_ptr();
+                    for i in 0..vararg_count {
+                        *reg_ptr.add(vararg_start + i) = *reg_ptr.add(new_base + num_params + i);
+                    }
+
+                    // Clear the slots that held varargs
+                    for i in num_params..max_stack_size {
+                        *reg_ptr.add(new_base + i) = nil_val;
+                    }
+                }
+
+                // Handle vararg case: clear slots after fixed params
+                if is_vararg && arg_count > 0 {
+                    let total_stack_size = if arg_count > num_params {
+                        max_stack_size + (arg_count - num_params)
+                    } else {
+                        max_stack_size
+                    };
+                    let actual_stack_size = num_params;
+                    for i in actual_stack_size..total_stack_size {
+                        *reg_ptr.add(new_base + i) = nil_val;
                     }
                 }
             }
 
-            // Push new frame
-            let nresults = if c == 0 { -1i16 } else { (c - 1) as i16 };
+            // Create and push new frame
+            let nresults = if return_count == usize::MAX {
+                -1i16
+            } else {
+                return_count as i16
+            };
+
             let new_frame = LuaCallFrame::new_lua_function(
                 func_id,
                 code_ptr,
@@ -871,22 +931,44 @@ pub fn exec_call(
             *frame_ptr_ptr = vm.push_frame(new_frame);
             return Ok(());
         }
-
-        // Vararg slow path
-        return exec_call_lua_vararg(
-            vm,
-            func_id,
-            a,
-            b,
-            c,
-            base,
-            max_stack_size,
-            num_params,
-            code_ptr,
-            constants_ptr,
-            upvalues_ptr,
-            frame_ptr_ptr,
-        );
+        
+        // C closure paths (less common)
+        match &func_ref.body {
+            crate::gc::FunctionBody::C(c_func) => {
+                // Simple C function or C closure with UpvalueIds
+                let c_func = *c_func;
+                return exec_call_c_closure(
+                    vm,
+                    func,
+                    c_func,
+                    func_ref.upvalues.as_ptr(),
+                    func_ref.upvalues.len(),
+                    a,
+                    b,
+                    c,
+                    base,
+                    false,
+                    LuaValue::nil(),
+                    frame_ptr_ptr,
+                );
+            }
+            crate::gc::FunctionBody::CClosureInline1(c_func, upvalue) => {
+                // Fast path: C closure with single inline upvalue (no indirection)
+                let c_func = *c_func;
+                let upvalue = *upvalue;
+                return exec_call_c_closure_inline1(
+                    vm,
+                    c_func,
+                    upvalue,
+                    a,
+                    b,
+                    c,
+                    base,
+                    frame_ptr_ptr,
+                );
+            }
+            crate::gc::FunctionBody::Lua(_) => unreachable!(),
+        }
     }
 
     // Check for CFunction
@@ -1053,13 +1135,14 @@ fn exec_call_lua_function(
 
     // Extract chunk info from ObjectPool - use unchecked for hot path
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
+    let chunk = func_ref.lua_chunk();
 
     let (max_stack_size, num_params, is_vararg, code_ptr, constants_ptr, upvalues_ptr) = (
-        func_ref.chunk.max_stack_size,
-        func_ref.chunk.param_count,
-        func_ref.chunk.is_vararg,
-        func_ref.chunk.code.as_ptr(),
-        func_ref.chunk.constants.as_ptr(),
+        chunk.max_stack_size,
+        chunk.param_count,
+        chunk.is_vararg,
+        chunk.code.as_ptr(),
+        chunk.constants.as_ptr(),
         func_ref.upvalues.as_ptr(),
     );
 
@@ -1217,6 +1300,263 @@ fn exec_call_lua_function(
     );
 
     *frame_ptr_ptr = vm.push_frame(new_frame);
+    Ok(())
+}
+
+/// Execute a C closure call (native function with upvalues)
+#[inline(always)]
+fn exec_call_c_closure(
+    vm: &mut LuaVM,
+    func: LuaValue,
+    c_func: crate::gc::CFunction,
+    upvalues_ptr: *const crate::gc::UpvalueId,
+    upvalues_len: usize,
+    a: usize,
+    b: usize,
+    c: usize,
+    base: usize,
+    use_call_metamethod: bool,
+    call_metamethod_self: LuaValue,
+    frame_ptr_ptr: &mut *mut LuaCallFrame,
+) -> LuaResult<()> {
+    // Calculate argument count
+    let arg_count = if b == 0 {
+        let frame = vm.current_frame();
+        if frame.top as usize > a + 1 {
+            (frame.top as usize) - (a + 1)
+        } else {
+            0
+        }
+    } else {
+        vm.current_frame_mut().top = (a + b) as u32;
+        b - 1
+    };
+
+    let return_count = if c == 0 { usize::MAX } else { c - 1 };
+
+    let call_base = base + a;
+
+    // Handle __call metamethod
+    if use_call_metamethod {
+        if arg_count > 0 {
+            for i in (0..arg_count).rev() {
+                vm.register_stack[call_base + 2 + i] = vm.register_stack[call_base + 1 + i];
+            }
+        }
+        vm.register_stack[call_base + 1] = call_metamethod_self;
+        vm.register_stack[call_base] = func;
+    }
+
+    let actual_arg_count = if use_call_metamethod {
+        arg_count + 1
+    } else {
+        arg_count
+    };
+
+    // Ensure stack capacity
+    let required_top = call_base + actual_arg_count + 1 + 20;
+    vm.ensure_stack_capacity(required_top);
+
+    // Push C function frame
+    let temp_frame = LuaCallFrame::new_c_function(call_base, actual_arg_count + 1);
+    vm.push_frame(temp_frame);
+
+    // Store C closure upvalues in VM state for access during call
+    let old_upvalues_ptr = vm.c_closure_upvalues_ptr;
+    let old_upvalues_len = vm.c_closure_upvalues_len;
+    vm.c_closure_upvalues_ptr = upvalues_ptr;
+    vm.c_closure_upvalues_len = upvalues_len;
+
+    // Call C function
+    let result = match c_func(vm) {
+        Ok(r) => {
+            // Restore old upvalues state
+            vm.c_closure_upvalues_ptr = old_upvalues_ptr;
+            vm.c_closure_upvalues_len = old_upvalues_len;
+            r
+        }
+        Err(LuaError::Yield) => {
+            vm.c_closure_upvalues_ptr = old_upvalues_ptr;
+            vm.c_closure_upvalues_len = old_upvalues_len;
+            vm.pop_frame_discard();
+            if vm.frame_count > 0 {
+                *frame_ptr_ptr = vm.current_frame_ptr();
+            }
+            return Err(LuaError::Yield);
+        }
+        Err(e) => {
+            vm.c_closure_upvalues_ptr = old_upvalues_ptr;
+            vm.c_closure_upvalues_len = old_upvalues_len;
+            vm.pop_frame_discard();
+            if vm.frame_count > 0 {
+                *frame_ptr_ptr = vm.current_frame_ptr();
+            }
+            return Err(e);
+        }
+    };
+
+    vm.pop_frame_discard();
+    if vm.frame_count > 0 {
+        *frame_ptr_ptr = vm.current_frame_ptr();
+    }
+
+    // Copy return values
+    let result_len = result.len();
+    let num_returns = if return_count == usize::MAX {
+        result_len
+    } else {
+        return_count.min(result_len)
+    };
+
+    if result.overflow.is_none() {
+        if num_returns > 0 {
+            vm.register_stack[call_base] = result.inline[0];
+        }
+        if num_returns > 1 {
+            vm.register_stack[call_base + 1] = result.inline[1];
+        }
+    } else {
+        let values = result.all_values();
+        if num_returns > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    values.as_ptr(),
+                    vm.register_stack.as_mut_ptr().add(call_base),
+                    num_returns,
+                );
+            }
+        }
+    }
+
+    if return_count != usize::MAX {
+        for i in num_returns..return_count {
+            vm.register_stack[call_base + i] = crate::LuaValue::nil();
+        }
+    }
+
+    vm.current_frame_mut().top = (a + num_returns) as u32;
+    Ok(())
+}
+
+/// Ultra-fast path for C closure with single inline upvalue
+/// This is the most optimized path for common patterns like coroutine.wrap
+/// No upvalue indirection, no pointer setup, direct value access
+#[inline(always)]
+fn exec_call_c_closure_inline1(
+    vm: &mut LuaVM,
+    c_func: crate::gc::CFunction,
+    inline_upvalue: LuaValue,
+    a: usize,
+    b: usize,
+    c: usize,
+    base: usize,
+    frame_ptr_ptr: &mut *mut LuaCallFrame,
+) -> LuaResult<()> {
+    // Calculate argument count
+    let arg_count = if b == 0 {
+        let frame = vm.current_frame();
+        if frame.top as usize > a + 1 {
+            (frame.top as usize) - (a + 1)
+        } else {
+            0
+        }
+    } else {
+        vm.current_frame_mut().top = (a + b) as u32;
+        b - 1
+    };
+
+    let return_count = if c == 0 { usize::MAX } else { c - 1 };
+    let call_base = base + a;
+
+    // Ensure stack capacity
+    let required_top = call_base + arg_count + 1 + 20;
+    vm.ensure_stack_capacity(required_top);
+
+    // Push C function frame
+    let temp_frame = LuaCallFrame::new_c_function(call_base, arg_count + 1);
+    vm.push_frame(temp_frame);
+
+    // Store inline upvalue in VM state for access during call
+    let old_inline_upvalue = vm.c_closure_inline_upvalue;
+    vm.c_closure_inline_upvalue = inline_upvalue;
+    
+    // Clear pointer-based upvalues (not used for inline1)
+    let old_upvalues_ptr = vm.c_closure_upvalues_ptr;
+    let old_upvalues_len = vm.c_closure_upvalues_len;
+    vm.c_closure_upvalues_ptr = std::ptr::null();
+    vm.c_closure_upvalues_len = 0;
+
+    // Call C function
+    let result = match c_func(vm) {
+        Ok(r) => {
+            // Restore old state
+            vm.c_closure_inline_upvalue = old_inline_upvalue;
+            vm.c_closure_upvalues_ptr = old_upvalues_ptr;
+            vm.c_closure_upvalues_len = old_upvalues_len;
+            r
+        }
+        Err(LuaError::Yield) => {
+            vm.c_closure_inline_upvalue = old_inline_upvalue;
+            vm.c_closure_upvalues_ptr = old_upvalues_ptr;
+            vm.c_closure_upvalues_len = old_upvalues_len;
+            vm.pop_frame_discard();
+            if vm.frame_count > 0 {
+                *frame_ptr_ptr = vm.current_frame_ptr();
+            }
+            return Err(LuaError::Yield);
+        }
+        Err(e) => {
+            vm.c_closure_inline_upvalue = old_inline_upvalue;
+            vm.c_closure_upvalues_ptr = old_upvalues_ptr;
+            vm.c_closure_upvalues_len = old_upvalues_len;
+            vm.pop_frame_discard();
+            if vm.frame_count > 0 {
+                *frame_ptr_ptr = vm.current_frame_ptr();
+            }
+            return Err(e);
+        }
+    };
+
+    vm.pop_frame_discard();
+    if vm.frame_count > 0 {
+        *frame_ptr_ptr = vm.current_frame_ptr();
+    }
+
+    // Copy return values
+    let result_len = result.len();
+    let num_returns = if return_count == usize::MAX {
+        result_len
+    } else {
+        return_count.min(result_len)
+    };
+
+    if result.overflow.is_none() {
+        if num_returns > 0 {
+            vm.register_stack[call_base] = result.inline[0];
+        }
+        if num_returns > 1 {
+            vm.register_stack[call_base + 1] = result.inline[1];
+        }
+    } else {
+        let values = result.all_values();
+        if num_returns > 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    values.as_ptr(),
+                    vm.register_stack.as_mut_ptr().add(call_base),
+                    num_returns,
+                );
+            }
+        }
+    }
+
+    if return_count != usize::MAX {
+        for i in num_returns..return_count {
+            vm.register_stack[call_base + i] = crate::LuaValue::nil();
+        }
+    }
+
+    vm.current_frame_mut().top = (a + num_returns) as u32;
     Ok(())
 }
 
@@ -1405,9 +1745,10 @@ pub fn exec_tailcall(
             let Some(func_ref) = vm.object_pool.get_function(func_id) else {
                 return Err(vm.error("Invalid function ID".to_string()));
             };
-            let max_stack_size = func_ref.chunk.max_stack_size;
-            let code_ptr = func_ref.chunk.code.as_ptr();
-            let constants_ptr = func_ref.chunk.constants.as_ptr();
+            let chunk = func_ref.lua_chunk();
+            let max_stack_size = chunk.max_stack_size;
+            let code_ptr = chunk.code.as_ptr();
+            let constants_ptr = chunk.constants.as_ptr();
             let upvalues_ptr = func_ref.upvalues.as_ptr();
 
             // CRITICAL: Before popping the frame, close all upvalues that point to it

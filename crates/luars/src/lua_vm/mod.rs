@@ -93,6 +93,14 @@ pub struct LuaVM {
 
     // String metatable (shared by all strings) - stored as TableId in LuaValue
     pub(crate) string_metatable: Option<LuaValue>,
+    
+    // C closure upvalues (temporary storage during C closure call)
+    // Points to the upvalues array of the currently executing C closure
+    pub(crate) c_closure_upvalues_ptr: *const UpvalueId,
+    pub(crate) c_closure_upvalues_len: usize,
+    
+    // Single inline upvalue for CClosureInline1 (no indirection needed)
+    pub(crate) c_closure_inline_upvalue: LuaValue,
 
     // Async executor for Lua-Rust async bridge
     #[cfg(feature = "async")]
@@ -138,6 +146,9 @@ impl LuaVM {
             current_thread_value: None,
             main_thread_value: None, // Will be initialized lazily
             string_metatable: None,
+            c_closure_upvalues_ptr: std::ptr::null(),
+            c_closure_upvalues_len: 0,
+            c_closure_inline_upvalue: LuaValue::nil(),
             #[cfg(feature = "async")]
             async_executor: AsyncExecutor::new(),
             // Initialize error storage
@@ -323,7 +334,7 @@ impl LuaVM {
             let Some(func_ref) = self.object_pool.get_function(func_id) else {
                 return Err(self.error("Invalid function ID".to_string()));
             };
-            let chunk = func_ref.chunk.clone();
+            let chunk = func_ref.lua_chunk().clone();
             let max_stack = chunk.max_stack_size;
             let code_ptr = chunk.code.as_ptr();
             let constants_ptr = chunk.constants.as_ptr();
@@ -1215,11 +1226,12 @@ impl LuaVM {
             let Some(func_ref) = self.object_pool.get_function(func_id) else {
                 return Err(self.error("Invalid function".to_string()));
             };
-            let size = func_ref.chunk.max_stack_size.max(2);
+            let chunk = func_ref.lua_chunk();
+            let size = chunk.max_stack_size.max(2);
             (
                 size,
-                func_ref.chunk.code.as_ptr(),
-                func_ref.chunk.constants.as_ptr(),
+                chunk.code.as_ptr(),
+                chunk.constants.as_ptr(),
                 func_ref.upvalues.as_ptr(),
             )
         };
@@ -1289,11 +1301,12 @@ impl LuaVM {
             let Some(func_ref) = self.object_pool.get_function(func_id) else {
                 return Err(self.error("Invalid function".to_string()));
             };
-            let size = func_ref.chunk.max_stack_size.max(1);
+            let chunk = func_ref.lua_chunk();
+            let size = chunk.max_stack_size.max(1);
             (
                 size,
-                func_ref.chunk.code.as_ptr(),
-                func_ref.chunk.constants.as_ptr(),
+                chunk.code.as_ptr(),
+                chunk.constants.as_ptr(),
                 func_ref.upvalues.as_ptr(),
             )
         };
@@ -1912,6 +1925,30 @@ impl LuaVM {
         self.gc_debt_local += 128;
         LuaValue::function(id)
     }
+    
+    /// Create a C closure (native function with upvalues stored as closed upvalues)
+    /// The upvalues are automatically created as closed upvalues with the given values
+    #[inline]
+    pub fn create_c_closure(&mut self, func: crate::gc::CFunction, upvalues: Vec<LuaValue>) -> LuaValue {
+        // Create closed upvalues for each value
+        let upvalue_ids: Vec<UpvalueId> = upvalues
+            .into_iter()
+            .map(|v| self.create_upvalue_closed(v))
+            .collect();
+        
+        let id = self.object_pool.create_c_closure(func, upvalue_ids);
+        self.gc_debt_local += 128;
+        LuaValue::function(id)
+    }
+    
+    /// Create a C closure with a single inline upvalue (fast path)
+    /// This avoids all upvalue indirection and allocation overhead
+    #[inline]
+    pub fn create_c_closure_inline1(&mut self, func: crate::gc::CFunction, upvalue: LuaValue) -> LuaValue {
+        let id = self.object_pool.create_c_closure_inline1(func, upvalue);
+        self.gc_debt_local += 128;
+        LuaValue::function(id)
+    }
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
@@ -1927,6 +1964,55 @@ impl LuaVM {
         let id = self.object_pool.create_upvalue_closed(value);
         self.gc_debt_local += 64;
         id
+    }
+    
+    /// Get the inline upvalue for CClosureInline1
+    /// This is the ultra-fast path for C closures with a single upvalue
+    /// Returns the upvalue value directly without any indirection
+    #[inline(always)]
+    pub fn get_c_closure_inline_upvalue(&self) -> LuaValue {
+        self.c_closure_inline_upvalue
+    }
+    
+    /// Get a C closure upvalue by index (1-based like Lua's lua_upvalueindex)
+    /// This can only be called from within a C closure
+    /// Returns None if index is out of bounds or not in a C closure context
+    #[inline]
+    pub fn get_c_closure_upvalue(&self, index: usize) -> Option<LuaValue> {
+        if self.c_closure_upvalues_ptr.is_null() || index == 0 || index > self.c_closure_upvalues_len {
+            return None;
+        }
+        
+        // Get the upvalue ID (1-based index)
+        let upvalue_id = unsafe { *self.c_closure_upvalues_ptr.add(index - 1) };
+        
+        // Resolve the upvalue value
+        if let Some(upvalue) = self.object_pool.get_upvalue(upvalue_id) {
+            upvalue.get_closed_value()
+        } else {
+            None
+        }
+    }
+    
+    /// Set a C closure upvalue by index (1-based)
+    /// This can only be called from within a C closure
+    /// Returns true if successful, false if index out of bounds or not in C closure
+    #[inline]
+    pub fn set_c_closure_upvalue(&mut self, index: usize, value: LuaValue) -> bool {
+        if self.c_closure_upvalues_ptr.is_null() || index == 0 || index > self.c_closure_upvalues_len {
+            return false;
+        }
+        
+        // Get the upvalue ID (1-based index)
+        let upvalue_id = unsafe { *self.c_closure_upvalues_ptr.add(index - 1) };
+        
+        // Set the upvalue value
+        if let Some(upvalue) = self.object_pool.get_upvalue_mut(upvalue_id) {
+            upvalue.close(value);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get function by LuaValue (resolves ID from object pool)
@@ -2134,7 +2220,7 @@ impl LuaVM {
                         // Extract child chunk before recursion to avoid borrow conflicts
                         let child_chunk =
                             if let Some(func_ref) = self.object_pool.get_function(func_id) {
-                                Some(func_ref.chunk.clone())
+                                func_ref.chunk().cloned()
                             } else {
                                 None
                             };
@@ -2357,9 +2443,10 @@ impl LuaVM {
                 let Some(func_ref) = self.object_pool.get_function(func_id) else {
                     return Err(self.error("Invalid function".to_string()));
                 };
-                let max_stack_size = func_ref.chunk.max_stack_size;
-                let code_ptr = func_ref.chunk.code.as_ptr();
-                let constants_ptr = func_ref.chunk.constants.as_ptr();
+                let chunk = func_ref.lua_chunk();
+                let max_stack_size = chunk.max_stack_size;
+                let code_ptr = chunk.code.as_ptr();
+                let constants_ptr = chunk.constants.as_ptr();
                 let upvalues_ptr = func_ref.upvalues.as_ptr();
 
                 // CRITICAL FIX: Calculate new base relative to current frame
@@ -2371,7 +2458,7 @@ impl LuaVM {
                         if let Some(caller_func_id) = current_frame.get_function_id() {
                             self.object_pool
                                 .get_function(caller_func_id)
-                                .map(|f| f.chunk.max_stack_size)
+                                .and_then(|f| f.chunk().map(|c| c.max_stack_size))
                                 .unwrap_or(256)
                         } else {
                             256
@@ -2428,7 +2515,7 @@ impl LuaVM {
                         if let Some(caller_func_id) = current_frame.get_function_id() {
                             self.object_pool
                                 .get_function(caller_func_id)
-                                .map(|f| f.chunk.max_stack_size)
+                                .and_then(|f| f.chunk().map(|c| c.max_stack_size))
                                 .unwrap_or(256)
                         } else {
                             256
@@ -2557,19 +2644,23 @@ impl LuaVM {
                 // Get function ID and chunk info
                 if let Some(func_id) = frame.get_function_id() {
                     if let Some(func) = self.object_pool.get_function(func_id) {
-                        let chunk = &func.chunk;
-                        let source_str = chunk.source_name.as_deref().unwrap_or("?");
+                        if let Some(chunk) = func.chunk() {
+                            let source_str = chunk.source_name.as_deref().unwrap_or("?");
 
-                        // Get line number from pc (pc points to next instruction, so use pc-1)
-                        let pc = frame.pc.saturating_sub(1) as usize;
-                        let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len()
-                        {
-                            chunk.line_info[pc].to_string()
+                            // Get line number from pc (pc points to next instruction, so use pc-1)
+                            let pc = frame.pc.saturating_sub(1) as usize;
+                            let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len()
+                            {
+                                chunk.line_info[pc].to_string()
+                            } else {
+                                "?".to_string()
+                            };
+
+                            (source_str.to_string(), line_str)
                         } else {
-                            "?".to_string()
-                        };
-
-                        (source_str.to_string(), line_str)
+                            // C closure with upvalues
+                            ("[C closure]".to_string(), "?".to_string())
+                        }
                     } else {
                         ("?".to_string(), "?".to_string())
                     }
@@ -2721,11 +2812,12 @@ impl LuaVM {
                     let Some(func_ref) = self.object_pool.get_function(func_id) else {
                         return Err(self.error("Invalid function".to_string()));
                     };
-                    let size = func_ref.chunk.max_stack_size.max(1);
+                    let chunk = func_ref.lua_chunk();
+                    let size = chunk.max_stack_size.max(1);
                     (
                         size,
-                        func_ref.chunk.code.as_ptr(),
-                        func_ref.chunk.constants.as_ptr(),
+                        chunk.code.as_ptr(),
+                        chunk.constants.as_ptr(),
                         func_ref.upvalues.as_ptr(),
                     )
                 };
@@ -2896,11 +2988,12 @@ impl LuaVM {
                     let Some(func_ref) = self.object_pool.get_function(func_id) else {
                         return Err(self.error("Invalid function".to_string()));
                     };
-                    let size = func_ref.chunk.max_stack_size.max(1);
+                    let chunk = func_ref.lua_chunk();
+                    let size = chunk.max_stack_size.max(1);
                     (
                         size,
-                        func_ref.chunk.code.as_ptr(),
-                        func_ref.chunk.constants.as_ptr(),
+                        chunk.code.as_ptr(),
+                        chunk.constants.as_ptr(),
                         func_ref.upvalues.as_ptr(),
                     )
                 };

@@ -350,10 +350,11 @@ pub fn exec_tforcall(
             let Some(func_ref) = vm.object_pool.get_function(func_id) else {
                 return Err(vm.error("Invalid function ID".to_string()));
             };
+            let chunk = func_ref.lua_chunk();
 
-            let max_stack_size = func_ref.chunk.max_stack_size;
-            let code_ptr = func_ref.chunk.code.as_ptr();
-            let constants_ptr = func_ref.chunk.constants.as_ptr();
+            let max_stack_size = chunk.max_stack_size;
+            let code_ptr = chunk.code.as_ptr();
+            let constants_ptr = chunk.constants.as_ptr();
             let upvalues_ptr = func_ref.upvalues.as_ptr();
 
             // Set up arguments at base_ptr + a + 4 (first arg = state)

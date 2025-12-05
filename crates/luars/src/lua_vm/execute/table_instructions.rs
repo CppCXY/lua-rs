@@ -39,9 +39,13 @@ pub fn exec_newtable(
         // Use new ID-based API to get function and read EXTRAARG
         if let Some(func_id) = func_value.as_function_id() {
             if let Some(func_ref) = vm.object_pool.get_function(func_id) {
-                if prev_pc < func_ref.chunk.code.len() {
-                    let extra = get_ax!(func_ref.chunk.code[prev_pc]);
-                    extra * 256 + c // MAXARG_C + 1 = 256
+                if let Some(chunk) = func_ref.chunk() {
+                    if prev_pc < chunk.code.len() {
+                        let extra = get_ax!(chunk.code[prev_pc]);
+                        extra * 256 + c // MAXARG_C + 1 = 256
+                    } else {
+                        c
+                    }
                 } else {
                     c
                 }
@@ -556,7 +560,10 @@ pub fn exec_self(
     let Some(func_ref) = vm.object_pool.get_function(func_id) else {
         return Err(vm.error("Invalid function ID".to_string()));
     };
-    let Some(key) = func_ref.chunk.constants.get(c).copied() else {
+    let Some(chunk) = func_ref.chunk() else {
+        return Err(vm.error("Not a Lua function".to_string()));
+    };
+    let Some(key) = chunk.constants.get(c).copied() else {
         return Err(vm.error(format!("Invalid constant index: {}", c)));
     };
 

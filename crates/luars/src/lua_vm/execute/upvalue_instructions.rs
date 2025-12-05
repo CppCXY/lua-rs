@@ -76,7 +76,7 @@ pub fn exec_closure(
     let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
 
-    let proto = func_ref.chunk.child_protos.get(bx).cloned();
+    let proto = func_ref.lua_chunk().child_protos.get(bx).cloned();
     let proto = match proto {
         Some(p) => p,
         None => return Err(vm.error(format!("Invalid prototype index: {}", bx))),

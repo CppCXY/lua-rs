@@ -63,21 +63,25 @@ fn debug_traceback(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             if frame.is_lua() {
                 if let Some(func_id) = frame.get_function_id() {
                     if let Some(func) = vm.object_pool.get_function(func_id) {
-                        let chunk = &func.chunk;
-                        let source = chunk.source_name.as_deref().unwrap_or("?");
+                        if let Some(chunk) = func.chunk() {
+                            let source = chunk.source_name.as_deref().unwrap_or("?");
 
-                        // Get line number from pc
-                        let pc = frame.pc.saturating_sub(1) as usize;
-                        let line = if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
-                            chunk.line_info[pc]
-                        } else {
-                            0
-                        };
+                            // Get line number from pc
+                            let pc = frame.pc.saturating_sub(1) as usize;
+                            let line = if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
+                                chunk.line_info[pc]
+                            } else {
+                                0
+                            };
 
-                        if line > 0 {
-                            trace.push_str(&format!("\n\t{}:{}: in function", source, line));
+                            if line > 0 {
+                                trace.push_str(&format!("\n\t{}:{}: in function", source, line));
+                            } else {
+                                trace.push_str(&format!("\n\t{}: in function", source));
+                            }
                         } else {
-                            trace.push_str(&format!("\n\t{}: in function", source));
+                            // C closure
+                            trace.push_str("\n\t[C closure]: in function");
                         }
                     } else {
                         trace.push_str("\n\t?: in function");

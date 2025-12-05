@@ -201,10 +201,12 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, bas
 
         if let Some(fid) = func_id {
             if let Some(func_ref) = vm.object_pool.get_function(fid) {
-                if let Some(&extra_instr) = func_ref.chunk.code.get(pc_val) {
-                    let bx = get_ax!(extra_instr);
-                    if let Some(&constant) = func_ref.chunk.constants.get(bx) {
-                        *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                if let Some(chunk) = func_ref.chunk() {
+                    if let Some(&extra_instr) = chunk.code.get(pc_val) {
+                        let bx = get_ax!(extra_instr);
+                        if let Some(&constant) = chunk.constants.get(bx) {
+                            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+                        }
                     }
                 }
             }

@@ -13,6 +13,7 @@ use crate::{
     FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
     LuaValue, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
 };
+use crate::gc::gc_object::{FunctionBody, CFunction};
 use std::rc::Rc;
 
 // ============ Pool Storage ============
@@ -1025,12 +1026,36 @@ impl ObjectPool {
 
     // ==================== Function Operations ====================
 
+    /// Create a Lua function (closure with bytecode chunk)
     #[inline]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> FunctionId {
         let gc_func = GcFunction {
             header: GcHeader::default(),
-            chunk,
+            body: FunctionBody::Lua(chunk),
             upvalues: upvalue_ids,
+        };
+        FunctionId(self.functions.alloc(gc_func))
+    }
+    
+    /// Create a C closure (native function with upvalues)
+    #[inline]
+    pub fn create_c_closure(&mut self, func: CFunction, upvalue_ids: Vec<UpvalueId>) -> FunctionId {
+        let gc_func = GcFunction {
+            header: GcHeader::default(),
+            body: FunctionBody::C(func),
+            upvalues: upvalue_ids,
+        };
+        FunctionId(self.functions.alloc(gc_func))
+    }
+    
+    /// Create a C closure with single inline upvalue (fast path)
+    /// This avoids UpvalueId allocation for common single-upvalue C closures
+    #[inline]
+    pub fn create_c_closure_inline1(&mut self, func: CFunction, upvalue: LuaValue) -> FunctionId {
+        let gc_func = GcFunction {
+            header: GcHeader::default(),
+            body: FunctionBody::CClosureInline1(func, upvalue),
+            upvalues: Vec::new(),
         };
         FunctionId(self.functions.alloc(gc_func))
     }
