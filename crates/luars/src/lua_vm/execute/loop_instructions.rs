@@ -2,9 +2,9 @@
 ///
 /// These instructions handle for loops (numeric and generic iterators).
 use crate::{
-    LuaValue,
+    LuaValue, get_a, get_bx, get_c,
     lua_value::{LuaValueKind, TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
-    lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
+    lua_vm::{LuaCallFrame, LuaResult, LuaVM},
 };
 
 // Re-export LuaCallFrame for use with frame_ptr
@@ -14,8 +14,8 @@ use crate::{
 /// OPTIMIZED: Uses frame_ptr directly, no i128, unsafe register access
 #[inline(always)]
 pub fn exec_forprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let bx = Instruction::get_bx(instr) as usize;
+    let a = get_a!(instr);
+    let bx = get_bx!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
@@ -134,8 +134,8 @@ pub fn exec_forprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_forloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let bx = Instruction::get_bx(instr) as usize;
+    let a = get_a!(instr);
+    let bx = get_bx!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
@@ -232,8 +232,8 @@ pub fn exec_forloop_float(
 /// In Lua 5.4, this creates a to-be-closed variable for the state
 #[inline(always)]
 pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let bx = Instruction::get_bx(instr) as usize;
+    let a = get_a!(instr);
+    let bx = get_bx!(instr);
 
     // In Lua 5.4, R[A+3] is the to-be-closed variable for the state
     // For now, we just copy the state value to ensure it's preserved
@@ -263,8 +263,8 @@ pub fn exec_tforcall(
     frame_ptr: &mut *mut LuaCallFrame,
     base_ptr: usize,
 ) -> LuaResult<bool> {
-    let a = Instruction::get_a(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let c = get_c!(instr);
 
     // Get iterator function and state
     let func = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
@@ -404,8 +404,8 @@ pub fn exec_tforcall(
 /// R[A+4] = first loop variable (checked here)
 #[inline(always)]
 pub fn exec_tforloop(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let bx = Instruction::get_bx(instr) as usize;
+    let a = get_a!(instr);
+    let bx = get_bx!(instr);
 
     // Check first loop variable at R[A+4]
     let first_var = vm.register_stack[base_ptr + a + 4];

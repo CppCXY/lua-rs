@@ -24,7 +24,7 @@ pub use object_pool::*;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcKind {
-    Incremental = 0, // Traditional incremental mark-sweep
+    Incremental = 0,  // Traditional incremental mark-sweep
     Generational = 1, // Generational with minor/major collections
 }
 
@@ -61,7 +61,7 @@ impl GcAge {
             GcAge::Touched2 => GcAge::Touched2, // handled specially
         }
     }
-    
+
     /// Check if this age is considered "old"
     #[inline]
     pub fn is_old(self) -> bool {
@@ -95,7 +95,7 @@ pub struct GC {
     // Gray lists for marking
     gray: Vec<GcId>,
     grayagain: Vec<GcId>,
-    
+
     // Lua 5.4 GC debt mechanism
     pub(crate) gc_debt: isize,
     pub(crate) total_bytes: usize,
@@ -103,7 +103,7 @@ pub struct GC {
     // GC state machine
     state: GcState,
     current_white: u8, // 0 or 1, flips each cycle
-    
+
     // GC mode (incremental or generational)
     gc_kind: GcKind,
 
@@ -112,14 +112,14 @@ pub struct GC {
     propagate_work: usize, // Work done in propagate phase
 
     // GC parameters (like Lua's gcparam)
-    gc_pause: usize,       // Pause parameter (default 200 = 200%)
-    gen_minor_mul: usize,  // Minor collection multiplier (default 25 = 25%)
-    gen_major_mul: usize,  // Major collection threshold (default 100 = 100%)
-    
+    gc_pause: usize,      // Pause parameter (default 200 = 200%)
+    gen_minor_mul: usize, // Minor collection multiplier (default 25 = 25%)
+    gen_major_mul: usize, // Major collection threshold (default 100 = 100%)
+
     // Generational mode state
-    last_atomic: usize,    // Objects traversed in last atomic (0 = good collection)
-    gc_estimate: usize,    // Estimate of memory in use after major collection
-    
+    last_atomic: usize, // Objects traversed in last atomic (0 = good collection)
+    gc_estimate: usize, // Estimate of memory in use after major collection
+
     // Generation boundaries (indices into allgc-style tracking)
     // In our design, we track these via object ages in headers
     // These are used for the minor collection optimization
@@ -161,9 +161,9 @@ impl GC {
             gc_kind: GcKind::Generational, // Default to generational mode like Lua 5.4
             sweep_index: 0,
             propagate_work: 0,
-            gc_pause: 200,       // Like Lua: 200 = wait until memory doubles
-            gen_minor_mul: 25,   // Minor GC when memory grows 25%
-            gen_major_mul: 100,  // Major GC when memory grows 100% since last major
+            gc_pause: 200,      // Like Lua: 200 = wait until memory doubles
+            gen_minor_mul: 25,  // Minor GC when memory grows 25%
+            gen_major_mul: 100, // Major GC when memory grows 100% since last major
             last_atomic: 0,
             gc_estimate: 0,
             young_list: Vec::with_capacity(1024),
@@ -173,20 +173,20 @@ impl GC {
             stats: GCStats::default(),
         }
     }
-    
+
     /// Create GC in incremental mode (for compatibility/testing)
     pub fn new_incremental() -> Self {
         let mut gc = Self::new();
         gc.gc_kind = GcKind::Incremental;
         gc
     }
-    
+
     /// Get current GC mode
     #[inline]
     pub fn gc_kind(&self) -> GcKind {
         self.gc_kind
     }
-    
+
     /// Set GC mode
     pub fn set_gc_kind(&mut self, kind: GcKind) {
         self.gc_kind = kind;
@@ -198,7 +198,7 @@ impl GC {
     pub fn track_object(&mut self, gc_id: GcId, size: usize) {
         self.total_bytes += size;
         self.gc_debt += size as isize;
-        
+
         // In generational mode, track new objects in young_list
         if self.gc_kind == GcKind::Generational {
             self.young_list.push(gc_id);
@@ -268,7 +268,7 @@ impl GC {
             GcKind::Incremental => self.inc_step(roots, pool),
         }
     }
-    
+
     /// Generational GC step - like Lua's genstep
     fn gen_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         if self.last_atomic != 0 {
@@ -278,11 +278,11 @@ impl GC {
             // Check if we need a major collection
             let major_base = self.gc_estimate;
             let major_inc = (major_base / 100) * self.gen_major_mul;
-            
+
             if self.gc_debt > 0 && self.total_bytes > major_base + major_inc {
                 // Memory grew too much, do a major collection
                 let num_objs = self.full_gen(roots, pool);
-                
+
                 if self.total_bytes < major_base + (major_inc / 2) {
                     // Good collection - collected at least half of growth
                     self.last_atomic = 0;
@@ -298,7 +298,7 @@ impl GC {
             }
         }
     }
-    
+
     /// Incremental GC step - original incremental mode
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         const WORK_PER_STEP: usize = 4096;
@@ -691,61 +691,61 @@ impl GC {
         let threshold = (estimate as isize * self.gc_pause as isize) / 100;
         self.gc_debt = self.total_bytes as isize - threshold;
     }
-    
+
     // ============ Generational GC Methods ============
-    
+
     /// Set debt for next minor collection
     /// Minor GC happens when memory grows by gen_minor_mul%
     fn set_minor_debt(&mut self) {
         let debt = -((self.total_bytes / 100) as isize * self.gen_minor_mul as isize);
         self.gc_debt = debt;
     }
-    
+
     /// Set pause for major collection (like Lua's setpause)
     fn set_pause(&mut self) {
         let estimate = self.gc_estimate.max(self.total_bytes);
         let threshold = (estimate as isize * self.gc_pause as isize) / 100;
         self.gc_debt = self.total_bytes as isize - threshold;
     }
-    
+
     /// Minor collection - only collect young generation
     /// Like Lua's youngcollection
     fn young_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         self.stats.collection_count += 1;
         self.stats.minor_collections += 1;
-        
+
         // Clear gray lists
         self.gray.clear();
         self.grayagain.clear();
-        
+
         // Mark roots
         for value in roots {
             self.mark_value(value, pool);
         }
-        
+
         // Mark touched old objects (they may point to young objects)
         for gc_id in std::mem::take(&mut self.touched_list) {
             self.mark_object_gen(gc_id, pool);
         }
-        
+
         // Propagate marks
         while let Some(gc_id) = self.gray.pop() {
             self.mark_one(gc_id, pool);
         }
-        
+
         // Process grayagain
         while let Some(gc_id) = self.grayagain.pop() {
             self.mark_one(gc_id, pool);
         }
-        
+
         // Sweep young objects and age them
         let collected = self.sweep_young(pool);
         self.stats.objects_collected += collected;
-        
+
         // Flip white for next cycle
         self.current_white ^= 1;
     }
-    
+
     /// Mark an object for generational GC
     fn mark_object_gen(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
         match gc_id.gc_type() {
@@ -789,15 +789,15 @@ impl GC {
             GcObjectType::Userdata => {}
         }
     }
-    
+
     /// Sweep young objects: delete dead, age survivors
     fn sweep_young(&mut self, pool: &mut ObjectPool) -> usize {
         let mut collected = 0;
         let mut new_young = Vec::with_capacity(self.young_list.len());
-        
+
         for gc_id in std::mem::take(&mut self.young_list) {
             let (is_alive, age) = self.get_object_age(gc_id, pool);
-            
+
             if !is_alive {
                 // Dead object - free it
                 self.free_object(gc_id, pool);
@@ -809,25 +809,25 @@ impl GC {
                     G_SURVIVAL => G_OLD1,
                     _ => age,
                 };
-                
+
                 self.set_object_age(gc_id, new_age, pool);
-                
+
                 // Keep in young list if still young, otherwise it graduates
                 if new_age <= G_SURVIVAL {
                     new_young.push(gc_id);
                 } else {
                     self.stats.promoted_objects += 1;
                 }
-                
+
                 // Make white for next cycle
                 self.make_white(gc_id, pool);
             }
         }
-        
+
         self.young_list = new_young;
         collected
     }
-    
+
     /// Get object's age
     fn get_object_age(&self, gc_id: GcId, pool: &ObjectPool) -> (bool, u8) {
         match gc_id.gc_type() {
@@ -869,7 +869,7 @@ impl GC {
             GcObjectType::Userdata => (true, G_OLD),
         }
     }
-    
+
     /// Set object's age
     fn set_object_age(&self, gc_id: GcId, age: u8, pool: &mut ObjectPool) {
         match gc_id.gc_type() {
@@ -901,28 +901,28 @@ impl GC {
             GcObjectType::Userdata => {}
         }
     }
-    
+
     /// Full generational collection - like Lua's fullgen
     fn full_gen(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) -> usize {
         self.stats.major_collections += 1;
-        
+
         // Do a full mark-sweep
         self.clear_marks(pool);
         self.mark_roots(roots, pool);
         let collected = self.sweep(pool);
-        
+
         // Reset generational state
         self.gc_estimate = self.total_bytes;
         self.young_list.clear();
         self.touched_list.clear();
-        
+
         // Make all surviving objects old
         self.make_all_old(pool);
-        
+
         self.stats.objects_collected += collected;
         collected
     }
-    
+
     /// Make all surviving objects old (for entering generational mode)
     fn make_all_old(&self, pool: &mut ObjectPool) {
         for (_id, t) in pool.tables.iter_mut() {
@@ -956,14 +956,14 @@ impl GC {
             }
         }
     }
-    
+
     /// Handle bad collection - step through full GC
     fn step_gen_full(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         let last_atomic = self.last_atomic;
-        
+
         // Do a full collection
         let new_atomic = self.full_gen(roots, pool);
-        
+
         // Check if this was a good collection
         if new_atomic < last_atomic + (last_atomic / 8) {
             // Good - return to generational mode
@@ -975,19 +975,19 @@ impl GC {
             self.set_pause();
         }
     }
-    
+
     // ============ Write Barriers for Generational GC ============
-    
+
     /// Forward barrier: when black object 'from' points to white object 'to'
     /// Mark 'to' and possibly make it old
     pub fn barrier_forward_gen(&mut self, from_id: GcId, to_id: GcId, pool: &mut ObjectPool) {
         if self.gc_kind != GcKind::Generational {
             return;
         }
-        
+
         // Check if 'from' is old
         let from_is_old = self.is_object_old(from_id, pool);
-        
+
         if from_is_old {
             // Mark the target object and make it OLD0
             // This ensures it won't be collected and will age properly
@@ -995,21 +995,21 @@ impl GC {
             self.set_object_age(to_id, G_OLD0, pool);
         }
     }
-    
+
     /// Back barrier: when old object 'obj' is modified to point to young object
     /// Mark 'obj' as touched so it will be revisited in minor collection
     pub fn barrier_back_gen(&mut self, obj_id: GcId, pool: &mut ObjectPool) {
         if self.gc_kind != GcKind::Generational {
             return;
         }
-        
+
         let age = match obj_id.gc_type() {
             GcObjectType::Table => pool.tables.get(obj_id.index()).map(|t| t.header.age()),
             GcObjectType::Function => pool.functions.get(obj_id.index()).map(|f| f.header.age()),
             GcObjectType::Thread => pool.threads.get(obj_id.index()).map(|t| t.header.age()),
             _ => None,
         };
-        
+
         if let Some(age) = age {
             if age >= G_OLD0 && age != G_TOUCHED1 {
                 // Mark as touched and add to touched list
@@ -1018,25 +1018,35 @@ impl GC {
             }
         }
     }
-    
+
     /// Check if an object is old
     fn is_object_old(&self, gc_id: GcId, pool: &ObjectPool) -> bool {
         match gc_id.gc_type() {
-            GcObjectType::Table => {
-                pool.tables.get(gc_id.index()).map(|t| t.header.age() >= G_OLD0).unwrap_or(false)
-            }
-            GcObjectType::Function => {
-                pool.functions.get(gc_id.index()).map(|f| f.header.age() >= G_OLD0).unwrap_or(false)
-            }
-            GcObjectType::Upvalue => {
-                pool.upvalues.get(gc_id.index()).map(|u| u.header.age() >= G_OLD0).unwrap_or(false)
-            }
-            GcObjectType::Thread => {
-                pool.threads.get(gc_id.index()).map(|t| t.header.age() >= G_OLD0).unwrap_or(false)
-            }
-            GcObjectType::String => {
-                pool.strings.get(gc_id.index()).map(|s| s.header.age() >= G_OLD0).unwrap_or(false)
-            }
+            GcObjectType::Table => pool
+                .tables
+                .get(gc_id.index())
+                .map(|t| t.header.age() >= G_OLD0)
+                .unwrap_or(false),
+            GcObjectType::Function => pool
+                .functions
+                .get(gc_id.index())
+                .map(|f| f.header.age() >= G_OLD0)
+                .unwrap_or(false),
+            GcObjectType::Upvalue => pool
+                .upvalues
+                .get(gc_id.index())
+                .map(|u| u.header.age() >= G_OLD0)
+                .unwrap_or(false),
+            GcObjectType::Thread => pool
+                .threads
+                .get(gc_id.index())
+                .map(|t| t.header.age() >= G_OLD0)
+                .unwrap_or(false),
+            GcObjectType::String => pool
+                .strings
+                .get(gc_id.index())
+                .map(|s| s.header.age() >= G_OLD0)
+                .unwrap_or(false),
             GcObjectType::Userdata => true,
         }
     }

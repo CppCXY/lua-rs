@@ -2,8 +2,8 @@
 ///
 /// These instructions handle upvalues, closures, and variable captures.
 use crate::{
-    LuaValue,
-    lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
+    LuaValue, get_a, get_b, get_bx, get_c,
+    lua_vm::{LuaCallFrame, LuaResult, LuaVM},
 };
 
 /// GETUPVAL A B
@@ -13,8 +13,8 @@ use crate::{
 #[allow(dead_code)]
 #[inline(always)]
 pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     // FAST PATH: Use cached upvalues_ptr for direct access
     let upvalue_id = unsafe { *(*frame_ptr).upvalues_ptr.add(b) };
@@ -33,8 +33,8 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 #[allow(dead_code)]
 #[inline(always)]
 pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     // FAST PATH: Use cached upvalues_ptr for direct access
     let upvalue_id = unsafe { *(*frame_ptr).upvalues_ptr.add(b) };
@@ -51,7 +51,7 @@ pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// close all upvalues >= R[A]
 #[inline(always)]
 pub fn exec_close(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
+    let a = get_a!(instr);
     let close_from = base_ptr + a;
 
     vm.close_upvalues_from(close_from);
@@ -69,8 +69,8 @@ pub fn exec_closure(
 ) -> LuaResult<()> {
     use crate::gc::UpvalueId;
 
-    let a = Instruction::get_a(instr) as usize;
-    let bx = Instruction::get_bx(instr) as usize;
+    let a = get_a!(instr);
+    let bx = get_bx!(instr);
 
     // Get prototype and parent upvalues without cloning upvalues early
     let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
@@ -156,8 +156,8 @@ pub fn exec_vararg(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let c = get_c!(instr);
 
     let (vararg_start, vararg_count, top) = unsafe {
         let frame = &*frame_ptr;
@@ -238,8 +238,8 @@ pub fn exec_vararg(
 /// OPTIMIZED: Pre-allocation for string/number combinations
 #[inline(always)]
 pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     // ULTRA-OPTIMIZED: Build result string directly without intermediate allocations
     // Estimate total capacity and format numbers inline with itoa
@@ -386,9 +386,9 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
 /// R[A][C+i] := R[A+i], 1 <= i <= B
 #[inline(always)]
 pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     let top = unsafe { (*frame_ptr).top } as usize;
     let table = vm.register_stack[base_ptr + a];
@@ -430,7 +430,7 @@ pub fn exec_setlist(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, ba
 /// This marks a variable to have its __close metamethod called when it goes out of scope
 #[inline(always)]
 pub fn exec_tbc(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
+    let a = get_a!(instr);
     let reg_idx = base_ptr + a;
 
     // Get the value to be marked as to-be-closed

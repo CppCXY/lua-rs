@@ -16,10 +16,10 @@ pub use loop_instructions::*;
 pub use table_instructions::*;
 pub use upvalue_instructions::*;
 
-use super::{Instruction, LuaError, LuaResult, LuaVM, OpCode};
-use crate::lua_value::{TAG_INTEGER, TYPE_MASK};
+use super::{LuaError, LuaResult, LuaVM, OpCode};
+use crate::lua_value::{TAG_FALSE, TAG_FLOAT, TAG_INTEGER, TAG_NIL, TAG_TRUE, TYPE_MASK};
 use crate::lua_vm::LuaCallFrame;
-use crate::{LuaValue, UpvalueState};
+use crate::{LuaValue, UpvalueState, get_a, get_ax, get_b, get_bx, get_k, get_op, get_sbx, get_sj};
 
 /// Save current pc to frame (like Lua C's savepc macro)
 /// Called before operations that may call Lua functions (CALL, metamethods, etc.)
@@ -84,15 +84,15 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
         let instr = unsafe { *code_ptr.add(pc) };
         pc += 1;
 
-        let opcode = Instruction::get_opcode(instr);
+        let opcode = get_op!(instr);
 
         match opcode {
             // ============ HOT PATH: Inline simple instructions (< 10 lines) ============
 
             // MOVE - R[A] := R[B]
             OpCode::Move => {
-                let a = Instruction::get_a(instr) as usize;
-                let b = Instruction::get_b(instr) as usize;
+                let a = get_a!(instr);
+                let b = get_b!(instr);
                 unsafe {
                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
                     *reg_base.add(a) = *reg_base.add(b);
@@ -102,47 +102,54 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // LOADI - R[A] := sBx
             OpCode::LoadI => {
-                let a = Instruction::get_a(instr) as usize;
-                let sbx = Instruction::get_sbx(instr);
+                let a = get_a!(instr);
+                let sbx = get_sbx!(instr);
                 unsafe {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
+                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    (*dst).primary = TAG_INTEGER;
+                    (*dst).secondary = sbx as i64 as u64;
                 }
                 continue 'mainloop;
             }
 
             // LOADF - R[A] := (float)sBx
             OpCode::LoadF => {
-                let a = Instruction::get_a(instr) as usize;
-                let sbx = Instruction::get_sbx(instr);
+                let a = get_a!(instr);
+                let sbx = get_sbx!(instr);
                 unsafe {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(sbx as f64);
+                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    (*dst).primary = TAG_FLOAT;
+                    (*dst).secondary = (sbx as f64).to_bits();
                 }
                 continue 'mainloop;
             }
 
             // LOADTRUE - R[A] := true
             OpCode::LoadTrue => {
-                let a = Instruction::get_a(instr) as usize;
+                let a = get_a!(instr);
                 unsafe {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(true);
+                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    (*dst).primary = TAG_TRUE;
                 }
                 continue 'mainloop;
             }
 
             // LOADFALSE - R[A] := false
             OpCode::LoadFalse => {
-                let a = Instruction::get_a(instr) as usize;
+                let a = get_a!(instr);
                 unsafe {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
+                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    (*dst).primary = TAG_FALSE;
                 }
                 continue 'mainloop;
             }
 
             // LFALSESKIP - R[A] := false; pc++
             OpCode::LFalseSkip => {
-                let a = Instruction::get_a(instr) as usize;
+                let a = get_a!(instr);
                 unsafe {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
+                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+                    (*dst).primary = TAG_FALSE;
                 }
                 pc += 1;
                 continue 'mainloop;
@@ -150,13 +157,12 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // LOADNIL - R[A], ..., R[A+B] := nil
             OpCode::LoadNil => {
-                let a = Instruction::get_a(instr) as usize;
-                let b = Instruction::get_b(instr) as usize;
+                let a = get_a!(instr);
+                let b = get_b!(instr);
                 unsafe {
-                    let nil_val = LuaValue::nil();
-                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
                     for i in 0..=b {
-                        *reg_base.add(a + i) = nil_val;
+                        (*reg_base.add(i)).primary = TAG_NIL;
                     }
                 }
                 continue 'mainloop;
@@ -164,8 +170,8 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // LOADK - R[A] := K[Bx]
             OpCode::LoadK => {
-                let a = Instruction::get_a(instr) as usize;
-                let bx = Instruction::get_bx(instr) as usize;
+                let a = get_a!(instr);
+                let bx = get_bx!(instr);
                 unsafe {
                     let constant = *(*frame_ptr).constants_ptr.add(bx);
                     *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
@@ -175,12 +181,12 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // LOADKX - R[A] := K[extra arg]; pc++
             OpCode::LoadKX => {
-                let a = Instruction::get_a(instr) as usize;
+                let a = get_a!(instr);
                 unsafe {
                     let extra_instr = *code_ptr.add(pc);
                     pc += 1;
-                    let bx = Instruction::get_ax(extra_instr) as usize;
-                    let constant = *(*frame_ptr).constants_ptr.add(bx);
+                    let ax = get_ax!(extra_instr);
+                    let constant = *(*frame_ptr).constants_ptr.add(ax);
                     *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
                 }
                 continue 'mainloop;
@@ -306,8 +312,8 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Unary operations (inline NOT) ============
             OpCode::Not => {
-                let a = Instruction::get_a(instr) as usize;
-                let b = Instruction::get_b(instr) as usize;
+                let a = get_a!(instr);
+                let b = get_b!(instr);
                 unsafe {
                     let value = *vm.register_stack.as_ptr().add(base_ptr + b);
                     let is_falsy = !value.is_truthy();
@@ -378,13 +384,13 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
             // ============ Control Flow (inline JMP and TEST) ============
             OpCode::Jmp => {
-                let sj = Instruction::get_sj(instr);
+                let sj = get_sj!(instr);
                 pc = (pc as i32 + sj) as usize;
                 continue 'mainloop;
             }
             OpCode::Test => {
-                let a = Instruction::get_a(instr) as usize;
-                let k = Instruction::get_k(instr);
+                let a = get_a!(instr);
+                let k = get_k!(instr);
                 unsafe {
                     let val = *vm.register_stack.as_mut_ptr().add(base_ptr + a);
                     let is_truthy = val.is_truthy();
@@ -407,14 +413,13 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 continue 'mainloop;
             }
             OpCode::ForLoop => {
-                let a = Instruction::get_a(instr) as usize;
-                let bx = Instruction::get_bx(instr) as usize;
+                let a = get_a!(instr);
+                let bx = get_bx!(instr);
                 unsafe {
                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
                     let idx = *reg_base;
 
                     // Integer loop: check if idx is integer (FORPREP sets this correctly)
-                    // If any of init/limit/step was float, FORPREP uses float mode
                     if (idx.primary & TYPE_MASK) == TAG_INTEGER {
                         let count = (*reg_base.add(1)).secondary;
                         if count > 0 {
@@ -447,8 +452,8 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             // ============ Upvalue operations (inline for performance) ============
             OpCode::GetUpval => {
                 // INLINED GETUPVAL: R[A] := UpValue[B]
-                let a = Instruction::get_a(instr) as usize;
-                let b = Instruction::get_b(instr) as usize;
+                let a = get_a!(instr);
+                let b = get_b!(instr);
 
                 unsafe {
                     let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
@@ -456,7 +461,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                     // Read upvalue value directly
                     let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
                     let value = match &uv.state {
-                        UpvalueState::Open { stack_index } => *vm.register_stack.as_ptr().add(*stack_index),
+                        UpvalueState::Open { stack_index } => {
+                            *vm.register_stack.as_ptr().add(*stack_index)
+                        }
                         UpvalueState::Closed(val) => *val,
                     };
 
@@ -466,8 +473,8 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             }
             OpCode::SetUpval => {
                 // INLINED SETUPVAL: UpValue[B] := R[A]
-                let a = Instruction::get_a(instr) as usize;
-                let b = Instruction::get_b(instr) as usize;
+                let a = get_a!(instr);
+                let b = get_b!(instr);
 
                 unsafe {
                     // Get the value to write
@@ -556,7 +563,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                     vm.close_upvalues_from(base_ptr);
                 }
 
-                let a = Instruction::get_a(instr) as usize;
+                let a = get_a!(instr);
 
                 // Get return value early
                 let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };

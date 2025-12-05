@@ -32,14 +32,14 @@ impl Node {
 /// A bit set to 1 means the metamethod is NOT present (absence cache)
 /// Only the first 6 metamethods use this optimization (TM_INDEX..TM_EQ)
 pub mod tm_flags {
-    pub const TM_INDEX: u8 = 1 << 0;      // __index
-    pub const TM_NEWINDEX: u8 = 1 << 1;   // __newindex
-    pub const TM_GC: u8 = 1 << 2;         // __gc
-    pub const TM_MODE: u8 = 1 << 3;       // __mode
-    pub const TM_LEN: u8 = 1 << 4;        // __len
-    pub const TM_EQ: u8 = 1 << 5;         // __eq
-    pub const TM_CALL: u8 = 1 << 6;       // __call (bonus: very common)
-    pub const MASK_ALL: u8 = 0x7F;        // All 7 bits
+    pub const TM_INDEX: u8 = 1 << 0; // __index
+    pub const TM_NEWINDEX: u8 = 1 << 1; // __newindex
+    pub const TM_GC: u8 = 1 << 2; // __gc
+    pub const TM_MODE: u8 = 1 << 3; // __mode
+    pub const TM_LEN: u8 = 1 << 4; // __len
+    pub const TM_EQ: u8 = 1 << 5; // __eq
+    pub const TM_CALL: u8 = 1 << 6; // __call (bonus: very common)
+    pub const MASK_ALL: u8 = 0x7F; // All 7 bits
 }
 
 /// Lua table implementation
@@ -61,7 +61,7 @@ pub struct LuaTable {
     /// Metatable - optional table that defines special behaviors  
     /// Store as LuaValue (table ID) instead of Rc for ID-based architecture
     metatable: Option<LuaValue>,
-    
+
     /// Metamethod absence flags (like Lua 5.4)
     /// A bit set to 1 means the metamethod is NOT present (cached absence)
     /// This allows O(1) check for common metamethods instead of hash lookup

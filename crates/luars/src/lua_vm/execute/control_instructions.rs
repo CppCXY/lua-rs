@@ -2,8 +2,9 @@
 ///
 /// These instructions handle function calls, returns, jumps, and coroutine operations.
 use crate::lua_value::LuaValueKind;
-use crate::lua_vm::{Instruction, LuaCallFrame, LuaError, LuaResult, LuaVM};
+use crate::lua_vm::{LuaCallFrame, LuaError, LuaResult, LuaVM};
 use crate::{FunctionId, LuaValue};
+use crate::{get_a, get_b, get_c, get_k, get_sb, get_sj};
 
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
@@ -12,9 +13,9 @@ pub fn exec_return(
     instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let k = get_k!(instr);
 
     // Get frame info BEFORE popping
     let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr } as usize;
@@ -141,7 +142,7 @@ pub fn exec_return(
 #[allow(dead_code)]
 #[inline(always)]
 pub fn exec_jmp(instr: u32, pc: &mut usize) {
-    let sj = Instruction::get_sj(instr);
+    let sj = get_sj!(instr);
 
     // PC already incremented by dispatcher, so we add offset directly
     *pc = (*pc as i32 + sj) as usize;
@@ -155,8 +156,8 @@ pub fn exec_jmp(instr: u32, pc: &mut usize) {
 #[allow(dead_code)]
 #[inline(always)]
 pub fn exec_test(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         // OPTIMIZATION: Direct unsafe access and type tag comparison
@@ -180,9 +181,9 @@ pub fn exec_test(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// ULTRA-OPTIMIZED: Direct type tag check, single branch
 #[inline(always)]
 pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         // OPTIMIZATION: Direct unsafe access
@@ -209,9 +210,9 @@ pub fn exec_testset(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize)
 /// ULTRA-OPTIMIZED: Fast path for common types (integers, floats, strings)
 #[inline(always)]
 pub fn exec_eq(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let k = get_k!(instr);
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {
@@ -284,9 +285,9 @@ pub fn exec_eq(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> L
 /// ULTRA-OPTIMIZED: Direct integer fast path like Lua C
 #[inline(always)]
 pub fn exec_lt(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: &mut usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_ptr().add(*base_ptr);
@@ -412,9 +413,9 @@ fn exec_lt_metamethod(
 /// ULTRA-OPTIMIZED: Use combined_tags for fast path like LT
 #[inline(always)]
 pub fn exec_le(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let k = get_k!(instr);
 
     // OPTIMIZATION: Use unsafe for unchecked register access
     let (left, right) = unsafe {
@@ -560,9 +561,9 @@ pub fn exec_eqk(
     pc: &mut usize,
     base_ptr: usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let k = get_k!(instr);
 
     let func_id = unsafe { (*frame_ptr).get_function_id() };
     // Get function using new ID-based API
@@ -591,9 +592,9 @@ pub fn exec_eqk(
 /// if ((R[A] == sB) ~= k) then pc++
 #[inline(always)]
 pub fn exec_eqi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr);
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let sb = get_sb!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
@@ -617,9 +618,9 @@ pub fn exec_eqi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// if ((R[A] < sB) ~= k) then pc++
 #[inline(always)]
 pub fn exec_lti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr);
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let sb = get_sb!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
@@ -650,9 +651,9 @@ pub fn exec_lti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 /// if ((R[A] <= sB) ~= k) then pc++
 #[inline(always)]
 pub fn exec_lei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr);
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let sb = get_sb!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
@@ -681,9 +682,9 @@ pub fn exec_lei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 /// if ((R[A] > sB) ~= k) then pc++
 #[inline(always)]
 pub fn exec_gti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr);
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let sb = get_sb!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
@@ -712,9 +713,9 @@ pub fn exec_gti(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> 
 /// if ((R[A] >= sB) ~= k) then pc++
 #[inline(always)]
 pub fn exec_gei(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr);
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let sb = get_sb!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + a);
@@ -778,9 +779,9 @@ pub fn exec_call(
     frame_ptr_ptr: &mut *mut LuaCallFrame,
     base: usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     // Get function value
     let func = unsafe { *vm.register_stack.get_unchecked(base + a) };
@@ -1341,8 +1342,8 @@ pub fn exec_tailcall(
 ) -> LuaResult<()> {
     // TAILCALL A B C: return R[A](R[A+1], ..., R[A+B-1])
     // Reuse current frame (tail call optimization)
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     // Extract all frame information we'll need BEFORE taking mutable references
     let (base, return_count, result_reg, _pc) = {
@@ -1581,7 +1582,7 @@ pub fn exec_return1(
     instr: u32,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
+    let a = get_a!(instr);
 
     // Get base_ptr and return value FIRST
     let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr } as usize;

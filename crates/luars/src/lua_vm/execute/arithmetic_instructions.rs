@@ -2,18 +2,18 @@
 ///
 /// These instructions handle arithmetic operations, bitwise operations, and comparisons.
 use crate::{
-    LuaValue,
+    LuaValue, get_a, get_b, get_c, get_k, get_sb, get_sc,
     lua_value::{TAG_FLOAT, TAG_INTEGER, TYPE_MASK},
-    lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM},
+    lua_vm::{LuaCallFrame, LuaResult, LuaVM},
 };
 
 /// ADD: R[A] = R[B] + R[C]
 /// OPTIMIZED: Matches Lua C's setivalue behavior - always write both fields
 #[inline(always)]
 pub fn exec_add(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
@@ -56,9 +56,9 @@ pub fn exec_add(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
 pub fn exec_sub(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
@@ -100,9 +100,9 @@ pub fn exec_sub(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// OPTIMIZED: Matches Lua C's setivalue behavior
 #[inline(always)]
 pub fn exec_mul(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
@@ -142,9 +142,9 @@ pub fn exec_mul(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// DIV: R[A] = R[B] / R[C]
 /// OPTIMIZED: If both are integers and division is exact, return integer
 pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
@@ -192,9 +192,9 @@ pub fn exec_div(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// IDIV: R[A] = R[B] // R[C] (floor division)
 pub fn exec_idiv(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
@@ -241,9 +241,9 @@ pub fn exec_idiv(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// MOD: R[A] = R[B] % R[C]
 /// OPTIMIZED: Returns integer when both operands are integers
 pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_ptr().add(base_ptr);
@@ -300,9 +300,9 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// POW: R[A] = R[B] ^ R[C]
 pub fn exec_pow(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -324,8 +324,8 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
 /// UNM: R[A] = -R[B] (unary minus)
 pub fn exec_unm(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     let value = vm.register_stack[base_ptr + b];
 
@@ -367,9 +367,9 @@ pub fn exec_unm(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 /// OPTIMIZED: Minimal branches, inline integer path
 #[inline(always)]
 pub fn exec_addi(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let sc = Instruction::get_sc(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let sc = get_sc!(instr);
 
     unsafe {
         let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
@@ -404,9 +404,9 @@ pub fn exec_addk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -454,9 +454,9 @@ pub fn exec_subk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -504,9 +504,9 @@ pub fn exec_mulk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -560,9 +560,9 @@ pub fn exec_modk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -611,9 +611,9 @@ pub fn exec_powk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -645,9 +645,9 @@ pub fn exec_divk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -688,9 +688,9 @@ pub fn exec_idivk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -726,9 +726,9 @@ pub fn exec_idivk(
 /// BAND: R[A] = R[B] & R[C]
 #[inline(always)]
 pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -744,9 +744,9 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// BOR: R[A] = R[B] | R[C]
 #[inline(always)]
 pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -762,9 +762,9 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// BXOR: R[A] = R[B] ~ R[C]
 #[inline(always)]
 pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -780,9 +780,9 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// SHL: R[A] = R[B] << R[C]
 #[inline(always)]
 pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -803,9 +803,9 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// SHR: R[A] = R[B] >> R[C]
 #[inline(always)]
 pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -833,9 +833,9 @@ pub fn exec_bandk(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -879,9 +879,9 @@ pub fn exec_bork(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -925,9 +925,9 @@ pub fn exec_bxork(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -964,9 +964,9 @@ pub fn exec_bxork(
 /// SHRI: R[A] = R[B] >> sC
 #[inline(always)]
 pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let sc = Instruction::get_sc(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let sc = get_sc!(instr);
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -986,9 +986,9 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// SHLI: R[A] = sC << R[B]
 #[inline(always)]
 pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let sc = Instruction::get_sc(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let sc = get_sc!(instr);
 
     unsafe {
         let right = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -1008,8 +1008,8 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 /// BNOT: R[A] = ~R[B]
 #[inline(always)]
 pub fn exec_bnot(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     let value = vm.register_stack[base_ptr + b];
 
@@ -1042,8 +1042,8 @@ pub fn exec_bnot(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 /// NOT: R[A] = not R[B]
 #[inline(always)]
 pub fn exec_not(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     unsafe {
         let value = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -1059,8 +1059,8 @@ pub fn exec_not(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 /// OPTIMIZED: Fast path for tables without __len metamethod
 #[inline(always)]
 pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     let value = vm.register_stack[base_ptr + b];
 
@@ -1075,13 +1075,13 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     // Table length with metamethod support
     if let Some(table_id) = value.as_table_id() {
         use crate::lua_value::tm_flags;
-        
+
         // Single table access to get both length and metatable info
         let table = match vm.object_pool.get_table(table_id) {
             Some(t) => t,
             None => return Err(vm.error("invalid table")),
         };
-        
+
         // FAST PATH: No metatable
         let mt_val = match table.get_metatable() {
             None => {
@@ -1091,7 +1091,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
             }
             Some(mt) => mt,
         };
-        
+
         // Has metatable - check for __len
         let mt_id = match mt_val.as_table_id() {
             Some(id) => id,
@@ -1101,7 +1101,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
                 return Ok(());
             }
         };
-        
+
         // Get both fasttm flag and __len value in one lookup
         let (len, len_mm) = {
             let mt_table = match vm.object_pool.get_table(mt_id) {
@@ -1113,7 +1113,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
                     });
                 }
             };
-            
+
             // FAST PATH: fasttm check - __len is known to be absent
             if mt_table.tm_absent(tm_flags::TM_LEN) {
                 (table.len() as i64, None)
@@ -1125,7 +1125,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
                 }
             }
         };
-        
+
         if let Some(metamethod) = len_mm {
             // Call __len metamethod
             let result = vm
@@ -1155,9 +1155,9 @@ pub fn exec_mmbin(
     pc: &mut usize,
     base_ptr: usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     unsafe {
         let prev_pc = *pc - 1;
@@ -1168,7 +1168,7 @@ pub fn exec_mmbin(
 
         // Get previous instruction to find destination register
         let prev_instr = code_ptr.add(prev_pc - 1).read();
-        let dest_reg = Instruction::get_a(prev_instr) as usize;
+        let dest_reg = get_a!(prev_instr);
 
         let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
         let rb = *vm.register_stack.as_ptr().add(base_ptr + b);
@@ -1206,10 +1206,10 @@ pub fn exec_mmbini(
     pc: &mut usize,
     base_ptr: usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let sb = Instruction::get_sb(instr);
-    let c = Instruction::get_c(instr);
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let sb = get_sb!(instr);
+    let c = get_c!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let prev_pc = *pc - 1;
@@ -1219,7 +1219,7 @@ pub fn exec_mmbini(
         }
 
         let prev_instr = code_ptr.add(prev_pc - 1).read();
-        let dest_reg = Instruction::get_a(prev_instr) as usize;
+        let dest_reg = get_a!(prev_instr);
 
         let rb = *vm.register_stack.as_ptr().add(base_ptr + a);
         let rc = LuaValue::integer(sb as i64);
@@ -1255,10 +1255,10 @@ pub fn exec_mmbink(
     pc: &mut usize,
     base_ptr: usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
+    let k = get_k!(instr);
 
     unsafe {
         let prev_pc = *pc - 1;
@@ -1268,7 +1268,7 @@ pub fn exec_mmbink(
         }
 
         let prev_instr = code_ptr.add(prev_pc - 1).read();
-        let dest_reg = Instruction::get_a(prev_instr) as usize;
+        let dest_reg = get_a!(prev_instr);
 
         let ra = *vm.register_stack.as_ptr().add(base_ptr + a);
 

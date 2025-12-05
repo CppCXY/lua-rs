@@ -2,7 +2,8 @@
 ///
 /// These instructions handle loading constants and moving values between registers.
 use crate::LuaValue;
-use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
+use crate::lua_vm::{LuaCallFrame, LuaVM};
+use crate::{get_a, get_ax, get_b, get_bx, get_sbx};
 
 /// VARARGPREP A
 /// Prepare stack for vararg function
@@ -17,7 +18,7 @@ pub fn exec_varargprep(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) {
-    let a = Instruction::get_a(instr) as usize; // number of fixed params
+    let a = get_a!(instr); // number of fixed params
 
     let frame = vm.current_frame();
     let frame_base = frame.base_ptr as usize;
@@ -100,8 +101,8 @@ pub fn exec_varargprep(
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_loadnil(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     unsafe {
         let nil_val = LuaValue::nil();
@@ -117,7 +118,7 @@ pub fn exec_loadnil(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
+    let a = get_a!(instr);
 
     unsafe {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
@@ -129,7 +130,7 @@ pub fn exec_loadfalse(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
+    let a = get_a!(instr);
 
     unsafe {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(false);
@@ -143,7 +144,7 @@ pub fn exec_lfalseskip(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usi
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
+    let a = get_a!(instr);
 
     unsafe {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(true);
@@ -156,8 +157,8 @@ pub fn exec_loadtrue(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 #[allow(dead_code)]
 #[allow(dead_code)]
 pub fn exec_loadi(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let sbx = Instruction::get_sbx(instr);
+    let a = get_a!(instr);
+    let sbx = get_sbx!(instr);
 
     unsafe {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
@@ -169,8 +170,8 @@ pub fn exec_loadi(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_loadf(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let sbx = Instruction::get_sbx(instr);
+    let a = get_a!(instr);
+    let sbx = get_sbx!(instr);
 
     unsafe {
         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(sbx as f64);
@@ -183,8 +184,8 @@ pub fn exec_loadf(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_loadk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let bx = Instruction::get_bx(instr) as usize;
+    let a = get_a!(instr);
+    let bx = get_bx!(instr);
 
     unsafe {
         // FAST PATH: Direct constant access via cached pointer
@@ -198,7 +199,7 @@ pub fn exec_loadk(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
+    let a = get_a!(instr);
 
     unsafe {
         let pc_val = (*frame_ptr).pc as usize;
@@ -208,7 +209,7 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, bas
         if let Some(fid) = func_id {
             if let Some(func_ref) = vm.object_pool.get_function(fid) {
                 if let Some(&extra_instr) = func_ref.chunk.code.get(pc_val) {
-                    let bx = Instruction::get_ax(extra_instr) as usize;
+                    let bx = get_ax!(extra_instr);
                     if let Some(&constant) = func_ref.chunk.constants.get(bx) {
                         *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
                     }
@@ -223,8 +224,8 @@ pub fn exec_loadkx(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, bas
 #[inline(always)]
 #[allow(dead_code)]
 pub fn exec_move(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
 
     unsafe {
         let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);

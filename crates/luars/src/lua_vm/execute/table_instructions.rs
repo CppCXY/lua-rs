@@ -2,7 +2,8 @@ use crate::lua_value::{LuaValue, tm_flags};
 /// Table operations
 ///
 /// These instructions handle table creation, access, and manipulation.
-use crate::lua_vm::{Instruction, LuaCallFrame, LuaResult, LuaVM};
+use crate::lua_vm::{LuaCallFrame, LuaResult, LuaVM};
+use crate::{get_a, get_ax, get_b, get_c, get_k};
 
 /// NEWTABLE A B C k
 /// R[A] := {} (size = B,C)
@@ -18,10 +19,10 @@ pub fn exec_newtable(
     pc: &mut usize,
     base_ptr: usize,
 ) {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr); // log2(hash_size) + 1
-    let c = Instruction::get_c(instr); // array_size % 256
-    let k = Instruction::get_k(instr); // true if EXTRAARG has high bits of array_size
+    let a = get_a!(instr);
+    let b = get_b!(instr); // log2(hash_size) + 1
+    let c = get_c!(instr); // array_size % 256
+    let k = get_k!(instr); // true if EXTRAARG has high bits of array_size
 
     // Decode hash size: if b > 0, hash_size = 2^(b-1)
     let hash_size = if b > 0 { 1usize << (b - 1) } else { 0 };
@@ -39,19 +40,19 @@ pub fn exec_newtable(
         if let Some(func_id) = func_value.as_function_id() {
             if let Some(func_ref) = vm.object_pool.get_function(func_id) {
                 if prev_pc < func_ref.chunk.code.len() {
-                    let extra = Instruction::get_ax(func_ref.chunk.code[prev_pc]) as usize;
-                    extra * 256 + c as usize // MAXARG_C + 1 = 256
+                    let extra = get_ax!(func_ref.chunk.code[prev_pc]);
+                    extra * 256 + c // MAXARG_C + 1 = 256
                 } else {
-                    c as usize
+                    c
                 }
             } else {
-                c as usize
+                c
             }
         } else {
-            c as usize
+            c
         }
     } else {
-        c as usize
+        c
     };
 
     // Create new table with size hints (array_size, hash_size)
@@ -80,9 +81,9 @@ pub fn exec_gettable(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     // Read values using unchecked access
     let (table_value, key_value) = unsafe {
@@ -122,7 +123,7 @@ pub fn exec_gettable(
             unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
             return Ok(());
         }
-        
+
         // FAST PATH: fasttm optimization - check if __index is known to be absent
         if let Some(mt_val) = metatable
             && let Some(mt_id) = mt_val.as_table_id()
@@ -158,10 +159,10 @@ pub fn exec_settable(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
+    let k = get_k!(instr);
 
     // Read all values using unchecked access
     let (table_value, key_value, set_value) = unsafe {
@@ -211,9 +212,9 @@ pub fn exec_settable(
 /// OPTIMIZED: Direct integer access using get_int_full() without creating LuaValue key
 #[inline(always)]
 pub fn exec_geti(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as i64; // C is unsigned integer index
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr) as i64; // C is unsigned integer index
 
     let table = unsafe { *vm.register_stack.get_unchecked(base_ptr + b) };
 
@@ -236,7 +237,7 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
             unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
             return Ok(());
         }
-        
+
         // FAST PATH: fasttm optimization - check if __index is known to be absent
         if let Some(mt_val) = metatable
             && let Some(mt_id) = mt_val.as_table_id()
@@ -270,10 +271,10 @@ pub fn exec_seti(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as i64; // B is unsigned integer key
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr) as i64; // B is unsigned integer key
+    let c = get_c!(instr);
+    let k = get_k!(instr);
 
     // CRITICAL: Read all values BEFORE any metamethod calls
     let (table_value, set_value) = unsafe {
@@ -323,9 +324,9 @@ pub fn exec_getfield(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     // FAST PATH: Direct constant access via cached pointer (like GETTABUP)
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(c) };
@@ -351,7 +352,7 @@ pub fn exec_getfield(
             unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
             return Ok(());
         }
-        
+
         // FAST PATH: fasttm optimization - check if __index is known to be absent
         if let Some(mt_val) = metatable
             && let Some(mt_id) = mt_val.as_table_id()
@@ -387,10 +388,10 @@ pub fn exec_setfield(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
+    let k = get_k!(instr);
 
     // FAST PATH: Direct access via cached pointers
     let (table_value, key_value, set_value) = unsafe {
@@ -437,9 +438,9 @@ pub fn exec_gettabup(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     // FAST PATH: Direct constant access via cached pointer
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(c) };
@@ -490,10 +491,10 @@ pub fn exec_settabup(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
-    let k = Instruction::get_k(instr);
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
+    let k = get_k!(instr);
 
     // FAST PATH: Direct constant access via cached pointer
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(b) };
@@ -541,9 +542,9 @@ pub fn exec_self(
     frame_ptr: *mut LuaCallFrame,
     base_ptr: &mut usize,
 ) -> LuaResult<()> {
-    let a = Instruction::get_a(instr) as usize;
-    let b = Instruction::get_b(instr) as usize;
-    let c = Instruction::get_c(instr) as usize;
+    let a = get_a!(instr);
+    let b = get_b!(instr);
+    let c = get_c!(instr);
 
     let func_id = unsafe { (*frame_ptr).get_function_id() };
     let table = vm.register_stack[*base_ptr + b];

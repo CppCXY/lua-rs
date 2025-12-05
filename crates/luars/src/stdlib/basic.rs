@@ -375,9 +375,7 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Most pcalls have 0-3 args, so this is fast
     let arg_count = if top > 2 { top - 2 } else { 0 };
     let args: Vec<LuaValue> = if arg_count > 0 {
-        (2..top)
-            .map(|i| vm.register_stack[base_ptr + i])
-            .collect()
+        (2..top).map(|i| vm.register_stack[base_ptr + i]).collect()
     } else {
         Vec::new()
     };
@@ -397,7 +395,7 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// OPTIMIZED: Avoid Vec allocations
 fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // xpcall(f, msgh, arg1, arg2, ...) -> status, result or error
-    
+
     // Get frame info to read args directly
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
@@ -420,9 +418,7 @@ fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Collect remaining args (3..top) into a small vec
     let arg_count = if top > 3 { top - 3 } else { 0 };
     let args: Vec<LuaValue> = if arg_count > 0 {
-        (3..top)
-            .map(|i| vm.register_stack[base_ptr + i])
-            .collect()
+        (3..top).map(|i| vm.register_stack[base_ptr + i]).collect()
     } else {
         Vec::new()
     };

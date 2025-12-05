@@ -401,30 +401,34 @@ impl LuaValue {
     // ============ Equality ============
 
     /// Raw equality (no metamethods)
-    /// OPTIMIZED: Branchless comparison for common case, only branch for float NaN handling
+    /// OPTIMIZED: Branchless comparison for common case
     #[inline(always)]
     pub fn raw_equal(&self, other: &Self) -> bool {
-        // Compare both primary and secondary
-        // This is branchless and correct for:
-        // - Strings/Tables/Functions: primary has tag|id, secondary is 0
-        // - Integers: primary is TAG_INTEGER, secondary has value
-        // - Booleans: primary is TAG_TRUE or TAG_FALSE, secondary is 0
-        // - Nil: primary is TAG_NIL, secondary is 0
-        //
-        // Special case: Float - IEEE 754 says NaN != NaN, but bit comparison would say equal
-        // We handle this with a single branch check
-        if self.primary == other.primary && self.secondary == other.secondary {
-            // Fast path: bits match
-            // Need to verify this isn't two NaNs comparing equal
-            if (self.primary & TAG_MASK) == TAG_FLOAT {
-                // For floats, use proper IEEE comparison
-                let a = f64::from_bits(self.secondary);
-                a == a // Returns false if NaN
-            } else {
-                true
+        // Fast path: compare primary (type tag + ID for GC objects)
+        if self.primary != other.primary {
+            return false;
+        }
+
+        // Primary matches - now check secondary based on type
+        let tag = self.primary & TAG_MASK;
+
+        // For nil, boolean: only primary matters (secondary is unused)
+        // For integers, floats: need to compare secondary
+        // For GC objects: secondary is unused, ID is in primary
+        match tag {
+            TAG_NIL | TAG_FALSE | TAG_TRUE => true,
+            TAG_FLOAT => {
+                // IEEE 754: NaN != NaN, but our bits might match
+                // Need proper float comparison
+                if self.secondary == other.secondary {
+                    let a = f64::from_bits(self.secondary);
+                    a == a // Returns false if NaN
+                } else {
+                    false
+                }
             }
-        } else {
-            false
+            TAG_INTEGER => self.secondary == other.secondary,
+            _ => true, // GC objects: ID is in primary, secondary unused
         }
     }
 
