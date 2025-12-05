@@ -7,10 +7,28 @@ param(
 
 $benchmarks = @(
     "bench_arithmetic.lua",
-    "bench_functions.lua",
+    "bench_control_flow.lua",
+    "bench_locals.lua",
+    
+    "bench_functions.lua", 
+    "bench_closures.lua",
+    "bench_multiret.lua",
+
     "bench_tables.lua",
+    "bench_table_lib.lua",
+    "bench_iterators.lua",
+    
+
     "bench_strings.lua",
-    "bench_control_flow.lua"
+    "bench_string_lib.lua",
+    
+
+    "bench_math.lua",
+
+    "bench_metatables.lua",
+    "bench_oop.lua",
+    "bench_coroutines.lua",
+    "bench_errors.lua"
 )
 
 # Detect Native Lua executable
