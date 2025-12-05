@@ -355,16 +355,29 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// pcall(f [, arg1, ...]) - Protected call
+/// OPTIMIZED: Avoid Vec allocations on success path
 fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // pcall(f, arg1, arg2, ...) -> status, result or error
 
-    // Get the function to call (argument 1)
-    let func = require_arg(vm, 1, "pcall")?;
+    // Get frame info to read args directly
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
-    // Get all arguments after the function
-    let all_args = get_args(vm);
-    let args: Vec<LuaValue> = if all_args.len() > 1 {
-        all_args[1..].to_vec()
+    // Arg 1 is the function (at base_ptr + 1)
+    let func = if top > 1 {
+        vm.register_stack[base_ptr + 1]
+    } else {
+        return Err(vm.error("pcall() requires argument 1".to_string()));
+    };
+
+    // Collect remaining args (2..top) into a small vec
+    // Most pcalls have 0-3 args, so this is fast
+    let arg_count = if top > 2 { top - 2 } else { 0 };
+    let args: Vec<LuaValue> = if arg_count > 0 {
+        (2..top)
+            .map(|i| vm.register_stack[base_ptr + i])
+            .collect()
     } else {
         Vec::new()
     };
@@ -372,25 +385,44 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Use protected_call from VM
     let (success, results) = vm.protected_call(func, args)?;
 
-    // Return status and results
-    let mut return_values = vec![LuaValue::boolean(success)];
+    // Return status and results - preallocate with capacity
+    let mut return_values = Vec::with_capacity(1 + results.len());
+    return_values.push(LuaValue::boolean(success));
     return_values.extend(results);
 
     Ok(MultiValue::multiple(return_values))
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
+/// OPTIMIZED: Avoid Vec allocations
 fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // xpcall(f, msgh, arg1, arg2, ...) -> status, result or error
-    // Get the function to call (argument 1)
-    let func = require_arg(vm, 1, "xpcall")?;
-    // Get the error handler (argument 2)
-    let err_handler = require_arg(vm, 2, "xpcall")?;
+    
+    // Get frame info to read args directly
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
-    // Get all arguments after the function and error handler
-    let all_args = get_args(vm);
-    let args: Vec<LuaValue> = if all_args.len() > 2 {
-        all_args[3..].to_vec()
+    // Arg 1 is the function (at base_ptr + 1)
+    let func = if top > 1 {
+        vm.register_stack[base_ptr + 1]
+    } else {
+        return Err(vm.error("xpcall() requires argument 1".to_string()));
+    };
+
+    // Arg 2 is the error handler (at base_ptr + 2)
+    let err_handler = if top > 2 {
+        vm.register_stack[base_ptr + 2]
+    } else {
+        return Err(vm.error("xpcall() requires argument 2".to_string()));
+    };
+
+    // Collect remaining args (3..top) into a small vec
+    let arg_count = if top > 3 { top - 3 } else { 0 };
+    let args: Vec<LuaValue> = if arg_count > 0 {
+        (3..top)
+            .map(|i| vm.register_stack[base_ptr + i])
+            .collect()
     } else {
         Vec::new()
     };

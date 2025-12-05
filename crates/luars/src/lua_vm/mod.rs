@@ -1134,6 +1134,7 @@ impl LuaVM {
     /// Fast path for calling CFunction metamethods with 2 arguments
     /// Used by __index, __newindex, etc. Avoids Vec allocation.
     /// Returns the first return value.
+    /// OPTIMIZED: Skip expensive get_function lookup by using a fixed offset from current base
     #[inline(always)]
     pub fn call_cfunc_metamethod_2(
         &mut self,
@@ -1141,19 +1142,13 @@ impl LuaVM {
         arg1: LuaValue,
         arg2: LuaValue,
     ) -> LuaResult<Option<LuaValue>> {
-        // Calculate new base position - use current frame's top area
+        // Fast path: use a fixed offset from current base (256 slots is enough for most cases)
+        // This avoids the expensive object_pool.get_function lookup
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr as usize;
-            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                self.object_pool
-                    .get_function(func_id)
-                    .map(|f| f.chunk.max_stack_size)
-                    .unwrap_or(256)
-            } else {
-                256
-            };
-            caller_base + caller_max_stack
+            // Use top as the base for nested calls, since all args are already there
+            // Adding 256 ensures we don't overwrite the caller's stack
+            (current_frame.base_ptr as usize) + 256
         } else {
             0
         };
@@ -1162,9 +1157,12 @@ impl LuaVM {
         self.ensure_stack_capacity(new_base + stack_size);
 
         // Set up arguments directly (no Vec allocation)
-        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
-        self.register_stack[new_base + 1] = arg1;
-        self.register_stack[new_base + 2] = arg2;
+        unsafe {
+            let base = self.register_stack.as_mut_ptr().add(new_base);
+            *base = LuaValue::cfunction(cfunc);
+            *base.add(1) = arg1;
+            *base.add(2) = arg2;
+        }
 
         // Create C function frame
         let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
@@ -1188,6 +1186,7 @@ impl LuaVM {
 
     /// Fast path for calling CFunction metamethods with 1 argument
     /// Used by __len, __unm, __bnot, etc. Avoids Vec allocation.
+    /// OPTIMIZED: Skip expensive get_function lookup
     #[inline(always)]
     pub fn call_cfunc_metamethod_1(
         &mut self,
@@ -1196,16 +1195,7 @@ impl LuaVM {
     ) -> LuaResult<Option<LuaValue>> {
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr as usize;
-            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                self.object_pool
-                    .get_function(func_id)
-                    .map(|f| f.chunk.max_stack_size)
-                    .unwrap_or(256)
-            } else {
-                256
-            };
-            caller_base + caller_max_stack
+            (current_frame.base_ptr as usize) + 256
         } else {
             0
         };
@@ -1213,8 +1203,11 @@ impl LuaVM {
         let stack_size = 2; // func + 1 arg
         self.ensure_stack_capacity(new_base + stack_size);
 
-        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
-        self.register_stack[new_base + 1] = arg1;
+        unsafe {
+            let base = self.register_stack.as_mut_ptr().add(new_base);
+            *base = LuaValue::cfunction(cfunc);
+            *base.add(1) = arg1;
+        }
 
         let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
         self.push_frame(temp_frame);
@@ -1236,6 +1229,7 @@ impl LuaVM {
 
     /// Fast path for calling CFunction metamethods with 3 arguments
     /// Used by __newindex. Avoids Vec allocation.
+    /// OPTIMIZED: Skip expensive get_function lookup
     #[inline(always)]
     pub fn call_cfunc_metamethod_3(
         &mut self,
@@ -1246,16 +1240,7 @@ impl LuaVM {
     ) -> LuaResult<Option<LuaValue>> {
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr as usize;
-            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                self.object_pool
-                    .get_function(func_id)
-                    .map(|f| f.chunk.max_stack_size)
-                    .unwrap_or(256)
-            } else {
-                256
-            };
-            caller_base + caller_max_stack
+            (current_frame.base_ptr as usize) + 256
         } else {
             0
         };
@@ -1263,10 +1248,13 @@ impl LuaVM {
         let stack_size = 4; // func + 3 args
         self.ensure_stack_capacity(new_base + stack_size);
 
-        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
-        self.register_stack[new_base + 1] = arg1;
-        self.register_stack[new_base + 2] = arg2;
-        self.register_stack[new_base + 3] = arg3;
+        unsafe {
+            let base = self.register_stack.as_mut_ptr().add(new_base);
+            *base = LuaValue::cfunction(cfunc);
+            *base.add(1) = arg1;
+            *base.add(2) = arg2;
+            *base.add(3) = arg3;
+        }
 
         let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
         self.push_frame(temp_frame);
@@ -2408,8 +2396,8 @@ impl LuaVM {
                     self.pop_frame_discard();
                 }
 
-                // Return error - the actual message is stored in vm.error_message
-                let msg = self.error_message.clone();
+                // Return error - take the message to avoid allocation
+                let msg = std::mem::take(&mut self.error_message);
                 let error_str = self.create_string(&msg);
 
                 Ok((false, vec![error_str]))
@@ -2480,19 +2468,10 @@ impl LuaVM {
             LuaValueKind::CFunction => {
                 let cfunc = func.as_cfunction().unwrap();
 
-                // Calculate new base position
+                // OPTIMIZED: Use fixed offset instead of expensive get_function lookup
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr as usize;
-                    let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                        self.object_pool
-                            .get_function(func_id)
-                            .map(|f| f.chunk.max_stack_size)
-                            .unwrap_or(256)
-                    } else {
-                        256
-                    };
-                    caller_base + caller_max_stack
+                    (current_frame.base_ptr as usize) + 256
                 } else {
                     0
                 };
@@ -2543,20 +2522,10 @@ impl LuaVM {
                     )
                 };
 
-                // Calculate new base
+                // OPTIMIZED: Use fixed offset instead of expensive get_function lookup
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr as usize;
-                    let caller_max_stack =
-                        if let Some(caller_func_id) = current_frame.get_function_id() {
-                            self.object_pool
-                                .get_function(caller_func_id)
-                                .map(|f| f.chunk.max_stack_size)
-                                .unwrap_or(256)
-                        } else {
-                            256
-                        };
-                    caller_base + caller_max_stack
+                    (current_frame.base_ptr as usize) + 256
                 } else {
                     0
                 };

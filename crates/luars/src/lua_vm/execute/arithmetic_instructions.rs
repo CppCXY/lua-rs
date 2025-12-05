@@ -1056,6 +1056,7 @@ pub fn exec_not(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 }
 
 /// LEN: R[A] = #R[B]
+/// OPTIMIZED: Fast path for tables without __len metamethod
 #[inline(always)]
 pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -1063,43 +1064,62 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 
     let value = vm.register_stack[base_ptr + b];
 
-    // Check for __len metamethod first (for tables)
-    if value.is_table() {
-        // Use pre-cached __len StringId
-        let mm_key = LuaValue::string(vm.object_pool.tm_len);
-        if let Some(mt) = vm.table_get_metatable(&value) {
-            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
-                if !metamethod.is_nil() {
-                    let result = vm
-                        .call_metamethod(&metamethod, &[value])?
-                        .unwrap_or(LuaValue::nil());
-                    vm.register_stack[base_ptr + a] = result;
-                    return Ok(());
+    // Fast path: direct table/string length
+    if let Some(table_id) = value.as_table_id() {
+        // Check for __len metamethod first
+        let (len, has_len_mm) = {
+            if let Some(table) = vm.object_pool.get_table(table_id) {
+                let mt = table.get_metatable();
+                if let Some(mt_val) = mt {
+                    // Has metatable, check for __len
+                    if let Some(mt_id) = mt_val.as_table_id() {
+                        let mm_key = LuaValue::string(vm.object_pool.tm_len);
+                        if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
+                            if let Some(len_mm) = mt_table.raw_get(&mm_key) {
+                                if !len_mm.is_nil() {
+                                    (0, Some(len_mm))
+                                } else {
+                                    (table.len() as i64, None)
+                                }
+                            } else {
+                                (table.len() as i64, None)
+                            }
+                        } else {
+                            (table.len() as i64, None)
+                        }
+                    } else {
+                        (table.len() as i64, None)
+                    }
+                } else {
+                    // No metatable, just get length
+                    (table.len() as i64, None)
                 }
+            } else {
+                (0, None)
             }
+        };
+
+        if let Some(metamethod) = has_len_mm {
+            // Call __len metamethod
+            let result = vm
+                .call_metamethod(&metamethod, &[value])?
+                .unwrap_or(LuaValue::nil());
+            vm.register_stack[base_ptr + a] = result;
+        } else {
+            vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+        }
+        return Ok(());
+    }
+
+    // String length - no metamethod for strings
+    if let Some(string_id) = value.as_string_id() {
+        if let Some(s) = vm.object_pool.get_string(string_id) {
+            vm.register_stack[base_ptr + a] = LuaValue::integer(s.as_str().len() as i64);
+            return Ok(());
         }
     }
 
-    // Use ObjectPool for table/string length
-    let len = if let Some(table_id) = value.as_table_id() {
-        if let Some(table) = vm.object_pool.get_table(table_id) {
-            table.len() as i64
-        } else {
-            0
-        }
-    } else if let Some(string_id) = value.as_string_id() {
-        if let Some(s) = vm.object_pool.get_string(string_id) {
-            s.as_str().len() as i64
-        } else {
-            0
-        }
-    } else {
-        return Err(vm.error(format!("attempt to get length of {}", value.type_name())));
-    };
-
-    let result = LuaValue::integer(len);
-    vm.register_stack[base_ptr + a] = result;
-    Ok(())
+    Err(vm.error(format!("attempt to get length of {}", value.type_name())))
 }
 
 /// MmBin: Metamethod binary operation (register, register)
