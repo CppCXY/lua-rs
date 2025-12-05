@@ -841,70 +841,37 @@ pub fn exec_call(
                 }
             }
 
+            // Use slow path for vararg functions
+            if is_vararg {
+                return exec_call_lua_vararg(
+                    vm,
+                    func_id,
+                    a,
+                    b,
+                    c,
+                    base,
+                    max_stack_size,
+                    num_params,
+                    code_ptr,
+                    constants_ptr,
+                    upvalues_ptr,
+                    frame_ptr_ptr,
+                );
+            }
+
             let return_count = if c == 0 { usize::MAX } else { c - 1 };
 
             // Ensure stack capacity
             let required_size = new_base + max_stack_size;
             vm.ensure_stack_capacity(required_size);
 
-            // Setup stack for new frame (without allocation)
-            let actual_stack_size = if is_vararg {
-                num_params
-            } else {
-                max_stack_size
-            };
-
-            // Initialize stack in one pass using unsafe for maximum speed
-            let nil_val = LuaValue::nil();
-            let reg_ptr = vm.register_stack.as_mut_ptr();
-
-            unsafe {
-                // Fill undefined parameters with nil
-                if arg_count < num_params {
-                    for i in arg_count..actual_stack_size {
-                        *reg_ptr.add(new_base + i) = nil_val;
-                    }
-                } else if !is_vararg {
-                    // Fill unused stack slots with nil (no vararg case)
-                    let fill_start = num_params.max(arg_count);
-                    for i in fill_start..actual_stack_size {
-                        *reg_ptr.add(new_base + i) = nil_val;
-                    }
-                }
-
-                // Handle vararg: store extra arguments after fixed parameters
-                if is_vararg && arg_count > num_params {
-                    let vararg_count = arg_count - num_params;
-                    let vararg_start = new_base + max_stack_size;
-                    let total_stack_size = max_stack_size + vararg_count;
-
-                    // Ensure capacity for varargs
-                    if new_base + total_stack_size > vm.register_stack.len() {
-                        vm.ensure_stack_capacity(new_base + total_stack_size);
-                    }
-
-                    // Move varargs to after max_stack
-                    let reg_ptr = vm.register_stack.as_mut_ptr();
-                    for i in 0..vararg_count {
-                        *reg_ptr.add(vararg_start + i) = *reg_ptr.add(new_base + num_params + i);
-                    }
-
-                    // Clear the slots that held varargs
-                    for i in num_params..max_stack_size {
-                        *reg_ptr.add(new_base + i) = nil_val;
-                    }
-                }
-
-                // Handle vararg case: clear slots after fixed params
-                if is_vararg && arg_count > 0 {
-                    let total_stack_size = if arg_count > num_params {
-                        max_stack_size + (arg_count - num_params)
-                    } else {
-                        max_stack_size
-                    };
-                    let actual_stack_size = num_params;
-                    for i in actual_stack_size..total_stack_size {
-                        *reg_ptr.add(new_base + i) = nil_val;
+            // Fill missing arguments with nil (non-vararg fast path)
+            if arg_count < num_params {
+                unsafe {
+                    let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
+                    let nil_val = LuaValue::nil();
+                    for i in arg_count..num_params {
+                        *reg_ptr.add(i) = nil_val;
                     }
                 }
             }
