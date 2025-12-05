@@ -28,7 +28,7 @@ pub struct ThreadId(pub u32);
 /// Object type tags (3 bits, supports up to 8 types)
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcType {
+pub enum GcObjectType {
     String = 0,
     Table = 1,
     Function = 2,
@@ -52,14 +52,14 @@ pub enum GcId {
 
 impl GcId {
     #[inline(always)]
-    pub fn gc_type(self) -> GcType {
+    pub fn gc_type(self) -> GcObjectType {
         match self {
-            GcId::StringId(_) => GcType::String,
-            GcId::TableId(_) => GcType::Table,
-            GcId::FunctionId(_) => GcType::Function,
-            GcId::UpvalueId(_) => GcType::Upvalue,
-            GcId::ThreadId(_) => GcType::Thread,
-            GcId::UserdataId(_) => GcType::Userdata,
+            GcId::StringId(_) => GcObjectType::String,
+            GcId::TableId(_) => GcObjectType::Table,
+            GcId::FunctionId(_) => GcObjectType::Function,
+            GcId::UpvalueId(_) => GcObjectType::Upvalue,
+            GcId::ThreadId(_) => GcObjectType::Thread,
+            GcId::UserdataId(_) => GcObjectType::Userdata,
         }
     }
 
