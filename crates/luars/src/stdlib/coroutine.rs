@@ -88,6 +88,7 @@ fn coroutine_status(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let status_sid = if let Some(thread_id) = thread_val.as_thread_id() {
         if let Some(thread) = vm.object_pool.get_thread(thread_id) {
             match thread.status {
+                CoroutineStatus::Main => vm.object_pool.str_main,
                 CoroutineStatus::Suspended => vm.object_pool.str_suspended,
                 CoroutineStatus::Running => vm.object_pool.str_running,
                 CoroutineStatus::Normal => vm.object_pool.str_normal,

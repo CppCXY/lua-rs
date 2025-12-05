@@ -1,5 +1,6 @@
 use crate::LuaValue;
 use crate::gc::UpvalueId;
+use crate::lua_vm::LuaCallFrame;
 
 /// Lua Thread (coroutine)
 /// Each coroutine has its own call stack and register stack, independent from the main VM
@@ -9,7 +10,7 @@ pub struct LuaThread {
 
     /// Independent call stack for this coroutine
     /// Using Vec<LuaCallFrame> directly (no Box) for efficiency
-    pub frames: Vec<crate::lua_vm::LuaCallFrame>,
+    pub frames: Vec<LuaCallFrame>,
 
     /// Current frame count (tracks active frames in the pre-allocated Vec)
     pub frame_count: usize,
@@ -25,9 +26,6 @@ pub struct LuaThread {
 
     /// Next frame ID (for tracking frames in this coroutine)
     pub next_frame_id: usize,
-
-    /// Error handler for this coroutine
-    pub error_handler: Option<LuaValue>,
 
     /// Values yielded by coroutine.yield()
     /// These are returned to the resume() caller
@@ -97,6 +95,8 @@ impl LuaThread {
 /// Coroutine status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoroutineStatus {
+    // Main thread (cannot yield)
+    Main,
     /// Created or yielded (can be resumed)
     Suspended,
     /// Currently executing
@@ -111,6 +111,7 @@ impl CoroutineStatus {
     /// Convert status to Lua string
     pub fn as_str(&self) -> &'static str {
         match self {
+            CoroutineStatus::Main => "main",
             CoroutineStatus::Suspended => "suspended",
             CoroutineStatus::Running => "running",
             CoroutineStatus::Normal => "normal",

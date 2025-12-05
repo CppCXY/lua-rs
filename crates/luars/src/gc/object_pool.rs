@@ -399,6 +399,7 @@ pub struct ObjectPool {
     pub tm_metatable: StringId, // "__metatable"
 
     // Pre-cached coroutine status strings for fast coroutine.status
+    pub str_main: StringId,      // "main"
     pub str_suspended: StringId, // "suspended"
     pub str_running: StringId,   // "running"
     pub str_normal: StringId,    // "normal"
@@ -630,6 +631,7 @@ impl ObjectPool {
             tm_shr: StringId(0),
             tm_concat: StringId(0),
             tm_metatable: StringId(0),
+            str_main: StringId(0),
             str_suspended: StringId(0),
             str_running: StringId(0),
             str_normal: StringId(0),
@@ -670,6 +672,7 @@ impl ObjectPool {
         pool.tm_metatable = pool.create_string("__metatable");
 
         // Pre-create coroutine status strings
+        pool.str_main = pool.create_string("main");
         pool.str_suspended = pool.create_string("suspended");
         pool.str_running = pool.create_string("running");
         pool.str_normal = pool.create_string("normal");
@@ -707,6 +710,7 @@ impl ObjectPool {
         pool.fix_string(pool.tm_shr);
         pool.fix_string(pool.tm_concat);
         pool.fix_string(pool.tm_metatable);
+        pool.fix_string(pool.str_main);
         pool.fix_string(pool.str_suspended);
         pool.fix_string(pool.str_running);
         pool.fix_string(pool.str_normal);
