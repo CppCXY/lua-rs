@@ -180,7 +180,8 @@ pub fn exec_settable(
                 lua_table.raw_set(key_value, set_value);
             }
 
-            // Note: GC barrier is handled lazily during collection
+            // GC write barrier: if table is old and value is young, mark table as touched
+            vm.gc_barrier_back_table(table_id, &set_value);
             return Ok(());
         }
     }
@@ -271,8 +272,8 @@ pub fn exec_seti(
             let lua_table = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
             lua_table.set_int(b, set_value);
 
-            // Note: GC barrier is handled lazily during collection
-            // This significantly improves write performance
+            // GC write barrier
+            vm.gc_barrier_back_table(table_id, &set_value);
             return Ok(());
         }
     }
@@ -371,6 +372,8 @@ pub fn exec_setfield(
             let table_ref = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
             // Ultra-fast path: direct set without any metamethod checks
             table_ref.raw_set(key_value, set_value);
+            // GC write barrier
+            vm.gc_barrier_back_table(table_id, &set_value);
             return Ok(());
         }
     }
@@ -487,7 +490,8 @@ pub fn exec_settabup(
                 // Ultra-fast path: direct set without any metamethod checks
                 table_ref.raw_set(key_value.clone(), set_value.clone());
 
-                // Note: GC barrier is handled lazily during collection
+                // GC write barrier
+                vm.gc_barrier_back_table(table_id, &set_value);
                 return Ok(());
             }
         }

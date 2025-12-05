@@ -5,7 +5,7 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
-use crate::gc::{GC, GcFunction, ThreadId, UpvalueId};
+use crate::gc::{GC, GcFunction, TableId, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
@@ -1529,6 +1529,68 @@ impl LuaVM {
             self.object_pool.get_string(id)
         } else {
             None
+        }
+    }
+
+    // ============ GC Write Barriers ============
+    // These are called when modifying old objects to point to young objects
+    // Critical for correct generational GC behavior
+    
+    /// Write barrier for table modification
+    /// Called when: table[key] = value (fast path)
+    /// If table is old and value is young/collectable, mark table as touched
+    #[inline(always)]
+    pub fn gc_barrier_back_table(&mut self, table_id: TableId, value: &LuaValue) {
+        // Only process in generational mode and if value is collectable
+        if self.gc.gc_kind() != crate::gc::GcKind::Generational {
+            return;
+        }
+        
+        // Check if value is a collectable GC object
+        let value_gc_id = match value.kind() {
+            LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
+            LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
+            LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
+            _ => None,
+        };
+        
+        if value_gc_id.is_some() {
+            // Call back barrier on the table
+            let table_gc_id = crate::gc::GcId::TableId(table_id);
+            self.gc.barrier_back_gen(table_gc_id, &mut self.object_pool);
+        }
+    }
+    
+    /// Write barrier for upvalue modification
+    /// Called when: upvalue = value (SETUPVAL)
+    /// If upvalue is old/closed and value is young, mark upvalue as touched
+    #[inline(always)]
+    pub fn gc_barrier_upvalue(&mut self, upvalue_id: UpvalueId, value: &LuaValue) {
+        // Only process in generational mode
+        if self.gc.gc_kind() != crate::gc::GcKind::Generational {
+            return;
+        }
+        
+        // Check if value is a collectable GC object
+        let is_collectable = matches!(
+            value.kind(),
+            LuaValueKind::Table | LuaValueKind::Function | LuaValueKind::Thread | LuaValueKind::String
+        );
+        
+        if is_collectable {
+            // Forward barrier: mark the value if upvalue is old
+            let uv_gc_id = crate::gc::GcId::UpvalueId(upvalue_id);
+            
+            // Get value's GcId for forward barrier
+            if let Some(value_gc_id) = match value.kind() {
+                LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
+                LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
+                LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
+                LuaValueKind::String => value.as_string_id().map(crate::gc::GcId::StringId),
+                _ => None,
+            } {
+                self.gc.barrier_forward_gen(uv_gc_id, value_gc_id, &mut self.object_pool);
+            }
         }
     }
 
