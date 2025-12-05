@@ -194,17 +194,26 @@ fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// select(index, ...) - Return subset of arguments
+/// OPTIMIZED: Avoid Vec allocation for common case
 fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let index_arg = require_arg(vm, 1, "select")?;
-    let args = get_args(vm);
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
-    // Handle "#" special case
+    // Get index argument (at register 1)
+    let index_arg = if base_ptr + 1 < vm.register_stack.len() && 1 < top {
+        vm.register_stack[base_ptr + 1]
+    } else {
+        return Err(vm.error("bad argument #1 to 'select' (value expected)".to_string()));
+    };
+
+    // Handle "#" special case - return count of varargs
     if let Some(string_id) = index_arg.as_string_id() {
         if let Some(s) = vm.object_pool.get_string(string_id) {
             if s.as_str() == "#" {
-                return Ok(MultiValue::single(LuaValue::integer(
-                    (args.len() - 1) as i64,
-                )));
+                // Count of extra arguments (excluding index itself)
+                let count = top.saturating_sub(2); // top - 1 (index) - 1 (function)
+                return Ok(MultiValue::single(LuaValue::integer(count as i64)));
             }
         }
     }
@@ -217,18 +226,28 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("bad argument #1 to 'select' (index out of range)".to_string()));
     }
 
+    let arg_count = top.saturating_sub(1); // Exclude function register
+
     let start = if index > 0 {
-        (index - 1) as usize
+        index as usize
     } else {
-        (args.len() as i64 + index) as usize
+        (arg_count as i64 + index) as usize
     };
 
-    if start >= args.len() - 1 {
+    if start >= arg_count {
         return Ok(MultiValue::empty());
     }
 
-    // Return args from start+1 onwards (skip the index argument itself)
-    let result: Vec<LuaValue> = args.iter().skip(start + 1).cloned().collect();
+    // Collect result directly from registers
+    let result_count = arg_count - start;
+    let mut result = Vec::with_capacity(result_count);
+    for i in 0..result_count {
+        let reg_idx = base_ptr + 1 + start + i;
+        if reg_idx < vm.register_stack.len() {
+            result.push(vm.register_stack[reg_idx]);
+        }
+    }
+
     Ok(MultiValue::multiple(result))
 }
 
@@ -336,16 +355,29 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// pcall(f [, arg1, ...]) - Protected call
+/// OPTIMIZED: Avoid Vec allocations on success path
 fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // pcall(f, arg1, arg2, ...) -> status, result or error
 
-    // Get the function to call (argument 1)
-    let func = require_arg(vm, 1, "pcall")?;
+    // Get frame info to read args directly
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
-    // Get all arguments after the function
-    let all_args = get_args(vm);
-    let args: Vec<LuaValue> = if all_args.len() > 1 {
-        all_args[1..].to_vec()
+    // Arg 1 is the function (at base_ptr + 1)
+    let func = if top > 1 {
+        vm.register_stack[base_ptr + 1]
+    } else {
+        return Err(vm.error("pcall() requires argument 1".to_string()));
+    };
+
+    // Collect remaining args (2..top) into a small vec
+    // Most pcalls have 0-3 args, so this is fast
+    let arg_count = if top > 2 { top - 2 } else { 0 };
+    let args: Vec<LuaValue> = if arg_count > 0 {
+        (2..top)
+            .map(|i| vm.register_stack[base_ptr + i])
+            .collect()
     } else {
         Vec::new()
     };
@@ -353,25 +385,44 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Use protected_call from VM
     let (success, results) = vm.protected_call(func, args)?;
 
-    // Return status and results
-    let mut return_values = vec![LuaValue::boolean(success)];
+    // Return status and results - preallocate with capacity
+    let mut return_values = Vec::with_capacity(1 + results.len());
+    return_values.push(LuaValue::boolean(success));
     return_values.extend(results);
 
     Ok(MultiValue::multiple(return_values))
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
+/// OPTIMIZED: Avoid Vec allocations
 fn lua_xpcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // xpcall(f, msgh, arg1, arg2, ...) -> status, result or error
-    // Get the function to call (argument 1)
-    let func = require_arg(vm, 1, "xpcall")?;
-    // Get the error handler (argument 2)
-    let err_handler = require_arg(vm, 2, "xpcall")?;
+    
+    // Get frame info to read args directly
+    let frame = vm.current_frame();
+    let base_ptr = frame.base_ptr as usize;
+    let top = frame.top as usize;
 
-    // Get all arguments after the function and error handler
-    let all_args = get_args(vm);
-    let args: Vec<LuaValue> = if all_args.len() > 2 {
-        all_args[3..].to_vec()
+    // Arg 1 is the function (at base_ptr + 1)
+    let func = if top > 1 {
+        vm.register_stack[base_ptr + 1]
+    } else {
+        return Err(vm.error("xpcall() requires argument 1".to_string()));
+    };
+
+    // Arg 2 is the error handler (at base_ptr + 2)
+    let err_handler = if top > 2 {
+        vm.register_stack[base_ptr + 2]
+    } else {
+        return Err(vm.error("xpcall() requires argument 2".to_string()));
+    };
+
+    // Collect remaining args (3..top) into a small vec
+    let arg_count = if top > 3 { top - 3 } else { 0 };
+    let args: Vec<LuaValue> = if arg_count > 0 {
+        (3..top)
+            .map(|i| vm.register_stack[base_ptr + i])
+            .collect()
     } else {
         Vec::new()
     };
@@ -861,9 +912,9 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             // Create upvalue for _ENV (global table)
             // Loaded chunks need _ENV as upvalue[0]
             let env_upvalue_id = if let Some(env) = env {
-                vm.object_pool.create_upvalue_closed(env)
+                vm.create_upvalue_closed(env)
             } else {
-                vm.object_pool.create_upvalue_closed(vm.global_value)
+                vm.create_upvalue_closed(vm.global_value)
             };
             let upvalues = vec![env_upvalue_id];
 
@@ -905,7 +956,7 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);
+            let env_upvalue_id = vm.create_upvalue_closed(vm.global_value);
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
             Ok(MultiValue::single(func))
@@ -945,7 +996,7 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.object_pool.create_upvalue_closed(vm.global_value);
+            let env_upvalue_id = vm.create_upvalue_closed(vm.global_value);
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
 

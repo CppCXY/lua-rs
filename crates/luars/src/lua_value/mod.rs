@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
+pub use lua_table::tm_flags; // Export TmFlags for metamethod absence caching
 pub use lua_thread::*;
 pub use lua_value::{
     ID_MASK,

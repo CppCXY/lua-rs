@@ -85,7 +85,7 @@ pub fn exec_closure(
     // Get prototype and parent upvalues without cloning upvalues early
     let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-    
+
     let proto = func_ref.chunk.child_protos.get(bx).cloned();
     let proto = match proto {
         Some(p) => p,
@@ -127,7 +127,7 @@ pub fn exec_closure(
                 upvalue_ids.push(existing_uv_id);
             } else {
                 // Create new open upvalue and add to open list directly
-                let new_uv_id = vm.object_pool.create_upvalue_open(stack_index);
+                let new_uv_id = vm.create_upvalue_open(stack_index);
                 upvalue_ids.push(new_uv_id);
                 vm.open_upvalues.push(new_uv_id);
             }
@@ -178,6 +178,9 @@ pub fn exec_vararg(
         )
     };
 
+    let dest_base = base_ptr + a;
+    let reg_ptr = vm.register_stack.as_mut_ptr();
+
     if c == 0 {
         // Variable number of results - copy all varargs
         // Update frame top to accommodate all varargs
@@ -186,24 +189,54 @@ pub fn exec_vararg(
             (*frame_ptr).top = (new_top.max(top)) as u32;
         }
 
-        for i in 0..vararg_count {
-            let value = if vararg_start + i < vm.register_stack.len() {
-                vm.register_stack[vararg_start + i]
-            } else {
-                LuaValue::nil()
-            };
-            vm.register_stack[base_ptr + a + i] = value;
+        // OPTIMIZED: Use ptr::copy for bulk transfer when possible
+        if vararg_count > 0 && vararg_start + vararg_count <= vm.register_stack.len() {
+            unsafe {
+                std::ptr::copy(
+                    reg_ptr.add(vararg_start),
+                    reg_ptr.add(dest_base),
+                    vararg_count,
+                );
+            }
+        } else {
+            // Fallback: copy with bounds checking
+            let nil_val = LuaValue::nil();
+            for i in 0..vararg_count {
+                let value = if vararg_start + i < vm.register_stack.len() {
+                    unsafe { *reg_ptr.add(vararg_start + i) }
+                } else {
+                    nil_val
+                };
+                unsafe {
+                    *reg_ptr.add(dest_base + i) = value;
+                }
+            }
         }
     } else {
         // Fixed number of results (c-1 values)
         let count = c - 1;
-        for i in 0..count {
-            let value = if i < vararg_count && vararg_start + i < vm.register_stack.len() {
-                vm.register_stack[vararg_start + i]
-            } else {
-                LuaValue::nil()
-            };
-            vm.register_stack[base_ptr + a + i] = value;
+        let copy_count = count.min(vararg_count);
+        let nil_count = count.saturating_sub(vararg_count);
+
+        // OPTIMIZED: Bulk copy available varargs
+        if copy_count > 0 && vararg_start + copy_count <= vm.register_stack.len() {
+            unsafe {
+                std::ptr::copy(
+                    reg_ptr.add(vararg_start),
+                    reg_ptr.add(dest_base),
+                    copy_count,
+                );
+            }
+        }
+
+        // Fill remaining with nil
+        if nil_count > 0 {
+            let nil_val = LuaValue::nil();
+            for i in copy_count..count {
+                unsafe {
+                    *reg_ptr.add(dest_base + i) = nil_val;
+                }
+            }
         }
     }
 
@@ -267,8 +300,8 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
         let result_value = vm.create_string_owned(result);
         vm.register_stack[base_ptr + a] = result_value;
 
-        // No GC check for fast path - rely on debt mechanism
-        // Only large allocations trigger automatic GC
+        // GC checkpoint - Lua checks GC after CONCAT
+        vm.check_gc();
         return Ok(());
     }
 
@@ -354,7 +387,8 @@ pub fn exec_concat(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()>
 
     vm.register_stack[base_ptr + a] = result_value;
 
-    // No GC check - rely on debt mechanism
+    // GC checkpoint - Lua checks GC after CONCAT
+    vm.check_gc();
     Ok(())
 }
 

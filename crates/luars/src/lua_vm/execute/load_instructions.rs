@@ -10,6 +10,7 @@ use crate::lua_vm::{Instruction, LuaCallFrame, LuaVM};
 ///
 /// This instruction moves vararg arguments to a safe location after max_stack_size,
 /// so they won't be overwritten by local variable operations.
+#[inline(always)]
 pub fn exec_varargprep(
     vm: &mut LuaVM,
     instr: u32,
@@ -46,9 +47,24 @@ pub fn exec_varargprep(
         vm.ensure_stack_capacity(required_size);
 
         // Move varargs from frame_base + a to frame_base + max_stack_size
-        // Copy in reverse order in case source and destination overlap
-        for i in (0..vararg_count).rev() {
-            vm.register_stack[vararg_dest + i] = vm.register_stack[frame_base + a + i];
+        // OPTIMIZED: Use ptr::copy_nonoverlapping when safe, otherwise copy in reverse
+        unsafe {
+            let reg_ptr = vm.register_stack.as_mut_ptr();
+            let src = frame_base + a;
+
+            if vararg_dest >= src + vararg_count {
+                // No overlap - use fast copy
+                std::ptr::copy_nonoverlapping(
+                    reg_ptr.add(src),
+                    reg_ptr.add(vararg_dest),
+                    vararg_count,
+                );
+            } else {
+                // Overlapping - copy in reverse
+                for i in (0..vararg_count).rev() {
+                    *reg_ptr.add(vararg_dest + i) = *reg_ptr.add(src + i);
+                }
+            }
         }
 
         // Set vararg info in frame
@@ -59,11 +75,17 @@ pub fn exec_varargprep(
             .set_vararg(frame_base + max_stack_size, 0);
     }
 
-    // Initialize local variables (registers from 0 to max_stack_size) with nil
-    // But preserve fixed parameters (0..a)
-    for i in a..max_stack_size {
-        if frame_base + i < vm.register_stack.len() {
-            vm.register_stack[frame_base + i] = LuaValue::nil();
+    // Initialize local variables (registers from a to max_stack_size) with nil
+    // OPTIMIZED: Use bulk fill
+    let nil_start = frame_base + a;
+    let nil_end = (frame_base + max_stack_size).min(vm.register_stack.len());
+    if nil_start < nil_end {
+        let nil_val = LuaValue::nil();
+        unsafe {
+            let reg_ptr = vm.register_stack.as_mut_ptr();
+            for i in nil_start..nil_end {
+                *reg_ptr.add(i) = nil_val;
+            }
         }
     }
 

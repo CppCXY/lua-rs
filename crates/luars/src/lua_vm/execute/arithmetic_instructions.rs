@@ -1056,6 +1056,7 @@ pub fn exec_not(vm: &mut LuaVM, instr: u32, base_ptr: usize) {
 }
 
 /// LEN: R[A] = #R[B]
+/// OPTIMIZED: Fast path for tables without __len metamethod
 #[inline(always)]
 pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
     let a = Instruction::get_a(instr) as usize;
@@ -1063,43 +1064,85 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
 
     let value = vm.register_stack[base_ptr + b];
 
-    // Check for __len metamethod first (for tables)
-    if value.is_table() {
-        // Use pre-cached __len StringId
-        let mm_key = LuaValue::string(vm.object_pool.tm_len);
-        if let Some(mt) = vm.table_get_metatable(&value) {
-            if let Some(metamethod) = vm.table_get_with_meta(&mt, &mm_key) {
-                if !metamethod.is_nil() {
-                    let result = vm
-                        .call_metamethod(&metamethod, &[value])?
-                        .unwrap_or(LuaValue::nil());
-                    vm.register_stack[base_ptr + a] = result;
-                    return Ok(());
-                }
-            }
+    // Fast path: string length - no metamethod
+    if let Some(string_id) = value.as_string_id() {
+        if let Some(s) = vm.object_pool.get_string(string_id) {
+            vm.register_stack[base_ptr + a] = LuaValue::integer(s.as_str().len() as i64);
+            return Ok(());
         }
     }
 
-    // Use ObjectPool for table/string length
-    let len = if let Some(table_id) = value.as_table_id() {
-        if let Some(table) = vm.object_pool.get_table(table_id) {
-            table.len() as i64
+    // Table length with metamethod support
+    if let Some(table_id) = value.as_table_id() {
+        use crate::lua_value::tm_flags;
+        
+        // Single table access to get both length and metatable info
+        let table = match vm.object_pool.get_table(table_id) {
+            Some(t) => t,
+            None => return Err(vm.error("invalid table")),
+        };
+        
+        // FAST PATH: No metatable
+        let mt_val = match table.get_metatable() {
+            None => {
+                let len = table.len() as i64;
+                vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+                return Ok(());
+            }
+            Some(mt) => mt,
+        };
+        
+        // Has metatable - check for __len
+        let mt_id = match mt_val.as_table_id() {
+            Some(id) => id,
+            None => {
+                let len = table.len() as i64;
+                vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+                return Ok(());
+            }
+        };
+        
+        // Get both fasttm flag and __len value in one lookup
+        let (len, len_mm) = {
+            let mt_table = match vm.object_pool.get_table(mt_id) {
+                Some(t) => t,
+                None => {
+                    let len = table.len() as i64;
+                    return Ok({
+                        vm.register_stack[base_ptr + a] = LuaValue::integer(len);
+                    });
+                }
+            };
+            
+            // FAST PATH: fasttm check - __len is known to be absent
+            if mt_table.tm_absent(tm_flags::TM_LEN) {
+                (table.len() as i64, None)
+            } else {
+                let mm_key = LuaValue::string(vm.object_pool.tm_len);
+                match mt_table.raw_get(&mm_key) {
+                    Some(mm) if !mm.is_nil() => (0, Some(mm)),
+                    _ => (table.len() as i64, None),
+                }
+            }
+        };
+        
+        if let Some(metamethod) = len_mm {
+            // Call __len metamethod
+            let result = vm
+                .call_metamethod(&metamethod, &[value])?
+                .unwrap_or(LuaValue::nil());
+            vm.register_stack[base_ptr + a] = result;
         } else {
-            0
+            // Cache __len absence for future lookups
+            if let Some(mt_table) = vm.object_pool.get_table_mut(mt_id) {
+                mt_table.set_tm_absent(tm_flags::TM_LEN);
+            }
+            vm.register_stack[base_ptr + a] = LuaValue::integer(len);
         }
-    } else if let Some(string_id) = value.as_string_id() {
-        if let Some(s) = vm.object_pool.get_string(string_id) {
-            s.as_str().len() as i64
-        } else {
-            0
-        }
-    } else {
-        return Err(vm.error(format!("attempt to get length of {}", value.type_name())));
-    };
+        return Ok(());
+    }
 
-    let result = LuaValue::integer(len);
-    vm.register_stack[base_ptr + a] = result;
-    Ok(())
+    Err(vm.error(format!("attempt to get length of {}", value.type_name())))
 }
 
 /// MmBin: Metamethod binary operation (register, register)

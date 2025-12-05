@@ -493,6 +493,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         }
                         UpvalueState::Closed(val) => *val = value,
                     };
+                    
+                    // GC write barrier for upvalue
+                    vm.gc_barrier_upvalue(upvalue_id, &value);
                 }
                 continue 'mainloop;
             }

@@ -5,7 +5,7 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
-use crate::gc::{GC, GcFunction, ThreadId, UpvalueId};
+use crate::gc::{GC, GcFunction, TableId, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
@@ -36,6 +36,9 @@ pub struct LuaVM {
     // Hot path GC debt counter - placed early in struct for cache locality
     // This is updated on every allocation and checked frequently
     pub(crate) gc_debt_local: isize,
+
+    // GC roots buffer - pre-allocated to avoid allocation during GC
+    gc_roots_buffer: Vec<LuaValue>,
 
     // Call stack - Pre-allocated Vec with fixed capacity
     // Using Vec<LuaCallFrame> directly (no Box indirection) for cache efficiency
@@ -117,6 +120,7 @@ impl LuaVM {
             global_value: LuaValue::nil(),
             registry: LuaValue::nil(),    // Will be initialized below
             gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
+            gc_roots_buffer: Vec::with_capacity(512), // Pre-allocate roots buffer
             frames,
             frame_count: 0,
             register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
@@ -246,7 +250,7 @@ impl LuaVM {
 
         // Create upvalue for _ENV (global table)
         // Main chunks in Lua 5.4 always have _ENV as upvalue[0]
-        let env_upvalue_id = self.object_pool.create_upvalue_closed(self.global_value);
+        let env_upvalue_id = self.create_upvalue_closed(self.global_value);
         let upvalues = vec![env_upvalue_id];
 
         // Create main function in object pool with _ENV upvalue
@@ -885,8 +889,14 @@ impl LuaVM {
             // Use pre-cached __index StringId - avoids hash computation and intern lookup
             let index_key = LuaValue::string(self.object_pool.tm_index);
 
+            // Single table lookup: check tm_flags AND get __index value together
             let index_value = {
                 let metatable = self.object_pool.get_table(meta_id)?;
+                // FAST PATH: Check tm_flags first (like Lua 5.4's fasttm)
+                // If flag is set, __index is known to be absent - skip lookup
+                if metatable.tm_absent(crate::lua_value::tm_flags::TM_INDEX) {
+                    return None;
+                }
                 metatable.raw_get(&index_key)
             };
 
@@ -912,6 +922,11 @@ impl LuaVM {
                         }
                     }
                     _ => {}
+                }
+            } else {
+                // __index not found - cache this fact for future lookups
+                if let Some(metatable) = self.object_pool.get_table_mut(meta_id) {
+                    metatable.set_tm_absent(crate::lua_value::tm_flags::TM_INDEX);
                 }
             }
         }
@@ -1130,6 +1145,7 @@ impl LuaVM {
     /// Fast path for calling CFunction metamethods with 2 arguments
     /// Used by __index, __newindex, etc. Avoids Vec allocation.
     /// Returns the first return value.
+    /// OPTIMIZED: Skip expensive get_function lookup by using a fixed offset from current base
     #[inline(always)]
     pub fn call_cfunc_metamethod_2(
         &mut self,
@@ -1137,19 +1153,13 @@ impl LuaVM {
         arg1: LuaValue,
         arg2: LuaValue,
     ) -> LuaResult<Option<LuaValue>> {
-        // Calculate new base position - use current frame's top area
+        // Fast path: use a fixed offset from current base (256 slots is enough for most cases)
+        // This avoids the expensive object_pool.get_function lookup
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr as usize;
-            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                self.object_pool
-                    .get_function(func_id)
-                    .map(|f| f.chunk.max_stack_size)
-                    .unwrap_or(256)
-            } else {
-                256
-            };
-            caller_base + caller_max_stack
+            // Use top as the base for nested calls, since all args are already there
+            // Adding 256 ensures we don't overwrite the caller's stack
+            (current_frame.base_ptr as usize) + 256
         } else {
             0
         };
@@ -1158,9 +1168,12 @@ impl LuaVM {
         self.ensure_stack_capacity(new_base + stack_size);
 
         // Set up arguments directly (no Vec allocation)
-        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
-        self.register_stack[new_base + 1] = arg1;
-        self.register_stack[new_base + 2] = arg2;
+        unsafe {
+            let base = self.register_stack.as_mut_ptr().add(new_base);
+            *base = LuaValue::cfunction(cfunc);
+            *base.add(1) = arg1;
+            *base.add(2) = arg2;
+        }
 
         // Create C function frame
         let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
@@ -1184,6 +1197,7 @@ impl LuaVM {
 
     /// Fast path for calling CFunction metamethods with 1 argument
     /// Used by __len, __unm, __bnot, etc. Avoids Vec allocation.
+    /// OPTIMIZED: Skip expensive get_function lookup
     #[inline(always)]
     pub fn call_cfunc_metamethod_1(
         &mut self,
@@ -1192,16 +1206,7 @@ impl LuaVM {
     ) -> LuaResult<Option<LuaValue>> {
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr as usize;
-            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                self.object_pool
-                    .get_function(func_id)
-                    .map(|f| f.chunk.max_stack_size)
-                    .unwrap_or(256)
-            } else {
-                256
-            };
-            caller_base + caller_max_stack
+            (current_frame.base_ptr as usize) + 256
         } else {
             0
         };
@@ -1209,8 +1214,11 @@ impl LuaVM {
         let stack_size = 2; // func + 1 arg
         self.ensure_stack_capacity(new_base + stack_size);
 
-        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
-        self.register_stack[new_base + 1] = arg1;
+        unsafe {
+            let base = self.register_stack.as_mut_ptr().add(new_base);
+            *base = LuaValue::cfunction(cfunc);
+            *base.add(1) = arg1;
+        }
 
         let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
         self.push_frame(temp_frame);
@@ -1232,6 +1240,7 @@ impl LuaVM {
 
     /// Fast path for calling CFunction metamethods with 3 arguments
     /// Used by __newindex. Avoids Vec allocation.
+    /// OPTIMIZED: Skip expensive get_function lookup
     #[inline(always)]
     pub fn call_cfunc_metamethod_3(
         &mut self,
@@ -1242,16 +1251,7 @@ impl LuaVM {
     ) -> LuaResult<Option<LuaValue>> {
         let new_base = if self.frame_count > 0 {
             let current_frame = &self.frames[self.frame_count - 1];
-            let caller_base = current_frame.base_ptr as usize;
-            let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                self.object_pool
-                    .get_function(func_id)
-                    .map(|f| f.chunk.max_stack_size)
-                    .unwrap_or(256)
-            } else {
-                256
-            };
-            caller_base + caller_max_stack
+            (current_frame.base_ptr as usize) + 256
         } else {
             0
         };
@@ -1259,10 +1259,13 @@ impl LuaVM {
         let stack_size = 4; // func + 3 args
         self.ensure_stack_capacity(new_base + stack_size);
 
-        self.register_stack[new_base] = LuaValue::cfunction(cfunc);
-        self.register_stack[new_base + 1] = arg1;
-        self.register_stack[new_base + 2] = arg2;
-        self.register_stack[new_base + 3] = arg3;
+        unsafe {
+            let base = self.register_stack.as_mut_ptr().add(new_base);
+            *base = LuaValue::cfunction(cfunc);
+            *base.add(1) = arg1;
+            *base.add(2) = arg2;
+            *base.add(3) = arg3;
+        }
 
         let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
         self.push_frame(temp_frame);
@@ -1506,15 +1509,7 @@ impl LuaVM {
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let id = self.object_pool.create_string(s);
-
-        // Estimate memory cost: string data + LuaString struct overhead
-        // LuaString: ~32 bytes base + string length
-        let estimated_bytes = 32 + s.len();
-        self.gc.record_allocation(estimated_bytes);
-
-        // GC check MUST NOT happen here - object not yet protected!
-        // Caller must call check_gc() AFTER storing value in register
-
+        self.gc_debt_local += (32 + s.len()) as isize;
         LuaValue::string(id)
     }
 
@@ -1523,10 +1518,7 @@ impl LuaVM {
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let len = s.len();
         let id = self.object_pool.create_string_owned(s);
-
-        let estimated_bytes = 32 + len;
-        self.gc.record_allocation(estimated_bytes);
-
+        self.gc_debt_local += (32 + len) as isize;
         LuaValue::string(id)
     }
 
@@ -1539,16 +1531,74 @@ impl LuaVM {
         }
     }
 
+    // ============ GC Write Barriers ============
+    // These are called when modifying old objects to point to young objects
+    // Critical for correct generational GC behavior
+    
+    /// Write barrier for table modification
+    /// Called when: table[key] = value (fast path)
+    /// If table is old and value is young/collectable, mark table as touched
+    #[inline(always)]
+    pub fn gc_barrier_back_table(&mut self, table_id: TableId, value: &LuaValue) {
+        // Only process in generational mode and if value is collectable
+        if self.gc.gc_kind() != crate::gc::GcKind::Generational {
+            return;
+        }
+        
+        // Check if value is a collectable GC object
+        let value_gc_id = match value.kind() {
+            LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
+            LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
+            LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
+            _ => None,
+        };
+        
+        if value_gc_id.is_some() {
+            // Call back barrier on the table
+            let table_gc_id = crate::gc::GcId::TableId(table_id);
+            self.gc.barrier_back_gen(table_gc_id, &mut self.object_pool);
+        }
+    }
+    
+    /// Write barrier for upvalue modification
+    /// Called when: upvalue = value (SETUPVAL)
+    /// If upvalue is old/closed and value is young, mark upvalue as touched
+    #[inline(always)]
+    pub fn gc_barrier_upvalue(&mut self, upvalue_id: UpvalueId, value: &LuaValue) {
+        // Only process in generational mode
+        if self.gc.gc_kind() != crate::gc::GcKind::Generational {
+            return;
+        }
+        
+        // Check if value is a collectable GC object
+        let is_collectable = matches!(
+            value.kind(),
+            LuaValueKind::Table | LuaValueKind::Function | LuaValueKind::Thread | LuaValueKind::String
+        );
+        
+        if is_collectable {
+            // Forward barrier: mark the value if upvalue is old
+            let uv_gc_id = crate::gc::GcId::UpvalueId(upvalue_id);
+            
+            // Get value's GcId for forward barrier
+            if let Some(value_gc_id) = match value.kind() {
+                LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
+                LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
+                LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
+                LuaValueKind::String => value.as_string_id().map(crate::gc::GcId::StringId),
+                _ => None,
+            } {
+                self.gc.barrier_forward_gen(uv_gc_id, value_gc_id, &mut self.object_pool);
+            }
+        }
+    }
+
     /// Create a new table in object pool
-    /// OPTIMIZATION: Only update local debt counter, no function calls
+    /// GC tracks objects via ObjectPool iteration, no allgc list needed
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
-
-        // Lightweight GC tracking: just increment debt
-        // This is a single integer add, should be very fast
         self.gc_debt_local += 256;
-
         LuaValue::table(id)
     }
 
@@ -1646,15 +1696,28 @@ impl LuaVM {
     }
 
     /// Create a function in object pool
+    /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         let id = self.object_pool.create_function(chunk, upvalue_ids);
-
-        // Register with GC - ultra-lightweight
-        self.gc
-            .register_object(id.0, crate::gc::GcObjectType::Function);
-
+        self.gc_debt_local += 128;
         LuaValue::function(id)
+    }
+
+    /// Create an open upvalue pointing to a stack index
+    #[inline(always)]
+    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
+        let id = self.object_pool.create_upvalue_open(stack_index);
+        self.gc_debt_local += 64;
+        id
+    }
+
+    /// Create a closed upvalue with a value
+    #[inline(always)]
+    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
+        let id = self.object_pool.create_upvalue_closed(value);
+        self.gc_debt_local += 64;
+        id
     }
 
     /// Get function by LuaValue (resolves ID from object pool)
@@ -1750,15 +1813,17 @@ impl LuaVM {
 
     /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
     /// This is called after allocating new objects (strings, tables, functions)
-    /// Uses GC debt mechanism: runs when debt > 0
+    /// Uses GC debt mechanism like Lua: runs when debt > threshold
     ///
     /// OPTIMIZATION: Fast path is inlined, slow path is separate function
     #[inline(always)]
     fn check_gc(&mut self) {
-        // Ultra-fast path: single integer comparison with local debt counter
-        // Only check if debt exceeds a significant threshold (1MB)
-        // This reduces the overhead of frequent checks dramatically
-        if self.gc_debt_local <= 1024 * 1024 {
+        // Fast path: check if gc_debt_local > threshold
+        // Use a larger threshold to reduce GC frequency
+        // 1MB threshold = about 16000 small object allocations before GC
+        // The incremental GC will catch up during collection anyway
+        const GC_THRESHOLD: isize = 1024 * 1024;
+        if self.gc_debt_local <= GC_THRESHOLD {
             return;
         }
         // Slow path: actual GC work
@@ -1779,72 +1844,66 @@ impl LuaVM {
         // Sync local debt to GC
         self.gc.gc_debt = self.gc_debt_local;
 
-        // Incremental GC: only collect every N checks to reduce overhead
-        self.gc.increment_check_counter();
-        if !self.gc.should_run_collection() {
-            return;
-        }
-
-        // Collect roots: all reachable objects from VM state
-        let mut roots = Vec::new();
+        // Collect roots using pre-allocated buffer (avoid allocation)
+        self.gc_roots_buffer.clear();
 
         // 1. Global table
-        roots.push(self.global_value);
+        self.gc_roots_buffer.push(self.global_value);
 
         // 2. Registry table (persistent objects storage)
-        roots.push(self.registry);
+        self.gc_roots_buffer.push(self.registry);
 
         // 3. String metatable
         if let Some(mt) = &self.string_metatable {
-            roots.push(*mt);
+            self.gc_roots_buffer.push(*mt);
         }
 
-        // 3. ALL frame registers AND function values (not just current frame)
+        // 4. ALL frame registers AND function values (not just current frame)
         // This is critical - any register in any active frame must be kept alive
         // Also, the function being executed in each frame must be kept alive!
         for frame in &self.frames[..self.frame_count] {
             // Add the function value for this frame - this is CRITICAL!
-            roots.push(frame.as_function_value());
+            self.gc_roots_buffer.push(frame.as_function_value());
 
             let base_ptr = frame.base_ptr as usize;
             let top = frame.top as usize;
             for i in 0..top {
                 if base_ptr + i < self.register_stack.len() {
-                    roots.push(self.register_stack[base_ptr + i]);
+                    self.gc_roots_buffer.push(self.register_stack[base_ptr + i]);
                 }
             }
         }
 
-        // 4. All registers beyond the frames (temporary values)
+        // 5. All registers beyond the frames (temporary values)
         if self.frame_count > 0 {
             let last_frame = &self.frames[self.frame_count - 1];
             let last_frame_end = last_frame.base_ptr as usize + last_frame.top as usize;
             for i in last_frame_end..self.register_stack.len() {
-                roots.push(self.register_stack[i]);
+                self.gc_roots_buffer.push(self.register_stack[i]);
             }
         } else {
             // No frames? Collect all registers
             for reg in &self.register_stack {
-                roots.push(*reg);
+                self.gc_roots_buffer.push(*reg);
             }
         }
 
-        // 5. Return values
+        // 6. Return values
         for value in &self.return_values {
-            roots.push(*value);
+            self.gc_roots_buffer.push(*value);
         }
 
-        // 6. Open upvalues - these point to stack locations that must stay alive
+        // 7. Open upvalues - these point to stack locations that must stay alive
         for upval_id in &self.open_upvalues {
             if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
                 if let Some(val) = uv.get_closed_value() {
-                    roots.push(val);
+                    self.gc_roots_buffer.push(val);
                 }
             }
         }
 
         // Perform GC step with complete root set
-        self.gc.step(&roots, &mut self.object_pool);
+        self.gc.step(&self.gc_roots_buffer, &mut self.object_pool);
 
         // Sync debt back from GC (it may have been reset to negative after collection)
         self.gc_debt_local = self.gc.gc_debt;
@@ -2348,8 +2407,8 @@ impl LuaVM {
                     self.pop_frame_discard();
                 }
 
-                // Return error - the actual message is stored in vm.error_message
-                let msg = self.error_message.clone();
+                // Return error - take the message to avoid allocation
+                let msg = std::mem::take(&mut self.error_message);
                 let error_str = self.create_string(&msg);
 
                 Ok((false, vec![error_str]))
@@ -2420,19 +2479,10 @@ impl LuaVM {
             LuaValueKind::CFunction => {
                 let cfunc = func.as_cfunction().unwrap();
 
-                // Calculate new base position
+                // OPTIMIZED: Use fixed offset instead of expensive get_function lookup
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr as usize;
-                    let caller_max_stack = if let Some(func_id) = current_frame.get_function_id() {
-                        self.object_pool
-                            .get_function(func_id)
-                            .map(|f| f.chunk.max_stack_size)
-                            .unwrap_or(256)
-                    } else {
-                        256
-                    };
-                    caller_base + caller_max_stack
+                    (current_frame.base_ptr as usize) + 256
                 } else {
                     0
                 };
@@ -2483,20 +2533,10 @@ impl LuaVM {
                     )
                 };
 
-                // Calculate new base
+                // OPTIMIZED: Use fixed offset instead of expensive get_function lookup
                 let new_base = if self.frame_count > 0 {
                     let current_frame = &self.frames[self.frame_count - 1];
-                    let caller_base = current_frame.base_ptr as usize;
-                    let caller_max_stack =
-                        if let Some(caller_func_id) = current_frame.get_function_id() {
-                            self.object_pool
-                                .get_function(caller_func_id)
-                                .map(|f| f.chunk.max_stack_size)
-                                .unwrap_or(256)
-                        } else {
-                            256
-                        };
-                    caller_base + caller_max_stack
+                    (current_frame.base_ptr as usize) + 256
                 } else {
                     0
                 };

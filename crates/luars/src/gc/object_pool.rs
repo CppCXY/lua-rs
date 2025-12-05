@@ -9,146 +9,11 @@
 // 6. GC headers embedded in objects for mark-sweep
 
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
-use crate::{LuaString, LuaTable, LuaValue};
-use std::hash::Hash;
+use crate::{
+    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
+    LuaValue, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
+};
 use std::rc::Rc;
-
-// ============ GC Header ============
-
-/// GC object header - embedded in every GC-managed object
-/// Based on Lua 5.4's CommonHeader design
-/// Kept minimal to reduce memory overhead
-#[derive(Clone, Copy, Default)]
-#[repr(C)]
-pub struct GcHeader {
-    pub marked: bool,
-    pub age: u8,     // For generational GC (like Lua's G_NEW, G_SURVIVAL, G_OLD, etc.)
-    pub fixed: bool, // If true, object is never collected (like Lua's fixedgc list)
-}
-
-// ============ Object IDs ============
-// All IDs are simple u32 indices - compact and efficient
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[repr(transparent)]
-pub struct StringId(pub u32);
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[repr(transparent)]
-pub struct TableId(pub u32);
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[repr(transparent)]
-pub struct FunctionId(pub u32);
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[repr(transparent)]
-pub struct UpvalueId(pub u32);
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[repr(transparent)]
-pub struct UserdataId(pub u32);
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[repr(transparent)]
-pub struct ThreadId(pub u32);
-
-// ============ GC-managed Objects ============
-
-/// Table with embedded GC header
-pub struct GcTable {
-    pub header: GcHeader,
-    pub data: LuaTable,
-}
-
-/// Lua function with embedded GC header
-pub struct GcFunction {
-    pub header: GcHeader,
-    pub chunk: Rc<Chunk>,
-    pub upvalues: Vec<UpvalueId>, // Upvalue IDs, not Rc
-}
-
-/// Upvalue state - uses absolute stack index like Lua C implementation
-#[derive(Debug, Clone)]
-pub enum UpvalueState {
-    Open { stack_index: usize },
-    Closed(LuaValue),
-}
-
-/// Upvalue with embedded GC header
-pub struct GcUpvalue {
-    pub header: GcHeader,
-    pub state: UpvalueState,
-}
-
-impl GcUpvalue {
-    /// Check if this upvalue points to the given absolute stack index
-    #[inline]
-    pub fn points_to_index(&self, index: usize) -> bool {
-        matches!(&self.state, UpvalueState::Open { stack_index } if *stack_index == index)
-    }
-
-    /// Check if this upvalue is open (still points to stack)
-    #[inline]
-    pub fn is_open(&self) -> bool {
-        matches!(&self.state, UpvalueState::Open { .. })
-    }
-
-    /// Close this upvalue with the given value
-    #[inline]
-    pub fn close(&mut self, value: LuaValue) {
-        self.state = UpvalueState::Closed(value);
-    }
-
-    /// Get the value of a closed upvalue (returns None if still open)
-    #[inline]
-    pub fn get_closed_value(&self) -> Option<LuaValue> {
-        match &self.state {
-            UpvalueState::Closed(v) => Some(v.clone()),
-            _ => None,
-        }
-    }
-
-    /// Get the absolute stack index if this upvalue is open
-    #[inline]
-    pub fn get_stack_index(&self) -> Option<usize> {
-        match &self.state {
-            UpvalueState::Open { stack_index } => Some(*stack_index),
-            _ => None,
-        }
-    }
-
-    /// Set closed upvalue value directly without checking state
-    /// SAFETY: Must only be called when upvalue is in Closed state
-    #[inline(always)]
-    pub unsafe fn set_closed_value_unchecked(&mut self, value: LuaValue) {
-        if let UpvalueState::Closed(ref mut v) = self.state {
-            *v = value;
-        }
-    }
-
-    /// Get closed value reference directly without Option
-    /// SAFETY: Must only be called when upvalue is in Closed state
-    #[inline(always)]
-    pub unsafe fn get_closed_value_ref_unchecked(&self) -> &LuaValue {
-        match &self.state {
-            UpvalueState::Closed(v) => v,
-            _ => unsafe { std::hint::unreachable_unchecked() },
-        }
-    }
-}
-
-/// String with embedded GC header
-pub struct GcString {
-    pub header: GcHeader,
-    pub data: LuaString,
-}
-
-/// Thread (coroutine) with embedded GC header
-pub struct GcThread {
-    pub header: GcHeader,
-    pub data: LuaThread,
-}
 
 // ============ Pool Storage ============
 
@@ -242,6 +107,24 @@ impl<T> Pool<T> {
                 self.count -= 1;
             }
         }
+    }
+
+    /// Get number of free slots in the free list
+    #[inline]
+    pub fn free_slots_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    /// Trim trailing None values from the pool to reduce iteration overhead
+    /// This removes None values from the end of the data vec
+    pub fn trim_tail(&mut self) {
+        // Remove trailing None values
+        while self.data.last().map_or(false, |v| v.is_none()) {
+            self.data.pop();
+        }
+        // Remove free list entries that are now out of bounds
+        let max_valid = self.data.len() as u32;
+        self.free_list.retain(|&id| id < max_valid);
     }
 
     /// Check if a slot is occupied
@@ -390,6 +273,21 @@ impl<T> BoxPool<T> {
                 self.count -= 1;
             }
         }
+    }
+
+    /// Get number of free slots in the free list
+    #[inline]
+    pub fn free_slots_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    /// Trim trailing None values from the pool to reduce iteration overhead
+    pub fn trim_tail(&mut self) {
+        while self.data.last().map_or(false, |v| v.is_none()) {
+            self.data.pop();
+        }
+        let max_valid = self.data.len() as u32;
+        self.free_list.retain(|&id| id < max_valid);
     }
 
     /// Check if a slot is occupied
@@ -1037,8 +935,8 @@ impl ObjectPool {
     #[inline]
     pub fn fix_string(&mut self, id: StringId) {
         if let Some(gs) = self.strings.get_mut(id.0) {
-            gs.header.fixed = true;
-            gs.header.marked = true; // Always considered marked
+            gs.header.set_fixed();
+            gs.header.make_black(); // Always considered marked
         }
     }
 
@@ -1046,8 +944,8 @@ impl ObjectPool {
     #[inline]
     pub fn fix_table(&mut self, id: TableId) {
         if let Some(gt) = self.tables.get_mut(id.0) {
-            gt.header.fixed = true;
-            gt.header.marked = true;
+            gt.header.set_fixed();
+            gt.header.make_black();
         }
     }
 
@@ -1228,56 +1126,57 @@ impl ObjectPool {
 
     // ==================== GC Support ====================
 
-    /// Clear all mark bits before GC mark phase
+    /// Clear all mark bits before GC mark phase (make all objects white)
     pub fn clear_marks(&mut self) {
         for (_, gs) in self.strings.iter_mut() {
-            gs.header.marked = false;
+            gs.header.make_white(0);
         }
         for (_, gt) in self.tables.iter_mut() {
-            gt.header.marked = false;
+            gt.header.make_white(0);
         }
         for (_, gf) in self.functions.iter_mut() {
-            gf.header.marked = false;
+            gf.header.make_white(0);
         }
         for (_, gu) in self.upvalues.iter_mut() {
-            gu.header.marked = false;
+            gu.header.make_white(0);
         }
         for (_, gth) in self.threads.iter_mut() {
-            gth.header.marked = false;
+            gth.header.make_white(0);
         }
     }
 
-    /// Sweep phase: free all unmarked objects
+    /// Sweep phase: free all unmarked (white) objects
     pub fn sweep(&mut self) {
         // Collect IDs to free (can't free while iterating)
+        // White objects are unmarked and should be collected
         let strings_to_free: Vec<u32> = self
             .strings
             .iter()
-            .filter(|(_, gs)| !gs.header.marked)
+            .filter(|(_, gs)| gs.header.is_white())
             .map(|(id, _)| id)
             .collect();
         let tables_to_free: Vec<u32> = self
             .tables
             .iter()
-            .filter(|(_, gt)| !gt.header.marked)
+            .filter(|(_, gt)| gt.header.is_white())
             .map(|(id, _)| id)
             .collect();
         let functions_to_free: Vec<u32> = self
             .functions
             .iter()
-            .filter(|(_, gf)| !gf.header.marked)
+            .filter(|(_, gf)| gf.header.is_white())
             .map(|(id, _)| id)
             .collect();
         let upvalues_to_free: Vec<u32> = self
             .upvalues
             .iter()
-            .filter(|(_, gu)| !gu.header.marked)
+            .filter(|(_, gu)| gu.header.is_white())
             .map(|(id, _)| id)
             .collect();
         let threads_to_free: Vec<u32> = self
             .threads
             .iter()
-            .filter(|(_, gth)| !gth.header.marked)
+            .filter(|(_, gth)| gth.header.is_white())
             .map(|(id, _)| id)
             .collect();
 

@@ -1,0 +1,194 @@
+======================================
+   LUA-RS PERFORMANCE BENCHMARKS
+======================================
+
+
+--- Running: bench_arithmetic.lua ---
+=== Arithmetic Benchmark ===
+Iterations:	10000000
+Integer addition: sum: 50000005000000 0.047 seconds (212.77 M ops/sec)
+Float multiplication: result: 2.718282 0.050 seconds (200.00 M ops/sec)
+Mixed operations: z: 20000007 0.089 seconds (112.36 M ops/sec)
+
+--- Running: bench_control_flow.lua ---
+=== Control Flow Benchmark ===
+Iterations:	10000000
+If-else: 0.178 seconds (56.18 M ops/sec)
+While loop: 0.081 seconds (123.46 M ops/sec)
+Repeat-until: 0.070 seconds (142.86 M ops/sec)
+Nested loops (1000x1000): 0.005 seconds (200.00 M ops/sec)
+
+--- Running: bench_locals.lua ---
+=== Local vs Global Benchmark ===
+Iterations:	10000000
+Global var access: 0.159 seconds (62.89 M ops/sec)
+Local var access: 0.044 seconds (227.27 M ops/sec)
+Upvalue access: 0.082 seconds (121.95 M ops/sec)
+Global table field: 0.227 seconds (44.05 M ops/sec)
+Local table field: 0.138 seconds (72.46 M ops/sec)
+_ENV lookup (math.pi): 0.140 seconds (71.43 M ops/sec)
+Cached global func: 0.265 seconds (37.74 M ops/sec)
+
+--- Running: bench_functions.lua ---
+=== Function Call Benchmark ===
+Iterations:	1000000
+Simple function call: 0.023 seconds (43.48 M calls/sec)
+Recursive fib(25): 0.006 seconds, result=75025
+Vararg function: 0.463 seconds (2.16 M calls/sec)
+
+--- Running: bench_closures.lua ---
+=== Closures & Upvalues Benchmark ===
+Iterations:	1000000
+Closure creation: 0.133 seconds (7.52 M ops/sec)
+Upvalue read/write: 0.025 seconds (40.00 M ops/sec)
+Multiple upvalues: 0.031 seconds (32.26 M ops/sec)
+Nested closures: 0.027 seconds (37.04 M ops/sec)
+
+--- Running: bench_multiret.lua ---
+=== Multiple Returns & Select Benchmark ===
+Iterations:	1000000
+Single return: 0.018 seconds (55.56 M ops/sec)
+Triple return: 0.026 seconds (38.46 M ops/sec)
+10 returns: 0.040 seconds (25.00 M ops/sec)
+Discard extra returns: 0.036 seconds (27.78 M ops/sec)
+select('#', ...): 0.066 seconds (15.15 M ops/sec)
+select(3, ...): 0.069 seconds (14.49 M ops/sec)
+Vararg passthrough: 0.038 seconds (26.32 M ops/sec)
+Vararg to table: 0.207 seconds (4.83 M ops/sec)
+table.pack: 0.327 seconds (3.06 M ops/sec)
+table.unpack: 0.080 seconds (12.50 M ops/sec)
+Returns in table ctor: 0.173 seconds (5.78 M ops/sec)
+Returns as func args: 0.045 seconds (22.22 M ops/sec)
+
+--- Running: bench_tables.lua ---
+=== Table Operations Benchmark ===
+Iterations:	1000000
+Array creation & access: 0.002 seconds (5.00 M ops/sec)
+Table insertion: 0.021 seconds (47.62 M inserts/sec)
+Table access: 0.008 seconds (125.00 M accesses/sec)
+Hash table insertion (100k): 0.065 seconds
+ipairs iteration (10x1000000): 0.310 seconds
+
+--- Running: bench_table_lib.lua ---
+=== Table Library Benchmark ===
+Iterations:	100000
+table.insert (end): 0.007 seconds (14285.71 K ops/sec)
+table.insert (middle): 0.002 seconds (5000.00 K ops/sec)
+table.remove (end): 0.011 seconds (9090.91 K ops/sec)
+table.concat (1000 items): 0.275 seconds (36.36 K ops/sec)
+table.sort (sorted): 0.156 seconds (6.41 K ops/sec)
+table.sort (reversed): 0.235 seconds (4.26 K ops/sec)
+table.sort (random): 0.281 seconds (3.56 K ops/sec)
+table.sort (custom cmp): 0.522 seconds (1.92 K ops/sec)
+table.move (1000 items): 0.093 seconds (107.53 K ops/sec)
+table.unpack (5 values): 0.007 seconds (14285.71 K ops/sec)
+table.pack (5 values): 0.033 seconds (3030.30 K ops/sec)
+# operator (10k array): 0.000 seconds (inf M ops/sec)
+
+--- Running: bench_iterators.lua ---
+=== Iterators Benchmark ===
+Iterations:	10000
+ipairs (1000 items): 0.302 seconds (33.11 K iters/sec)
+pairs on array (1000): 0.313 seconds (31.95 K iters/sec)
+pairs on hash (1000): 0.449 seconds (22.27 K iters/sec)
+pairs on mixed (1000): 0.509 seconds (19.65 K iters/sec)
+next() iteration (1000): 0.507 seconds (19.72 K iters/sec)
+Numeric for (1000): 0.096 seconds (104.17 K iters/sec)
+Custom stateless iter: 0.427 seconds (23.42 K iters/sec)
+Closure iterator (100): 0.040 seconds (250.00 K iters/sec)
+Multi-value iterator: 0.609 seconds (16.42 K iters/sec)
+
+--- Running: bench_strings.lua ---
+=== String Operations Benchmark ===
+Iterations:	100000
+String concatenation: 0.039 seconds (2564.10 K ops/sec)
+String length: 0.001 seconds (100.00 M ops/sec)
+string.sub: 0.006 seconds (16666.67 K ops/sec)
+string.find: 0.008 seconds (12500.00 K ops/sec)
+string.gsub (10k): 0.195 seconds
+
+--- Running: bench_string_lib.lua ---
+=== String Library Extended Benchmark ===
+Iterations:	100000
+string.upper: 0.023 seconds (4347.83 K ops/sec)
+string.lower: 0.022 seconds (4545.45 K ops/sec)
+string.reverse: 0.014 seconds (7142.86 K ops/sec)
+string.rep (100 chars): 0.044 seconds (2272.73 K ops/sec)
+string.byte: 0.005 seconds (20000.00 K ops/sec)
+string.char (5 chars): 0.009 seconds (11111.11 K ops/sec)
+string.format (%d): 0.027 seconds (3703.70 K ops/sec)
+string.format (complex): 0.071 seconds (1408.45 K ops/sec)
+string.match (simple): 0.012 seconds (8333.33 K ops/sec)
+string.match (3 captures): 0.035 seconds (2857.14 K ops/sec)
+string.gmatch: 0.001 seconds (1000.00 K ops/sec)
+string.gsub (simple): 0.005 seconds (2000.00 K ops/sec)
+string.gsub (pattern): 0.008 seconds (1250.00 K ops/sec)
+string.sub (long str): 0.001 seconds (1000.00 K ops/sec)
+string.find (long str): 0.000 seconds (inf K ops/sec)
+String equality: 0.001 seconds (100000.00 K ops/sec)
+Concat (4 parts): 0.005 seconds (20000.00 K ops/sec)
+
+--- Running: bench_math.lua ---
+=== Math Operations Benchmark ===
+Iterations:	5000000
+Integer mul/add/mod: 0.086 seconds (58.14 M ops/sec)
+Float mul/add/div: 0.049 seconds (102.04 M ops/sec)
+math.sqrt: 0.119 seconds (42.02 M ops/sec)
+math.sin: 0.159 seconds (31.45 M ops/sec)
+math.floor/ceil: 0.293 seconds (17.06 M ops/sec)
+math.min/max: 0.277 seconds (18.05 M ops/sec)
+math.abs: 0.119 seconds (42.02 M ops/sec)
+math.random: 0.196 seconds (25.51 M ops/sec)
+Bitwise AND/OR/SHR: 0.052 seconds (96.15 M ops/sec)
+Integer division (//): 0.065 seconds (76.92 M ops/sec)
+Power (^2): 0.094 seconds (53.19 M ops/sec)
+
+--- Running: bench_metatables.lua ---
+=== Metatables & Metamethods Benchmark ===
+Iterations:	500000
+__index (function): 0.022 seconds (22.73 M ops/sec)
+__index (table): 0.016 seconds (31.25 M ops/sec)
+__newindex: 0.006 seconds (16.67 M ops/sec)
+__add metamethod: 0.025 seconds (4.00 M ops/sec)
+__call metamethod: 0.003 seconds (33.33 M ops/sec)
+__len metamethod: 0.020 seconds (25.00 M ops/sec)
+rawget (no metamethod): 0.026 seconds (19.23 M ops/sec)
+
+--- Running: bench_oop.lua ---
+=== OOP Patterns Benchmark ===
+Iterations:	100000
+Object creation: 0.028 seconds (3571.43 K ops/sec)
+Method call (colon): 0.047 seconds (10638.30 K ops/sec)
+Method call (dot): 0.041 seconds (12195.12 K ops/sec)
+Inherited object creation: 0.011 seconds (1818.18 K ops/sec)
+Inherited method call: 0.050 seconds (10000.00 K ops/sec)
+Property access: 0.008 seconds (62500.00 K ops/sec)
+Property modification: 0.006 seconds (83333.33 K ops/sec)
+Closure object creation: 0.006 seconds (1666.67 K ops/sec)
+Closure method call: 0.013 seconds (38461.54 K ops/sec)
+Prototype chain (3 levels): 0.023 seconds (21739.13 K ops/sec)
+
+--- Running: bench_coroutines.lua ---
+=== Coroutines Benchmark ===
+Iterations:	100000
+Create/resume/yield: 0.212 seconds (471.70 K cycles/sec)
+Repeated yield: 0.147 seconds (680.27 K yields/sec)
+Producer-consumer: 0.155 seconds (645.16 K msgs/sec)
+coroutine.wrap: 0.004 seconds (2500.00 K ops/sec)
+coroutine.status: 0.005 seconds (20.00 M ops/sec)
+
+--- Running: bench_errors.lua ---
+=== Error Handling Benchmark ===
+Iterations:	100000
+pcall (success): 0.007 seconds (14285.71 K ops/sec)
+pcall (error): 0.198 seconds (505.05 K ops/sec)
+xpcall (error): 0.239 seconds (418.41 K ops/sec)
+Direct call (baseline): 0.002 seconds (50000.00 K ops/sec)
+pcall (multi-return): 0.008 seconds (12500.00 K ops/sec)
+assert (success): 0.003 seconds (33333.33 K ops/sec)
+pcall (type check): 0.014 seconds (7142.86 K ops/sec)
+
+======================================
+   BENCHMARKS COMPLETE
+   Total time: 12.08 seconds
+======================================

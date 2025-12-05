@@ -1,4 +1,4 @@
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaValue, tm_flags};
 /// Table operations
 ///
 /// These instructions handle table creation, access, and manipulation.
@@ -62,7 +62,12 @@ pub fn exec_newtable(
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = table;
     }
 
-    // GC checkpoint disabled for testing
+    // GC checkpoint - inline fast path to avoid function call overhead
+    // Only call slow path when debt exceeds 1MB threshold
+    const GC_THRESHOLD: isize = 1024 * 1024;
+    if vm.gc_debt_local > GC_THRESHOLD {
+        vm.check_gc_slow_pub();
+    }
 }
 
 /// GETTABLE A B C
@@ -110,10 +115,24 @@ pub fn exec_gettable(
             }
         }
 
-        // Key not found - check if no metatable to skip metamethod handling
-        if lua_table.get_metatable().is_none() {
+        // Key not found - check metatable for __index
+        let metatable = lua_table.get_metatable();
+        if metatable.is_none() {
+            // No metatable - just return nil
             unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
             return Ok(());
+        }
+        
+        // FAST PATH: fasttm optimization - check if __index is known to be absent
+        if let Some(mt_val) = metatable
+            && let Some(mt_id) = mt_val.as_table_id()
+        {
+            let mt_table = unsafe { vm.object_pool.get_table_unchecked(mt_id) };
+            if mt_table.tm_absent(tm_flags::TM_INDEX) {
+                // __index is known to be absent - skip slow path
+                unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
+                return Ok(());
+            }
         }
     }
 
@@ -175,7 +194,8 @@ pub fn exec_settable(
                 lua_table.raw_set(key_value, set_value);
             }
 
-            // Note: GC barrier is handled lazily during collection
+            // GC write barrier: if table is old and value is young, mark table as touched
+            vm.gc_barrier_back_table(table_id, &set_value);
             return Ok(());
         }
     }
@@ -209,10 +229,24 @@ pub fn exec_geti(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
             return Ok(());
         }
 
-        // Key not found - check if no metatable to skip metamethod handling
-        if lua_table.get_metatable().is_none() {
+        // Key not found - check for metatable and fasttm
+        let metatable = lua_table.get_metatable();
+        if metatable.is_none() {
+            // No metatable - return nil directly
             unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
             return Ok(());
+        }
+        
+        // FAST PATH: fasttm optimization - check if __index is known to be absent
+        if let Some(mt_val) = metatable
+            && let Some(mt_id) = mt_val.as_table_id()
+        {
+            let mt_table = unsafe { vm.object_pool.get_table_unchecked(mt_id) };
+            if mt_table.tm_absent(tm_flags::TM_INDEX) {
+                // __index is known to be absent - skip slow path
+                unsafe { *vm.register_stack.get_unchecked_mut(base_ptr + a) = LuaValue::nil() };
+                return Ok(());
+            }
         }
     }
 
@@ -266,8 +300,8 @@ pub fn exec_seti(
             let lua_table = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
             lua_table.set_int(b, set_value);
 
-            // Note: GC barrier is handled lazily during collection
-            // This significantly improves write performance
+            // GC write barrier
+            vm.gc_barrier_back_table(table_id, &set_value);
             return Ok(());
         }
     }
@@ -310,10 +344,24 @@ pub fn exec_getfield(
             }
         }
 
-        // Check if no metatable - can return nil directly
-        if table_ref.get_metatable().is_none() {
+        // Check for metatable and fasttm optimization
+        let metatable = table_ref.get_metatable();
+        if metatable.is_none() {
+            // No metatable - return nil directly
             unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
             return Ok(());
+        }
+        
+        // FAST PATH: fasttm optimization - check if __index is known to be absent
+        if let Some(mt_val) = metatable
+            && let Some(mt_id) = mt_val.as_table_id()
+        {
+            let mt_table = unsafe { vm.object_pool.get_table_unchecked(mt_id) };
+            if mt_table.tm_absent(tm_flags::TM_INDEX) {
+                // __index is known to be absent - skip slow path
+                unsafe { *vm.register_stack.get_unchecked_mut(*base_ptr + a) = LuaValue::nil() };
+                return Ok(());
+            }
         }
     }
 
@@ -366,6 +414,8 @@ pub fn exec_setfield(
             let table_ref = unsafe { vm.object_pool.get_table_mut_unchecked(table_id) };
             // Ultra-fast path: direct set without any metamethod checks
             table_ref.raw_set(key_value, set_value);
+            // GC write barrier
+            vm.gc_barrier_back_table(table_id, &set_value);
             return Ok(());
         }
     }
@@ -482,7 +532,8 @@ pub fn exec_settabup(
                 // Ultra-fast path: direct set without any metamethod checks
                 table_ref.raw_set(key_value.clone(), set_value.clone());
 
-                // Note: GC barrier is handled lazily during collection
+                // GC write barrier
+                vm.gc_barrier_back_table(table_id, &set_value);
                 return Ok(());
             }
         }
