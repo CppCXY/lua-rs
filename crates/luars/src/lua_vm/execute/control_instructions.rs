@@ -905,46 +905,57 @@ pub fn exec_call(
         return Ok(());
     }
 
-    // Slow path: Check for __call metamethod
-    if func.kind() == LuaValueKind::Table {
-        let metatable_opt = func.as_table_id().and_then(|table_id| {
-            vm.object_pool
-                .get_table(table_id)
-                .and_then(|t| t.get_metatable())
-        });
+    // Slow path: Check for __call metamethod (for Table and Userdata)
+    let metatable_opt = match func.kind() {
+        LuaValueKind::Table => {
+            func.as_table_id().and_then(|table_id| {
+                vm.object_pool
+                    .get_table(table_id)
+                    .and_then(|t| t.get_metatable())
+            })
+        }
+        LuaValueKind::Userdata => {
+            func.as_userdata_id().and_then(|ud_id| {
+                vm.object_pool
+                    .get_userdata(ud_id)
+                    .map(|ud| ud.get_metatable())
+                    .filter(|mt| !mt.is_nil())
+            })
+        }
+        _ => None,
+    };
 
-        if let Some(metatable) = metatable_opt {
-            // Use pre-cached __call StringId
-            let call_key = LuaValue::string(vm.object_pool.tm_call);
-            if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
-                if call_func.is_callable() {
-                    if call_func.is_cfunction() {
-                        exec_call_cfunction(
-                            vm,
-                            call_func,
-                            a,
-                            b,
-                            c,
-                            base,
-                            true,
-                            func,
-                            frame_ptr_ptr,
-                        )?;
-                        return Ok(());
-                    } else {
-                        exec_call_lua_function(
-                            vm,
-                            call_func,
-                            a,
-                            b,
-                            c,
-                            base,
-                            true,
-                            func,
-                            frame_ptr_ptr,
-                        )?;
-                        return Ok(());
-                    }
+    if let Some(metatable) = metatable_opt {
+        // Use pre-cached __call StringId
+        let call_key = LuaValue::string(vm.object_pool.tm_call);
+        if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
+            if call_func.is_callable() {
+                if call_func.is_cfunction() {
+                    exec_call_cfunction(
+                        vm,
+                        call_func,
+                        a,
+                        b,
+                        c,
+                        base,
+                        true,
+                        func,
+                        frame_ptr_ptr,
+                    )?;
+                    return Ok(());
+                } else {
+                    exec_call_lua_function(
+                        vm,
+                        call_func,
+                        a,
+                        b,
+                        c,
+                        base,
+                        true,
+                        func,
+                        frame_ptr_ptr,
+                    )?;
+                    return Ok(());
                 }
             }
         }

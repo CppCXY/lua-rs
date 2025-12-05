@@ -4,6 +4,12 @@
 use crate::lib_registry::{LibraryModule, arg_count, get_arg, get_args, require_arg};
 use crate::lua_value::{CoroutineStatus, LuaValue, MultiValue};
 use crate::lua_vm::{LuaResult, LuaVM};
+use crate::gc::ThreadId;
+
+/// WrappedCoroutine - stored in userdata for fast access
+pub struct WrappedCoroutine {
+    pub thread_id: ThreadId,
+}
 
 pub fn create_coroutine_lib() -> LibraryModule {
     crate::lib_module!("coroutine", {
@@ -84,24 +90,23 @@ fn coroutine_status(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("coroutine.status requires a thread argument".to_string()));
     }
 
-    // Get thread status using thread_id
-    let status_str = if let Some(thread_id) = thread_val.as_thread_id() {
+    // Get thread status using thread_id and pre-cached StringIds
+    let status_sid = if let Some(thread_id) = thread_val.as_thread_id() {
         if let Some(thread) = vm.object_pool.get_thread(thread_id) {
             match thread.status {
-                CoroutineStatus::Suspended => "suspended",
-                CoroutineStatus::Running => "running",
-                CoroutineStatus::Normal => "normal",
-                CoroutineStatus::Dead => "dead",
+                CoroutineStatus::Suspended => vm.object_pool.str_suspended,
+                CoroutineStatus::Running => vm.object_pool.str_running,
+                CoroutineStatus::Normal => vm.object_pool.str_normal,
+                CoroutineStatus::Dead => vm.object_pool.str_dead,
             }
         } else {
-            "dead"
+            vm.object_pool.str_dead
         }
     } else {
-        "dead"
+        vm.object_pool.str_dead
     };
 
-    let s = vm.create_string(status_str);
-    Ok(MultiValue::single(s))
+    Ok(MultiValue::single(LuaValue::string(status_sid)))
 }
 
 /// coroutine.running() - Get currently running coroutine
@@ -129,54 +134,58 @@ fn coroutine_running(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// coroutine.wrap(f) - Create a wrapped coroutine
-/// This is placeholder - the actual implementation is injected as Lua code in lib_registry
+/// OPTIMIZED: Uses userdata to store thread directly, avoiding table+metatable overhead
 fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    use crate::lua_value::LuaUserdata;
+    
     let func = require_arg(vm, 1, "coroutine.wrap")?;
 
     if !func.is_function() && !func.is_cfunction() {
         return Err(vm.error("coroutine.wrap requires a function argument".to_string()));
     }
 
-    // Create the coroutine using new ThreadId-based API
+    // Create the coroutine
     let thread_val = vm.create_thread_value(func);
+    
+    // Get the ThreadId from the thread value
+    let Some(thread_id) = thread_val.as_thread_id() else {
+        return Err(vm.error("Failed to create coroutine".to_string()));
+    };
 
-    // Create a wrapper table that will act as a callable object
-    let wrapper_table = vm.create_table(0, 1);
-
-    // Store the coroutine in the table
-    let thread_key = vm.create_string("__thread");
-    vm.table_set_with_meta(wrapper_table, thread_key, thread_val)?;
-
-    // Create the __call metamethod
-    let call_func = LuaValue::cfunction(coroutine_wrap_call);
-
-    // Create and set metatable
+    // Create metatable with __call first
     let metatable = vm.create_table(0, 1);
     let call_key = vm.create_string("__call");
-    vm.table_set_with_meta(metatable, call_key, call_func)?;
+    vm.table_set_with_meta(metatable, call_key, LuaValue::cfunction(coroutine_wrap_call))?;
 
-    // Set metatable on wrapper table
-    let Some(table_id) = wrapper_table.as_table_id() else {
-        return Err(vm.error("Invalid table".to_string()));
-    };
-    let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
-        return Err(vm.error("Invalid table".to_string()));
-    };
-    table_ref.set_metatable(Some(metatable));
+    // Create a userdata that wraps the coroutine for fast access
+    let wrapped = WrappedCoroutine { thread_id };
+    let wrapper_ud = vm.create_userdata(LuaUserdata::with_metatable(wrapped, metatable));
 
-    Ok(MultiValue::single(wrapper_table))
+    Ok(MultiValue::single(wrapper_ud))
 }
 
 /// Helper function for coroutine.wrap - called when the wrapper is invoked
+/// OPTIMIZED: Direct userdata access instead of table lookup
 fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    // First argument is the wrapper table itself (self)
-    let wrapper_table = require_arg(vm, 1, "coroutine.wrap_call")?;
+    // First argument is the wrapper userdata itself (self)
+    let wrapper_ud = require_arg(vm, 1, "coroutine.wrap_call")?;
 
-    // Get the stored coroutine
-    let thread_key = vm.create_string("__thread");
-    let thread_val = vm
-        .table_get_with_meta(&wrapper_table, &thread_key)
-        .ok_or(vm.error("coroutine not found in wrapper".to_string()))?;
+    // Get the ThreadId directly from userdata
+    let Some(ud_id) = wrapper_ud.as_userdata_id() else {
+        return Err(vm.error("invalid wrapped coroutine".to_string()));
+    };
+    
+    let thread_id = {
+        let Some(ud) = vm.object_pool.get_userdata(ud_id) else {
+            return Err(vm.error("invalid wrapped coroutine".to_string()));
+        };
+        let data_rc = ud.get_data();
+        let data_ref = data_rc.borrow();
+        let Some(wrapped) = data_ref.downcast_ref::<WrappedCoroutine>() else {
+            return Err(vm.error("invalid wrapped coroutine type".to_string()));
+        };
+        wrapped.thread_id
+    };
 
     // Collect arguments (skip self at index 0)
     let mut args = Vec::new();
@@ -187,7 +196,8 @@ fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
     }
 
-    // Resume the coroutine
+    // Resume the coroutine using ThreadId directly
+    let thread_val = LuaValue::thread(thread_id);
     let (success, results) = vm.resume_thread(thread_val, args)?;
 
     if !success {
