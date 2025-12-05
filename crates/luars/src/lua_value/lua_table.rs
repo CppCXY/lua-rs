@@ -2,7 +2,7 @@
 // - Array part for integer keys [1..n]
 // - Hash part using open addressing (same as Lua 5.4)
 use super::LuaValue;
-use crate::LuaVM;
+use crate::{LuaVM, TableId};
 
 /// Hash node - mimics Lua 5.4's Node structure
 /// Contains key+value pair
@@ -60,7 +60,7 @@ pub struct LuaTable {
 
     /// Metatable - optional table that defines special behaviors  
     /// Store as LuaValue (table ID) instead of Rc for ID-based architecture
-    metatable: Option<LuaValue>,
+    metatable: Option<TableId>,
 
     /// Metamethod absence flags (like Lua 5.4)
     /// A bit set to 1 means the metamethod is NOT present (cached absence)
@@ -252,13 +252,14 @@ impl LuaTable {
 
     /// Get the metatable of this table
     pub fn get_metatable(&self) -> Option<LuaValue> {
-        self.metatable.clone()
+        self.metatable
+            .map(|mt_id| LuaValue::table(mt_id))
     }
 
     /// Set the metatable of this table
     /// Resets tm_flags since the new metatable may have different metamethods
     pub fn set_metatable(&mut self, mt: Option<LuaValue>) {
-        self.metatable = mt;
+        self.metatable = mt.and_then(|v| v.as_table_id());
         // Reset all flags - metamethods need to be re-checked
         self.tm_flags = 0;
     }
