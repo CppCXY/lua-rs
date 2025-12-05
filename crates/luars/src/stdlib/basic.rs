@@ -199,7 +199,7 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
-    
+
     // Get index argument (at register 1)
     let index_arg = if base_ptr + 1 < vm.register_stack.len() && 1 < top {
         vm.register_stack[base_ptr + 1]
@@ -227,7 +227,7 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     let arg_count = top.saturating_sub(1); // Exclude function register
-    
+
     let start = if index > 0 {
         index as usize
     } else {
@@ -247,7 +247,7 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             result.push(vm.register_stack[reg_idx]);
         }
     }
-    
+
     Ok(MultiValue::multiple(result))
 }
 

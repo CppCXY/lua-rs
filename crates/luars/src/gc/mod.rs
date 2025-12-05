@@ -10,108 +10,14 @@
 // Key difference from Lua C: We use Vec<GcId> instead of linked list
 // because Rust ownership makes linked lists impractical
 
+mod gc_id;
+mod gc_object;
 mod object_pool;
 
-use crate::lua_value::LuaValue;
-pub use object_pool::{
-    Arena, BoxPool, FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue,
-    ObjectPool, Pool, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
-};
-
-// ============ GcId: Unified Object Identifier ============
-
-/// Object type tags (3 bits, supports up to 8 types)
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcType {
-    String = 0,
-    Table = 1,
-    Function = 2,
-    Upvalue = 3,
-    Thread = 4,
-    Userdata = 5,
-}
-
-/// Unified GC object identifier
-/// Layout: [type: 3 bits][index: 29 bits]
-/// Supports up to 536 million objects per type
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[repr(transparent)]
-pub struct GcId(u32);
-
-impl GcId {
-    const TYPE_BITS: u32 = 3;
-    const TYPE_MASK: u32 = (1 << Self::TYPE_BITS) - 1;
-    const INDEX_SHIFT: u32 = Self::TYPE_BITS;
-
-    #[inline(always)]
-    pub fn new(gc_type: GcType, index: u32) -> Self {
-        debug_assert!(index < (1 << 29), "Index overflow");
-        GcId((index << Self::INDEX_SHIFT) | (gc_type as u32))
-    }
-
-    #[inline(always)]
-    pub fn gc_type(self) -> GcType {
-        unsafe { std::mem::transmute((self.0 & Self::TYPE_MASK) as u8) }
-    }
-
-    #[inline(always)]
-    pub fn index(self) -> u32 {
-        self.0 >> Self::INDEX_SHIFT
-    }
-
-    #[inline(always)]
-    pub fn from_string(id: StringId) -> Self {
-        Self::new(GcType::String, id.0)
-    }
-
-    #[inline(always)]
-    pub fn from_table(id: TableId) -> Self {
-        Self::new(GcType::Table, id.0)
-    }
-
-    #[inline(always)]
-    pub fn from_function(id: FunctionId) -> Self {
-        Self::new(GcType::Function, id.0)
-    }
-
-    #[inline(always)]
-    pub fn from_upvalue(id: UpvalueId) -> Self {
-        Self::new(GcType::Upvalue, id.0)
-    }
-
-    #[inline(always)]
-    pub fn from_thread(id: ThreadId) -> Self {
-        Self::new(GcType::Thread, id.0)
-    }
-
-    #[inline(always)]
-    pub fn as_string_id(self) -> Option<StringId> {
-        if self.gc_type() == GcType::String {
-            Some(StringId(self.index()))
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_table_id(self) -> Option<TableId> {
-        if self.gc_type() == GcType::Table {
-            Some(TableId(self.index()))
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_function_id(self) -> Option<FunctionId> {
-        if self.gc_type() == GcType::Function {
-            Some(FunctionId(self.index()))
-        } else {
-            None
-        }
-    }
-}
+use crate::lua_value::{LuaValue, LuaValueKind};
+pub use gc_id::*;
+pub use gc_object::*;
+pub use object_pool::*;
 
 // Re-export for compatibility
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -166,15 +72,15 @@ pub struct GC {
     // GC state
     state: GcState,
     current_white: u8, // 0 or 1, flips each cycle
-    
+
     // Incremental sweep state
-    sweep_index: usize,        // Current position in sweep phase
-    propagate_work: usize,     // Work done in propagate phase
-    
+    sweep_index: usize,    // Current position in sweep phase
+    propagate_work: usize, // Work done in propagate phase
+
     // GC parameters
-    gc_pause: usize,     // Pause parameter (default 200 = 200%)
-    gc_stepmul: usize,   // Step multiplier (default 100)
-    
+    gc_pause: usize,   // Pause parameter (default 200 = 200%)
+    gc_stepmul: usize, // Step multiplier (default 100)
+
     // Collection throttling
     check_counter: u32,
     check_interval: u32,
@@ -210,8 +116,8 @@ impl GC {
             current_white: 0,
             sweep_index: 0,
             propagate_work: 0,
-            gc_pause: 200,    // Like Lua: 200 = wait until memory doubles
-            gc_stepmul: 100,  // Step multiplier
+            gc_pause: 200,   // Like Lua: 200 = wait until memory doubles
+            gc_stepmul: 100, // Step multiplier
             check_counter: 0,
             check_interval: 1, // Check every time (Lua doesn't use interval)
             stats: GCStats::default(),
@@ -279,12 +185,12 @@ impl GC {
         if self.gc_debt <= 0 {
             return;
         }
-        
+
         // Calculate work budget for this step
         // Like Lua's gettotalbytes(g) / WORK2MEM
         const WORK_PER_STEP: usize = 4096; // Do 4KB worth of work per step
         let mut work = 0;
-        
+
         // State machine for incremental GC
         loop {
             match self.state {
@@ -294,18 +200,18 @@ impl GC {
                     self.state = GcState::Propagate;
                     work += 100; // Small fixed cost
                 }
-                
+
                 GcState::Propagate => {
                     // Incremental marking: process some gray objects
                     let marked = self.propagate_step(pool, WORK_PER_STEP - work);
                     work += marked;
-                    
+
                     if self.gray.is_empty() && self.grayagain.is_empty() {
                         // All marking done, go to atomic phase
                         self.state = GcState::Atomic;
                     }
                 }
-                
+
                 GcState::Atomic => {
                     // Atomic phase - must finish marking (like Lua's atomic)
                     // Process any grayagain objects
@@ -317,7 +223,7 @@ impl GC {
                     self.state = GcState::Sweep;
                     work += 50;
                 }
-                
+
                 GcState::Sweep => {
                     // Complete sweep in one step (pools are iterated directly)
                     let swept = self.sweep_step(pool, WORK_PER_STEP - work);
@@ -326,24 +232,24 @@ impl GC {
                     break;
                 }
             }
-            
+
             // Check if we've done enough work for this step
             if work >= WORK_PER_STEP {
                 break;
             }
         }
-        
+
         // Reduce debt by work done (convert work to "bytes paid off")
         self.gc_debt -= (work as isize) * 2;
     }
-    
+
     /// Start a new GC cycle - mark roots and build gray list
     fn start_cycle(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         self.stats.collection_count += 1;
         self.gray.clear();
         self.grayagain.clear();
         self.propagate_work = 0;
-        
+
         // Make all objects white by iterating pools directly
         for (_id, table) in pool.tables.iter_mut() {
             if !table.header.is_fixed() {
@@ -370,13 +276,13 @@ impl GC {
                 string.header.make_white(self.current_white);
             }
         }
-        
+
         // Mark roots and add to gray list
         for value in roots {
             self.mark_value(value, pool);
         }
     }
-    
+
     /// Make an object white (for start of cycle)
     #[inline]
     fn make_white(&self, gc_id: GcId, pool: &mut ObjectPool) {
@@ -419,41 +325,41 @@ impl GC {
             GcType::Userdata => {}
         }
     }
-    
+
     /// Mark a value and add to gray list if needed
     fn mark_value(&mut self, value: &LuaValue, pool: &mut ObjectPool) {
         match value.kind() {
-            crate::lua_value::LuaValueKind::Table => {
+            LuaValueKind::Table => {
                 if let Some(id) = value.as_table_id() {
                     if let Some(t) = pool.tables.get_mut(id.0) {
                         if t.header.is_white() {
                             t.header.make_gray();
-                            self.gray.push(GcId::from_table(id));
+                            self.gray.push(GcId::TableId(id));
                         }
                     }
                 }
             }
-            crate::lua_value::LuaValueKind::Function => {
+            LuaValueKind::Function => {
                 if let Some(id) = value.as_function_id() {
                     if let Some(f) = pool.functions.get_mut(id.0) {
                         if f.header.is_white() {
                             f.header.make_gray();
-                            self.gray.push(GcId::from_function(id));
+                            self.gray.push(GcId::FunctionId(id));
                         }
                     }
                 }
             }
-            crate::lua_value::LuaValueKind::Thread => {
+            LuaValueKind::Thread => {
                 if let Some(id) = value.as_thread_id() {
                     if let Some(t) = pool.threads.get_mut(id.0) {
                         if t.header.is_white() {
                             t.header.make_gray();
-                            self.gray.push(GcId::from_thread(id));
+                            self.gray.push(GcId::ThreadId(id));
                         }
                     }
                 }
             }
-            crate::lua_value::LuaValueKind::String => {
+            LuaValueKind::String => {
                 if let Some(id) = value.as_string_id() {
                     if let Some(s) = pool.strings.get_mut(id.0) {
                         // Strings are leaves - mark black directly
@@ -464,11 +370,11 @@ impl GC {
             _ => {}
         }
     }
-    
+
     /// Do one step of propagation - process some gray objects
     fn propagate_step(&mut self, pool: &mut ObjectPool, max_work: usize) -> usize {
         let mut work = 0;
-        
+
         while work < max_work {
             if let Some(gc_id) = self.gray.pop() {
                 work += self.mark_one(gc_id, pool);
@@ -476,28 +382,30 @@ impl GC {
                 break;
             }
         }
-        
+
         work
     }
-    
+
     /// Mark one gray object and its references
     fn mark_one(&mut self, gc_id: GcId, pool: &mut ObjectPool) -> usize {
         let mut work = 1;
-        
+
         match gc_id.gc_type() {
             GcType::Table => {
                 if let Some(table) = pool.tables.get_mut(gc_id.index()) {
                     if table.header.is_gray() {
                         table.header.make_black();
                         work += table.data.len();
-                        
+
                         // Collect references to mark
-                        let refs: Vec<LuaValue> = table.data.iter_all()
+                        let refs: Vec<LuaValue> = table
+                            .data
+                            .iter_all()
                             .into_iter()
                             .flat_map(|(k, v)| [k, v])
                             .collect();
                         let mt = table.data.get_metatable();
-                        
+
                         // Mark references
                         for v in refs {
                             self.mark_value(&v, pool);
@@ -512,24 +420,24 @@ impl GC {
                 if let Some(func) = pool.functions.get(gc_id.index()) {
                     let upvalue_ids = func.upvalues.clone();
                     let constants = func.chunk.constants.clone();
-                    
+
                     if let Some(f) = pool.functions.get_mut(gc_id.index()) {
                         if f.header.is_gray() {
                             f.header.make_black();
                             work += upvalue_ids.len() + constants.len();
                         }
                     }
-                    
+
                     // Mark upvalues
                     for upval_id in upvalue_ids {
                         if let Some(upval) = pool.upvalues.get_mut(upval_id.0) {
                             if upval.header.is_white() {
                                 upval.header.make_gray();
-                                self.gray.push(GcId::from_upvalue(upval_id));
+                                self.gray.push(GcId::UpvalueId(upval_id));
                             }
                         }
                     }
-                    
+
                     // Mark constants
                     for c in constants {
                         self.mark_value(&c, pool);
@@ -549,14 +457,14 @@ impl GC {
             GcType::Thread => {
                 if let Some(thread) = pool.threads.get(gc_id.index()) {
                     let stack = thread.data.register_stack.clone();
-                    
+
                     if let Some(t) = pool.threads.get_mut(gc_id.index()) {
                         if t.header.is_gray() {
                             t.header.make_black();
                             work += stack.len();
                         }
                     }
-                    
+
                     for v in stack {
                         self.mark_value(&v, pool);
                     }
@@ -570,24 +478,24 @@ impl GC {
             }
             GcType::Userdata => {}
         }
-        
+
         work
     }
-    
+
     /// Do one step of sweeping - sweep all pools in one step
     /// This is acceptable because sweep is much faster than marking
     fn sweep_step(&mut self, pool: &mut ObjectPool, _max_work: usize) -> usize {
         // Sweep all pools in one step (much faster than incremental)
         let collected = self.sweep_pools(pool);
         self.stats.objects_collected += collected;
-        
+
         // Sweeping done - transition to finished
         self.state = GcState::Pause;
         self.finish_cycle();
-        
+
         collected
     }
-    
+
     /// Sweep all pools directly
     fn sweep_pools(&mut self, pool: &mut ObjectPool) -> usize {
         let mut collected = 0;
@@ -659,12 +567,12 @@ impl GC {
 
         collected
     }
-    
+
     /// Finish the GC cycle
     fn finish_cycle(&mut self) {
         // Flip white bit for next cycle
         self.current_white ^= 1;
-        
+
         // Set debt based on memory and pause factor
         let estimate = self.total_bytes;
         let threshold = (estimate as isize * self.gc_pause as isize) / 100;

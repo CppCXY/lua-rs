@@ -85,7 +85,7 @@ pub fn exec_closure(
     // Get prototype and parent upvalues without cloning upvalues early
     let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-    
+
     let proto = func_ref.chunk.child_protos.get(bx).cloned();
     let proto = match proto {
         Some(p) => p,
@@ -207,7 +207,9 @@ pub fn exec_vararg(
                 } else {
                     nil_val
                 };
-                unsafe { *reg_ptr.add(dest_base + i) = value; }
+                unsafe {
+                    *reg_ptr.add(dest_base + i) = value;
+                }
             }
         }
     } else {
@@ -215,7 +217,7 @@ pub fn exec_vararg(
         let count = c - 1;
         let copy_count = count.min(vararg_count);
         let nil_count = count.saturating_sub(vararg_count);
-        
+
         // OPTIMIZED: Bulk copy available varargs
         if copy_count > 0 && vararg_start + copy_count <= vm.register_stack.len() {
             unsafe {
@@ -226,12 +228,14 @@ pub fn exec_vararg(
                 );
             }
         }
-        
+
         // Fill remaining with nil
         if nil_count > 0 {
             let nil_val = LuaValue::nil();
             for i in copy_count..count {
-                unsafe { *reg_ptr.add(dest_base + i) = nil_val; }
+                unsafe {
+                    *reg_ptr.add(dest_base + i) = nil_val;
+                }
             }
         }
     }

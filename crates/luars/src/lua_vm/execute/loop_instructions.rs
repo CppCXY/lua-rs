@@ -246,7 +246,7 @@ pub fn exec_tforprep(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize
 
 /// TFORCALL A C
 /// R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2]);
-/// 
+///
 /// Lua 5.4 for-in loop layout:
 /// R[A]   = iter_func
 /// R[A+1] = state
@@ -279,7 +279,7 @@ pub fn exec_tforcall(
         // Set up temporary call frame position (beyond result area)
         let call_base = base_ptr + a + 4 + c + 1;
         vm.ensure_stack_capacity(call_base + 3);
-        
+
         unsafe {
             *vm.register_stack.get_unchecked_mut(call_base) = func;
             *vm.register_stack.get_unchecked_mut(call_base + 1) = state;
@@ -295,28 +295,38 @@ pub fn exec_tforcall(
         // OPTIMIZED: Direct inline access without Vec allocation
         // ipairs/pairs typically return 2 values (index, value) or nil
         let result_base = base_ptr + a + 4;
-        
+
         if result.overflow.is_some() {
             // Rare case: more than 2 values
             let values = result.overflow.unwrap();
             let count = values.len().min(c);
             for i in 0..count {
-                unsafe { *vm.register_stack.get_unchecked_mut(result_base + i) = values[i]; }
+                unsafe {
+                    *vm.register_stack.get_unchecked_mut(result_base + i) = values[i];
+                }
             }
             for i in count..c {
-                unsafe { *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil(); }
+                unsafe {
+                    *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
+                }
             }
         } else {
             // Common case: 0-2 inline values
             let inline_count = result.inline_count as usize;
             unsafe {
                 if c >= 1 {
-                    *vm.register_stack.get_unchecked_mut(result_base) = 
-                        if inline_count >= 1 { result.inline[0] } else { LuaValue::nil() };
+                    *vm.register_stack.get_unchecked_mut(result_base) = if inline_count >= 1 {
+                        result.inline[0]
+                    } else {
+                        LuaValue::nil()
+                    };
                 }
                 if c >= 2 {
-                    *vm.register_stack.get_unchecked_mut(result_base + 1) = 
-                        if inline_count >= 2 { result.inline[1] } else { LuaValue::nil() };
+                    *vm.register_stack.get_unchecked_mut(result_base + 1) = if inline_count >= 2 {
+                        result.inline[1]
+                    } else {
+                        LuaValue::nil()
+                    };
                 }
                 // Fill any remaining slots with nil
                 for i in 2..c {
@@ -332,7 +342,7 @@ pub fn exec_tforcall(
         LuaValueKind::Function => {
             // For Lua functions, set up for a normal call
             // We need to place function and arguments, then results go to R[A+4]
-            
+
             // Use new ID-based API to get function
             let Some(func_id) = func.as_function_id() else {
                 return Err(vm.error("Not a Lua function".to_string()));
@@ -349,7 +359,7 @@ pub fn exec_tforcall(
             // Arguments: state, control
             let call_base = base_ptr + a + 4;
             vm.ensure_stack_capacity(call_base + max_stack_size);
-            
+
             // Place arguments (overwriting result slots temporarily is OK)
             vm.register_stack[call_base] = state;
             vm.register_stack[call_base + 1] = control;
@@ -383,7 +393,7 @@ pub fn exec_tforcall(
 
 /// TFORLOOP A Bx
 /// if R[A+4] ~= nil then { R[A+2]=R[A+4]; pc -= Bx }
-/// 
+///
 /// Lua 5.4 for-in loop layout:
 /// R[A]   = iter_func
 /// R[A+1] = state

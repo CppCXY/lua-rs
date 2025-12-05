@@ -51,7 +51,7 @@ pub fn exec_varargprep(
         unsafe {
             let reg_ptr = vm.register_stack.as_mut_ptr();
             let src = frame_base + a;
-            
+
             if vararg_dest >= src + vararg_count {
                 // No overlap - use fast copy
                 std::ptr::copy_nonoverlapping(

@@ -718,15 +718,15 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         // First, compile all expressions except the last directly to target registers
         for (i, expr) in exprs.iter().take(num_exprs - 1).enumerate() {
             let target_reg = base_reg + i as u32;
-            
+
             // Try to compile expression directly to target register
             let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
-            
+
             // If expression couldn't be placed in target, emit a MOVE
             if src_reg != target_reg {
                 emit_move(c, target_reg, src_reg);
             }
-            
+
             if target_reg >= c.freereg {
                 c.freereg = target_reg + 1;
             }
@@ -767,16 +767,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     // Compile expressions directly to target registers when possible
     for i in 0..num_exprs {
         let target_reg = base_reg + i as u32;
-        
+
         // Try to compile expression directly to target register
         // compile_expr_to will use get_result_reg which ensures max_stack_size is updated
         let src_reg = compile_expr_to(c, &exprs[i], Some(target_reg))?;
-        
+
         // If expression couldn't be placed in target, emit a MOVE
         if src_reg != target_reg {
             emit_move(c, target_reg, src_reg);
         }
-        
+
         // Update freereg to account for this register
         if target_reg >= c.freereg {
             c.freereg = target_reg + 1;
@@ -1138,7 +1138,7 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 }
 
 /// Compile generic for loop using TFORPREP/TFORCALL/TFORLOOP instructions
-/// 
+///
 /// Lua 5.4 for-in register layout:
 /// R[A]   = iter_func (f)
 /// R[A+1] = state (s)
@@ -1176,7 +1176,7 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
     // FIRST: Compile iterator expressions BEFORE allocating the for-in block
     // This prevents the call results from overlapping with loop variables
     let base = c.freereg;
-    
+
     // Compile iterator expressions to get (iter_func, state, control_var, to-be-closed) at base
     // Lua 5.4 for-in needs 4 control slots: iterator, state, control, closing value
     if iter_exprs.len() == 1 {
@@ -1285,7 +1285,8 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
     // Patch TFORPREP to jump to TFORCALL
     // TFORPREP jumps forward by Bx
     let tforprep_jump = tforcall_pc - tforprep_pc - 1;
-    c.chunk.code[tforprep_pc] = Instruction::encode_abx(OpCode::TForPrep, base, tforprep_jump as u32);
+    c.chunk.code[tforprep_pc] =
+        Instruction::encode_abx(OpCode::TForPrep, base, tforprep_jump as u32);
 
     end_loop(c);
     end_scope(c);

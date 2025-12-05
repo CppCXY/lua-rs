@@ -77,11 +77,7 @@ pub fn exec_return(
                 // Return all values - use memcpy
                 if return_count > 0 {
                     let src_start = base_ptr + a;
-                    std::ptr::copy(
-                        reg_ptr.add(src_start),
-                        reg_ptr.add(dest_base),
-                        return_count,
-                    );
+                    std::ptr::copy(reg_ptr.add(src_start), reg_ptr.add(dest_base), return_count);
                 }
                 (*caller_ptr).top = (result_reg + return_count) as u32;
             } else if num_results == 0 {
@@ -761,12 +757,12 @@ fn relocate_parent_vararg(
     if vm.register_stack.len() < required_capacity {
         vm.register_stack.resize(required_capacity, LuaValue::nil());
     }
-    
+
     // Copy vararg values to new location
     for i in 0..parent_vararg_count {
         vm.register_stack[new_vararg_start + i] = vm.register_stack[parent_vararg_start + i];
     }
-    
+
     // Update parent frame's vararg position
     let parent_frame = unsafe { &mut **frame_ptr_ptr };
     parent_frame.set_vararg(new_vararg_start, parent_vararg_count);
@@ -821,13 +817,19 @@ pub fn exec_call(
         // Only check parent vararg if function uses significant stack
         let parent_frame = unsafe { &**frame_ptr_ptr };
         let parent_vararg_count = parent_frame.get_vararg_count();
-        
+
         // Cold path: parent has vararg that might be overwritten
         if parent_vararg_count > 0 {
             let parent_vararg_start = parent_frame.get_vararg_start();
             let new_frame_end = new_base + max_stack_size;
             if new_frame_end > parent_vararg_start {
-                relocate_parent_vararg(vm, frame_ptr_ptr, new_frame_end, parent_vararg_start, parent_vararg_count);
+                relocate_parent_vararg(
+                    vm,
+                    frame_ptr_ptr,
+                    new_frame_end,
+                    parent_vararg_start,
+                    parent_vararg_count,
+                );
             }
         }
 
@@ -1062,7 +1064,7 @@ fn exec_call_lua_function(
     let parent_frame = unsafe { &mut **frame_ptr_ptr };
     let parent_vararg_start = parent_frame.get_vararg_start();
     let parent_vararg_count = parent_frame.get_vararg_count();
-    
+
     if parent_vararg_count > 0 {
         let new_frame_end = new_base + max_stack_size;
         if new_frame_end > parent_vararg_start {
@@ -1073,12 +1075,13 @@ fn exec_call_lua_function(
             if vm.register_stack.len() < required_capacity {
                 vm.register_stack.resize(required_capacity, LuaValue::nil());
             }
-            
+
             // Copy vararg values to new location (copy forward, no overlap issue since new > old)
             for i in 0..parent_vararg_count {
-                vm.register_stack[new_vararg_start + i] = vm.register_stack[parent_vararg_start + i];
+                vm.register_stack[new_vararg_start + i] =
+                    vm.register_stack[parent_vararg_start + i];
             }
-            
+
             // Update parent frame's vararg position
             // Need to get mutable reference again after potential reallocation
             let parent_frame = unsafe { &mut **frame_ptr_ptr };
@@ -1511,20 +1514,23 @@ pub fn exec_return0(
     if vm.frame_count > 1 {
         // FAST PATH: Calculate caller frame pointer BEFORE pop
         let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
-        
+
         // Pop frame - just decrement counter (like Lua C: L->ci = ci->previous)
         vm.frame_count -= 1;
-        
+
         // Check if caller is Lua function
         if unsafe { (*caller_ptr).is_lua() } {
             // Get info we need
             let (result_reg, num_results) = unsafe {
-                ((**frame_ptr_ptr).get_result_reg(), (**frame_ptr_ptr).get_num_results())
+                (
+                    (**frame_ptr_ptr).get_result_reg(),
+                    (**frame_ptr_ptr).get_num_results(),
+                )
             };
-            
+
             // Update frame_ptr to caller
             *frame_ptr_ptr = caller_ptr;
-            
+
             // Only fill nil if caller expects results
             // Like Lua C: for (nres = ci->nresults; l_unlikely(nres > 0); nres--)
             if num_results > 0 && num_results != usize::MAX {
@@ -1538,7 +1544,7 @@ pub fn exec_return0(
                     }
                 }
             }
-            
+
             return Ok(());
         } else {
             // C function caller
@@ -1547,7 +1553,7 @@ pub fn exec_return0(
             return Err(LuaError::Exit);
         }
     }
-    
+
     // No caller - exit VM
     vm.frame_count -= 1;
     vm.return_values.clear();
@@ -1575,23 +1581,24 @@ pub fn exec_return1(
     if vm.frame_count > 1 {
         // FAST PATH: Calculate caller frame pointer BEFORE pop
         let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
-        
+
         // Pop frame - just decrement counter
         vm.frame_count -= 1;
-        
+
         // Check if caller is Lua function
         if unsafe { (*caller_ptr).is_lua() } {
             let result_reg = unsafe { (**frame_ptr_ptr).get_result_reg() };
-            
+
             // Update frame_ptr to caller
             *frame_ptr_ptr = caller_ptr;
-            
+
             // Write return value directly to caller's register
             let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
             unsafe {
-                *vm.register_stack.get_unchecked_mut(caller_base + result_reg) = return_value;
+                *vm.register_stack
+                    .get_unchecked_mut(caller_base + result_reg) = return_value;
             }
-            
+
             return Ok(());
         } else {
             // C function caller
@@ -1601,7 +1608,7 @@ pub fn exec_return1(
             return Err(LuaError::Exit);
         }
     }
-    
+
     // No caller - exit VM
     vm.frame_count -= 1;
     vm.return_values.clear();

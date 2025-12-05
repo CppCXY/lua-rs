@@ -219,7 +219,7 @@ pub fn args_iter(vm: &LuaVM) -> impl Iterator<Item = (usize, LuaValue)> + '_ {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
-    
+
     (1..top).map(move |i| (i, vm.register_stack[base_ptr + i]))
 }
 

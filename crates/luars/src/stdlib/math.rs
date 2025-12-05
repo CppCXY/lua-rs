@@ -119,59 +119,63 @@ fn math_log(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 fn math_max(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use crate::lib_registry::{arg_count, get_arg};
-    
+
     let argc = arg_count(vm);
     if argc == 0 {
         return Err(vm.error("bad argument to 'math.max' (value expected)".to_string()));
     }
-    
+
     // Get first argument
     let first = get_arg(vm, 1).unwrap();
-    let mut max_val = first.as_number()
+    let mut max_val = first
+        .as_number()
         .ok_or_else(|| vm.error("bad argument to 'math.max' (number expected)".to_string()))?;
     let mut max_arg = first;
-    
+
     // Compare with rest
     for i in 2..=argc {
         if let Some(arg) = get_arg(vm, i) {
-            let val = arg.as_number()
-                .ok_or_else(|| vm.error("bad argument to 'math.max' (number expected)".to_string()))?;
+            let val = arg.as_number().ok_or_else(|| {
+                vm.error("bad argument to 'math.max' (number expected)".to_string())
+            })?;
             if val > max_val {
                 max_val = val;
                 max_arg = arg;
             }
         }
     }
-    
+
     Ok(MultiValue::single(max_arg))
 }
 
 fn math_min(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use crate::lib_registry::{arg_count, get_arg};
-    
+
     let argc = arg_count(vm);
     if argc == 0 {
         return Err(vm.error("bad argument to 'math.min' (value expected)".to_string()));
     }
-    
+
     // Get first argument
     let first = get_arg(vm, 1).unwrap();
-    let mut min_val = first.as_number()
+    let mut min_val = first
+        .as_number()
         .ok_or_else(|| vm.error("bad argument to 'math.min' (number expected)".to_string()))?;
     let mut min_arg = first;
-    
+
     // Compare with rest
     for i in 2..=argc {
         if let Some(arg) = get_arg(vm, i) {
-            let val = arg.as_number()
-                .ok_or_else(|| vm.error("bad argument to 'math.min' (number expected)".to_string()))?;
+            let val = arg.as_number().ok_or_else(|| {
+                vm.error("bad argument to 'math.min' (number expected)".to_string())
+            })?;
             if val < min_val {
                 min_val = val;
                 min_arg = arg;
             }
         }
     }
-    
+
     Ok(MultiValue::single(min_arg))
 }
 

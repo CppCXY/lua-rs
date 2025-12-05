@@ -492,12 +492,12 @@ mod tests {
     fn test_opcode_mode() {
         assert_eq!(OpCode::Move.get_mode(), OpMode::IABC);
         assert_eq!(OpCode::LoadK.get_mode(), OpMode::IABx);
-        assert_eq!(OpCode::Jmp.get_mode(), OpMode::IsJ);  // JMP uses sJ format (signed jump)
+        assert_eq!(OpCode::Jmp.get_mode(), OpMode::IsJ); // JMP uses sJ format (signed jump)
         assert_eq!(OpCode::ExtraArg.get_mode(), OpMode::IAx);
         assert_eq!(OpCode::Add.get_mode(), OpMode::IABC);
-        assert_eq!(OpCode::TForCall.get_mode(), OpMode::IABC);  // TFORCALL uses ABC format
-        assert_eq!(OpCode::TForLoop.get_mode(), OpMode::IABx);  // TFORLOOP uses ABx format
-        assert_eq!(OpCode::LoadI.get_mode(), OpMode::IAsBx);  // LOADI uses signed sBx
+        assert_eq!(OpCode::TForCall.get_mode(), OpMode::IABC); // TFORCALL uses ABC format
+        assert_eq!(OpCode::TForLoop.get_mode(), OpMode::IABx); // TFORLOOP uses ABx format
+        assert_eq!(OpCode::LoadI.get_mode(), OpMode::IAsBx); // LOADI uses signed sBx
     }
 
     #[test]
