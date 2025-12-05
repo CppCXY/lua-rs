@@ -672,8 +672,57 @@ impl LuaVM {
 
             is_first_resume = thread.frame_count == 0;
             thread.status = CoroutineStatus::Running;
+        }
 
-            // Swap state between VM and thread (O(1) pointer swaps)
+        // CRITICAL FIX: Before first resume, close all open upvalues in the coroutine function
+        // This is necessary because open upvalues point to stack positions in the MAIN thread.
+        // After swap, the coroutine has its own stack, so open upvalues would point to wrong locations.
+        // By closing them BEFORE swap, we capture their current values from the main stack.
+        if is_first_resume {
+            let func = {
+                let Some(thread) = self.object_pool.get_thread(thread_id) else {
+                    return Err(self.error("invalid thread".to_string()));
+                };
+                thread.register_stack.get(0).cloned().unwrap_or(LuaValue::nil())
+            };
+            
+            // If the function has upvalues, close them before swap
+            if let Some(func_id) = func.as_function_id() {
+                // Get upvalue IDs from the function
+                let upvalue_ids: Vec<UpvalueId> = {
+                    if let Some(func_ref) = self.object_pool.get_function(func_id) {
+                        func_ref.upvalues.clone()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                
+                // Close each open upvalue by reading from current (main) stack
+                for uv_id in upvalue_ids {
+                    if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
+                        if let Some(stack_idx) = uv.get_stack_index() {
+                            // Read current value from main stack
+                            let value = if stack_idx < self.register_stack.len() {
+                                self.register_stack[stack_idx]
+                            } else {
+                                LuaValue::nil()
+                            };
+                            // Close the upvalue with this value
+                            if let Some(uv_mut) = self.object_pool.get_upvalue_mut(uv_id) {
+                                uv_mut.close(value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now swap state between VM and thread (O(1) pointer swaps)
+        {
+            let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
+                return Err(self.error("invalid thread".to_string()));
+            };
+
             std::mem::swap(&mut self.frames, &mut thread.frames);
             std::mem::swap(&mut self.register_stack, &mut thread.register_stack);
             std::mem::swap(&mut self.return_values, &mut thread.return_values);
