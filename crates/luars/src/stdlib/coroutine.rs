@@ -138,7 +138,7 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     // Create the coroutine
     let thread_val = vm.create_thread_value(func);
-    
+
     // Get the ThreadId from the thread value
     let Some(thread_id) = thread_val.as_thread_id() else {
         return Err(vm.error("Failed to create coroutine".to_string()));
@@ -157,7 +157,7 @@ fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Get the thread from inline upvalue (no indirection, direct value)
     let thread_val = vm.get_c_closure_inline_upvalue();
-    
+
     if !thread_val.is_thread() {
         return Err(vm.error("invalid wrapped coroutine".to_string()));
     }

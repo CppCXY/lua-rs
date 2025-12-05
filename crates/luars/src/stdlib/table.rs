@@ -263,11 +263,11 @@ fn table_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
-    
+
     if top <= 1 {
         return Err(vm.error("bad argument #1 to 'unpack' (table expected)".to_string()));
     }
-    
+
     let table_val = vm.register_stack[base_ptr + 1];
     let Some(table_id) = table_val.as_table_id() else {
         return Err(vm.error("bad argument #1 to 'unpack' (table expected)".to_string()));
@@ -275,39 +275,41 @@ fn table_unpack(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let Some(table_ref) = vm.object_pool.get_table(table_id) else {
         return Err(vm.error("Invalid table".to_string()));
     };
-    
+
     let len = table_ref.len();
-    
+
     // Get i (default 1) - direct stack access
     let i = if top > 2 {
         vm.register_stack[base_ptr + 2].as_integer().unwrap_or(1)
     } else {
         1
     };
-    
+
     // Get j (default len) - direct stack access
     let j = if top > 3 {
-        vm.register_stack[base_ptr + 3].as_integer().unwrap_or(len as i64)
+        vm.register_stack[base_ptr + 3]
+            .as_integer()
+            .unwrap_or(len as i64)
     } else {
         len as i64
     };
-    
+
     // Handle empty range
     if i > j {
         return Ok(MultiValue::empty());
     }
-    
+
     let count = (j - i + 1) as usize;
-    
+
     // FAST PATH: Small unpacks (common case)
     if count == 1 {
         let val = table_ref.get_int(i).unwrap_or(LuaValue::nil());
         return Ok(MultiValue::single(val));
     }
-    
+
     // Pre-allocate with exact capacity
     let mut result = Vec::with_capacity(count);
-    
+
     // FAST PATH: If unpacking from beginning and array part is large enough
     // we can copy directly from array
     if i == 1 && table_ref.array.len() >= count {

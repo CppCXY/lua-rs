@@ -797,7 +797,7 @@ pub fn exec_call(
 
         // Get function info - check if Lua or C closure
         let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-        
+
         // FAST PATH: Lua function (most common case) - check first!
         if let crate::gc::FunctionBody::Lua(chunk) = &func_ref.body {
             // Lua function path - inline for speed
@@ -898,7 +898,7 @@ pub fn exec_call(
             *frame_ptr_ptr = vm.push_frame(new_frame);
             return Ok(());
         }
-        
+
         // C closure paths (less common)
         match &func_ref.body {
             crate::gc::FunctionBody::C(c_func) => {
@@ -956,21 +956,17 @@ pub fn exec_call(
 
     // Slow path: Check for __call metamethod (for Table and Userdata)
     let metatable_opt = match func.kind() {
-        LuaValueKind::Table => {
-            func.as_table_id().and_then(|table_id| {
-                vm.object_pool
-                    .get_table(table_id)
-                    .and_then(|t| t.get_metatable())
-            })
-        }
-        LuaValueKind::Userdata => {
-            func.as_userdata_id().and_then(|ud_id| {
-                vm.object_pool
-                    .get_userdata(ud_id)
-                    .map(|ud| ud.get_metatable())
-                    .filter(|mt| !mt.is_nil())
-            })
-        }
+        LuaValueKind::Table => func.as_table_id().and_then(|table_id| {
+            vm.object_pool
+                .get_table(table_id)
+                .and_then(|t| t.get_metatable())
+        }),
+        LuaValueKind::Userdata => func.as_userdata_id().and_then(|ud_id| {
+            vm.object_pool
+                .get_userdata(ud_id)
+                .map(|ud| ud.get_metatable())
+                .filter(|mt| !mt.is_nil())
+        }),
         _ => None,
     };
 
@@ -980,17 +976,7 @@ pub fn exec_call(
         if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
             if call_func.is_callable() {
                 if call_func.is_cfunction() {
-                    exec_call_cfunction(
-                        vm,
-                        call_func,
-                        a,
-                        b,
-                        c,
-                        base,
-                        true,
-                        func,
-                        frame_ptr_ptr,
-                    )?;
+                    exec_call_cfunction(vm, call_func, a, b, c, base, true, func, frame_ptr_ptr)?;
                     return Ok(());
                 } else {
                     exec_call_lua_function(
@@ -1446,7 +1432,7 @@ fn exec_call_c_closure_inline1(
     // Store inline upvalue in VM state for access during call
     let old_inline_upvalue = vm.c_closure_inline_upvalue;
     vm.c_closure_inline_upvalue = inline_upvalue;
-    
+
     // Clear pointer-based upvalues (not used for inline1)
     let old_upvalues_ptr = vm.c_closure_upvalues_ptr;
     let old_upvalues_len = vm.c_closure_upvalues_len;

@@ -252,8 +252,7 @@ impl LuaTable {
 
     /// Get the metatable of this table
     pub fn get_metatable(&self) -> Option<LuaValue> {
-        self.metatable
-            .map(|mt_id| LuaValue::table(mt_id))
+        self.metatable.map(|mt_id| LuaValue::table(mt_id))
     }
 
     /// Set the metatable of this table

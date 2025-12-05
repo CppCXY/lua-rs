@@ -26,12 +26,12 @@ pub const MAX_CALL_DEPTH: usize = 256;
 
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
-    pub(crate) global_value: LuaValue,
+    pub(crate) global: TableId,
 
     // Registry table (like Lua's LUA_REGISTRYINDEX)
     // Used to store objects that should be protected from GC but not visible to Lua code
     // This is a GC root and all values in it are protected
-    pub(crate) registry: LuaValue,
+    pub(crate) registry: TableId,
 
     // Hot path GC debt counter - placed early in struct for cache locality
     // This is updated on every allocation and checked frequently
@@ -93,12 +93,12 @@ pub struct LuaVM {
 
     // String metatable (shared by all strings) - stored as TableId in LuaValue
     pub(crate) string_metatable: Option<LuaValue>,
-    
+
     // C closure upvalues (temporary storage during C closure call)
     // Points to the upvalues array of the currently executing C closure
     pub(crate) c_closure_upvalues_ptr: *const UpvalueId,
     pub(crate) c_closure_upvalues_len: usize,
-    
+
     // Single inline upvalue for CClosureInline1 (no indirection needed)
     pub(crate) c_closure_inline_upvalue: LuaValue,
 
@@ -125,8 +125,8 @@ impl LuaVM {
         frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
 
         let mut vm = LuaVM {
-            global_value: LuaValue::nil(),
-            registry: LuaValue::nil(),    // Will be initialized below
+            global: TableId(0),                       // Will be initialized below
+            registry: TableId(1),                     // Will be initialized below
             gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
             gc_roots_buffer: Vec::with_capacity(512), // Pre-allocate roots buffer
             frames,
@@ -162,79 +162,62 @@ impl LuaVM {
         if let Some(registry_id) = registry.as_table_id() {
             // Fix the registry table so it's never collected
             vm.object_pool.fix_table(registry_id);
+            vm.registry = registry_id;
         }
-        vm.registry = registry;
 
         // Set _G to point to the global table itself
-        let globals_ref = vm.create_table(0, 20);
-        vm.global_value = globals_ref;
-        vm.set_global("_G", globals_ref);
-        vm.set_global("_ENV", globals_ref);
+        let globals_value = vm.create_table(0, 20);
+        if let Some(globals_id) = globals_value.as_table_id() {
+            // Fix the global table so it's never collected
+            vm.object_pool.fix_table(globals_id);
+            vm.global = globals_id;
+        }
+
+        vm.set_global("_G", globals_value);
+        vm.set_global("_ENV", globals_value);
 
         // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
-        vm.registry_set_integer(1, globals_ref);
+        vm.registry_set_integer(1, globals_value);
 
         vm
     }
 
     /// Set a value in the registry by integer key
     pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
-        if let Some(reg_id) = self.registry.as_table_id() {
-            if let Some(reg_table) = self.object_pool.get_table_mut(reg_id) {
-                reg_table.set_int(key, value);
-            }
+        if let Some(reg_table) = self.object_pool.get_table_mut(self.registry) {
+            reg_table.set_int(key, value);
         }
     }
 
     /// Get a value from the registry by integer key
     pub fn registry_get_integer(&self, key: i64) -> Option<LuaValue> {
-        if let Some(reg_id) = self.registry.as_table_id() {
-            if let Some(reg_table) = self.object_pool.get_table(reg_id) {
-                return reg_table.get_int(key);
-            }
+        if let Some(reg_table) = self.object_pool.get_table(self.registry) {
+            return reg_table.get_int(key);
         }
+
         None
     }
 
     /// Set a value in the registry by string key
     pub fn registry_set(&mut self, key: &str, value: LuaValue) {
         let key_value = self.create_string(key);
-        if let Some(reg_id) = self.registry.as_table_id() {
-            if let Some(reg_table) = self.object_pool.get_table_mut(reg_id) {
-                reg_table.raw_set(key_value, value);
-            }
+
+        if let Some(reg_table) = self.object_pool.get_table_mut(self.registry) {
+            reg_table.raw_set(key_value, value);
         }
     }
 
     /// Get a value from the registry by string key
-    pub fn registry_get(&self, key: &str) -> Option<LuaValue> {
-        // We can't use create_string here as it requires &mut self
-        // So we do a linear search (registry is typically small)
-        if let Some(reg_id) = self.registry.as_table_id() {
-            if let Some(reg_table) = self.object_pool.get_table(reg_id) {
-                for (k, v) in reg_table.iter_all() {
-                    if let Some(k_id) = k.as_string_id() {
-                        if let Some(k_str) = self.object_pool.get_string_str(k_id) {
-                            if k_str == key {
-                                return Some(v);
-                            }
-                        }
-                    }
-                }
-            }
+    pub fn registry_get(&mut self, key: &str) -> Option<LuaValue> {
+        let key = self.create_string(key);
+        if let Some(reg_table) = self.object_pool.get_table(self.registry) {
+            return reg_table.raw_get(&key);
         }
+
         None
     }
 
-    // Register access helpers for unified stack architecture
     #[inline(always)]
-    #[allow(dead_code)]
-    fn get_register(&self, base_ptr: usize, reg: usize) -> LuaValue {
-        self.register_stack[base_ptr + reg]
-    }
-
-    #[inline(always)]
-    #[allow(dead_code)]
     fn set_register(&mut self, base_ptr: usize, reg: usize, value: LuaValue) {
         self.register_stack[base_ptr + reg] = value;
     }
@@ -261,7 +244,7 @@ impl LuaVM {
 
         // Create upvalue for _ENV (global table)
         // Main chunks in Lua 5.4 always have _ENV as upvalue[0]
-        let env_upvalue_id = self.create_upvalue_closed(self.global_value);
+        let env_upvalue_id = self.create_upvalue_closed(LuaValue::table(self.global));
         let upvalues = vec![env_upvalue_id];
 
         // Create main function in object pool with _ENV upvalue
@@ -488,49 +471,38 @@ impl LuaVM {
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
         let key = self.create_string(name);
-        if let Some(global_id) = self.global_value.as_table_id() {
-            let global = self.object_pool.get_table(global_id)?;
-            global.raw_get(&key)
-        } else {
-            None
-        }
+
+        let global = self.object_pool.get_table(self.global)?;
+        global.raw_get(&key)
     }
 
     pub fn get_global_by_lua_value(&self, key: &LuaValue) -> Option<LuaValue> {
-        if let Some(global_id) = self.global_value.as_table_id() {
-            let global = self.object_pool.get_table(global_id)?;
-            global.raw_get(key)
-        } else {
-            None
-        }
+        let global = self.object_pool.get_table(self.global)?;
+        global.raw_get(key)
     }
 
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
         let key = self.create_string(name);
 
-        if let Some(global_id) = self.global_value.as_table_id() {
-            if let Some(global) = self.object_pool.get_table_mut(global_id) {
-                global.raw_set(key.clone(), value.clone());
-            }
-
-            // Write barrier: global table (old) may now reference new object
-            self.gc
-                .barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
-            self.gc.barrier_back(&value);
+        if let Some(global) = self.object_pool.get_table_mut(self.global) {
+            global.raw_set(key.clone(), value.clone());
         }
+
+        // Write barrier: global table (old) may now reference new object
+        // self.gc
+        //     .barrier_forward(crate::gc::GcObjectType::Table, self.global.0);
+        // self.gc.barrier_back(&value);
     }
 
     pub fn set_global_by_lua_value(&mut self, key: &LuaValue, value: LuaValue) {
-        if let Some(global_id) = self.global_value.as_table_id() {
-            if let Some(global) = self.object_pool.get_table_mut(global_id) {
-                global.raw_set(key.clone(), value.clone());
-            }
-
-            // Write barrier
-            self.gc
-                .barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
-            self.gc.barrier_back(&value);
+        if let Some(global) = self.object_pool.get_table_mut(self.global) {
+            global.raw_set(key.clone(), value.clone());
         }
+
+        // Write barrier
+        // self.gc
+        //     .barrier_forward(crate::gc::GcObjectType::Table, global_id.0);
+        // self.gc.barrier_back(&value);
     }
 
     /// Set the metatable for all strings
@@ -673,14 +645,14 @@ impl LuaVM {
 
             let is_first = thread.frame_count == 0;
             thread.status = CoroutineStatus::Running;
-            
+
             // Get function for upvalue closing if first resume
             let func = if is_first {
                 thread.register_stack.get(0).cloned()
             } else {
                 None
             };
-            
+
             (is_first, func)
         };
 
@@ -696,7 +668,7 @@ impl LuaVM {
                             Vec::new()
                         }
                     };
-                    
+
                     // Close each open upvalue by reading from current (main) stack
                     for uv_id in upvalue_ids {
                         if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
@@ -1925,26 +1897,34 @@ impl LuaVM {
         self.gc_debt_local += 128;
         LuaValue::function(id)
     }
-    
+
     /// Create a C closure (native function with upvalues stored as closed upvalues)
     /// The upvalues are automatically created as closed upvalues with the given values
     #[inline]
-    pub fn create_c_closure(&mut self, func: crate::gc::CFunction, upvalues: Vec<LuaValue>) -> LuaValue {
+    pub fn create_c_closure(
+        &mut self,
+        func: crate::gc::CFunction,
+        upvalues: Vec<LuaValue>,
+    ) -> LuaValue {
         // Create closed upvalues for each value
         let upvalue_ids: Vec<UpvalueId> = upvalues
             .into_iter()
             .map(|v| self.create_upvalue_closed(v))
             .collect();
-        
+
         let id = self.object_pool.create_c_closure(func, upvalue_ids);
         self.gc_debt_local += 128;
         LuaValue::function(id)
     }
-    
+
     /// Create a C closure with a single inline upvalue (fast path)
     /// This avoids all upvalue indirection and allocation overhead
     #[inline]
-    pub fn create_c_closure_inline1(&mut self, func: crate::gc::CFunction, upvalue: LuaValue) -> LuaValue {
+    pub fn create_c_closure_inline1(
+        &mut self,
+        func: crate::gc::CFunction,
+        upvalue: LuaValue,
+    ) -> LuaValue {
         let id = self.object_pool.create_c_closure_inline1(func, upvalue);
         self.gc_debt_local += 128;
         LuaValue::function(id)
@@ -1965,7 +1945,7 @@ impl LuaVM {
         self.gc_debt_local += 64;
         id
     }
-    
+
     /// Get the inline upvalue for CClosureInline1
     /// This is the ultra-fast path for C closures with a single upvalue
     /// Returns the upvalue value directly without any indirection
@@ -1973,19 +1953,22 @@ impl LuaVM {
     pub fn get_c_closure_inline_upvalue(&self) -> LuaValue {
         self.c_closure_inline_upvalue
     }
-    
+
     /// Get a C closure upvalue by index (1-based like Lua's lua_upvalueindex)
     /// This can only be called from within a C closure
     /// Returns None if index is out of bounds or not in a C closure context
     #[inline]
     pub fn get_c_closure_upvalue(&self, index: usize) -> Option<LuaValue> {
-        if self.c_closure_upvalues_ptr.is_null() || index == 0 || index > self.c_closure_upvalues_len {
+        if self.c_closure_upvalues_ptr.is_null()
+            || index == 0
+            || index > self.c_closure_upvalues_len
+        {
             return None;
         }
-        
+
         // Get the upvalue ID (1-based index)
         let upvalue_id = unsafe { *self.c_closure_upvalues_ptr.add(index - 1) };
-        
+
         // Resolve the upvalue value
         if let Some(upvalue) = self.object_pool.get_upvalue(upvalue_id) {
             upvalue.get_closed_value()
@@ -1993,19 +1976,22 @@ impl LuaVM {
             None
         }
     }
-    
+
     /// Set a C closure upvalue by index (1-based)
     /// This can only be called from within a C closure
     /// Returns true if successful, false if index out of bounds or not in C closure
     #[inline]
     pub fn set_c_closure_upvalue(&mut self, index: usize, value: LuaValue) -> bool {
-        if self.c_closure_upvalues_ptr.is_null() || index == 0 || index > self.c_closure_upvalues_len {
+        if self.c_closure_upvalues_ptr.is_null()
+            || index == 0
+            || index > self.c_closure_upvalues_len
+        {
             return false;
         }
-        
+
         // Get the upvalue ID (1-based index)
         let upvalue_id = unsafe { *self.c_closure_upvalues_ptr.add(index - 1) };
-        
+
         // Set the upvalue value
         if let Some(upvalue) = self.object_pool.get_upvalue_mut(upvalue_id) {
             upvalue.close(value);
@@ -2143,10 +2129,10 @@ impl LuaVM {
         self.gc_roots_buffer.clear();
 
         // 1. Global table
-        self.gc_roots_buffer.push(self.global_value);
+        self.gc_roots_buffer.push(LuaValue::table(self.global));
 
         // 2. Registry table (persistent objects storage)
-        self.gc_roots_buffer.push(self.registry);
+        self.gc_roots_buffer.push(LuaValue::table(self.registry));
 
         // 3. String metatable
         if let Some(mt) = &self.string_metatable {
@@ -2241,10 +2227,10 @@ impl LuaVM {
         let mut roots = Vec::new();
 
         // Add the global table itself as a root
-        roots.push(self.global_value);
+        roots.push(LuaValue::table(self.global));
 
         // Add registry table as a root (persistent objects)
-        roots.push(self.registry);
+        roots.push(LuaValue::table(self.registry));
 
         // Add string metatable if present
         if let Some(mt) = &self.string_metatable {
@@ -2649,12 +2635,12 @@ impl LuaVM {
 
                             // Get line number from pc (pc points to next instruction, so use pc-1)
                             let pc = frame.pc.saturating_sub(1) as usize;
-                            let line_str = if !chunk.line_info.is_empty() && pc < chunk.line_info.len()
-                            {
-                                chunk.line_info[pc].to_string()
-                            } else {
-                                "?".to_string()
-                            };
+                            let line_str =
+                                if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
+                                    chunk.line_info[pc].to_string()
+                                } else {
+                                    "?".to_string()
+                                };
 
                             (source_str.to_string(), line_str)
                         } else {
@@ -2727,8 +2713,8 @@ impl LuaVM {
     pub fn protected_call_stack_based(
         &mut self,
         func: LuaValue,
-        arg_base: usize,   // Where args start in stack (caller's base + 1)
-        arg_count: usize,  // Number of arguments
+        arg_base: usize,  // Where args start in stack (caller's base + 1)
+        arg_count: usize, // Number of arguments
     ) -> LuaResult<(bool, usize)> {
         // Save current state
         let initial_frame_count = self.frame_count;

@@ -8,12 +8,12 @@
 // 5. Free list for slot reuse
 // 6. GC headers embedded in objects for mark-sweep
 
+use crate::gc::gc_object::{CFunction, FunctionBody};
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{
     FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
     LuaValue, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
 };
-use crate::gc::gc_object::{FunctionBody, CFunction};
 use std::rc::Rc;
 
 // ============ Pool Storage ============
@@ -397,12 +397,12 @@ pub struct ObjectPool {
     pub tm_shr: StringId,       // "__shr"
     pub tm_concat: StringId,    // "__concat"
     pub tm_metatable: StringId, // "__metatable"
-    
+
     // Pre-cached coroutine status strings for fast coroutine.status
-    pub str_suspended: StringId,  // "suspended"
-    pub str_running: StringId,    // "running"
-    pub str_normal: StringId,     // "normal"
-    pub str_dead: StringId,       // "dead"
+    pub str_suspended: StringId, // "suspended"
+    pub str_running: StringId,   // "running"
+    pub str_normal: StringId,    // "normal"
+    pub str_dead: StringId,      // "dead"
 }
 
 // ============ Lua-style String Interning Table ============
@@ -668,7 +668,7 @@ impl ObjectPool {
         pool.tm_shr = pool.create_string("__shr");
         pool.tm_concat = pool.create_string("__concat");
         pool.tm_metatable = pool.create_string("__metatable");
-        
+
         // Pre-create coroutine status strings
         pool.str_suspended = pool.create_string("suspended");
         pool.str_running = pool.create_string("running");
@@ -1036,7 +1036,7 @@ impl ObjectPool {
         };
         FunctionId(self.functions.alloc(gc_func))
     }
-    
+
     /// Create a C closure (native function with upvalues)
     #[inline]
     pub fn create_c_closure(&mut self, func: CFunction, upvalue_ids: Vec<UpvalueId>) -> FunctionId {
@@ -1047,7 +1047,7 @@ impl ObjectPool {
         };
         FunctionId(self.functions.alloc(gc_func))
     }
-    
+
     /// Create a C closure with single inline upvalue (fast path)
     /// This avoids UpvalueId allocation for common single-upvalue C closures
     #[inline]

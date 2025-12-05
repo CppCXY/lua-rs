@@ -166,7 +166,8 @@ pub struct GcTable {
 }
 
 /// C Function type - Rust function callable from Lua
-pub type CFunction = fn(&mut crate::lua_vm::LuaVM) -> crate::lua_vm::LuaResult<crate::lua_value::MultiValue>;
+pub type CFunction =
+    fn(&mut crate::lua_vm::LuaVM) -> crate::lua_vm::LuaResult<crate::lua_value::MultiValue>;
 
 /// Function body - either Lua bytecode or C function
 pub enum FunctionBody {
@@ -191,15 +192,18 @@ impl GcFunction {
     /// Check if this is a C function (any C variant)
     #[inline(always)]
     pub fn is_c_function(&self) -> bool {
-        matches!(self.body, FunctionBody::C(_) | FunctionBody::CClosureInline1(_, _))
+        matches!(
+            self.body,
+            FunctionBody::C(_) | FunctionBody::CClosureInline1(_, _)
+        )
     }
-    
+
     /// Check if this is a Lua function
     #[inline(always)]
     pub fn is_lua_function(&self) -> bool {
         matches!(self.body, FunctionBody::Lua(_))
     }
-    
+
     /// Get the chunk if this is a Lua function
     #[inline(always)]
     pub fn chunk(&self) -> Option<&Rc<Chunk>> {
@@ -208,7 +212,7 @@ impl GcFunction {
             _ => None,
         }
     }
-    
+
     /// Get the chunk reference for Lua functions (panics if C function)
     /// Use this in contexts where we know it's a Lua function
     #[inline(always)]
@@ -218,7 +222,7 @@ impl GcFunction {
             _ => panic!("Called lua_chunk() on a C function"),
         }
     }
-    
+
     /// Get the C function pointer if this is any C function variant
     #[inline(always)]
     pub fn c_function(&self) -> Option<CFunction> {
@@ -228,7 +232,7 @@ impl GcFunction {
             FunctionBody::Lua(_) => None,
         }
     }
-    
+
     /// Get inline upvalue 1 for CClosureInline1
     #[inline(always)]
     pub fn inline_upvalue1(&self) -> Option<LuaValue> {

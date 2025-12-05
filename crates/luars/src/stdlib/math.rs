@@ -49,7 +49,7 @@ fn get_number_fast(vm: &LuaVM, idx: usize) -> Option<f64> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
-    
+
     if idx < top {
         let value = vm.register_stack[base_ptr + idx];
         value.as_number()
@@ -64,8 +64,7 @@ fn get_number(vm: &mut LuaVM, idx: usize, func_name: &str) -> LuaResult<f64> {
     } else {
         Err(vm.error(format!(
             "bad argument #{} to '{}' (number expected)",
-            idx,
-            func_name
+            idx, func_name
         )))
     }
 }
@@ -74,22 +73,22 @@ fn math_abs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
-    
+
     if top <= 1 {
         return Err(vm.error("bad argument #1 to 'abs' (number expected)".to_string()));
     }
-    
+
     let value = vm.register_stack[base_ptr + 1];
-    
+
     // Fast path: preserve integer type
     if let Some(i) = value.as_integer() {
         return Ok(MultiValue::single(LuaValue::integer(i.abs())));
     }
-    
+
     if let Some(f) = value.as_float() {
         return Ok(MultiValue::single(LuaValue::float(f.abs())));
     }
-    
+
     Err(vm.error("bad argument #1 to 'abs' (number expected)".to_string()))
 }
 
@@ -113,22 +112,22 @@ fn math_ceil(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
-    
+
     if top <= 1 {
         return Err(vm.error("bad argument #1 to 'ceil' (number expected)".to_string()));
     }
-    
+
     let value = vm.register_stack[base_ptr + 1];
-    
+
     // Fast path: integers are already ceil'd
     if let Some(i) = value.as_integer() {
         return Ok(MultiValue::single(LuaValue::integer(i)));
     }
-    
+
     if let Some(f) = value.as_float() {
         return Ok(MultiValue::single(LuaValue::integer(f.ceil() as i64)));
     }
-    
+
     Err(vm.error("bad argument #1 to 'ceil' (number expected)".to_string()))
 }
 
@@ -151,22 +150,22 @@ fn math_floor(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
-    
+
     if top <= 1 {
         return Err(vm.error("bad argument #1 to 'floor' (number expected)".to_string()));
     }
-    
+
     let value = vm.register_stack[base_ptr + 1];
-    
+
     // Fast path: integers are already floor'd
     if let Some(i) = value.as_integer() {
         return Ok(MultiValue::single(LuaValue::integer(i)));
     }
-    
+
     if let Some(f) = value.as_float() {
         return Ok(MultiValue::single(LuaValue::integer(f.floor() as i64)));
     }
-    
+
     Err(vm.error("bad argument #1 to 'floor' (number expected)".to_string()))
 }
 
@@ -206,9 +205,9 @@ fn math_max(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Compare with rest - direct stack access
     for i in 2..=argc {
         let arg = vm.register_stack[base_ptr + i];
-        let val = arg.as_number().ok_or_else(|| {
-            vm.error("bad argument to 'math.max' (number expected)".to_string())
-        })?;
+        let val = arg
+            .as_number()
+            .ok_or_else(|| vm.error("bad argument to 'math.max' (number expected)".to_string()))?;
         if val > max_val {
             max_val = val;
             max_arg = arg;
@@ -239,9 +238,9 @@ fn math_min(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // Compare with rest - direct stack access
     for i in 2..=argc {
         let arg = vm.register_stack[base_ptr + i];
-        let val = arg.as_number().ok_or_else(|| {
-            vm.error("bad argument to 'math.min' (number expected)".to_string())
-        })?;
+        let val = arg
+            .as_number()
+            .ok_or_else(|| vm.error("bad argument to 'math.min' (number expected)".to_string()))?;
         if val < min_val {
             min_val = val;
             min_arg = arg;

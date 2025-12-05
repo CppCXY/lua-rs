@@ -533,7 +533,10 @@ impl GC {
                 if let Some(func) = pool.functions.get(gc_id.index()) {
                     let upvalue_ids = func.upvalues.clone();
                     // C closures don't have constants
-                    let constants = func.chunk().map(|c| c.constants.clone()).unwrap_or_default();
+                    let constants = func
+                        .chunk()
+                        .map(|c| c.constants.clone())
+                        .unwrap_or_default();
 
                     if let Some(f) = pool.functions.get_mut(gc_id.index()) {
                         if f.header.is_gray() {
@@ -1148,7 +1151,10 @@ impl GC {
                             if let Some(func) = pool.functions.get(id.0) {
                                 if func.header.is_white() {
                                     // C closures don't have constants
-                                    let consts = func.chunk().map(|c| c.constants.clone()).unwrap_or_default();
+                                    let consts = func
+                                        .chunk()
+                                        .map(|c| c.constants.clone())
+                                        .unwrap_or_default();
                                     (true, func.upvalues.clone(), consts)
                                 } else {
                                     (false, vec![], vec![])

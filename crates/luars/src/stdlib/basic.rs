@@ -205,7 +205,7 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     }
 
     let index_arg = vm.register_stack[base_ptr + 1];
-    
+
     // Total args after index = top - 2 (subtract function slot and index slot)
     let vararg_count = top.saturating_sub(2);
 
@@ -394,7 +394,7 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // We need to copy since return_values will be reused
     let mut return_values = Vec::with_capacity(1 + result_count);
     return_values.push(LuaValue::boolean(success));
-    
+
     // Take results from vm.return_values
     for i in 0..result_count {
         if i < vm.return_values.len() {
@@ -924,7 +924,7 @@ fn lua_load(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let env_upvalue_id = if let Some(env) = env {
                 vm.create_upvalue_closed(env)
             } else {
-                vm.create_upvalue_closed(vm.global_value)
+                vm.create_upvalue_closed(LuaValue::table(vm.global))
             };
             let upvalues = vec![env_upvalue_id];
 
@@ -966,7 +966,7 @@ fn lua_loadfile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.create_upvalue_closed(vm.global_value);
+            let env_upvalue_id = vm.create_upvalue_closed(LuaValue::table(vm.global));
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
             Ok(MultiValue::single(func))
@@ -1006,7 +1006,7 @@ fn lua_dofile(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.create_upvalue_closed(vm.global_value);
+            let env_upvalue_id = vm.create_upvalue_closed(LuaValue::table(vm.global));
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
 
