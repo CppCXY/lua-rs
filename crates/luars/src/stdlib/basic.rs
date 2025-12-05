@@ -355,10 +355,9 @@ fn lua_next(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// pcall(f [, arg1, ...]) - Protected call
-/// OPTIMIZED: Avoid Vec allocations on success path
+/// ULTRA-OPTIMIZED: Zero Vec allocations on success path
+/// Uses stack-based argument passing and direct return value handling
 fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    // pcall(f, arg1, arg2, ...) -> status, result or error
-
     // Get frame info to read args directly
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
@@ -371,22 +370,24 @@ fn lua_pcall(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("pcall() requires argument 1".to_string()));
     };
 
-    // Collect remaining args (2..top) into a small vec
-    // Most pcalls have 0-3 args, so this is fast
+    // Args start at base_ptr + 2, count is (top - 2) if > 0
+    let arg_base = base_ptr + 2;
     let arg_count = if top > 2 { top - 2 } else { 0 };
-    let args: Vec<LuaValue> = if arg_count > 0 {
-        (2..top).map(|i| vm.register_stack[base_ptr + i]).collect()
-    } else {
-        Vec::new()
-    };
 
-    // Use protected_call from VM
-    let (success, results) = vm.protected_call(func, args)?;
+    // Use stack-based protected call - no Vec allocations!
+    let (success, result_count) = vm.protected_call_stack_based(func, arg_base, arg_count)?;
 
-    // Return status and results - preallocate with capacity
-    let mut return_values = Vec::with_capacity(1 + results.len());
+    // Build return: status first, then results from vm.return_values
+    // We need to copy since return_values will be reused
+    let mut return_values = Vec::with_capacity(1 + result_count);
     return_values.push(LuaValue::boolean(success));
-    return_values.extend(results);
+    
+    // Take results from vm.return_values
+    for i in 0..result_count {
+        if i < vm.return_values.len() {
+            return_values.push(vm.return_values[i]);
+        }
+    }
 
     Ok(MultiValue::multiple(return_values))
 }

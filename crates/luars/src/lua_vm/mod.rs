@@ -5,7 +5,7 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
-use crate::gc::{GC, GcFunction, TableId, ThreadId, UpvalueId};
+use crate::gc::{FunctionId, GC, GcFunction, TableId, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
@@ -1146,9 +1146,162 @@ impl LuaVM {
             }
         }
 
-        // Slow path for Lua functions and general cases
+        // Fast path for Lua functions with 1-2 args (common case)
+        if let Some(func_id) = func.as_function_id() {
+            match args.len() {
+                1 => return self.call_lua_metamethod_1(func_id, args[0]),
+                2 => return self.call_lua_metamethod_2(func_id, args[0], args[1]),
+                _ => {}
+            }
+        }
+
+        // Slow path for general cases
         let result = self.call_function_internal(func.clone(), args.to_vec())?;
         Ok(result.get(0).cloned())
+    }
+
+    /// ULTRA-OPTIMIZED: Call Lua function metamethod with 2 args
+    /// Used by __index, __eq, __lt, __le, etc.
+    /// Zero Vec allocation - copies args directly to stack
+    #[inline]
+    fn call_lua_metamethod_2(
+        &mut self,
+        func_id: FunctionId,
+        arg1: LuaValue,
+        arg2: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        let (max_stack_size, code_ptr, constants_ptr, upvalues_ptr) = {
+            let Some(func_ref) = self.object_pool.get_function(func_id) else {
+                return Err(self.error("Invalid function".to_string()));
+            };
+            let size = func_ref.chunk.max_stack_size.max(2);
+            (
+                size,
+                func_ref.chunk.code.as_ptr(),
+                func_ref.chunk.constants.as_ptr(),
+                func_ref.upvalues.as_ptr(),
+            )
+        };
+
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            (current_frame.base_ptr as usize) + 256
+        } else {
+            0
+        };
+
+        self.ensure_stack_capacity(new_base + max_stack_size);
+
+        // Set up args directly - no Vec allocation
+        unsafe {
+            let dst = self.register_stack.as_mut_ptr().add(new_base);
+            *dst = arg1;
+            *dst.add(1) = arg2;
+            // Initialize remaining with nil
+            let nil_val = LuaValue::nil();
+            for i in 2..max_stack_size {
+                *dst.add(i) = nil_val;
+            }
+        }
+
+        // Push boundary + Lua frame
+        let boundary_frame = LuaCallFrame::new_c_function(new_base, 0);
+        self.push_frame(boundary_frame);
+
+        let new_frame = LuaCallFrame::new_lua_function(
+            func_id,
+            code_ptr,
+            constants_ptr,
+            upvalues_ptr,
+            new_base,
+            max_stack_size,
+            0,
+            -1,
+        );
+        self.push_frame(new_frame);
+
+        let exec_result = execute::luavm_execute(self);
+
+        match exec_result {
+            Ok(_) | Err(LuaError::Exit) => {
+                self.pop_frame_discard();
+                Ok(self.return_values.first().cloned())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        }
+    }
+
+    /// ULTRA-OPTIMIZED: Call Lua function metamethod with 1 arg
+    /// Used by __len, __unm, __bnot, __tostring
+    #[inline]
+    fn call_lua_metamethod_1(
+        &mut self,
+        func_id: FunctionId,
+        arg1: LuaValue,
+    ) -> LuaResult<Option<LuaValue>> {
+        let (max_stack_size, code_ptr, constants_ptr, upvalues_ptr) = {
+            let Some(func_ref) = self.object_pool.get_function(func_id) else {
+                return Err(self.error("Invalid function".to_string()));
+            };
+            let size = func_ref.chunk.max_stack_size.max(1);
+            (
+                size,
+                func_ref.chunk.code.as_ptr(),
+                func_ref.chunk.constants.as_ptr(),
+                func_ref.upvalues.as_ptr(),
+            )
+        };
+
+        let new_base = if self.frame_count > 0 {
+            let current_frame = &self.frames[self.frame_count - 1];
+            (current_frame.base_ptr as usize) + 256
+        } else {
+            0
+        };
+
+        self.ensure_stack_capacity(new_base + max_stack_size);
+
+        unsafe {
+            let dst = self.register_stack.as_mut_ptr().add(new_base);
+            *dst = arg1;
+            let nil_val = LuaValue::nil();
+            for i in 1..max_stack_size {
+                *dst.add(i) = nil_val;
+            }
+        }
+
+        let boundary_frame = LuaCallFrame::new_c_function(new_base, 0);
+        self.push_frame(boundary_frame);
+
+        let new_frame = LuaCallFrame::new_lua_function(
+            func_id,
+            code_ptr,
+            constants_ptr,
+            upvalues_ptr,
+            new_base,
+            max_stack_size,
+            0,
+            -1,
+        );
+        self.push_frame(new_frame);
+
+        let exec_result = execute::luavm_execute(self);
+
+        match exec_result {
+            Ok(_) | Err(LuaError::Exit) => {
+                self.pop_frame_discard();
+                Ok(self.return_values.first().cloned())
+            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(e) => {
+                self.pop_frame_discard();
+                Err(e)
+            }
+        }
     }
 
     /// Fast path for calling CFunction metamethods with 2 arguments
@@ -2428,6 +2581,164 @@ impl LuaVM {
 
                 Ok((false, vec![error_str]))
             }
+        }
+    }
+
+    /// ULTRA-OPTIMIZED pcall for CFunction calls
+    /// Works directly on the stack without any Vec allocations
+    /// Args are read from caller's stack and results are written directly to return_values
+    /// Returns: (success, result_count) where results are in self.return_values
+    #[inline]
+    pub fn protected_call_stack_based(
+        &mut self,
+        func: LuaValue,
+        arg_base: usize,   // Where args start in stack (caller's base + 1)
+        arg_count: usize,  // Number of arguments
+    ) -> LuaResult<(bool, usize)> {
+        // Save current state
+        let initial_frame_count = self.frame_count;
+
+        // Call function directly without Vec allocation
+        let result = self.call_function_stack_based(func, arg_base, arg_count);
+
+        match result {
+            Ok(result_count) => Ok((true, result_count)),
+            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(_) => {
+                // Error path: clean up and return error message
+                self.open_upvalues.clear();
+                while self.frame_count > initial_frame_count {
+                    self.pop_frame_discard();
+                }
+                let msg = std::mem::take(&mut self.error_message);
+                let error_str = self.create_string(&msg);
+                self.return_values.clear();
+                self.return_values.push(error_str);
+                Ok((false, 1))
+            }
+        }
+    }
+
+    /// Internal helper that calls function using stack-based arguments
+    /// Avoids Vec allocation for the common case
+    /// Results are placed in self.return_values, returns count
+    #[inline]
+    fn call_function_stack_based(
+        &mut self,
+        func: LuaValue,
+        arg_base: usize,
+        arg_count: usize,
+    ) -> LuaResult<usize> {
+        match func.kind() {
+            LuaValueKind::CFunction => {
+                let cfunc = func.as_cfunction().unwrap();
+
+                // Calculate new base for the call frame
+                let new_base = if self.frame_count > 0 {
+                    let current_frame = &self.frames[self.frame_count - 1];
+                    (current_frame.base_ptr as usize) + 256
+                } else {
+                    0
+                };
+
+                let stack_size = arg_count + 1;
+                self.ensure_stack_capacity(new_base + stack_size);
+
+                // Copy args from caller's stack to new frame
+                unsafe {
+                    let src = self.register_stack.as_ptr().add(arg_base);
+                    let dst = self.register_stack.as_mut_ptr().add(new_base);
+                    *dst = func; // func at slot 0
+                    std::ptr::copy_nonoverlapping(src, dst.add(1), arg_count);
+                }
+
+                let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
+                self.push_frame(temp_frame);
+
+                match cfunc(self) {
+                    Ok(r) => {
+                        self.pop_frame_discard();
+                        self.return_values = r.all_values();
+                        Ok(self.return_values.len())
+                    }
+                    Err(LuaError::Yield) => Err(LuaError::Yield),
+                    Err(e) => {
+                        self.pop_frame_discard();
+                        Err(e)
+                    }
+                }
+            }
+            LuaValueKind::Function => {
+                let Some(func_id) = func.as_function_id() else {
+                    return Err(self.error("Invalid function reference".to_string()));
+                };
+
+                let (max_stack_size, code_ptr, constants_ptr, upvalues_ptr) = {
+                    let Some(func_ref) = self.object_pool.get_function(func_id) else {
+                        return Err(self.error("Invalid function".to_string()));
+                    };
+                    let size = func_ref.chunk.max_stack_size.max(1);
+                    (
+                        size,
+                        func_ref.chunk.code.as_ptr(),
+                        func_ref.chunk.constants.as_ptr(),
+                        func_ref.upvalues.as_ptr(),
+                    )
+                };
+
+                let new_base = if self.frame_count > 0 {
+                    let current_frame = &self.frames[self.frame_count - 1];
+                    (current_frame.base_ptr as usize) + 256
+                } else {
+                    0
+                };
+
+                self.ensure_stack_capacity(new_base + max_stack_size);
+
+                // Copy args and initialize remaining slots
+                unsafe {
+                    let src = self.register_stack.as_ptr().add(arg_base);
+                    let dst = self.register_stack.as_mut_ptr().add(new_base);
+                    let copy_count = arg_count.min(max_stack_size);
+                    std::ptr::copy_nonoverlapping(src, dst, copy_count);
+                    // Initialize remaining with nil
+                    let nil_val = LuaValue::nil();
+                    for i in copy_count..max_stack_size {
+                        *dst.add(i) = nil_val;
+                    }
+                }
+
+                // Push boundary frame and Lua function frame
+                let boundary_frame = LuaCallFrame::new_c_function(new_base, 0);
+                self.push_frame(boundary_frame);
+
+                let new_frame = LuaCallFrame::new_lua_function(
+                    func_id,
+                    code_ptr,
+                    constants_ptr,
+                    upvalues_ptr,
+                    new_base,
+                    max_stack_size,
+                    0,
+                    -1,
+                );
+                self.push_frame(new_frame);
+
+                let exec_result = execute::luavm_execute(self);
+
+                match exec_result {
+                    Ok(_) | Err(LuaError::Exit) => {
+                        self.pop_frame_discard();
+                        Ok(self.return_values.len())
+                    }
+                    Err(LuaError::Yield) => Err(LuaError::Yield),
+                    Err(e) => {
+                        self.pop_frame_discard();
+                        Err(e)
+                    }
+                }
+            }
+            _ => Err(self.error("attempt to call a non-function value".to_string())),
         }
     }
 
