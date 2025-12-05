@@ -31,7 +31,7 @@ macro_rules! savepc {
     };
 }
 
-/// Update pc, code_ptr and base_ptr from frame (like Lua C's updatestate)
+/// Update pc, code_ptr, base_ptr from frame (like Lua C's updatestate)
 /// Used after CALL/RETURN instructions when frame changes
 #[inline(always)]
 unsafe fn updatestate(
@@ -105,8 +105,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = Instruction::get_a(instr) as usize;
                 let sbx = Instruction::get_sbx(instr);
                 unsafe {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
-                        LuaValue::integer(sbx as i64);
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(sbx as i64);
                 }
                 continue 'mainloop;
             }
@@ -116,8 +115,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = Instruction::get_a(instr) as usize;
                 let sbx = Instruction::get_sbx(instr);
                 unsafe {
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) =
-                        LuaValue::number(sbx as f64);
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(sbx as f64);
                 }
                 continue 'mainloop;
             }
@@ -156,9 +154,9 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let b = Instruction::get_b(instr) as usize;
                 unsafe {
                     let nil_val = LuaValue::nil();
-                    let reg_ptr = vm.register_stack.as_mut_ptr().add(base_ptr);
+                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
                     for i in 0..=b {
-                        *reg_ptr.add(a + i) = nil_val;
+                        *reg_base.add(a + i) = nil_val;
                     }
                 }
                 continue 'mainloop;
@@ -388,7 +386,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let a = Instruction::get_a(instr) as usize;
                 let k = Instruction::get_k(instr);
                 unsafe {
-                    let val = *vm.register_stack.as_ptr().add(base_ptr + a);
+                    let val = *vm.register_stack.as_mut_ptr().add(base_ptr + a);
                     let is_truthy = val.is_truthy();
                     if !is_truthy == k {
                         pc += 1;
@@ -453,21 +451,16 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 let b = Instruction::get_b(instr) as usize;
 
                 unsafe {
-                    // Get function's upvalue list pointer
-                    let func_id = (*frame_ptr).get_function_id_unchecked();
-                    let func_ref = vm.object_pool.get_function_unchecked(func_id);
-                    let upvalue_id = *func_ref.upvalues.get_unchecked(b);
+                    let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
 
                     // Read upvalue value directly
                     let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
                     let value = match &uv.state {
-                        UpvalueState::Open { stack_index } => {
-                            *vm.register_stack.get_unchecked(*stack_index)
-                        }
+                        UpvalueState::Open { stack_index } => *vm.register_stack.as_ptr().add(*stack_index),
                         UpvalueState::Closed(val) => *val,
                     };
 
-                    *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
+                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
                 }
                 continue 'mainloop;
             }
@@ -478,22 +471,20 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
                 unsafe {
                     // Get the value to write
-                    let value = *vm.register_stack.get_unchecked(base_ptr + a);
+                    let value = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-                    // Get function's upvalue list pointer
-                    let func_id = (*frame_ptr).get_function_id_unchecked();
-                    let func_ref = vm.object_pool.get_function_unchecked(func_id);
-                    let upvalue_id = *func_ref.upvalues.get_unchecked(b);
+                    // Get upvalue
+                    let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
 
                     // Write upvalue value directly
                     let uv = vm.object_pool.get_upvalue_mut_unchecked(upvalue_id);
                     match &mut uv.state {
                         UpvalueState::Open { stack_index } => {
-                            *vm.register_stack.get_unchecked_mut(*stack_index) = value;
+                            *vm.register_stack.as_mut_ptr().add(*stack_index) = value;
                         }
                         UpvalueState::Closed(val) => *val = value,
                     };
-                    
+
                     // GC write barrier for upvalue
                     vm.gc_barrier_upvalue(upvalue_id, &value);
                 }

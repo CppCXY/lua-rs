@@ -799,6 +799,7 @@ pub fn exec_call(
         let is_vararg = chunk.is_vararg;
         let code_ptr = chunk.code.as_ptr();
         let constants_ptr = chunk.constants.as_ptr();
+        let upvalues_ptr = func_ref.upvalues.as_ptr();
 
         // Calculate argument count
         let arg_count = if b == 0 {
@@ -858,6 +859,7 @@ pub fn exec_call(
                 func_id,
                 code_ptr,
                 constants_ptr,
+                upvalues_ptr,
                 new_base,
                 arg_count,
                 a,
@@ -880,6 +882,7 @@ pub fn exec_call(
             num_params,
             code_ptr,
             constants_ptr,
+            upvalues_ptr,
             frame_ptr_ptr,
         );
     }
@@ -961,6 +964,7 @@ fn exec_call_lua_vararg(
     _num_params: usize,
     code_ptr: *const u32,
     constants_ptr: *const LuaValue,
+    upvalues_ptr: *const crate::gc::UpvalueId,
     frame_ptr_ptr: &mut *mut LuaCallFrame,
 ) -> LuaResult<()> {
     // Get argument count from top
@@ -1005,6 +1009,7 @@ fn exec_call_lua_vararg(
         func_id,
         code_ptr,
         constants_ptr,
+        upvalues_ptr,
         new_base,
         arg_count,
         a,
@@ -1035,12 +1040,13 @@ fn exec_call_lua_function(
     // Extract chunk info from ObjectPool - use unchecked for hot path
     let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
 
-    let (max_stack_size, num_params, is_vararg, code_ptr, constants_ptr) = (
+    let (max_stack_size, num_params, is_vararg, code_ptr, constants_ptr, upvalues_ptr) = (
         func_ref.chunk.max_stack_size,
         func_ref.chunk.param_count,
         func_ref.chunk.is_vararg,
         func_ref.chunk.code.as_ptr(),
         func_ref.chunk.constants.as_ptr(),
+        func_ref.upvalues.as_ptr(),
     );
 
     // Calculate argument count - use frame_ptr directly!
@@ -1118,6 +1124,7 @@ fn exec_call_lua_function(
             func_id,
             code_ptr,
             constants_ptr,
+            upvalues_ptr,
             new_base,
             arg_count, // top = number of arguments
             a,         // result_reg
@@ -1186,6 +1193,7 @@ fn exec_call_lua_function(
         func_id,
         code_ptr,
         constants_ptr,
+        upvalues_ptr,
         new_base,
         actual_arg_count, // top = number of arguments
         a,                // result_reg
@@ -1384,6 +1392,7 @@ pub fn exec_tailcall(
             let max_stack_size = func_ref.chunk.max_stack_size;
             let code_ptr = func_ref.chunk.code.as_ptr();
             let constants_ptr = func_ref.chunk.constants.as_ptr();
+            let upvalues_ptr = func_ref.upvalues.as_ptr();
 
             // CRITICAL: Before popping the frame, close all upvalues that point to it
             // This ensures that any closures created in this frame can still access
@@ -1412,6 +1421,7 @@ pub fn exec_tailcall(
                 func_id,
                 code_ptr,
                 constants_ptr,
+                upvalues_ptr,
                 old_base,
                 arg_count,  // top = number of arguments passed
                 result_reg, // result_reg from the CALLER (not 0!)

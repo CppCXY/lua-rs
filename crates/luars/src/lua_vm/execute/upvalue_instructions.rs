@@ -9,23 +9,18 @@ use crate::{
 /// GETUPVAL A B
 /// R[A] := UpValue[B]
 /// Get upvalue from the closure's upvalue list
+/// OPTIMIZED: Uses cached upvalues_ptr in frame for direct access
 #[allow(dead_code)]
 #[inline(always)]
 pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    // Get the function's upvalue ID from its upvalue list
-    let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
-    let upvalue_id = unsafe {
-        vm.object_pool
-            .get_function_unchecked(func_id)
-            .upvalues
-            .get_unchecked(b)
-    };
+    // FAST PATH: Use cached upvalues_ptr for direct access
+    let upvalue_id = unsafe { *(*frame_ptr).upvalues_ptr.add(b) };
 
     // Read the upvalue value
-    let value = unsafe { vm.read_upvalue_unchecked(*upvalue_id) };
+    let value = unsafe { vm.read_upvalue_unchecked(upvalue_id) };
     unsafe {
         *vm.register_stack.get_unchecked_mut(base_ptr + a) = value;
     }
@@ -34,20 +29,15 @@ pub fn exec_getupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, b
 /// SETUPVAL A B
 /// UpValue[B] := R[A]
 /// Set upvalue in the closure's upvalue list
+/// OPTIMIZED: Uses cached upvalues_ptr in frame for direct access
 #[allow(dead_code)]
 #[inline(always)]
 pub fn exec_setupval(vm: &mut LuaVM, instr: u32, frame_ptr: *mut LuaCallFrame, base_ptr: usize) {
     let a = Instruction::get_a(instr) as usize;
     let b = Instruction::get_b(instr) as usize;
 
-    // Get the function's upvalue ID from its upvalue list
-    let func_id = unsafe { (*frame_ptr).get_function_id_unchecked() };
-    let upvalue_id = unsafe {
-        *vm.object_pool
-            .get_function_unchecked(func_id)
-            .upvalues
-            .get_unchecked(b)
-    };
+    // FAST PATH: Use cached upvalues_ptr for direct access
+    let upvalue_id = unsafe { *(*frame_ptr).upvalues_ptr.add(b) };
 
     let value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
 

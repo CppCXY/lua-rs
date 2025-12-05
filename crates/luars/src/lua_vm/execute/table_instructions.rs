@@ -444,10 +444,8 @@ pub fn exec_gettabup(
     // FAST PATH: Direct constant access via cached pointer
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(c) };
 
-    // OPTIMIZED: Use unchecked access for hot path
-    let func_id = unsafe { (*frame_ptr).get_function_id().unwrap_unchecked() };
-    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-    let upvalue_id = unsafe { *func_ref.upvalues.get_unchecked(b) };
+    // OPTIMIZED: Use cached upvalues_ptr for direct access (avoids function lookup)
+    let upvalue_id = unsafe { *(*frame_ptr).upvalues_ptr.add(b) };
 
     // OPTIMIZED: Use unchecked upvalue read
     let table_value = unsafe { vm.read_upvalue_unchecked(upvalue_id) };
@@ -484,7 +482,7 @@ pub fn exec_gettabup(
 
 /// SETTABUP A B C k
 /// UpValue[A][K[B]:string] := RK(C)
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Uses cached constants_ptr and upvalues_ptr for direct access
 #[inline(always)]
 pub fn exec_settabup(
     vm: &mut LuaVM,
@@ -497,8 +495,6 @@ pub fn exec_settabup(
     let c = Instruction::get_c(instr) as usize;
     let k = Instruction::get_k(instr);
 
-    let func_id = unsafe { (*frame_ptr).get_function_id() };
-
     // FAST PATH: Direct constant access via cached pointer
     let key_value = unsafe { *(*frame_ptr).constants_ptr.add(b) };
 
@@ -509,17 +505,8 @@ pub fn exec_settabup(
         vm.register_stack[*base_ptr + c]
     };
 
-    // Get function for upvalues access (still needed)
-    let Some(func_id) = func_id else {
-        return Err(vm.error("Not a Lua function".to_string()));
-    };
-    let Some(func_ref) = vm.object_pool.get_function(func_id) else {
-        return Err(vm.error("Invalid function ID".to_string()));
-    };
-
-    let Some(&upvalue_id) = func_ref.upvalues.get(a) else {
-        return Err(vm.error(format!("Invalid upvalue index: {}", a)));
-    };
+    // OPTIMIZED: Use cached upvalues_ptr for direct access
+    let upvalue_id = unsafe { *(*frame_ptr).upvalues_ptr.add(a) };
 
     // Get upvalue value
     let table_value = vm.read_upvalue(upvalue_id);

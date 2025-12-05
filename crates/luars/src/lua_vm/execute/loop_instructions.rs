@@ -354,6 +354,7 @@ pub fn exec_tforcall(
             let max_stack_size = func_ref.chunk.max_stack_size;
             let code_ptr = func_ref.chunk.code.as_ptr();
             let constants_ptr = func_ref.chunk.constants.as_ptr();
+            let upvalues_ptr = func_ref.upvalues.as_ptr();
 
             // Set up arguments at base_ptr + a + 4 (first arg = state)
             // Arguments: state, control
@@ -376,6 +377,7 @@ pub fn exec_tforcall(
                 func_id,
                 code_ptr,
                 constants_ptr,
+                upvalues_ptr,
                 call_base,
                 2,        // top = 2 (we have 2 arguments)
                 a + 4,    // result goes to R[A+4] relative to caller's base

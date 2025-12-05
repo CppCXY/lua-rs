@@ -44,8 +44,9 @@ use crate::{FunctionId, LuaValue};
 pub struct LuaCallFrame {
     /// NonBox field: high bits store call status, low 48 bits store function ID or C function pointer
     pub func_id_ptr: u64, // 8 bytes
-    pub code_ptr: *const u32, // 8 bytes - direct pointer to instruction array
+    pub code_ptr: *const u32,         // 8 bytes - direct pointer to instruction array
     pub constants_ptr: *const LuaValue, // 8 bytes - direct pointer to constant array
+    pub upvalues_ptr: *const crate::gc::UpvalueId, // 8 bytes - direct pointer to upvalues array
     pub base_ptr: u32,        // 4 bytes - register stack base address
     pub top: u32,             // 4 bytes - stack top
     pub pc: u32,              // 4 bytes - program counter
@@ -83,6 +84,7 @@ impl Default for LuaCallFrame {
             func_id_ptr: 0, // C function, no flags
             code_ptr: std::ptr::null(),
             constants_ptr: std::ptr::null(),
+            upvalues_ptr: std::ptr::null(),
             base_ptr: 0,
             top: 0,
             pc: 0,
@@ -135,6 +137,7 @@ impl LuaCallFrame {
         func_id: FunctionId,
         code_ptr: *const u32,
         constants_ptr: *const LuaValue,
+        upvalues_ptr: *const crate::gc::UpvalueId,
         base_ptr: usize,
         top: usize,
         result_reg: usize,
@@ -144,6 +147,7 @@ impl LuaCallFrame {
             func_id_ptr: Self::pack_lua_function(func_id),
             code_ptr,
             constants_ptr,
+            upvalues_ptr,
             base_ptr: base_ptr as u32,
             top: top as u32,
             pc: 0,
@@ -161,6 +165,7 @@ impl LuaCallFrame {
             func_id_ptr: 0, // C function, no FLAG_LUA
             code_ptr: std::ptr::null(),
             constants_ptr: std::ptr::null(),
+            upvalues_ptr: std::ptr::null(),
             base_ptr: base_ptr as u32,
             top: top as u32,
             pc: 0,
@@ -331,14 +336,14 @@ mod tests {
     #[test]
     fn test_lua_call_frame_size() {
         // Verify frame size is compact
-        assert_eq!(std::mem::size_of::<LuaCallFrame>(), 48);
+        assert_eq!(std::mem::size_of::<LuaCallFrame>(), 56);
     }
 
     #[test]
     fn test_nonbox_lua_function() {
         let func_id = FunctionId(12345);
         let frame =
-            LuaCallFrame::new_lua_function(func_id, std::ptr::null(), std::ptr::null(), 0, 0, 0, 0);
+            LuaCallFrame::new_lua_function(func_id, std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0, 0, 0);
 
         assert!(frame.is_lua());
         assert!(!frame.is_fresh());
@@ -361,7 +366,7 @@ mod tests {
     fn test_nonbox_flags() {
         let func_id = FunctionId(999);
         let mut frame =
-            LuaCallFrame::new_lua_function(func_id, std::ptr::null(), std::ptr::null(), 0, 0, 0, 0);
+            LuaCallFrame::new_lua_function(func_id, std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0, 0, 0);
 
         // Test fresh flag
         assert!(!frame.is_fresh());
@@ -391,7 +396,7 @@ mod tests {
         // Test large FunctionId value
         let func_id = FunctionId(0xFFFF_FFFF);
         let mut frame =
-            LuaCallFrame::new_lua_function(func_id, std::ptr::null(), std::ptr::null(), 0, 0, 0, 0);
+            LuaCallFrame::new_lua_function(func_id, std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0, 0, 0);
 
         // Set all flags
         frame.set_fresh();

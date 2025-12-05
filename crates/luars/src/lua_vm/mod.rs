@@ -255,20 +255,27 @@ impl LuaVM {
 
         // Create main function in object pool with _ENV upvalue
         let main_func_value = self.create_function(chunk.clone(), upvalues);
+        let func_id = main_func_value.as_function_id().unwrap();
 
         // Create initial call frame using unified stack
         let base_ptr = self.register_stack.len();
         let required_size = base_ptr + chunk.max_stack_size;
         self.ensure_stack_capacity(required_size);
 
-        // Get code and constants pointers from chunk
+        // Get code, constants, and upvalues pointers from chunk/function
         let code_ptr = chunk.code.as_ptr();
         let constants_ptr = chunk.constants.as_ptr();
+        let upvalues_ptr = self
+            .object_pool
+            .get_function(func_id)
+            .map(|f| f.upvalues.as_ptr())
+            .unwrap_or(std::ptr::null());
 
         let frame = LuaCallFrame::new_lua_function(
-            main_func_value.as_function_id().unwrap(),
+            func_id,
             code_ptr,
             constants_ptr,
+            upvalues_ptr,
             base_ptr,
             chunk.max_stack_size, // top
             0,                    // result_reg
@@ -311,7 +318,7 @@ impl LuaVM {
         };
 
         // Clone chunk and get info before borrowing self mutably
-        let (chunk, max_stack, code_ptr, constants_ptr) = {
+        let (chunk, max_stack, code_ptr, constants_ptr, upvalues_ptr) = {
             let Some(func_ref) = self.object_pool.get_function(func_id) else {
                 return Err(self.error("Invalid function ID".to_string()));
             };
@@ -319,7 +326,8 @@ impl LuaVM {
             let max_stack = chunk.max_stack_size;
             let code_ptr = chunk.code.as_ptr();
             let constants_ptr = chunk.constants.as_ptr();
-            (chunk, max_stack, code_ptr, constants_ptr)
+            let upvalues_ptr = func_ref.upvalues.as_ptr();
+            (chunk, max_stack, code_ptr, constants_ptr, upvalues_ptr)
         };
 
         // Register chunk constants
@@ -343,6 +351,7 @@ impl LuaVM {
             func_id,
             code_ptr,
             constants_ptr,
+            upvalues_ptr,
             base_ptr,
             max_stack,
             0,
@@ -2151,6 +2160,7 @@ impl LuaVM {
                 let max_stack_size = func_ref.chunk.max_stack_size;
                 let code_ptr = func_ref.chunk.code.as_ptr();
                 let constants_ptr = func_ref.chunk.constants.as_ptr();
+                let upvalues_ptr = func_ref.upvalues.as_ptr();
 
                 // CRITICAL FIX: Calculate new base relative to current frame
                 // This prevents register_stack from growing indefinitely
@@ -2183,6 +2193,7 @@ impl LuaVM {
                     func_id,
                     code_ptr,
                     constants_ptr,
+                    upvalues_ptr,
                     new_base,
                     max_stack_size, // top
                     result_reg,
@@ -2521,7 +2532,7 @@ impl LuaVM {
                 };
 
                 // Get function info
-                let (max_stack_size, code_ptr, constants_ptr) = {
+                let (max_stack_size, code_ptr, constants_ptr, upvalues_ptr) = {
                     let Some(func_ref) = self.object_pool.get_function(func_id) else {
                         return Err(self.error("Invalid function".to_string()));
                     };
@@ -2530,6 +2541,7 @@ impl LuaVM {
                         size,
                         func_ref.chunk.code.as_ptr(),
                         func_ref.chunk.constants.as_ptr(),
+                        func_ref.upvalues.as_ptr(),
                     )
                 };
 
@@ -2569,6 +2581,7 @@ impl LuaVM {
                     func_id,
                     code_ptr,
                     constants_ptr,
+                    upvalues_ptr,
                     new_base,
                     max_stack_size,
                     0,  // result_reg unused
