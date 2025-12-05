@@ -194,28 +194,33 @@ fn lua_tostring(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// select(index, ...) - Return subset of arguments
-/// OPTIMIZED: Avoid Vec allocation for common case
+/// ULTRA-OPTIMIZED: Fast path for "#" and single-value returns
 fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let frame = vm.current_frame();
     let base_ptr = frame.base_ptr as usize;
     let top = frame.top as usize;
 
-    // Get index argument (at register 1)
-    let index_arg = if base_ptr + 1 < vm.register_stack.len() && 1 < top {
-        vm.register_stack[base_ptr + 1]
-    } else {
+    if top <= 1 {
         return Err(vm.error("bad argument #1 to 'select' (value expected)".to_string()));
-    };
+    }
 
-    // Handle "#" special case - return count of varargs
+    let index_arg = vm.register_stack[base_ptr + 1];
+    
+    // Total args after index = top - 2 (subtract function slot and index slot)
+    let vararg_count = top.saturating_sub(2);
+
+    // FAST PATH: Check for "#" using string interning
+    // StringId can be compared directly without string lookup
     if let Some(string_id) = index_arg.as_string_id() {
+        // Check if this is the interned "#" string
+        // Note: Most Lua code uses "#" as literal, so it's likely interned
         if let Some(s) = vm.object_pool.get_string(string_id) {
-            if s.as_str() == "#" {
-                // Count of extra arguments (excluding index itself)
-                let count = top.saturating_sub(2); // top - 1 (index) - 1 (function)
-                return Ok(MultiValue::single(LuaValue::integer(count as i64)));
+            let s_str = s.as_str();
+            if s_str.len() == 1 && s_str.as_bytes()[0] == b'#' {
+                return Ok(MultiValue::single(LuaValue::integer(vararg_count as i64)));
             }
         }
+        return Err(vm.error("bad argument #1 to 'select' (number expected)".to_string()));
     }
 
     let index = index_arg
@@ -226,26 +231,34 @@ fn lua_select(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         return Err(vm.error("bad argument #1 to 'select' (index out of range)".to_string()));
     }
 
-    let arg_count = top.saturating_sub(1); // Exclude function register
-
-    let start = if index > 0 {
-        index as usize
+    // Calculate start position (1-based to 0-based)
+    let start_idx = if index > 0 {
+        (index - 1) as usize
     } else {
-        (arg_count as i64 + index) as usize
+        // Negative index: count from end
+        let abs_idx = (-index) as usize;
+        if abs_idx > vararg_count {
+            return Err(vm.error("bad argument #1 to 'select' (index out of range)".to_string()));
+        }
+        vararg_count - abs_idx
     };
 
-    if start >= arg_count {
+    if start_idx >= vararg_count {
         return Ok(MultiValue::empty());
     }
 
-    // Collect result directly from registers
-    let result_count = arg_count - start;
+    // FAST PATH: Single value return (most common case: select(n, ...))
+    let result_count = vararg_count - start_idx;
+    if result_count == 1 {
+        let reg_idx = base_ptr + 2 + start_idx;
+        return Ok(MultiValue::single(vm.register_stack[reg_idx]));
+    }
+
+    // Multi-value return: collect from registers
     let mut result = Vec::with_capacity(result_count);
     for i in 0..result_count {
-        let reg_idx = base_ptr + 1 + start + i;
-        if reg_idx < vm.register_stack.len() {
-            result.push(vm.register_stack[reg_idx]);
-        }
+        let reg_idx = base_ptr + 2 + start_idx + i;
+        result.push(vm.register_stack[reg_idx]);
     }
 
     Ok(MultiValue::multiple(result))
