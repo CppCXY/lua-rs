@@ -134,6 +134,7 @@ fn string_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 /// string.lower(s) - Convert to lowercase
+/// OPTIMIZED: ASCII fast path
 fn string_lower(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 1, "string.lower")?;
     let Some(string_id) = s_value.as_string_id() else {
@@ -143,13 +144,20 @@ fn string_lower(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let Some(s) = vm.object_pool.get_string(string_id) else {
             return Err(vm.error("bad argument #1 to 'string.lower' (string expected)".to_string()));
         };
-        s.as_str().to_lowercase()
+        let str_ref = s.as_str();
+        // ASCII fast path: if all bytes are ASCII, use make_ascii_lowercase
+        if str_ref.is_ascii() {
+            str_ref.to_ascii_lowercase()
+        } else {
+            str_ref.to_lowercase()
+        }
     };
     let result = vm.create_string_owned(result);
     Ok(MultiValue::single(result))
 }
 
 /// string.upper(s) - Convert to uppercase
+/// OPTIMIZED: ASCII fast path
 fn string_upper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let s_value = require_arg(vm, 1, "string.upper")?;
     let Some(string_id) = s_value.as_string_id() else {
@@ -159,7 +167,13 @@ fn string_upper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let Some(s) = vm.object_pool.get_string(string_id) else {
             return Err(vm.error("bad argument #1 to 'string.upper' (string expected)".to_string()));
         };
-        s.as_str().to_uppercase()
+        let str_ref = s.as_str();
+        // ASCII fast path
+        if str_ref.is_ascii() {
+            str_ref.to_ascii_uppercase()
+        } else {
+            str_ref.to_uppercase()
+        }
     };
     let result = vm.create_string_owned(result);
     Ok(MultiValue::single(result))

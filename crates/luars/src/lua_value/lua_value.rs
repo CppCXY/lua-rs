@@ -278,6 +278,17 @@ impl LuaValue {
         self.as_boolean()
     }
 
+    /// Fast integer check - only returns integer if type IS integer
+    /// Does NOT convert floats. Use for bitwise operations.
+    #[inline(always)]
+    pub fn as_integer_strict(&self) -> Option<i64> {
+        if (self.primary & TAG_MASK) == TAG_INTEGER {
+            Some(self.secondary as i64)
+        } else {
+            None
+        }
+    }
+
     #[inline(always)]
     pub fn as_integer(&self) -> Option<i64> {
         if (self.primary & TAG_MASK) == TAG_INTEGER {

@@ -4,6 +4,7 @@
 use super::parser::{AnchorType, Pattern, RepeatMode};
 
 /// Find pattern in string, returns (start, end, captures)
+/// Positions are char indices (not byte indices)
 pub fn find(text: &str, pattern: &Pattern, init: usize) -> Option<(usize, usize, Vec<String>)> {
     let text_chars: Vec<char> = text.chars().collect();
 

@@ -299,6 +299,8 @@ pub fn exec_mod(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 }
 
 /// POW: R[A] = R[B] ^ R[C]
+/// OPTIMIZED: Fast path for small integer exponents
+#[inline(always)]
 pub fn exec_pow(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
     let b = get_b!(instr);
@@ -312,6 +314,15 @@ pub fn exec_pow(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
             Some(n) => n,
             None => return,
         };
+
+        // Fast path: integer exponent (common case like x^2, x^3)
+        if let Some(exp) = right.as_integer_strict() {
+            let result = fast_int_pow(l_float, exp);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(result);
+            *pc += 1;
+            return;
+        }
+
         let r_float = match right.as_number() {
             Some(n) => n,
             None => return,
@@ -601,8 +612,39 @@ pub fn exec_modk(
     }
 }
 
+/// Fast integer power using binary exponentiation
+/// Only for small positive exponents (0-63) to avoid overflow checks
+#[inline(always)]
+fn fast_int_pow(base: f64, exp: i64) -> f64 {
+    match exp {
+        0 => 1.0,
+        1 => base,
+        2 => base * base,
+        3 => base * base * base,
+        4 => {
+            let b2 = base * base;
+            b2 * b2
+        }
+        _ if exp > 0 && exp <= 63 => {
+            // Binary exponentiation for larger exponents
+            let mut result = 1.0;
+            let mut b = base;
+            let mut e = exp as u32;
+            while e > 0 {
+                if e & 1 == 1 {
+                    result *= b;
+                }
+                b *= b;
+                e >>= 1;
+            }
+            result
+        }
+        _ => base.powf(exp as f64), // Fallback for negative or very large
+    }
+}
+
 /// POWK: R[A] = R[B] ^ K[C]
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Fast path for small integer exponents (^2, ^3, etc.)
 #[inline(always)]
 pub fn exec_powk(
     vm: &mut LuaVM,
@@ -617,14 +659,21 @@ pub fn exec_powk(
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-
-        // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
         let l_float = match left.as_number() {
             Some(n) => n,
             None => return,
         };
+
+        // Fast path: integer exponent (common case like x^2, x^3)
+        if let Some(exp) = constant.as_integer_strict() {
+            let result = fast_int_pow(l_float, exp);
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::number(result);
+            *pc += 1;
+            return;
+        }
+
         let r_float = match constant.as_number() {
             Some(n) => n,
             None => return,
@@ -724,6 +773,7 @@ pub fn exec_idivk(
 // ============ Bitwise Operations ============
 
 /// BAND: R[A] = R[B] & R[C]
+/// OPTIMIZED: Fast path for integer-integer, fallback for float conversion
 #[inline(always)]
 pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
@@ -734,6 +784,13 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
         let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
+        // Fast path: both are integers (most common case)
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), right.as_integer_strict()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
+            *pc += 1;
+            return;
+        }
+        // Slow path: try float conversion
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
             *pc += 1;
@@ -742,6 +799,7 @@ pub fn exec_band(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 }
 
 /// BOR: R[A] = R[B] | R[C]
+/// OPTIMIZED: Fast path for integer-integer
 #[inline(always)]
 pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
@@ -752,6 +810,13 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
         let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
+        // Fast path: both are integers
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), right.as_integer_strict()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
+            *pc += 1;
+            return;
+        }
+        // Slow path: try float conversion
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
             *pc += 1;
@@ -760,6 +825,7 @@ pub fn exec_bor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 }
 
 /// BXOR: R[A] = R[B] ~ R[C]
+/// OPTIMIZED: Fast path for integer-integer
 #[inline(always)]
 pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
@@ -770,6 +836,13 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
         let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
+        // Fast path: both are integers
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), right.as_integer_strict()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
+            *pc += 1;
+            return;
+        }
+        // Slow path: try float conversion
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
             *pc += 1;
@@ -778,6 +851,7 @@ pub fn exec_bxor(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 }
 
 /// SHL: R[A] = R[B] << R[C]
+/// OPTIMIZED: Fast path + branchless shift
 #[inline(always)]
 pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
@@ -788,19 +862,33 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
         let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
+        // Fast path: both are integers
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), right.as_integer_strict()) {
+            // Lua shift semantics: negative r means shift right
+            let result = if r >= 0 {
+                l.wrapping_shl((r & 63) as u32)
+            } else {
+                (l as u64).wrapping_shr(((-r) & 63) as u32) as i64
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
+            *pc += 1;
+            return;
+        }
+        // Slow path
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             let result = if r >= 0 {
-                LuaValue::integer(l << (r & 63))
+                l.wrapping_shl((r & 63) as u32)
             } else {
-                LuaValue::integer(l >> ((-r) & 63))
+                (l as u64).wrapping_shr(((-r) & 63) as u32) as i64
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
     }
 }
 
 /// SHR: R[A] = R[B] >> R[C]
+/// OPTIMIZED: Fast path + logical shift (unsigned)
 #[inline(always)]
 pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
@@ -811,13 +899,26 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
         let right = *vm.register_stack.as_ptr().add(base_ptr + c);
 
+        // Fast path: both are integers
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), right.as_integer_strict()) {
+            // Lua uses logical (unsigned) right shift
+            let result = if r >= 0 {
+                (l as u64).wrapping_shr((r & 63) as u32) as i64
+            } else {
+                l.wrapping_shl(((-r) & 63) as u32)
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
+            *pc += 1;
+            return;
+        }
+        // Slow path
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
             let result = if r >= 0 {
-                LuaValue::integer(l >> (r & 63))
+                (l as u64).wrapping_shr((r & 63) as u32) as i64
             } else {
-                LuaValue::integer(l << ((-r) & 63))
+                l.wrapping_shl(((-r) & 63) as u32)
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
     }
