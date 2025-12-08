@@ -655,6 +655,7 @@ impl LuaVM {
         let is_first_resume = unsafe { (*thread_ptr).frame_count == 0 };
 
         // Handle first resume upvalue closing (only when needed)
+        // This is required to properly capture upvalues from the parent scope
         if is_first_resume {
             let func = unsafe { (&(*thread_ptr).register_stack).get(0).cloned() };
             if let Some(func) = func {
@@ -781,8 +782,24 @@ impl LuaVM {
     }
 
     /// Helper: close upvalues for a function being resumed in a coroutine
-    #[inline(never)]
+    /// OPTIMIZED: Skip if function has no upvalues, avoid clone
+    #[inline(always)]
     fn close_function_upvalues_for_thread(&mut self, func_id: FunctionId) {
+        // First check: does this function have any upvalues?
+        let upvalue_count = {
+            if let Some(func_ref) = self.object_pool.get_function(func_id) {
+                func_ref.upvalues.len()
+            } else {
+                return;
+            }
+        };
+
+        // Fast path: no upvalues, nothing to close
+        if upvalue_count == 0 {
+            return;
+        }
+
+        // Clone only if we have upvalues to process
         let upvalue_ids: Vec<UpvalueId> = {
             if let Some(func_ref) = self.object_pool.get_function(func_id) {
                 func_ref.upvalues.clone()

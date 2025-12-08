@@ -19,7 +19,7 @@ pub use upvalue_instructions::*;
 use super::{LuaError, LuaResult, LuaVM, OpCode};
 use crate::lua_value::{TAG_FALSE, TAG_FLOAT, TAG_INTEGER, TAG_NIL, TAG_TRUE, TYPE_MASK};
 use crate::lua_vm::LuaCallFrame;
-use crate::{LuaValue, get_a, get_ax, get_b, get_bx, get_c, get_k, get_op, get_sbx, get_sc, get_sj};
+use crate::{LuaValue, get_a, get_ax, get_b, get_bx, get_k, get_op, get_sbx, get_sj};
 
 /// Save current pc to frame (like Lua C's savepc macro)
 /// Called before operations that may call Lua functions (CALL, metamethods, etc.)
