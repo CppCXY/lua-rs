@@ -11,6 +11,7 @@ pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
         "byte" => string_byte,
         "char" => string_char,
+        "dump" => string_dump,
         "len" => string_len,
         "lower" => string_lower,
         "upper" => string_upper,
@@ -113,6 +114,48 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
     let result = vm.create_string_owned(result_str);
     Ok(MultiValue::single(result))
+}
+
+/// string.dump(function [, strip]) - Serialize a function to binary string
+fn string_dump(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    use crate::lua_value::chunk_serializer;
+    
+    let func_value = require_arg(vm, 1, "string.dump")?;
+    let strip = get_arg(vm, 2)
+        .map(|v| v.is_truthy())
+        .unwrap_or(false);
+    
+    // Get the function ID
+    let Some(func_id) = func_value.as_function_id() else {
+        return Err(vm.error("bad argument #1 to 'dump' (function expected)".to_string()));
+    };
+    
+    // Get the function from object pool
+    let Some(func) = vm.object_pool.get_function(func_id) else {
+        return Err(vm.error("bad argument #1 to 'dump' (function expected)".to_string()));
+    };
+    
+    // Check if it's a Lua function (not a C function)
+    let Some(chunk) = func.chunk() else {
+        return Err(vm.error("unable to dump given function".to_string()));
+    };
+    
+    // Clone the chunk to avoid borrow issues
+    let chunk = chunk.clone();
+    
+    // Serialize the chunk with pool access for string constants
+    match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_pool) {
+        Ok(bytes) => {
+            // Convert bytes to a string using Latin-1 encoding (each byte -> char)
+            // This is how Lua handles binary strings
+            let result_str: String = bytes.iter().map(|&b| b as char).collect();
+            let result = vm.create_string_owned(result_str);
+            Ok(MultiValue::single(result))
+        }
+        Err(e) => {
+            Err(vm.error(format!("dump error: {}", e)))
+        }
+    }
 }
 
 /// string.len(s) - Return string length

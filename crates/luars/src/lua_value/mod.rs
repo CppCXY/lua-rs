@@ -3,6 +3,7 @@
 mod lua_table;
 mod lua_thread;
 mod lua_value;
+pub mod chunk_serializer;
 
 use crate::LuaVM;
 use crate::lua_vm::LuaResult;
