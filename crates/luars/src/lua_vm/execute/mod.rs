@@ -19,7 +19,7 @@ pub use upvalue_instructions::*;
 use super::{LuaError, LuaResult, LuaVM, OpCode};
 use crate::lua_value::{TAG_FALSE, TAG_FLOAT, TAG_INTEGER, TAG_NIL, TAG_TRUE, TYPE_MASK};
 use crate::lua_vm::LuaCallFrame;
-use crate::{LuaValue, UpvalueState, get_a, get_ax, get_b, get_bx, get_k, get_op, get_sbx, get_sj};
+use crate::{LuaValue, get_a, get_ax, get_b, get_bx, get_k, get_op, get_sbx, get_sj};
 
 /// Save current pc to frame (like Lua C's savepc macro)
 /// Called before operations that may call Lua functions (CALL, metamethods, etc.)
@@ -452,6 +452,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             // ============ Upvalue operations (inline for performance) ============
             OpCode::GetUpval => {
                 // INLINED GETUPVAL: R[A] := UpValue[B]
+                // OPTIMIZED: Direct field access with branch prediction
                 let a = get_a!(instr);
                 let b = get_b!(instr);
 
@@ -460,11 +461,10 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
                     // Read upvalue value directly
                     let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
-                    let value = match &uv.state {
-                        UpvalueState::Open { stack_index } => {
-                            *vm.register_stack.as_ptr().add(*stack_index)
-                        }
-                        UpvalueState::Closed(val) => *val,
+                    let value = if uv.is_open {
+                        *vm.register_stack.get_unchecked(uv.stack_index)
+                    } else {
+                        uv.closed_value
                     };
 
                     *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
@@ -473,6 +473,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
             }
             OpCode::SetUpval => {
                 // INLINED SETUPVAL: UpValue[B] := R[A]
+                // OPTIMIZED: Direct field access with branch prediction
                 let a = get_a!(instr);
                 let b = get_b!(instr);
 
@@ -485,12 +486,11 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
                     // Write upvalue value directly
                     let uv = vm.object_pool.get_upvalue_mut_unchecked(upvalue_id);
-                    match &mut uv.state {
-                        UpvalueState::Open { stack_index } => {
-                            *vm.register_stack.as_mut_ptr().add(*stack_index) = value;
-                        }
-                        UpvalueState::Closed(val) => *val = value,
-                    };
+                    if uv.is_open {
+                        *vm.register_stack.get_unchecked_mut(uv.stack_index) = value;
+                    } else {
+                        uv.closed_value = value;
+                    }
 
                     // GC write barrier for upvalue
                     vm.gc_barrier_upvalue(upvalue_id, &value);

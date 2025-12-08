@@ -243,53 +243,61 @@ impl GcFunction {
     }
 }
 
-/// Upvalue state - uses absolute stack index like Lua C implementation
-#[derive(Debug, Clone)]
-pub enum UpvalueState {
-    Open { stack_index: usize },
-    Closed(LuaValue),
-}
-
 /// Upvalue with embedded GC header
+/// 
+/// Hybrid design for safety and performance:
+/// - When open: uses stack_index (safe, no dangling pointers)
+/// - When closed: stores value inline (fast, no indirection)
+/// 
+/// Note: We cannot use raw pointers for open upvalues because
+/// register_stack may reallocate, invalidating the pointers.
 pub struct GcUpvalue {
     pub header: GcHeader,
-    pub state: UpvalueState,
+    /// The stack index when open (used for accessing stack value)
+    pub stack_index: usize,
+    /// Storage for closed value
+    pub closed_value: LuaValue,
+    /// Whether the upvalue is open (still pointing to stack)
+    pub is_open: bool,
 }
 
 impl GcUpvalue {
     /// Check if this upvalue points to the given absolute stack index
     #[inline]
     pub fn points_to_index(&self, index: usize) -> bool {
-        matches!(&self.state, UpvalueState::Open { stack_index } if *stack_index == index)
+        self.is_open && self.stack_index == index
     }
 
     /// Check if this upvalue is open (still points to stack)
     #[inline]
     pub fn is_open(&self) -> bool {
-        matches!(&self.state, UpvalueState::Open { .. })
+        self.is_open
     }
 
     /// Close this upvalue with the given value
     #[inline]
     pub fn close(&mut self, value: LuaValue) {
-        self.state = UpvalueState::Closed(value);
+        self.closed_value = value;
+        self.is_open = false;
     }
 
     /// Get the value of a closed upvalue (returns None if still open)
     #[inline]
     pub fn get_closed_value(&self) -> Option<LuaValue> {
-        match &self.state {
-            UpvalueState::Closed(v) => Some(v.clone()),
-            _ => None,
+        if self.is_open {
+            None
+        } else {
+            Some(self.closed_value)
         }
     }
 
     /// Get the absolute stack index if this upvalue is open
     #[inline]
     pub fn get_stack_index(&self) -> Option<usize> {
-        match &self.state {
-            UpvalueState::Open { stack_index } => Some(*stack_index),
-            _ => None,
+        if self.is_open {
+            Some(self.stack_index)
+        } else {
+            None
         }
     }
 
@@ -297,19 +305,14 @@ impl GcUpvalue {
     /// SAFETY: Must only be called when upvalue is in Closed state
     #[inline(always)]
     pub unsafe fn set_closed_value_unchecked(&mut self, value: LuaValue) {
-        if let UpvalueState::Closed(ref mut v) = self.state {
-            *v = value;
-        }
+        self.closed_value = value;
     }
 
     /// Get closed value reference directly without Option
     /// SAFETY: Must only be called when upvalue is in Closed state
     #[inline(always)]
     pub unsafe fn get_closed_value_ref_unchecked(&self) -> &LuaValue {
-        match &self.state {
-            UpvalueState::Closed(v) => v,
-            _ => unsafe { std::hint::unreachable_unchecked() },
-        }
+        &self.closed_value
     }
 }
 

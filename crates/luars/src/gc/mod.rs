@@ -562,13 +562,23 @@ impl GC {
                 }
             }
             GcObjectType::Upvalue => {
-                if let Some(upval) = pool.upvalues.get_mut(gc_id.index()) {
+                // Get closed value first, then release borrow before marking
+                let closed_value = if let Some(upval) = pool.upvalues.get_mut(gc_id.index()) {
                     if upval.header.is_gray() {
                         upval.header.make_black();
-                        if let UpvalueState::Closed(v) = upval.state {
-                            self.mark_value(&v, pool);
+                        if !upval.is_open {
+                            Some(upval.closed_value)
+                        } else {
+                            None
                         }
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+                if let Some(v) = closed_value {
+                    self.mark_value(&v, pool);
                 }
             }
             GcObjectType::Thread => {
@@ -1175,8 +1185,8 @@ impl GC {
                                 if let Some(upval) = pool.upvalues.get_mut(upval_id.0) {
                                     if upval.header.is_white() {
                                         upval.header.make_black();
-                                        if let UpvalueState::Closed(v) = &upval.state {
-                                            worklist.push(*v);
+                                        if !upval.is_open {
+                                            worklist.push(upval.closed_value);
                                         }
                                     }
                                 }

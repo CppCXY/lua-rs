@@ -12,7 +12,7 @@ use crate::gc::gc_object::{CFunction, FunctionBody};
 use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
 use crate::{
     FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
-    LuaValue, StringId, TableId, ThreadId, UpvalueId, UpvalueState, UserdataId,
+    LuaValue, StringId, TableId, ThreadId, UpvalueId, UserdataId,
 };
 use std::rc::Rc;
 
@@ -1079,20 +1079,26 @@ impl ObjectPool {
 
     // ==================== Upvalue Operations ====================
 
+    /// Create an open upvalue pointing to a stack location
     #[inline]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
-            state: UpvalueState::Open { stack_index },
+            stack_index,
+            closed_value: LuaValue::nil(),
+            is_open: true,
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
     }
 
+    /// Create a closed upvalue with a value
     #[inline]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
-            state: UpvalueState::Closed(value),
+            stack_index: 0,
+            closed_value: value,
+            is_open: false,
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
     }
