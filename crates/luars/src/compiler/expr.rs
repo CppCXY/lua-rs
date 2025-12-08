@@ -33,9 +33,19 @@ fn is_vararg_expr(expr: &LuaExpr) -> bool {
     }
 }
 
+/// Result of parsing a Lua number literal
+#[derive(Debug, Clone, Copy)]
+enum ParsedNumber {
+    /// Successfully parsed as integer
+    Int(i64),
+    /// Number is too large for i64, use float instead
+    Float(f64),
+}
+
 /// Parse a Lua integer literal from text, handling hex numbers that overflow i64
 /// Lua treats 0xFFFFFFFFFFFFFFFF as -1 (two's complement interpretation)
-fn parse_lua_int(text: &str) -> i64 {
+/// For decimal numbers that overflow i64 range, returns Float instead
+fn parse_lua_int(text: &str) -> ParsedNumber {
     let text = text.trim();
     if text.starts_with("0x") || text.starts_with("0X") {
         // Hex number - parse as u64 first, then reinterpret as i64
@@ -44,11 +54,20 @@ fn parse_lua_int(text: &str) -> i64 {
         // Remove any trailing decimal part (e.g., 0xFF.0)
         let hex_part = hex_part.split('.').next().unwrap_or(hex_part);
         if let Ok(val) = u64::from_str_radix(hex_part, 16) {
-            return val as i64; // Reinterpret bits as signed
+            return ParsedNumber::Int(val as i64); // Reinterpret bits as signed
         }
     }
-    // Default case: parse as i64
-    text.parse::<i64>().unwrap_or(0)
+    // Decimal case: parse as i64 only, if overflow use float
+    // (Unlike hex, decimal numbers should NOT be reinterpreted as two's complement)
+    if let Ok(val) = text.parse::<i64>() {
+        return ParsedNumber::Int(val);
+    }
+    // Decimal number is too large for i64, parse as float
+    if let Ok(val) = text.parse::<f64>() {
+        return ParsedNumber::Float(val);
+    }
+    // Default fallback
+    ParsedNumber::Int(0)
 }
 
 /// Lua left shift: x << n (returns 0 if |n| >= 64)
@@ -167,9 +186,11 @@ fn compile_literal_expr_desc(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<
             if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
                 // Parse as integer - use our custom parser for hex numbers
                 // Lua 5.4: 0xFFFFFFFFFFFFFFFF should be interpreted as -1 (two's complement)
-                let int_val = parse_lua_int(text);
-                // Use VKInt for integers
-                Ok(ExpDesc::new_int(int_val))
+                // parse_lua_int may return Float if the number overflows i64 range
+                match parse_lua_int(text) {
+                    ParsedNumber::Int(int_val) => Ok(ExpDesc::new_int(int_val)),
+                    ParsedNumber::Float(float_val) => Ok(ExpDesc::new_float(float_val)),
+                }
             } else {
                 let float_val = num.get_float_value();
                 // Use VKFlt for floats
@@ -877,14 +898,24 @@ fn compile_literal_expr(
             // Lua 5.4 optimization: Try LoadI for integers, LoadF for simple floats
             // Treat as integer only if: parser says integer AND no decimal/exponent AND is hex int
             if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
-                let int_val = parse_lua_int(text);
-                // Try LoadI first (fast path for small integers)
-                if let Some(_) = emit_loadi(c, reg, int_val) {
-                    return Ok(reg);
+                match parse_lua_int(text) {
+                    ParsedNumber::Int(int_val) => {
+                        // Try LoadI first (fast path for small integers)
+                        if let Some(_) = emit_loadi(c, reg, int_val) {
+                            return Ok(reg);
+                        }
+                        // LoadI failed, add to constant table
+                        let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
+                        emit_loadk(c, reg, const_idx);
+                    }
+                    ParsedNumber::Float(float_val) => {
+                        // Number overflowed i64, treat as float
+                        if emit_loadf(c, reg, float_val).is_none() {
+                            let const_idx = add_constant_dedup(c, LuaValue::float(float_val));
+                            emit_loadk(c, reg, const_idx);
+                        }
+                    }
                 }
-                // LoadI failed, add to constant table
-                let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
-                emit_loadk(c, reg, const_idx);
             } else {
                 let float_val = num.get_float_value();
                 // Try LoadF for integer-representable floats
@@ -956,8 +987,23 @@ fn try_eval_const_int(expr: &LuaExpr) -> Option<i64> {
     match expr {
         LuaExpr::LiteralExpr(lit) => {
             if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
-                if !num.is_float() {
-                    return Some(num.get_int_value());
+                let text = num.get_text();
+                
+                // Check if this is a hex integer
+                let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
+                    && !text.contains('.')
+                    && !text.to_lowercase().contains('p');
+                
+                // Check if has decimal or exponent
+                let text_lower = text.to_lowercase();
+                let has_decimal_or_exp = text.contains('.') || 
+                    (!text_lower.starts_with("0x") && text_lower.contains('e'));
+                
+                if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
+                    match parse_lua_int(text) {
+                        ParsedNumber::Int(int_val) => return Some(int_val),
+                        ParsedNumber::Float(_) => return None, // Overflowed, not an integer
+                    }
                 }
             }
             None
@@ -2094,25 +2140,50 @@ fn compile_unary_expr_to(
             Some(LuaLiteralToken::Number(num_token)) => {
                 if op_kind == UnaryOperator::OpUnm {
                     // Negative number literal: emit LOADI/LOADK with negated value
-                    if !num_token.is_float() {
-                        let int_val = num_token.get_int_value();
-                        let neg_val = -int_val;
-
-                        // Use LOADI for small integers
-                        if let Some(_) = emit_loadi(c, result_reg, neg_val) {
-                            return Ok(result_reg);
+                    let text = num_token.get_text();
+                    
+                    // Check if this is a hex integer
+                    let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
+                        && !text.contains('.')
+                        && !text.to_lowercase().contains('p');
+                    
+                    // Check if has decimal or exponent
+                    let text_lower = text.to_lowercase();
+                    let has_decimal_or_exp = text.contains('.') || 
+                        (!text_lower.starts_with("0x") && text_lower.contains('e'));
+                    
+                    // Determine if should parse as integer
+                    if (!num_token.is_float() && !has_decimal_or_exp) || is_hex_int {
+                        match parse_lua_int(text) {
+                            ParsedNumber::Int(int_val) => {
+                                // Successfully parsed as integer, negate it
+                                let neg_val = int_val.wrapping_neg();
+                                
+                                // Use LOADI for small integers
+                                if let Some(_) = emit_loadi(c, result_reg, neg_val) {
+                                    return Ok(result_reg);
+                                }
+                                // Large integer, add to constant table
+                                let const_idx = add_constant(c, LuaValue::integer(neg_val));
+                                emit_loadk(c, result_reg, const_idx);
+                                return Ok(result_reg);
+                            }
+                            ParsedNumber::Float(float_val) => {
+                                // Number overflowed i64, use negated float
+                                let neg_val = -float_val;
+                                let const_idx = add_constant(c, LuaValue::number(neg_val));
+                                emit_loadk(c, result_reg, const_idx);
+                                return Ok(result_reg);
+                            }
                         }
-                    }
-
-                    // For floats or large integers, use constant
-                    let num_val = if num_token.is_float() {
-                        LuaValue::number(-num_token.get_float_value())
                     } else {
-                        LuaValue::integer(-num_token.get_int_value())
-                    };
-                    let const_idx = add_constant(c, num_val);
-                    emit_loadk(c, result_reg, const_idx);
-                    return Ok(result_reg);
+                        // Float literal
+                        let float_val = num_token.get_float_value();
+                        let neg_val = -float_val;
+                        let const_idx = add_constant(c, LuaValue::number(neg_val));
+                        emit_loadk(c, result_reg, const_idx);
+                        return Ok(result_reg);
+                    }
                 }
             }
             Some(LuaLiteralToken::Bool(b)) => {

@@ -525,8 +525,14 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         // Read caller's state
                         let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
 
-                        // Only fill nil if caller expects results (rare case)
-                        if num_results > 0 && num_results != usize::MAX {
+                        // CRITICAL FIX: When caller expects variable returns (C=0, num_results=usize::MAX),
+                        // we must set top to indicate 0 values were returned.
+                        if num_results == usize::MAX {
+                            unsafe {
+                                (*caller_ptr).top = result_reg as u32;
+                            }
+                        } else if num_results > 0 {
+                            // Only fill nil if caller expects fixed results (rare case)
                             unsafe {
                                 let reg_ptr = vm.register_stack.as_mut_ptr();
                                 let nil_val = LuaValue::nil();
@@ -572,6 +578,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 if vm.frame_count > 1 {
                     // Get caller info BEFORE decrementing frame_count
                     let result_reg = unsafe { (*frame_ptr).get_result_reg() };
+                    let num_results = unsafe { (*frame_ptr).get_num_results() };
                     let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
 
                     // Pop frame
@@ -586,6 +593,15 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                         unsafe {
                             *vm.register_stack
                                 .get_unchecked_mut(caller_base + result_reg) = return_value;
+                        }
+
+                        // CRITICAL FIX: When caller expects variable returns (C=0, num_results=usize::MAX),
+                        // we must set top to indicate how many values were returned.
+                        // This is essential for nested calls like outer(1, inner(10))
+                        if num_results == usize::MAX {
+                            unsafe {
+                                (*caller_ptr).top = (result_reg + 1) as u32;
+                            }
                         }
 
                         // Update frame_ptr and local state

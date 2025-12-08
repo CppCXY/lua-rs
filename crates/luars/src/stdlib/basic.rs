@@ -64,7 +64,13 @@ fn lua_print(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
 /// type(v) - Return the type of a value as a string
 fn lua_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let value = get_arg(vm, 1).unwrap_or(LuaValue::nil());
+    // type() requires exactly one argument
+    let value = match get_arg(vm, 1) {
+        Some(v) => v,
+        None => {
+            return Err(vm.error("bad argument #1 to 'type' (value expected)".to_string()));
+        }
+    };
 
     let type_name = match value.kind() {
         LuaValueKind::Nil => "nil",
