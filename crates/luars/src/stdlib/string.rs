@@ -1412,24 +1412,61 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     let mut size = 0usize;
-    let mut chars = fmt_str.chars();
+    let mut chars = fmt_str.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
             ' ' | '\t' | '\n' | '\r' => continue,
             'b' | 'B' => size += 1,
             'h' | 'H' => size += 2,
-            'i' | 'I' | 'l' | 'L' | 'f' => size += 4,
-            'd' => size += 8,
+            'l' | 'L' | 'f' => size += 4,
+            // 'i' and 'I' can have optional size specifier
+            'i' | 'I' => {
+                // Check for size specifier
+                let mut size_str = String::new();
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                let n: usize = if size_str.is_empty() {
+                    4 // default size
+                } else {
+                    size_str.parse().unwrap_or(4)
+                };
+                size += n;
+            }
+            'd' | 'n' => size += 8,  // 'n' is lua_Number (double)
+            'j' | 'J' | 'T' => size += std::mem::size_of::<i64>(),  // lua_Integer / size_t
+            's' => {
+                // Check for size specifier
+                let mut size_str = String::new();
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                let n: usize = if size_str.is_empty() {
+                    std::mem::size_of::<usize>() // default size_t
+                } else {
+                    size_str.parse().unwrap_or(std::mem::size_of::<usize>())
+                };
+                return Err(vm.error("variable-length format 's' in 'string.packsize'".to_string()));
+            }
             'z' => {
                 return Err(vm.error("variable-length format in 'string.packsize'".to_string()));
             }
             'c' => {
                 let mut size_str = String::new();
-                loop {
-                    match chars.next() {
-                        Some(digit) if digit.is_ascii_digit() => size_str.push(digit),
-                        _ => break,
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
                     }
                 }
                 let n: usize = size_str.parse().map_err(|_| {
@@ -1437,6 +1474,9 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 })?;
                 size += n;
             }
+            'x' => size += 1, // padding byte
+            'X' => {} // empty alignment
+            '<' | '>' | '=' | '!' => {} // endianness/alignment modifiers
             _ => {
                 return Err(vm.error(format!(
                     "bad argument to 'string.packsize' (invalid format option '{}')",

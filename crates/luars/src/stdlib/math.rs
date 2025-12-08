@@ -319,14 +319,39 @@ fn math_random(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 }
 
 fn math_randomseed(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.randomseed")? as u64;
+    // Lua 5.4: math.randomseed() with no args uses time-based seed
+    let seed = if let Some(arg) = get_arg(vm, 1) {
+        if arg.is_nil() {
+            // Use time-based seed
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x853c49e6748fea9b_u64)
+        } else if let Some(n) = arg.as_number() {
+            n as u64
+        } else {
+            return Err(vm.error("bad argument #1 to 'math.randomseed' (number expected)".to_string()));
+        }
+    } else {
+        // No argument - use time-based seed
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x853c49e6748fea9b_u64)
+    };
+    
     // Seed the random state
     RANDOM_STATE.with(|state| {
         // Ensure seed is non-zero for xorshift
-        let seed = if x == 0 { 0x853c49e6748fea9b_u64 } else { x };
-        state.set(seed);
+        let s = if seed == 0 { 0x853c49e6748fea9b_u64 } else { seed };
+        state.set(s);
     });
-    Ok(MultiValue::empty())
+    
+    // Lua 5.4 returns two values from randomseed
+    Ok(MultiValue::multiple(vec![
+        LuaValue::integer((seed >> 32) as i64),
+        LuaValue::integer((seed & 0xFFFFFFFF) as i64),
+    ]))
 }
 
 fn math_sin(vm: &mut LuaVM) -> LuaResult<MultiValue> {

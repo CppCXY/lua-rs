@@ -16,7 +16,7 @@ use emmylua_parser::LuaParenExpr;
 use emmylua_parser::LuaTableExpr;
 use emmylua_parser::UnaryOperator;
 use emmylua_parser::{
-    BinaryOperator, LuaBinaryExpr, LuaCallExpr, LuaExpr, LuaLiteralExpr, LuaLiteralToken,
+    BinaryOperator, LuaAstToken, LuaBinaryExpr, LuaCallExpr, LuaExpr, LuaLiteralExpr, LuaLiteralToken,
     LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
 };
 
@@ -31,6 +31,24 @@ fn is_vararg_expr(expr: &LuaExpr) -> bool {
     } else {
         false
     }
+}
+
+/// Parse a Lua integer literal from text, handling hex numbers that overflow i64
+/// Lua treats 0xFFFFFFFFFFFFFFFF as -1 (two's complement interpretation)
+fn parse_lua_int(text: &str) -> i64 {
+    let text = text.trim();
+    if text.starts_with("0x") || text.starts_with("0X") {
+        // Hex number - parse as u64 first, then reinterpret as i64
+        // This handles the case like 0xFFFFFFFFFFFFFFFF which should be -1
+        let hex_part = &text[2..];
+        // Remove any trailing decimal part (e.g., 0xFF.0)
+        let hex_part = hex_part.split('.').next().unwrap_or(hex_part);
+        if let Ok(val) = u64::from_str_radix(hex_part, 16) {
+            return val as i64; // Reinterpret bits as signed
+        }
+    }
+    // Default case: parse as i64
+    text.parse::<i64>().unwrap_or(0)
 }
 
 //======================================================================================
@@ -102,8 +120,19 @@ fn compile_literal_expr_desc(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<
         }
         LuaLiteralToken::Nil(_) => Ok(ExpDesc::new_nil()),
         LuaLiteralToken::Number(num) => {
-            if !num.is_float() {
-                let int_val = num.get_int_value();
+            // Get the raw text to handle hex numbers correctly
+            let text = num.get_text();
+            
+            // Check if this is a hex integer literal (0x... without decimal point or exponent)
+            // emmylua_parser may incorrectly treat large hex numbers as floats
+            let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
+                && !text.contains('.')
+                && !text.to_lowercase().contains('p');
+            
+            if !num.is_float() || is_hex_int {
+                // Parse as integer - use our custom parser for hex numbers
+                // Lua 5.4: 0xFFFFFFFFFFFFFFFF should be interpreted as -1 (two's complement)
+                let int_val = parse_lua_int(text);
                 // Use VKInt for integers
                 Ok(ExpDesc::new_int(int_val))
             } else {
@@ -795,9 +824,18 @@ fn compile_literal_expr(
             emit_load_nil(c, reg);
         }
         LuaLiteralToken::Number(num) => {
+            // Get the raw text to handle hex numbers correctly
+            let text = num.get_text();
+            
+            // Check if this is a hex integer literal (0x... without decimal point or exponent)
+            // emmylua_parser may incorrectly treat large hex numbers as floats
+            let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
+                && !text.contains('.')
+                && !text.to_lowercase().contains('p');
+            
             // Lua 5.4 optimization: Try LoadI for integers, LoadF for simple floats
-            if !num.is_float() {
-                let int_val = num.get_int_value();
+            if !num.is_float() || is_hex_int {
+                let int_val = parse_lua_int(text);
                 // Try LoadI first (fast path for small integers)
                 if let Some(_) = emit_loadi(c, reg, int_val) {
                     return Ok(reg);

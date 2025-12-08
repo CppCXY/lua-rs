@@ -1,8 +1,8 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 
-use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
-use crate::lua_value::{LuaValue, MultiValue};
+use crate::lib_registry::{LibraryModule, LibraryEntry, get_arg, get_args, require_arg};
+use crate::lua_value::{LuaValue, LuaUserdata, MultiValue};
 use crate::lua_vm::{LuaResult, LuaVM};
 use std::io::{self, BufRead, Write};
 
@@ -10,18 +10,66 @@ mod file;
 pub use file::{LuaFile, create_file_metatable};
 
 pub fn create_io_lib() -> LibraryModule {
-    crate::lib_module!("io", {
-        "write" => io_write,
-        "read" => io_read,
-        "flush" => io_flush,
-        "open" => io_open,
-        "lines" => io_lines,
-        "input" => io_input,
-        "output" => io_output,
-        "type" => io_type,
-        "tmpfile" => io_tmpfile,
-        "close" => io_close,
-    })
+    let mut module = LibraryModule::new("io");
+    
+    // Functions
+    module.entries.push(("write", LibraryEntry::Function(io_write)));
+    module.entries.push(("read", LibraryEntry::Function(io_read)));
+    module.entries.push(("flush", LibraryEntry::Function(io_flush)));
+    module.entries.push(("open", LibraryEntry::Function(io_open)));
+    module.entries.push(("lines", LibraryEntry::Function(io_lines)));
+    module.entries.push(("input", LibraryEntry::Function(io_input)));
+    module.entries.push(("output", LibraryEntry::Function(io_output)));
+    module.entries.push(("type", LibraryEntry::Function(io_type)));
+    module.entries.push(("tmpfile", LibraryEntry::Function(io_tmpfile)));
+    module.entries.push(("close", LibraryEntry::Function(io_close)));
+    module.entries.push(("popen", LibraryEntry::Function(io_popen)));
+    
+    // Standard streams
+    module.entries.push(("stdin", LibraryEntry::Value(create_stdin)));
+    module.entries.push(("stdout", LibraryEntry::Value(create_stdout)));
+    module.entries.push(("stderr", LibraryEntry::Value(create_stderr)));
+    
+    module
+}
+
+/// Create stdin file handle
+fn create_stdin(vm: &mut LuaVM) -> LuaValue {
+    let file = LuaFile::stdin();
+    let file_mt = create_file_metatable(vm).unwrap_or(LuaValue::nil());
+    let userdata = vm.create_userdata(LuaUserdata::new(file));
+    if let Some(ud_id) = userdata.as_userdata_id() {
+        if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
+            ud.set_metatable(file_mt);
+        }
+    }
+    userdata
+}
+
+/// Create stdout file handle
+fn create_stdout(vm: &mut LuaVM) -> LuaValue {
+    let file = LuaFile::stdout();
+    let file_mt = create_file_metatable(vm).unwrap_or(LuaValue::nil());
+    let userdata = vm.create_userdata(LuaUserdata::new(file));
+    if let Some(ud_id) = userdata.as_userdata_id() {
+        if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
+            ud.set_metatable(file_mt);
+        }
+    }
+    userdata
+}
+
+/// Create stderr file handle
+fn create_stderr(vm: &mut LuaVM) -> LuaValue {
+    let file = LuaFile::stderr();
+    let file_mt = create_file_metatable(vm).unwrap_or(LuaValue::nil());
+    let userdata = vm.create_userdata(LuaUserdata::new(file));
+    if let Some(ud_id) = userdata.as_userdata_id() {
+        if let Some(ud) = vm.object_pool.get_userdata_mut(ud_id) {
+            ud.set_metatable(file_mt);
+        }
+    }
+    userdata
 }
 
 /// io.write(...) - Write to stdout
@@ -329,6 +377,10 @@ fn io_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let data = ud.get_data();
             let mut data_ref = data.borrow_mut();
             if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+                // Don't actually close standard streams
+                if lua_file.is_std_stream() {
+                    return Ok(MultiValue::single(LuaValue::boolean(true)));
+                }
                 match lua_file.close() {
                     Ok(_) => return Ok(MultiValue::single(LuaValue::boolean(true))),
                     Err(e) => return Err(vm.error(format!("close error: {}", e))),
@@ -340,4 +392,14 @@ fn io_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     // No argument - close default output
     Ok(MultiValue::single(LuaValue::boolean(true)))
+}
+
+/// io.popen(prog [, mode]) - Execute program and return file handle
+fn io_popen(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+    // io.popen is platform-specific and potentially dangerous
+    // Return nil + error message to indicate it's not available
+    Ok(MultiValue::multiple(vec![
+        LuaValue::nil(),
+        vm.create_string("io.popen not available in this environment"),
+    ]))
 }

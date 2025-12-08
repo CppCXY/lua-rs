@@ -5,38 +5,43 @@
 
 use std::rc::Rc;
 
-use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
+use crate::lib_registry::{LibraryModule, LibraryEntry, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_basic_lib() -> LibraryModule {
-    crate::lib_module!("_G", {
-        "print" => lua_print,
-        "type" => lua_type,
-        "assert" => lua_assert,
-        "error" => lua_error,
-        "tonumber" => lua_tonumber,
-        "tostring" => lua_tostring,
-        "select" => lua_select,
-        "ipairs" => lua_ipairs,
-        "pairs" => lua_pairs,
-        "next" => lua_next,
-        "pcall" => lua_pcall,
-        "xpcall" => lua_xpcall,
-        "getmetatable" => lua_getmetatable,
-        "setmetatable" => lua_setmetatable,
-        "rawget" => lua_rawget,
-        "rawset" => lua_rawset,
-        "rawlen" => lua_rawlen,
-        "rawequal" => lua_rawequal,
-        "collectgarbage" => lua_collectgarbage,
-        "_VERSION" => lua_version,
-        "require" => lua_require,
-        "load" => lua_load,
-        "loadfile" => lua_loadfile,
-        "dofile" => lua_dofile,
-        "warn" => lua_warn,
-    })
+    let mut module = LibraryModule::new("_G");
+    
+    // Functions
+    module.entries.push(("print", LibraryEntry::Function(lua_print)));
+    module.entries.push(("type", LibraryEntry::Function(lua_type)));
+    module.entries.push(("assert", LibraryEntry::Function(lua_assert)));
+    module.entries.push(("error", LibraryEntry::Function(lua_error)));
+    module.entries.push(("tonumber", LibraryEntry::Function(lua_tonumber)));
+    module.entries.push(("tostring", LibraryEntry::Function(lua_tostring)));
+    module.entries.push(("select", LibraryEntry::Function(lua_select)));
+    module.entries.push(("ipairs", LibraryEntry::Function(lua_ipairs)));
+    module.entries.push(("pairs", LibraryEntry::Function(lua_pairs)));
+    module.entries.push(("next", LibraryEntry::Function(lua_next)));
+    module.entries.push(("pcall", LibraryEntry::Function(lua_pcall)));
+    module.entries.push(("xpcall", LibraryEntry::Function(lua_xpcall)));
+    module.entries.push(("getmetatable", LibraryEntry::Function(lua_getmetatable)));
+    module.entries.push(("setmetatable", LibraryEntry::Function(lua_setmetatable)));
+    module.entries.push(("rawget", LibraryEntry::Function(lua_rawget)));
+    module.entries.push(("rawset", LibraryEntry::Function(lua_rawset)));
+    module.entries.push(("rawlen", LibraryEntry::Function(lua_rawlen)));
+    module.entries.push(("rawequal", LibraryEntry::Function(lua_rawequal)));
+    module.entries.push(("collectgarbage", LibraryEntry::Function(lua_collectgarbage)));
+    module.entries.push(("require", LibraryEntry::Function(lua_require)));
+    module.entries.push(("load", LibraryEntry::Function(lua_load)));
+    module.entries.push(("loadfile", LibraryEntry::Function(lua_loadfile)));
+    module.entries.push(("dofile", LibraryEntry::Function(lua_dofile)));
+    module.entries.push(("warn", LibraryEntry::Function(lua_warn)));
+    
+    // Values
+    module.entries.push(("_VERSION", LibraryEntry::Value(|vm| vm.create_string("Lua 5.4"))));
+    
+    module
 }
 
 /// print(...) - Print values to stdout
@@ -692,12 +697,6 @@ fn lua_collectgarbage(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         }
         _ => Err(vm.error(format!("collectgarbage: invalid option '{}'", opt))),
     }
-}
-
-/// _VERSION - Lua version string
-fn lua_version(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let version = vm.create_string("Lua 5.4");
-    Ok(MultiValue::single(version))
 }
 
 /// require(modname) - Load a module  

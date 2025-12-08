@@ -87,16 +87,28 @@ fn os_difftime(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use std::process::Command;
 
-    let cmd = get_arg(vm, 1)
-        .and_then(|v| v.as_string_id())
-        .and_then(|id| {
-            vm.object_pool
-                .get_string(id)
-                .map(|s| s.as_str().to_string())
-        })
-        .ok_or_else(|| vm.error("execute: argument 1 must be a string".to_string()))?;
+    let cmd_opt = get_arg(vm, 1)
+        .and_then(|v| {
+            if v.is_nil() {
+                None
+            } else {
+                v.as_string_id()
+                    .and_then(|id| vm.object_pool.get_string(id).map(|s| s.as_str().to_string()))
+            }
+        });
 
-    let output = Command::new("sh").arg("-c").arg(cmd.as_str()).output();
+    // If no command given, check if shell is available
+    let Some(cmd) = cmd_opt else {
+        // Return true to indicate shell is available
+        return Ok(MultiValue::single(LuaValue::boolean(true)));
+    };
+
+    // Platform-specific command execution
+    #[cfg(target_os = "windows")]
+    let output = Command::new("cmd").args(["/C", &cmd]).output();
+    
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new("sh").arg("-c").arg(&cmd).output();
 
     match output {
         Ok(result) => {
@@ -107,7 +119,11 @@ fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 LuaValue::integer(exit_code as i64),
             ]))
         }
-        Err(_) => Ok(MultiValue::single(LuaValue::nil())),
+        Err(_) => Ok(MultiValue::multiple(vec![
+            LuaValue::nil(),
+            vm.create_string("exit"),
+            LuaValue::integer(-1),
+        ])),
     }
 }
 

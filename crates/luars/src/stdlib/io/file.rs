@@ -9,7 +9,7 @@ use crate::lib_registry::{get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::LuaResult;
 
-/// File handle wrapper
+/// File handle wrapper - supports files and standard streams
 pub struct LuaFile {
     inner: FileInner,
 }
@@ -18,10 +18,28 @@ enum FileInner {
     Read(BufReader<File>),
     Write(BufWriter<File>),
     ReadWrite(File),
+    Stdin,
+    Stdout,
+    Stderr,
     Closed,
 }
 
 impl LuaFile {
+    /// Create stdin handle
+    pub fn stdin() -> Self {
+        LuaFile { inner: FileInner::Stdin }
+    }
+
+    /// Create stdout handle
+    pub fn stdout() -> Self {
+        LuaFile { inner: FileInner::Stdout }
+    }
+
+    /// Create stderr handle
+    pub fn stderr() -> Self {
+        LuaFile { inner: FileInner::Stderr }
+    }
+
     pub fn open_read(path: &str) -> io::Result<Self> {
         let file = File::open(path)?;
         Ok(LuaFile {
@@ -69,6 +87,11 @@ impl LuaFile {
     pub fn is_closed(&self) -> bool {
         matches!(self.inner, FileInner::Closed)
     }
+    
+    /// Check if this is a standard stream (stdin/stdout/stderr)
+    pub fn is_std_stream(&self) -> bool {
+        matches!(self.inner, FileInner::Stdin | FileInner::Stdout | FileInner::Stderr)
+    }
 
     /// Read operations
     pub fn read_line(&mut self) -> io::Result<Option<String>> {
@@ -104,6 +127,21 @@ impl LuaFile {
                     Ok(Some(line))
                 }
             }
+            FileInner::Stdin => {
+                let stdin = io::stdin();
+                let n = stdin.lock().read_line(&mut line)?;
+                if n == 0 {
+                    Ok(None)
+                } else {
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                    }
+                    Ok(Some(line))
+                }
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "File not opened for reading",
@@ -120,6 +158,10 @@ impl LuaFile {
             }
             FileInner::ReadWrite(file) => {
                 file.read_to_string(&mut content)?;
+                Ok(content)
+            }
+            FileInner::Stdin => {
+                io::stdin().lock().read_to_string(&mut content)?;
                 Ok(content)
             }
             _ => Err(io::Error::new(
@@ -142,6 +184,11 @@ impl LuaFile {
                 buffer.truncate(bytes_read);
                 Ok(buffer)
             }
+            FileInner::Stdin => {
+                let bytes_read = io::stdin().lock().read(&mut buffer)?;
+                buffer.truncate(bytes_read);
+                Ok(buffer)
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "File not opened for reading",
@@ -160,6 +207,14 @@ impl LuaFile {
                 file.write_all(data.as_bytes())?;
                 Ok(())
             }
+            FileInner::Stdout => {
+                io::stdout().write_all(data.as_bytes())?;
+                Ok(())
+            }
+            FileInner::Stderr => {
+                io::stderr().write_all(data.as_bytes())?;
+                Ok(())
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "File not opened for writing",
@@ -171,6 +226,8 @@ impl LuaFile {
         match &mut self.inner {
             FileInner::Write(writer) => writer.flush(),
             FileInner::ReadWrite(file) => file.flush(),
+            FileInner::Stdout => io::stdout().flush(),
+            FileInner::Stderr => io::stderr().flush(),
             _ => Ok(()),
         }
     }
@@ -490,6 +547,9 @@ fn file_seek(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 FileInner::ReadWrite(file) => file.seek(seek_from),
                 FileInner::Closed => {
                     return Err(vm.error("file is closed".to_string()));
+                }
+                FileInner::Stdin | FileInner::Stdout | FileInner::Stderr => {
+                    return Err(vm.error("cannot seek on standard stream".to_string()));
                 }
             };
 
