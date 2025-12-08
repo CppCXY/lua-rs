@@ -75,10 +75,10 @@ fn os_exit(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn os_difftime(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let t2 = get_arg(vm, 1)
         .and_then(|v| v.as_integer())
-        .ok_or(vm.error("difftime: argument 1 must be a number".to_string()))?;
+        .ok_or_else(|| vm.error("difftime: argument 1 must be a number".to_string()))?;
     let t1 = get_arg(vm, 2)
         .and_then(|v| v.as_integer())
-        .ok_or(vm.error("difftime: argument 2 must be a number".to_string()))?;
+        .ok_or_else(|| vm.error("difftime: argument 2 must be a number".to_string()))?;
 
     let diff = t2 - t1;
     Ok(MultiValue::single(LuaValue::integer(diff)))
@@ -94,7 +94,7 @@ fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or(vm.error("execute: argument 1 must be a string".to_string()))?;
+        .ok_or_else(|| vm.error("execute: argument 1 must be a string".to_string()))?;
 
     let output = Command::new("sh").arg("-c").arg(cmd.as_str()).output();
 
@@ -119,7 +119,7 @@ fn os_getenv(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or(vm.error("getenv: argument 1 must be a string".to_string()))?;
+        .ok_or_else(|| vm.error("getenv: argument 1 must be a string".to_string()))?;
 
     match std::env::var(varname.as_str()) {
         Ok(value) => {
@@ -138,7 +138,7 @@ fn os_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or(vm.error("remove: argument 1 must be a string".to_string()))?;
+        .ok_or_else(|| vm.error("remove: argument 1 must be a string".to_string()))?;
 
     match std::fs::remove_file(filename.as_str()) {
         Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
@@ -157,7 +157,7 @@ fn os_rename(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or(vm.error("rename: argument 1 must be a string".to_string()))?;
+        .ok_or_else(|| vm.error("rename: argument 1 must be a string".to_string()))?;
     let newname = get_arg(vm, 2)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
@@ -165,8 +165,7 @@ fn os_rename(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or(vm.error("rename: argument 2 must be a string".to_string()))?;
-
+        .ok_or_else(|| vm.error("rename: argument 2 must be a string".to_string()))?;
     match std::fs::rename(oldname.as_str(), newname.as_str()) {
         Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
         Err(e) => {
