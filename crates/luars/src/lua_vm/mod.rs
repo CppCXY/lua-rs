@@ -544,19 +544,24 @@ impl LuaVM {
     // ============ Coroutine Support ============
 
     /// Initial call depth for coroutines (grows on demand, like Lua's linked list CallInfo)
-    const INITIAL_COROUTINE_CALL_DEPTH: usize = 8;
+    const INITIAL_COROUTINE_CALL_DEPTH: usize = 4;
 
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
+    /// OPTIMIZED: Minimal initial allocations - grows on demand
     pub fn create_thread_value(&mut self, func: LuaValue) -> LuaValue {
         // Only allocate capacity, don't pre-fill (unlike main VM)
         // Coroutines typically have shallow call stacks, so we grow on demand
         let frames = Vec::with_capacity(Self::INITIAL_COROUTINE_CALL_DEPTH);
 
-        let mut thread = LuaThread {
+        // Start with smaller register stack - grows on demand
+        let mut register_stack = Vec::with_capacity(64);
+        register_stack.push(func);
+
+        let thread = LuaThread {
             status: CoroutineStatus::Suspended,
             frames,
             frame_count: 0,
-            register_stack: Vec::with_capacity(256),
+            register_stack,
             return_values: Vec::new(),
             open_upvalues: Vec::new(),
             next_frame_id: 0,
@@ -568,9 +573,6 @@ impl LuaVM {
             yield_pc: None,
             yield_frame_id: None,
         };
-
-        // Store the function in the thread's first register
-        thread.register_stack.push(func);
 
         // Create thread in ObjectPool and return LuaValue
         let thread_id = self.object_pool.create_thread(thread);
@@ -610,7 +612,7 @@ impl LuaVM {
     }
 
     /// Resume a coroutine using ThreadId-based LuaValue
-    /// OPTIMIZED: Uses swap instead of take to avoid repeated allocations
+    /// ULTRA-OPTIMIZED: Minimized object_pool lookups using raw pointers
     pub fn resume_thread(
         &mut self,
         thread_val: LuaValue,
@@ -621,12 +623,13 @@ impl LuaVM {
             return Err(self.error("invalid thread".to_string()));
         };
 
-        // OPTIMIZED: Single lookup for status check and state modification
-        let (is_first_resume, func_for_upvalues) = {
+        // OPTIMIZATION: Get thread pointer once and reuse
+        let thread_ptr: *mut LuaThread = {
             let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
                 return Err(self.error("invalid thread".to_string()));
             };
 
+            // Check status
             match thread.status {
                 CoroutineStatus::Dead => {
                     return Ok((
@@ -643,68 +646,35 @@ impl LuaVM {
                 _ => {}
             }
 
-            let is_first = thread.frame_count == 0;
             thread.status = CoroutineStatus::Running;
-
-            // Get function for upvalue closing if first resume
-            let func = if is_first {
-                thread.register_stack.get(0).cloned()
-            } else {
-                None
-            };
-
-            (is_first, func)
+            thread as *mut _
         };
 
-        // CRITICAL FIX: Before first resume, close all open upvalues in the coroutine function
-        if is_first_resume {
-            if let Some(func) = func_for_upvalues {
-                if let Some(func_id) = func.as_function_id() {
-                    // Get upvalue IDs from the function
-                    let upvalue_ids: Vec<UpvalueId> = {
-                        if let Some(func_ref) = self.object_pool.get_function(func_id) {
-                            func_ref.upvalues.clone()
-                        } else {
-                            Vec::new()
-                        }
-                    };
+        // SAFETY: thread_ptr is valid for the duration of this function
+        // as we don't modify the object_pool's thread storage
+        let is_first_resume = unsafe { (*thread_ptr).frame_count == 0 };
 
-                    // Close each open upvalue by reading from current (main) stack
-                    for uv_id in upvalue_ids {
-                        if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
-                            if let Some(stack_idx) = uv.get_stack_index() {
-                                // Read current value from main stack
-                                let value = if stack_idx < self.register_stack.len() {
-                                    self.register_stack[stack_idx]
-                                } else {
-                                    LuaValue::nil()
-                                };
-                                // Close the upvalue with this value
-                                if let Some(uv_mut) = self.object_pool.get_upvalue_mut(uv_id) {
-                                    uv_mut.close(value);
-                                }
-                            }
-                        }
-                    }
+        // Handle first resume upvalue closing (only when needed)
+        if is_first_resume {
+            let func = unsafe { (&(*thread_ptr).register_stack).get(0).cloned() };
+            if let Some(func) = func {
+                if let Some(func_id) = func.as_function_id() {
+                    self.close_function_upvalues_for_thread(func_id);
                 }
             }
         }
 
-        // Now swap state between VM and thread (O(1) pointer swaps)
-        {
-            let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
-                return Err(self.error("invalid thread".to_string()));
-            };
-
-            std::mem::swap(&mut self.frames, &mut thread.frames);
-            std::mem::swap(&mut self.register_stack, &mut thread.register_stack);
-            std::mem::swap(&mut self.return_values, &mut thread.return_values);
-            std::mem::swap(&mut self.open_upvalues, &mut thread.open_upvalues);
-            std::mem::swap(&mut self.frame_count, &mut thread.frame_count);
-            std::mem::swap(&mut self.next_frame_id, &mut thread.next_frame_id);
+        // Swap state between VM and thread (O(1) pointer swaps)
+        unsafe {
+            std::mem::swap(&mut self.frames, &mut (*thread_ptr).frames);
+            std::mem::swap(&mut self.register_stack, &mut (*thread_ptr).register_stack);
+            std::mem::swap(&mut self.return_values, &mut (*thread_ptr).return_values);
+            std::mem::swap(&mut self.open_upvalues, &mut (*thread_ptr).open_upvalues);
+            std::mem::swap(&mut self.frame_count, &mut (*thread_ptr).frame_count);
+            std::mem::swap(&mut self.next_frame_id, &mut (*thread_ptr).next_frame_id);
         }
 
-        // Save thread tracking info
+        // Save and set thread tracking
         let saved_thread = self.current_thread.take();
         let saved_thread_id = self.current_thread_id.take();
         self.current_thread_id = Some(thread_id);
@@ -712,28 +682,16 @@ impl LuaVM {
 
         // Execute
         let result = if is_first_resume {
-            // First resume: call the function
-            let func = self
-                .register_stack
-                .get(0)
-                .cloned()
-                .unwrap_or(LuaValue::nil());
+            let func = self.register_stack.get(0).cloned().unwrap_or(LuaValue::nil());
             match self.call_function_internal(func, args) {
                 Ok(values) => Ok(values),
-                Err(LuaError::Yield) => {
-                    let values = self.take_yield_values();
-                    Ok(values)
-                }
+                Err(LuaError::Yield) => Ok(self.take_yield_values()),
                 Err(e) => Err(e),
             }
         } else {
             // Resumed from yield: handle return values
-            let (call_reg, call_nret) = {
-                let Some(thread) = self.object_pool.get_thread(thread_id) else {
-                    return Err(self.error("invalid thread".to_string()));
-                };
-                (thread.yield_call_reg, thread.yield_call_nret)
-            };
+            let call_reg = unsafe { (*thread_ptr).yield_call_reg };
+            let call_nret = unsafe { (*thread_ptr).yield_call_nret };
 
             if let (Some(a), Some(num_expected)) = (call_reg, call_nret) {
                 if self.frame_count > 0 {
@@ -760,16 +718,16 @@ impl LuaVM {
                     }
                 }
 
-                if let Some(thread) = self.object_pool.get_thread_mut(thread_id) {
-                    thread.yield_call_reg = None;
-                    thread.yield_call_nret = None;
+                unsafe {
+                    (*thread_ptr).yield_call_reg = None;
+                    (*thread_ptr).yield_call_nret = None;
                 }
             }
 
             self.return_values = args;
 
             match self.run() {
-                Ok(_) => Ok(self.return_values.clone()),
+                Ok(_) => Ok(std::mem::take(&mut self.return_values)),
                 Err(LuaError::Yield) => Ok(self.take_yield_values()),
                 Err(e) => Err(e),
             }
@@ -779,39 +737,37 @@ impl LuaVM {
         let did_yield = matches!(&result, Ok(_) if self.frame_count > 0);
 
         // Swap state back to thread
-        let final_result = {
-            let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
-                return Err(self.error("invalid thread".to_string()));
-            };
+        unsafe {
+            std::mem::swap(&mut self.frames, &mut (*thread_ptr).frames);
+            std::mem::swap(&mut self.register_stack, &mut (*thread_ptr).register_stack);
+            std::mem::swap(&mut self.return_values, &mut (*thread_ptr).return_values);
+            std::mem::swap(&mut self.open_upvalues, &mut (*thread_ptr).open_upvalues);
+            std::mem::swap(&mut self.frame_count, &mut (*thread_ptr).frame_count);
+            std::mem::swap(&mut self.next_frame_id, &mut (*thread_ptr).next_frame_id);
+        }
 
-            // Swap back (O(1) pointer swaps)
-            std::mem::swap(&mut self.frames, &mut thread.frames);
-            std::mem::swap(&mut self.register_stack, &mut thread.register_stack);
-            std::mem::swap(&mut self.return_values, &mut thread.return_values);
-            std::mem::swap(&mut self.open_upvalues, &mut thread.open_upvalues);
-            std::mem::swap(&mut self.frame_count, &mut thread.frame_count);
-            std::mem::swap(&mut self.next_frame_id, &mut thread.next_frame_id);
-
-            if did_yield {
-                thread.status = CoroutineStatus::Suspended;
-                let values = thread.yield_values.clone();
-                thread.yield_values.clear();
+        // Finalize result
+        let final_result = if did_yield {
+            unsafe {
+                (*thread_ptr).status = CoroutineStatus::Suspended;
+                let values = std::mem::take(&mut (*thread_ptr).yield_values);
                 Ok((true, values))
-            } else {
-                match result {
-                    Ok(values) => {
-                        thread.status = CoroutineStatus::Dead;
-                        Ok((true, values))
-                    }
-                    Err(LuaError::Exit) => {
-                        thread.status = CoroutineStatus::Dead;
-                        Ok((true, thread.return_values.clone()))
-                    }
-                    Err(_) => {
-                        thread.status = CoroutineStatus::Dead;
-                        let error_msg = self.get_error_message().to_string();
-                        Ok((false, vec![self.create_string(&error_msg)]))
-                    }
+            }
+        } else {
+            match result {
+                Ok(values) => {
+                    unsafe { (*thread_ptr).status = CoroutineStatus::Dead };
+                    Ok((true, values))
+                }
+                Err(LuaError::Exit) => {
+                    unsafe { (*thread_ptr).status = CoroutineStatus::Dead };
+                    let values = unsafe { std::mem::take(&mut (*thread_ptr).return_values) };
+                    Ok((true, values))
+                }
+                Err(_) => {
+                    unsafe { (*thread_ptr).status = CoroutineStatus::Dead };
+                    let error_msg = self.get_error_message().to_string();
+                    Ok((false, vec![self.create_string(&error_msg)]))
                 }
             }
         };
@@ -824,17 +780,45 @@ impl LuaVM {
         final_result
     }
 
+    /// Helper: close upvalues for a function being resumed in a coroutine
+    #[inline(never)]
+    fn close_function_upvalues_for_thread(&mut self, func_id: FunctionId) {
+        let upvalue_ids: Vec<UpvalueId> = {
+            if let Some(func_ref) = self.object_pool.get_function(func_id) {
+                func_ref.upvalues.clone()
+            } else {
+                return;
+            }
+        };
+
+        for uv_id in upvalue_ids {
+            if let Some(uv) = self.object_pool.get_upvalue(uv_id) {
+                if let Some(stack_idx) = uv.get_stack_index() {
+                    let value = if stack_idx < self.register_stack.len() {
+                        self.register_stack[stack_idx]
+                    } else {
+                        LuaValue::nil()
+                    };
+                    if let Some(uv_mut) = self.object_pool.get_upvalue_mut(uv_id) {
+                        uv_mut.close(value);
+                    }
+                }
+            }
+        }
+    }
+
     /// Yield from current coroutine
     /// Returns Err(LuaError::Yield) which will be caught by run() loop
     pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
         if let Some(thread_id) = self.current_thread_id {
-            // Store yield values in the thread
+            // Store yield values in the thread  
             if let Some(thread) = self.object_pool.get_thread_mut(thread_id) {
-                thread.yield_values = values.clone();
+                // Avoid clone - move directly
+                thread.yield_values = values;
                 thread.status = CoroutineStatus::Suspended;
             }
             // Return Yield "error" to unwind the call stack
-            Err(self.do_yield(values))
+            Err(LuaError::Yield)
         } else {
             Err(self.error("attempt to yield from outside a coroutine".to_string()))
         }

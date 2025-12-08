@@ -925,7 +925,7 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 }
 
 /// BANDK: R[A] = R[B] & K[C]
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Fast path for integer-integer
 #[inline(always)]
 pub fn exec_bandk(
     vm: &mut LuaVM,
@@ -940,30 +940,16 @@ pub fn exec_bandk(
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-
-        // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        let l_int = left.as_integer().or_else(|| {
-            left.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                    Some(f as i64)
-                } else {
-                    None
-                }
-            })
-        });
-        let r_int = constant.as_integer().or_else(|| {
-            constant.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                    Some(f as i64)
-                } else {
-                    None
-                }
-            })
-        });
-
-        if let (Some(l), Some(r)) = (l_int, r_int) {
+        // Fast path: both are integers (common case)
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), constant.as_integer_strict()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
+            *pc += 1;
+            return;
+        }
+        // Slow path: try float conversion
+        if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l & r);
             *pc += 1;
         }
@@ -971,7 +957,7 @@ pub fn exec_bandk(
 }
 
 /// BORK: R[A] = R[B] | K[C]
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Fast path for integer-integer
 #[inline(always)]
 pub fn exec_bork(
     vm: &mut LuaVM,
@@ -986,30 +972,16 @@ pub fn exec_bork(
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-
-        // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        let l_int = left.as_integer().or_else(|| {
-            left.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                    Some(f as i64)
-                } else {
-                    None
-                }
-            })
-        });
-        let r_int = constant.as_integer().or_else(|| {
-            constant.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                    Some(f as i64)
-                } else {
-                    None
-                }
-            })
-        });
-
-        if let (Some(l), Some(r)) = (l_int, r_int) {
+        // Fast path: both are integers
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), constant.as_integer_strict()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
+            *pc += 1;
+            return;
+        }
+        // Slow path
+        if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l | r);
             *pc += 1;
         }
@@ -1017,7 +989,7 @@ pub fn exec_bork(
 }
 
 /// BXORK: R[A] = R[B] ~ K[C]
-/// OPTIMIZED: Uses cached constants_ptr for direct constant access
+/// OPTIMIZED: Fast path for integer-integer
 #[inline(always)]
 pub fn exec_bxork(
     vm: &mut LuaVM,
@@ -1032,30 +1004,16 @@ pub fn exec_bxork(
 
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
-
-        // FAST PATH: Direct constant access via cached pointer
         let constant = *(*frame_ptr).constants_ptr.add(c);
 
-        let l_int = left.as_integer().or_else(|| {
-            left.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                    Some(f as i64)
-                } else {
-                    None
-                }
-            })
-        });
-        let r_int = constant.as_integer().or_else(|| {
-            constant.as_number().and_then(|f| {
-                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                    Some(f as i64)
-                } else {
-                    None
-                }
-            })
-        });
-
-        if let (Some(l), Some(r)) = (l_int, r_int) {
+        // Fast path: both are integers
+        if let (Some(l), Some(r)) = (left.as_integer_strict(), constant.as_integer_strict()) {
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
+            *pc += 1;
+            return;
+        }
+        // Slow path
+        if let (Some(l), Some(r)) = (left.as_integer(), constant.as_integer()) {
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(l ^ r);
             *pc += 1;
         }
@@ -1063,6 +1021,7 @@ pub fn exec_bxork(
 }
 
 /// SHRI: R[A] = R[B] >> sC
+/// OPTIMIZED: Fast path + wrapping operations
 #[inline(always)]
 pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
@@ -1072,19 +1031,32 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     unsafe {
         let left = *vm.register_stack.as_ptr().add(base_ptr + b);
 
+        // Fast path
+        if let Some(l) = left.as_integer_strict() {
+            let result = if sc >= 0 {
+                (l as u64).wrapping_shr((sc & 63) as u32) as i64
+            } else {
+                l.wrapping_shl(((-sc) & 63) as u32)
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
+            *pc += 1;
+            return;
+        }
+        // Slow path
         if let Some(l) = left.as_integer() {
             let result = if sc >= 0 {
-                LuaValue::integer(l >> (sc & 63))
+                (l as u64).wrapping_shr((sc & 63) as u32) as i64
             } else {
-                LuaValue::integer(l << ((-sc) & 63))
+                l.wrapping_shl(((-sc) & 63) as u32)
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
     }
 }
 
 /// SHLI: R[A] = sC << R[B]
+/// OPTIMIZED: Fast path + wrapping operations
 #[inline(always)]
 pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     let a = get_a!(instr);
@@ -1094,13 +1066,25 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
     unsafe {
         let right = *vm.register_stack.as_ptr().add(base_ptr + b);
 
+        // Fast path
+        if let Some(r) = right.as_integer_strict() {
+            let result = if r >= 0 {
+                (sc as i64).wrapping_shl((r & 63) as u32)
+            } else {
+                ((sc as i64) as u64).wrapping_shr(((-r) & 63) as u32) as i64
+            };
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
+            *pc += 1;
+            return;
+        }
+        // Slow path
         if let Some(r) = right.as_integer() {
             let result = if r >= 0 {
-                LuaValue::integer((sc as i64) << (r & 63))
+                (sc as i64).wrapping_shl((r & 63) as u32)
             } else {
-                LuaValue::integer((sc as i64) >> ((-r) & 63))
+                ((sc as i64) as u64).wrapping_shr(((-r) & 63) as u32) as i64
             };
-            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = result;
+            *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
     }
