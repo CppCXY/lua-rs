@@ -681,9 +681,32 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             );
         }
         BinaryOperator::OpAnd | BinaryOperator::OpOr => {
-            // Boolean operators need special handling with jumps
-            // For now, fallback to simple approach
-            return Err("Boolean operators not yet implemented in ExpDesc mode".to_string());
+            // Boolean operators with proper short-circuit evaluation
+            // Pattern: TESTSET + JMP + MOVE
+            // and: if left is false, return left; else return right
+            // or: if left is true, return left; else return right
+            result_reg = if can_reuse_left {
+                left_reg
+            } else {
+                alloc_register(c)
+            };
+            
+            let k_flag = matches!(op_kind, BinaryOperator::OpOr);
+
+            // TestSet: if (is_truthy == k) then R[A] := R[B] else pc++
+            emit(
+                c,
+                Instruction::create_abck(OpCode::TestSet, result_reg, left_reg, 0, k_flag),
+            );
+            // JMP: skip the MOVE if TestSet assigned the value
+            let jump_pos = emit_jump(c, OpCode::Jmp);
+            // MOVE: use right operand if TestSet didn't assign
+            emit(
+                c,
+                Instruction::create_abc(OpCode::Move, result_reg, right_reg, 0),
+            );
+            // Patch the jump to point after MOVE
+            patch_jump(c, jump_pos);
         }
         BinaryOperator::OpNop => {
             return Err("Invalid binary operator OpNop".to_string());
