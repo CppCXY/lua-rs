@@ -375,11 +375,7 @@ fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let result = if let Some(i) = val.as_integer() {
         LuaValue::integer(i)
     } else if let Some(f) = val.as_number() {
-        if f.fract() == 0.0 && f.is_finite() {
-            LuaValue::integer(f as i64)
-        } else {
-            LuaValue::nil()
-        }
+        float_to_integer(f)
     } else if let Some(s_id) = val.as_string_id() {
         // Try to parse string as integer
         if let Some(s) = vm.object_pool.get_string(s_id) {
@@ -388,11 +384,7 @@ fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 LuaValue::integer(i)
             } else if let Ok(f) = s_str.parse::<f64>() {
                 // String is a float, check if it's a whole number
-                if f.fract() == 0.0 && f.is_finite() {
-                    LuaValue::integer(f as i64)
-                } else {
-                    LuaValue::nil()
-                }
+                float_to_integer(f)
             } else {
                 LuaValue::nil()
             }
@@ -404,6 +396,44 @@ fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     Ok(MultiValue::single(result))
+}
+
+/// Convert a float to integer if it's an exact integer within i64 range
+/// Returns nil if the float is not an exact integer or out of range
+fn float_to_integer(f: f64) -> LuaValue {
+    // Check for non-finite values
+    if !f.is_finite() {
+        return LuaValue::nil();
+    }
+    // Check if it's a whole number
+    if f.fract() != 0.0 {
+        return LuaValue::nil();
+    }
+    // Check if it's within i64 range BEFORE conversion
+    // i64::MIN = -9223372036854775808 (can be exactly represented in f64)
+    // i64::MAX = 9223372036854775807 (cannot be exactly represented in f64)
+    // The closest f64 values are:
+    // - i64::MIN as f64 = -9223372036854775808.0 (exact)
+    // - i64::MAX as f64 = 9223372036854776000.0 (rounded up!)
+    // 
+    // So we check: f >= i64::MIN as f64 AND f < (i64::MAX as f64 + 1.0)
+    // But since i64::MAX can't be exactly represented, we use a different check:
+    // f must be in the range where f as i64 doesn't overflow
+    const MIN_F: f64 = i64::MIN as f64;  // -9223372036854775808.0
+    // i64::MAX + 1 = 9223372036854775808 which is exactly representable as f64
+    const MAX_PLUS_ONE: f64 = 9223372036854775808.0;  // 2^63
+    
+    if f >= MIN_F && f < MAX_PLUS_ONE {
+        let i = f as i64;
+        // Verify the conversion is exact
+        if i as f64 == f {
+            LuaValue::integer(i)
+        } else {
+            LuaValue::nil()
+        }
+    } else {
+        LuaValue::nil()
+    }
 }
 
 fn math_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {

@@ -51,6 +51,34 @@ fn parse_lua_int(text: &str) -> i64 {
     text.parse::<i64>().unwrap_or(0)
 }
 
+/// Lua left shift: x << n (returns 0 if |n| >= 64)
+/// Negative n means right shift
+#[inline(always)]
+fn lua_shl(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shl(r as u32) as i64
+    } else {
+        // Negative shift means right shift (logical)
+        (l as u64).wrapping_shr((-r) as u32) as i64
+    }
+}
+
+/// Lua right shift: x >> n (logical shift, returns 0 if |n| >= 64)
+/// Negative n means left shift
+#[inline(always)]
+fn lua_shr(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shr(r as u32) as i64
+    } else {
+        // Negative shift means left shift
+        (l as u64).wrapping_shl((-r) as u32) as i64
+    }
+}
+
 //======================================================================================
 // NEW API: ExpDesc-based expression compilation (Lua 5.4 compatible)
 //======================================================================================
@@ -129,7 +157,14 @@ fn compile_literal_expr_desc(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<
                 && !text.contains('.')
                 && !text.to_lowercase().contains('p');
             
-            if !num.is_float() || is_hex_int {
+            // Check if text has decimal point or exponent (should be treated as float)
+            // This handles cases like 1.0e19 or 9223372036854775808.0
+            let text_lower = text.to_lowercase();
+            let has_decimal_or_exp = text.contains('.') || 
+                (!text_lower.starts_with("0x") && text_lower.contains('e'));
+            
+            // Treat as integer only if: no decimal/exponent OR is hex int
+            if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
                 // Parse as integer - use our custom parser for hex numbers
                 // Lua 5.4: 0xFFFFFFFFFFFFFFFF should be interpreted as -1 (two's complement)
                 let int_val = parse_lua_int(text);
@@ -833,8 +868,15 @@ fn compile_literal_expr(
                 && !text.contains('.')
                 && !text.to_lowercase().contains('p');
             
+            // Check if text has decimal point or exponent (should be treated as float)
+            // This handles cases like 1.0e19 or 9223372036854775808.0
+            let text_lower = text.to_lowercase();
+            let has_decimal_or_exp = text.contains('.') || 
+                (!text_lower.starts_with("0x") && text_lower.contains('e'));
+            
             // Lua 5.4 optimization: Try LoadI for integers, LoadF for simple floats
-            if !num.is_float() || is_hex_int {
+            // Treat as integer only if: parser says integer AND no decimal/exponent AND is hex int
+            if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
                 let int_val = parse_lua_int(text);
                 // Try LoadI first (fast path for small integers)
                 if let Some(_) = emit_loadi(c, reg, int_val) {
@@ -944,8 +986,8 @@ fn try_eval_const_int(expr: &LuaExpr) -> Option<i64> {
                 BinaryOperator::OpBAnd => Some(left_val & right_val),
                 BinaryOperator::OpBOr => Some(left_val | right_val),
                 BinaryOperator::OpBXor => Some(left_val ^ right_val),
-                BinaryOperator::OpShl => Some(left_val << (right_val & 0x3f)),
-                BinaryOperator::OpShr => Some(left_val >> (right_val & 0x3f)),
+                BinaryOperator::OpShl => Some(lua_shl(left_val, right_val)),
+                BinaryOperator::OpShr => Some(lua_shr(left_val, right_val)),
                 _ => None,
             }
         }
@@ -1048,8 +1090,8 @@ fn compile_binary_expr_to(
                 BinaryOperator::OpBAnd => Some((left_int & right_int) as f64),
                 BinaryOperator::OpBOr => Some((left_int | right_int) as f64),
                 BinaryOperator::OpBXor => Some((left_int ^ right_int) as f64),
-                BinaryOperator::OpShl => Some((left_int << (right_int & 0x3f)) as f64),
-                BinaryOperator::OpShr => Some((left_int >> (right_int & 0x3f)) as f64),
+                BinaryOperator::OpShl => Some(lua_shl(left_int, right_int) as f64),
+                BinaryOperator::OpShr => Some(lua_shr(left_int, right_int) as f64),
                 _ => None,
             };
 
@@ -1125,8 +1167,8 @@ fn compile_binary_expr_to(
                             BinaryOperator::OpBAnd => left_int & right_int,
                             BinaryOperator::OpBOr => left_int | right_int,
                             BinaryOperator::OpBXor => left_int ^ right_int,
-                            BinaryOperator::OpShl => left_int << (right_int & 0x3f),
-                            BinaryOperator::OpShr => left_int >> (right_int & 0x3f),
+                            BinaryOperator::OpShl => lua_shl(left_int, right_int),
+                            BinaryOperator::OpShr => lua_shr(left_int, right_int),
                             _ => unreachable!(),
                         };
                         Some(result_int as f64)
@@ -1504,18 +1546,14 @@ fn compile_binary_expr_to(
                                     alloc_register(c)
                                 }
                             });
-                            // Lua 5.4: Use ShlI for immediate left shift
-                            // Note: ShlI uses negated immediate: sC << R[B] where sC is the immediate
-                            // To shift left by N, we use -N as the immediate
-                            let neg_imm = if int_val < 0 {
-                                ((-int_val) + 256) as u32
-                            } else {
-                                ((-int_val) + 512) as u32 % 512
-                            };
+                            // Lua 5.4: x << n is equivalent to x >> -n
+                            // Use ShrI with negated immediate: R[A] = R[B] >> sC
+                            // sC encoding: (val + 127) & 0xff, where val = -n
+                            let neg_imm = ((-int_val + 127) & 0xff) as u32;
                             emit(
                                 c,
                                 Instruction::encode_abc(
-                                    OpCode::ShlI,
+                                    OpCode::ShrI,
                                     result_reg,
                                     left_reg,
                                     neg_imm,
@@ -2288,11 +2326,16 @@ pub fn compile_call_expr_with_returns_and_dest(
             let nactvar = c.nactvar as u32;
             let args_start = d + 1;
 
-            // Check if args_start would overwrite active locals
+            // Check if dest or args would overwrite active locals
             // Active locals occupy R[0] through R[nactvar-1]
-            // If args_start < nactvar, arguments would overwrite locals!
-            if args_start < nactvar {
-                // Conflict! Arguments would overwrite active locals
+            // - If d < nactvar: moving function to d would overwrite a local before args are compiled!
+            // - If args_start < nactvar: arguments would overwrite locals!
+            // 
+            // Example: `x = tonumber(x)` where x is in R[0]:
+            //   - d = 0, nactvar = 1, args_start = 1
+            //   - If we move tonumber to R[0] first, we overwrite x before reading it as argument!
+            if d < nactvar || args_start < nactvar {
+                // Conflict! Either dest or arguments would overwrite active locals
                 // Solution: Place function at freereg (after all locals) and move result back later
                 let new_func_reg = if c.freereg < nactvar {
                     // Ensure freereg is at least nactvar

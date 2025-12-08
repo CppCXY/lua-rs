@@ -129,16 +129,10 @@ fn lua_tonumber(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 if let Some(s) = vm.object_pool.get_string(string_id) {
                     let s_str = s.as_str().trim();
                     if base == 10 {
-                        // Try integer first, then float
-                        if let Ok(i) = s_str.parse::<i64>() {
-                            LuaValue::integer(i)
-                        } else if let Ok(f) = s_str.parse::<f64>() {
-                            LuaValue::float(f)
-                        } else {
-                            LuaValue::nil()
-                        }
+                        // Parse Lua number (supports hex like 0xAA.0)
+                        parse_lua_number(s_str)
                     } else {
-                        // Parse with specific base
+                        // Parse with specific base (no hex/float support)
                         if let Ok(i) = i64::from_str_radix(s_str, base as u32) {
                             LuaValue::integer(i)
                         } else {
@@ -156,6 +150,101 @@ fn lua_tonumber(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     Ok(MultiValue::single(result))
+}
+
+/// Parse a Lua number string, supporting hex integers and hex floats
+fn parse_lua_number(s: &str) -> LuaValue {
+    let s = s.trim();
+    if s.is_empty() {
+        return LuaValue::nil();
+    }
+    
+    // Check for hex prefix (0x or 0X), with optional sign
+    let (sign, rest) = if s.starts_with('-') {
+        (-1i64, &s[1..])
+    } else if s.starts_with('+') {
+        (1i64, &s[1..])
+    } else {
+        (1i64, s)
+    };
+    
+    let rest = rest.trim_start();
+    
+    if rest.starts_with("0x") || rest.starts_with("0X") {
+        let hex_part = &rest[2..];
+        
+        // Check if this is a hex float (contains '.' or 'p'/'P')
+        if hex_part.contains('.') || hex_part.to_lowercase().contains('p') {
+            // Parse hex float: 0xAA.BB or 0xAA.BBpEE or 0xAApEE
+            if let Some(f) = parse_hex_float(hex_part) {
+                return LuaValue::float(sign as f64 * f);
+            }
+            return LuaValue::nil();
+        }
+        
+        // Plain hex integer
+        if let Ok(i) = u64::from_str_radix(hex_part, 16) {
+            // Reinterpret as i64 for large values
+            let i = i as i64;
+            return LuaValue::integer(sign * i);
+        }
+        return LuaValue::nil();
+    }
+    
+    // Regular decimal number
+    if let Ok(i) = s.parse::<i64>() {
+        return LuaValue::integer(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return LuaValue::float(f);
+    }
+    
+    LuaValue::nil()
+}
+
+/// Parse hex float like "AA.BB" or "AA.BBpEE" (without 0x prefix)
+fn parse_hex_float(s: &str) -> Option<f64> {
+    let s_lower = s.to_lowercase();
+    
+    // Split by 'p' for exponent
+    let (mantissa_str, exp_str) = if let Some(p_pos) = s_lower.find('p') {
+        (&s[..p_pos], Some(&s[p_pos + 1..]))
+    } else {
+        (s, None)
+    };
+    
+    // Parse mantissa (integer.fraction in hex)
+    let mantissa = if let Some(dot_pos) = mantissa_str.find('.') {
+        let int_part = &mantissa_str[..dot_pos];
+        let frac_part = &mantissa_str[dot_pos + 1..];
+        
+        let int_val = if int_part.is_empty() {
+            0u64
+        } else {
+            u64::from_str_radix(int_part, 16).ok()?
+        };
+        
+        let frac_val = if frac_part.is_empty() {
+            0.0
+        } else {
+            let frac_int = u64::from_str_radix(frac_part, 16).ok()?;
+            frac_int as f64 / 16f64.powi(frac_part.len() as i32)
+        };
+        
+        int_val as f64 + frac_val
+    } else {
+        let int_val = u64::from_str_radix(mantissa_str, 16).ok()?;
+        int_val as f64
+    };
+    
+    // Parse exponent (base 2)
+    let exp = if let Some(exp_str) = exp_str {
+        exp_str.parse::<i32>().ok()?
+    } else {
+        0
+    };
+    
+    Some(mantissa * 2f64.powi(exp))
 }
 
 /// tostring(v) - Convert to string

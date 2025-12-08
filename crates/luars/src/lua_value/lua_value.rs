@@ -295,9 +295,17 @@ impl LuaValue {
             Some(self.secondary as i64)
         } else if (self.primary & TAG_MASK) == TAG_FLOAT {
             // Lua 5.4 semantics: floats with zero fraction are integers
+            // But must be in i64 range!
             let f = f64::from_bits(self.secondary);
             if f.fract() == 0.0 && f.is_finite() {
-                Some(f as i64)
+                // Check if in i64 range before casting
+                const MIN_INT_F: f64 = i64::MIN as f64;
+                const MAX_INT_F: f64 = i64::MAX as f64;
+                if f >= MIN_INT_F && f <= MAX_INT_F {
+                    Some(f as i64)
+                } else {
+                    None
+                }
             } else {
                 None
             }

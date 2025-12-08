@@ -865,25 +865,31 @@ pub fn exec_shl(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         // Fast path: both are integers
         if let (Some(l), Some(r)) = (left.as_integer_strict(), right.as_integer_strict()) {
             // Lua shift semantics: negative r means shift right
-            let result = if r >= 0 {
-                l.wrapping_shl((r & 63) as u32)
-            } else {
-                (l as u64).wrapping_shr(((-r) & 63) as u32) as i64
-            };
+            // If |r| >= 64, result is 0
+            let result = lua_shl(l, r);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
             return;
         }
         // Slow path
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            let result = if r >= 0 {
-                l.wrapping_shl((r & 63) as u32)
-            } else {
-                (l as u64).wrapping_shr(((-r) & 63) as u32) as i64
-            };
+            let result = lua_shl(l, r);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
+    }
+}
+
+/// Lua left shift: x << n (returns 0 if |n| >= 64)
+#[inline(always)]
+fn lua_shl(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shl(r as u32) as i64
+    } else {
+        // Negative shift means right shift (logical)
+        (l as u64).wrapping_shr((-r) as u32) as i64
     }
 }
 
@@ -902,25 +908,31 @@ pub fn exec_shr(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
         // Fast path: both are integers
         if let (Some(l), Some(r)) = (left.as_integer_strict(), right.as_integer_strict()) {
             // Lua uses logical (unsigned) right shift
-            let result = if r >= 0 {
-                (l as u64).wrapping_shr((r & 63) as u32) as i64
-            } else {
-                l.wrapping_shl(((-r) & 63) as u32)
-            };
+            // If shift amount is >= 64 or <= -64, result is 0
+            let result = lua_shr(l, r);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
             return;
         }
         // Slow path
         if let (Some(l), Some(r)) = (left.as_integer(), right.as_integer()) {
-            let result = if r >= 0 {
-                (l as u64).wrapping_shr((r & 63) as u32) as i64
-            } else {
-                l.wrapping_shl(((-r) & 63) as u32)
-            };
+            let result = lua_shr(l, r);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
+    }
+}
+
+/// Lua right shift: x >> n (logical shift, returns 0 if |n| >= 64)
+#[inline(always)]
+fn lua_shr(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shr(r as u32) as i64
+    } else {
+        // Negative shift means left shift
+        (l as u64).wrapping_shl((-r) as u32) as i64
     }
 }
 
@@ -1033,22 +1045,14 @@ pub fn exec_shri(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
         // Fast path
         if let Some(l) = left.as_integer_strict() {
-            let result = if sc >= 0 {
-                (l as u64).wrapping_shr((sc & 63) as u32) as i64
-            } else {
-                l.wrapping_shl(((-sc) & 63) as u32)
-            };
+            let result = lua_shr(l, sc as i64);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
             return;
         }
         // Slow path
         if let Some(l) = left.as_integer() {
-            let result = if sc >= 0 {
-                (l as u64).wrapping_shr((sc & 63) as u32) as i64
-            } else {
-                l.wrapping_shl(((-sc) & 63) as u32)
-            };
+            let result = lua_shr(l, sc as i64);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
@@ -1068,22 +1072,14 @@ pub fn exec_shli(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
 
         // Fast path
         if let Some(r) = right.as_integer_strict() {
-            let result = if r >= 0 {
-                (sc as i64).wrapping_shl((r & 63) as u32)
-            } else {
-                ((sc as i64) as u64).wrapping_shr(((-r) & 63) as u32) as i64
-            };
+            let result = lua_shl(sc as i64, r);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
             return;
         }
         // Slow path
         if let Some(r) = right.as_integer() {
-            let result = if r >= 0 {
-                (sc as i64).wrapping_shl((r & 63) as u32)
-            } else {
-                ((sc as i64) as u64).wrapping_shr(((-r) & 63) as u32) as i64
-            };
+            let result = lua_shl(sc as i64, r);
             *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::integer(result);
             *pc += 1;
         }
@@ -1275,8 +1271,19 @@ pub fn exec_mmbin(
             if let Some(result) = vm.call_metamethod(&metamethod, &[ra, rb])? {
                 *vm.register_stack.as_mut_ptr().add(base_ptr + dest_reg) = result;
             }
+        } else {
+            // No metamethod found - check if this is a bitwise operation that needs error handling
+            // TM_BAND=13, TM_BOR=14, TM_BXOR=15, TM_SHL=16, TM_SHR=17, TM_BNOT=19
+            if (13..=17).contains(&c) || c == 19 {
+                // Check if operands can be converted to integer
+                if ra.as_integer().is_none() {
+                    return Err(vm.error("number has no integer representation"));
+                }
+                if rb.as_integer().is_none() {
+                    return Err(vm.error("number has no integer representation"));
+                }
+            }
         }
-        // If no metamethod, leave the instruction result as-is (error will be caught elsewhere)
     }
     Ok(())
 }
