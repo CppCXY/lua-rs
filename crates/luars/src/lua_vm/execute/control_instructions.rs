@@ -1361,22 +1361,22 @@ fn exec_call_c_closure(
         return_count.min(result_len)
     };
 
-    if result.overflow.is_none() {
-        if num_returns > 0 {
-            vm.register_stack[call_base] = result.inline[0];
+    match &result {
+        crate::MultiValue::Empty => {}
+        crate::MultiValue::Single(v) => {
+            if num_returns > 0 {
+                vm.register_stack[call_base] = *v;
+            }
         }
-        if num_returns > 1 {
-            vm.register_stack[call_base + 1] = result.inline[1];
-        }
-    } else {
-        let values = result.all_values();
-        if num_returns > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    values.as_ptr(),
-                    vm.register_stack.as_mut_ptr().add(call_base),
-                    num_returns,
-                );
+        crate::MultiValue::Many(values) => {
+            if num_returns > 0 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        values.as_ptr(),
+                        vm.register_stack.as_mut_ptr().add(call_base),
+                        num_returns,
+                    );
+                }
             }
         }
     }
@@ -1483,22 +1483,22 @@ fn exec_call_c_closure_inline1(
         return_count.min(result_len)
     };
 
-    if result.overflow.is_none() {
-        if num_returns > 0 {
-            vm.register_stack[call_base] = result.inline[0];
+    match &result {
+        crate::MultiValue::Empty => {}
+        crate::MultiValue::Single(v) => {
+            if num_returns > 0 {
+                vm.register_stack[call_base] = *v;
+            }
         }
-        if num_returns > 1 {
-            vm.register_stack[call_base + 1] = result.inline[1];
-        }
-    } else {
-        let values = result.all_values();
-        if num_returns > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    values.as_ptr(),
-                    vm.register_stack.as_mut_ptr().add(call_base),
-                    num_returns,
-                );
+        crate::MultiValue::Many(values) => {
+            if num_returns > 0 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        values.as_ptr(),
+                        vm.register_stack.as_mut_ptr().add(call_base),
+                        num_returns,
+                    );
+                }
             }
         }
     }
@@ -1607,25 +1607,23 @@ fn exec_call_cfunction(
         return_count.min(result_len)
     };
 
-    // Fast path: copy inline values directly (no Vec allocation)
-    if result.overflow.is_none() {
-        // Values are stored inline
-        if num_returns > 0 {
-            vm.register_stack[call_base] = result.inline[0];
+    // Fast path: copy values directly based on enum variant
+    match &result {
+        crate::MultiValue::Empty => {}
+        crate::MultiValue::Single(v) => {
+            if num_returns > 0 {
+                vm.register_stack[call_base] = *v;
+            }
         }
-        if num_returns > 1 {
-            vm.register_stack[call_base + 1] = result.inline[1];
-        }
-    } else {
-        // Slow path: overflow to Vec
-        let values = result.all_values();
-        if num_returns > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    values.as_ptr(),
-                    vm.register_stack.as_mut_ptr().add(call_base),
-                    num_returns,
-                );
+        crate::MultiValue::Many(values) => {
+            if num_returns > 0 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        values.as_ptr(),
+                        vm.register_stack.as_mut_ptr().add(call_base),
+                        num_returns,
+                    );
+                }
             }
         }
     }

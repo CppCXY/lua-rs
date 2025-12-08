@@ -292,45 +292,40 @@ pub fn exec_tforcall(
         let result = cfunc(vm)?;
         vm.pop_frame_discard();
 
-        // OPTIMIZED: Direct inline access without Vec allocation
+        // OPTIMIZED: Direct access without Vec allocation
         // ipairs/pairs typically return 2 values (index, value) or nil
         let result_base = base_ptr + a + 4;
 
-        if result.overflow.is_some() {
-            // Rare case: more than 2 values
-            let values = result.overflow.unwrap();
-            let count = values.len().min(c);
-            for i in 0..count {
-                unsafe {
-                    *vm.register_stack.get_unchecked_mut(result_base + i) = values[i];
+        match &result {
+            crate::MultiValue::Many(values) => {
+                // Rare case: more than 2 values
+                let count = values.len().min(c);
+                for i in 0..count {
+                    unsafe {
+                        *vm.register_stack.get_unchecked_mut(result_base + i) = values[i];
+                    }
+                }
+                for i in count..c {
+                    unsafe {
+                        *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
+                    }
                 }
             }
-            for i in count..c {
+            _ => {
+                // Common case: 0-2 values
                 unsafe {
-                    *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
-                }
-            }
-        } else {
-            // Common case: 0-2 inline values
-            let inline_count = result.inline_count as usize;
-            unsafe {
-                if c >= 1 {
-                    *vm.register_stack.get_unchecked_mut(result_base) = if inline_count >= 1 {
-                        result.inline[0]
-                    } else {
-                        LuaValue::nil()
-                    };
-                }
-                if c >= 2 {
-                    *vm.register_stack.get_unchecked_mut(result_base + 1) = if inline_count >= 2 {
-                        result.inline[1]
-                    } else {
-                        LuaValue::nil()
-                    };
-                }
-                // Fill any remaining slots with nil
-                for i in 2..c {
-                    *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
+                    if c >= 1 {
+                        *vm.register_stack.get_unchecked_mut(result_base) = 
+                            result.first().unwrap_or(LuaValue::nil());
+                    }
+                    if c >= 2 {
+                        *vm.register_stack.get_unchecked_mut(result_base + 1) = 
+                            result.second().unwrap_or(LuaValue::nil());
+                    }
+                    // Fill any remaining slots with nil
+                    for i in 2..c {
+                        *vm.register_stack.get_unchecked_mut(result_base + i) = LuaValue::nil();
+                    }
                 }
             }
         }

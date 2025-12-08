@@ -20,7 +20,7 @@ pub use compiler::Compiler;
 pub use ffi::FFIState;
 pub use gc::*;
 pub use lib_registry::LibraryRegistry;
-pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue};
+pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue, MultiValue};
 pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
 use std::rc::Rc;
 

@@ -8,7 +8,6 @@ use crate::LuaVM;
 use crate::lua_vm::LuaResult;
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hasher;
 use std::rc::Rc;
@@ -44,103 +43,124 @@ pub use lua_value::{
 };
 
 /// Multi-return values from Lua functions
-/// OPTIMIZED: Use inline storage for common single-value case
+/// OPTIMIZED: Compact enum representation (32 bytes)
+/// - Empty: no return values
+/// - Single: one value (no heap allocation, most common case)
+/// - Many: 2+ values stored in Vec (heap allocation only when needed)
 #[derive(Debug, Clone)]
-pub struct MultiValue {
-    // Inline storage for 0-2 values (covers 99% of cases without heap allocation)
-    pub inline: [LuaValue; 2],
-    // Count of values stored inline (0, 1, or 2)
-    pub inline_count: u8,
-    // Only used when > 2 values
-    pub overflow: Option<Vec<LuaValue>>,
+pub enum MultiValue {
+    Empty,
+    Single(LuaValue),
+    Many(Vec<LuaValue>),
 }
 
 impl MultiValue {
     #[inline(always)]
     pub fn empty() -> Self {
-        MultiValue {
-            inline: [LuaValue::nil(), LuaValue::nil()],
-            inline_count: 0,
-            overflow: None,
-        }
+        MultiValue::Empty
     }
 
     #[inline(always)]
     pub fn single(value: LuaValue) -> Self {
-        MultiValue {
-            inline: [value, LuaValue::nil()],
-            inline_count: 1,
-            overflow: None,
-        }
+        MultiValue::Single(value)
     }
 
     #[inline(always)]
     pub fn two(v1: LuaValue, v2: LuaValue) -> Self {
-        MultiValue {
-            inline: [v1, v2],
-            inline_count: 2,
-            overflow: None,
-        }
+        MultiValue::Many(vec![v1, v2])
     }
 
     pub fn multiple(values: Vec<LuaValue>) -> Self {
-        let len = values.len();
-        if len == 0 {
-            Self::empty()
-        } else if len == 1 {
-            Self::single(values.into_iter().next().unwrap())
-        } else if len == 2 {
-            let mut iter = values.into_iter();
-            Self::two(iter.next().unwrap(), iter.next().unwrap())
-        } else {
-            MultiValue {
-                inline: [LuaValue::nil(), LuaValue::nil()],
-                inline_count: 0,
-                overflow: Some(values),
-            }
+        match values.len() {
+            0 => MultiValue::Empty,
+            1 => MultiValue::Single(values.into_iter().next().unwrap()),
+            _ => MultiValue::Many(values),
         }
     }
 
     #[inline(always)]
     pub fn all_values(self) -> Vec<LuaValue> {
-        if let Some(v) = self.overflow {
-            v
-        } else {
-            match self.inline_count {
-                0 => Vec::new(),
-                1 => vec![self.inline[0]],
-                2 => vec![self.inline[0], self.inline[1]],
-                _ => Vec::new(),
-            }
+        match self {
+            MultiValue::Empty => Vec::new(),
+            MultiValue::Single(v) => vec![v],
+            MultiValue::Many(v) => v,
         }
     }
 
     /// Get count of return values (optimized, no allocation)
     #[inline(always)]
     pub fn len(&self) -> usize {
-        if let Some(ref v) = self.overflow {
-            v.len()
-        } else {
-            self.inline_count as usize
+        match self {
+            MultiValue::Empty => 0,
+            MultiValue::Single(_) => 1,
+            MultiValue::Many(v) => v.len(),
         }
     }
 
     /// Check if empty
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        self.inline_count == 0 && self.overflow.is_none()
+        matches!(self, MultiValue::Empty)
     }
 
     /// Get first value (common case, optimized)
     #[inline(always)]
     pub fn first(&self) -> Option<LuaValue> {
-        if let Some(ref v) = self.overflow {
-            v.first().copied()
-        } else if self.inline_count > 0 {
-            Some(self.inline[0])
-        } else {
-            None
+        match self {
+            MultiValue::Empty => None,
+            MultiValue::Single(v) => Some(*v),
+            MultiValue::Many(v) => v.first().copied(),
         }
+    }
+
+    /// Get second value
+    #[inline(always)]
+    pub fn second(&self) -> Option<LuaValue> {
+        match self {
+            MultiValue::Empty | MultiValue::Single(_) => None,
+            MultiValue::Many(v) => v.get(1).copied(),
+        }
+    }
+
+    /// Get value at index (0-based)
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> Option<LuaValue> {
+        match self {
+            MultiValue::Empty => None,
+            MultiValue::Single(v) => {
+                if index == 0 {
+                    Some(*v)
+                } else {
+                    None
+                }
+            }
+            MultiValue::Many(v) => v.get(index).copied(),
+        }
+    }
+
+    /// Copy values to a slice, filling with nil if needed
+    /// Returns the number of values actually copied (before nil fill)
+    #[inline(always)]
+    pub fn copy_to_slice(&self, dest: &mut [LuaValue]) -> usize {
+        let count = self.len().min(dest.len());
+        match self {
+            MultiValue::Empty => {}
+            MultiValue::Single(v) => {
+                if !dest.is_empty() {
+                    dest[0] = *v;
+                }
+            }
+            MultiValue::Many(v) => {
+                for (i, val) in v.iter().take(dest.len()).enumerate() {
+                    dest[i] = *val;
+                }
+            }
+        }
+        // Fill remaining with nil
+        for slot in dest.iter_mut().skip(count) {
+            *slot = LuaValue::nil();
+        }
+        count
     }
 }
 
@@ -425,109 +445,6 @@ impl Chunk {
     }
 }
 
-/// String interning pool for short strings (Lua 5.4 optimization)
-/// Short strings (≤ LUAI_MAXSHORTLEN) are interned to save memory and speed up comparisons
-pub struct StringPool {
-    /// Maximum length for short strings (typically 40 bytes in Lua)
-    max_short_len: usize,
-    /// Interned short strings - key is the string content, value is Rc
-    pool: HashMap<String, Rc<LuaString>>,
-}
-
-impl StringPool {
-    /// Create a new string pool with default max short length
-    pub fn new() -> Self {
-        Self::with_max_len(40)
-    }
-
-    /// Create a new string pool with custom max short length
-    pub fn with_max_len(max_short_len: usize) -> Self {
-        StringPool {
-            max_short_len,
-            pool: HashMap::new(),
-        }
-    }
-
-    /// Intern a string. If it's short and already exists, return the cached version.
-    /// Otherwise create a new string.
-    pub fn intern(&mut self, s: String) -> Rc<LuaString> {
-        if s.len() <= self.max_short_len {
-            // Short string: check pool first
-            if let Some(existing) = self.pool.get(&s) {
-                return Rc::clone(existing);
-            }
-
-            // Not in pool: create and insert
-            let lua_str = Rc::new(LuaString::new(s.clone()));
-            self.pool.insert(s, Rc::clone(&lua_str));
-            lua_str
-        } else {
-            // Long string: don't intern, create directly
-            Rc::new(LuaString::new(s))
-        }
-    }
-
-    /// Get statistics about the string pool
-    pub fn stats(&self) -> (usize, usize) {
-        let count = self.pool.len();
-        let bytes: usize = self.pool.keys().map(|s| s.len()).sum();
-        (count, bytes)
-    }
-
-    /// Clear the string pool (useful for testing or memory cleanup)
-    pub fn clear(&mut self) {
-        self.pool.clear();
-    }
-}
-
-impl Default for StringPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod string_pool_tests {
-    use super::*;
-
-    #[test]
-    fn test_short_string_interning() {
-        let mut pool = StringPool::new();
-
-        let s1 = pool.intern("hello".to_string());
-        let s2 = pool.intern("hello".to_string());
-
-        // Should be the same Rc instance
-        assert!(Rc::ptr_eq(&s1, &s2));
-        assert_eq!(pool.stats().0, 1); // Only 1 unique string
-    }
-
-    #[test]
-    fn test_long_string_no_interning() {
-        let mut pool = StringPool::with_max_len(10);
-
-        let long_str = "a".repeat(50);
-        let s1 = pool.intern(long_str.clone());
-        let s2 = pool.intern(long_str);
-
-        // Long strings are NOT interned
-        assert!(!Rc::ptr_eq(&s1, &s2));
-        assert_eq!(pool.stats().0, 0); // No strings in pool
-    }
-
-    #[test]
-    fn test_multiple_short_strings() {
-        let mut pool = StringPool::new();
-
-        let _ = pool.intern("foo".to_string());
-        let _ = pool.intern("bar".to_string());
-        let _ = pool.intern("foo".to_string()); // Duplicate
-        let _ = pool.intern("baz".to_string());
-
-        assert_eq!(pool.stats().0, 3); // 3 unique strings
-    }
-}
-
 #[cfg(test)]
 mod value_tests {
     use super::*;
@@ -579,5 +496,9 @@ mod value_tests {
 
         // LuaValue should be 16 bytes (enum discriminant + largest variant)
         assert_eq!(size_of::<LuaValue>(), 16);
+
+        // MultiValue should be 24 bytes (Many variant: Vec<LuaValue> 24 bytes, Single is 16+tag)
+        // Down from 64 bytes in original struct - 62.5% reduction!
+        assert_eq!(size_of::<super::MultiValue>(), 24);
     }
 }
