@@ -2328,117 +2328,82 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
     } else {
         // Regular call: compile function expression
-        let temp_func_reg = compile_expr(c, &prefix_expr)?;
-
-        // CRITICAL FIX: When function call returns values and will be used in an expression,
-        // we need to avoid overwriting the function value itself.
-        //
-        // Example: `f()` where f is in R[0] - if we call directly, return value overwrites f!
-        // Solution: If temp_func_reg is an "old" register (< freereg when we started),
-        // move the function to a new register first.
-        //
-        // However, we need to distinguish:
-        // - `f = load(...)` - first assignment, can reuse register ✓
-        // - `assert(f() == 30)` - f exists, must preserve it ✓
-        //
-        // The key insight: If dest is specified, caller wants a specific target.
-        // If dest is NOT specified AND we need returns, allocate fresh register to be safe.
-
+        // OPTIMIZATION: If dest is specified and safe (>= nactvar), compile function directly to dest
+        // This avoids unnecessary MOVE instructions
+        let nactvar = c.nactvar as u32;
+        
         let func_reg = if let Some(d) = dest {
-            // Caller specified a destination - use it
-            // CRITICAL CHECK: Verify that arguments won't overwrite active local variables!
-            // Arguments will be placed at R[d+1], R[d+2], etc.
-            // If any of these overlap with active locals (< nactvar), we need to use a different register
-            let nactvar = c.nactvar as u32;
+            // Check if we can safely use dest for function
             let args_start = d + 1;
-
-            // Check if dest or args would overwrite active locals
-            // Active locals occupy R[0] through R[nactvar-1]
-            // - If d < nactvar: moving function to d would overwrite a local before args are compiled!
-            // - If args_start < nactvar: arguments would overwrite locals!
-            // 
-            // Example: `x = tonumber(x)` where x is in R[0]:
-            //   - d = 0, nactvar = 1, args_start = 1
-            //   - If we move tonumber to R[0] first, we overwrite x before reading it as argument!
-            if d < nactvar || args_start < nactvar {
-                // Conflict! Either dest or arguments would overwrite active locals
-                // Solution: Place function at freereg (after all locals) and move result back later
-                let new_func_reg = if c.freereg < nactvar {
-                    // Ensure freereg is at least nactvar
-                    c.freereg = nactvar;
-                    alloc_register(c)
-                } else {
-                    alloc_register(c)
-                };
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_func_reg, temp_func_reg, 0),
-                );
-                need_move_to_dest = true; // Remember to move result back to original dest
-                new_func_reg
-            } else {
-                // No conflict - safe to use dest
-                if d != temp_func_reg {
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0),
-                    );
+            if d >= nactvar && args_start >= nactvar {
+                // Safe to compile directly to dest
+                let temp_func_reg = compile_expr_to(c, &prefix_expr, Some(d))?;
+                // Ensure we got the register we asked for (or move if needed)
+                if temp_func_reg != d {
+                    ensure_register(c, d);
+                    emit_move(c, d, temp_func_reg);
                 }
-                // CRITICAL: Reset freereg to just past func_reg
-                // This ensures arguments compile into consecutive registers starting from func_reg+1
+                // Reset freereg to just past func_reg
                 c.freereg = d + 1;
                 d
-            }
-        } else if num_returns > 0 {
-            // No dest specified, but need return values - this is expression context!
-            // CRITICAL: Must preserve local variables!
-            // Check if temp_func_reg is a local variable (< nactvar)
-            let nactvar = c.nactvar as u32;
-            if temp_func_reg < nactvar {
-                // Function is a local variable - must preserve it!
-                let new_reg = alloc_register(c);
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
-                );
-                new_reg
-            } else if temp_func_reg + 1 == c.freereg {
-                // Function was just loaded into a fresh temporary register - safe to reuse
-                temp_func_reg
             } else {
-                // Function is in an "old" temporary register - must preserve it!
-                let new_reg = alloc_register(c);
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
-                );
-                new_reg
-            }
-        } else {
-            // num_returns == 0: Statement context, no return values needed
-            // BUT we still need to ensure arguments don't overwrite local variables!
-            // Arguments will go to temp_func_reg + 1, temp_func_reg + 2, etc.
-            // If these overlap with local variables (< nactvar), we must relocate!
-            let nactvar = c.nactvar as u32;
-            let args_would_start_at = temp_func_reg + 1;
-
-            if args_would_start_at < nactvar || temp_func_reg < nactvar {
-                // Arguments would overwrite local variables!
-                // Move function to a safe register (at or after nactvar)
-                let new_reg = if c.freereg < nactvar {
+                // dest < nactvar: we need to use a safe temporary register
+                let temp_func_reg = compile_expr(c, &prefix_expr)?;
+                let new_func_reg = if c.freereg < nactvar {
                     c.freereg = nactvar;
                     alloc_register(c)
                 } else {
                     alloc_register(c)
                 };
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
-                );
-                new_reg
+                if temp_func_reg != new_func_reg {
+                    emit_move(c, new_func_reg, temp_func_reg);
+                }
+                need_move_to_dest = true;
+                new_func_reg
+            }
+        } else {
+            // No dest specified - use default behavior
+            let temp_func_reg = compile_expr(c, &prefix_expr)?;
+            
+            if num_returns > 0 {
+                // Expression context - need return values
+                // CRITICAL: Must preserve local variables!
+                let nactvar = c.nactvar as u32;
+                if temp_func_reg < nactvar {
+                    // Function is a local variable - must preserve it!
+                    let new_reg = alloc_register(c);
+                    emit_move(c, new_reg, temp_func_reg);
+                    new_reg
+                } else if temp_func_reg + 1 == c.freereg {
+                    // Function was just loaded into a fresh temporary register - safe to reuse
+                    temp_func_reg
+                } else {
+                    // Function is in an "old" temporary register - must preserve it!
+                    let new_reg = alloc_register(c);
+                    emit_move(c, new_reg, temp_func_reg);
+                    new_reg
+                }
             } else {
-                // Safe - neither function nor arguments overlap with locals
-                temp_func_reg
+                // num_returns == 0: Statement context, no return values needed
+                // BUT we still need to ensure arguments don't overwrite local variables!
+                let nactvar = c.nactvar as u32;
+                let args_would_start_at = temp_func_reg + 1;
+
+                if args_would_start_at < nactvar || temp_func_reg < nactvar {
+                    // Arguments would overwrite local variables!
+                    // Move function to a safe register (at or after nactvar)
+                    let new_reg = if c.freereg < nactvar {
+                        c.freereg = nactvar;
+                        alloc_register(c)
+                    } else {
+                        alloc_register(c)
+                    };
+                    emit_move(c, new_reg, temp_func_reg);
+                    new_reg
+                } else {
+                    // Safe - neither function nor arguments overlap with locals
+                    temp_func_reg
+                }
             }
         };
 
@@ -2765,9 +2730,36 @@ fn compile_table_expr_to(
     expr: &LuaTableExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    let reg = get_result_reg(c, dest);
+    // Get all fields first to check if we need to use a temporary register
+    let fields: Vec<_> = expr.get_fields().collect();
+    
+    // CRITICAL FIX: When dest is a local variable register (< nactvar) and we have
+    // non-empty table constructor, we must NOT use dest directly. This is because
+    // table elements will be compiled into consecutive registers starting from reg+1,
+    // which could overwrite other local variables.
+    //
+    // Example: `local a,b,c; a = {f()}` where a=R0, b=R1, c=R2
+    // If we create table at R0, function and args go to R1, R2... overwriting b, c!
+    //
+    // Solution: When dest < nactvar AND table is non-empty, ignore dest and use
+    // a fresh temporary register. At the end, we move the result to dest.
+    let original_dest = dest;
+    let need_move_to_dest = if let Some(d) = dest {
+        !fields.is_empty() && d < c.nactvar as u32
+    } else {
+        false
+    };
+    
+    // If we need to protect locals, ignore dest and allocate a fresh register
+    let effective_dest = if need_move_to_dest {
+        None
+    } else {
+        dest
+    };
+    
+    let reg = get_result_reg(c, effective_dest);
 
-    // Get all fields
+    // Fields already collected above
     let fields: Vec<_> = expr.get_fields().collect();
 
     // Separate array part from hash part to count sizes
@@ -3093,6 +3085,13 @@ fn compile_table_expr_to(
         emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, c_param));
 
         c.freereg = reg + 1;
+        // Move result to original destination if needed
+        if need_move_to_dest {
+            if let Some(d) = original_dest {
+                emit_move(c, d, reg);
+                return Ok(d);
+            }
+        }
         return Ok(reg);
     }
 
@@ -3118,6 +3117,13 @@ fn compile_table_expr_to(
         emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, c_param));
         
         c.freereg = reg + 1;
+        // Move result to original destination if needed
+        if need_move_to_dest {
+            if let Some(d) = original_dest {
+                emit_move(c, d, reg);
+                return Ok(d);
+            }
+        }
         return Ok(reg);
     }
 
@@ -3144,6 +3150,14 @@ fn compile_table_expr_to(
     // Free temporary registers used during table construction
     // Reset to table_reg + 1 to match luac's register allocation behavior
     c.freereg = reg + 1;
+
+    // Move result to original destination if needed
+    if need_move_to_dest {
+        if let Some(d) = original_dest {
+            emit_move(c, d, reg);
+            return Ok(d);
+        }
+    }
 
     Ok(reg)
 }

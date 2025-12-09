@@ -262,17 +262,29 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             // Check if last expression is a function call (which might return multiple values)
             else if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
-                    // Multi-return call: compile with dest = target_base
+                    // Multi-return call: DON'T pass dest to avoid overwriting pre-allocated registers
+                    // Let the call compile into safe temporary position, results will be in target_base
+                    // because we've pre-allocated the registers
+                    // 
+                    // CRITICAL: We need to compile without dest, then the results will naturally
+                    // end up in sequential registers starting from wherever the function was placed.
+                    // Since we pre-allocated target_base..target_base+remaining_vars, freereg points
+                    // past them, so the call will compile into fresh registers.
                     let result_base = compile_call_expr_with_returns_and_dest(
                         c,
                         call_expr,
                         remaining_vars,
-                        Some(target_base),
+                        None, // Don't specify dest - let call choose safe location
                     )?;
 
-                    // Add all return registers
+                    // Move results to target registers if needed
                     for i in 0..remaining_vars {
-                        regs.push(result_base + i as u32);
+                        let src = result_base + i as u32;
+                        let dst = target_base + i as u32;
+                        if src != dst {
+                            emit_move(c, dst, src);
+                        }
+                        regs.push(dst);
                     }
 
                     // Define locals and return
