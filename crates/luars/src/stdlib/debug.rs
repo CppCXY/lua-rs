@@ -10,21 +10,15 @@ use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_debug_lib() -> LibraryModule {
     crate::lib_module!("debug", {
-        // "debug" => debug_debug,
-        // "gethook" => debug_gethook,
         // "getinfo" => debug_getinfo,
         // "getlocal" => debug_getlocal,
-        // "getmetatable" => debug_getmetatable,
-        // "getregistry" => debug_getregistry,
-        // "getupvalue" => debug_getupvalue,
-        // "getuservalue" => debug_getuservalue,
-        // "sethook" => debug_sethook,
         // "setlocal" => debug_setlocal,
+        // "getmetatable" => debug_getmetatable,
+        // "setmetatable" => debug_setmetatable,
+        // "getupvalue" => debug_getupvalue,
         // "setupvalue" => debug_setupvalue,
-        // "setuservalue" => debug_setuservalue,
         "traceback" => debug_traceback,
         // "upvalueid" => debug_upvalueid,
-        // "upvaluejoin" => debug_upvaluejoin,
     })
 }
 

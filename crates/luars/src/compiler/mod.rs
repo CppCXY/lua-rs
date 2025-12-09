@@ -1,5 +1,6 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
+mod binop;
 mod exp2reg;
 mod expdesc;
 mod expr;
