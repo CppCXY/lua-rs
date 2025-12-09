@@ -169,6 +169,71 @@ pub fn exec_vararg(
     };
 
     let dest_base = base_ptr + a;
+    
+    // Calculate actual copy count
+    let actual_copy_count = if c == 0 {
+        vararg_count
+    } else {
+        (c - 1).min(vararg_count)
+    };
+    
+    // Check for overlap between source (vararg_start..vararg_start+actual_copy_count)
+    // and destination (dest_base..dest_base+actual_copy_count)
+    // If there's overlap, we need to relocate vararg source data first to prevent corruption
+    let dest_end = dest_base + actual_copy_count;
+    let src_end = vararg_start + actual_copy_count;
+    let has_overlap = actual_copy_count > 0 && !(dest_end <= vararg_start || src_end <= dest_base);
+
+    // If there's overlap, relocate vararg source data to a safe location
+    // This prevents subsequent VARARG instructions from reading corrupted data
+    if has_overlap {
+        // Allocate a new safe location beyond any potential destination
+        // Use the end of current stack + some buffer
+        let safe_location = vm.register_stack.len().max(dest_end + vararg_count);
+        vm.ensure_stack_capacity(safe_location + vararg_count);
+        if vm.register_stack.len() < safe_location + vararg_count {
+            vm.register_stack.resize(safe_location + vararg_count, LuaValue::nil());
+        }
+        
+        // Copy ALL vararg data to safe location (not just actual_copy_count)
+        // This ensures subsequent VARARG instructions can read correct data
+        for i in 0..vararg_count {
+            vm.register_stack[safe_location + i] = vm.register_stack[vararg_start + i];
+        }
+        
+        // Update frame's vararg_start to point to new location
+        unsafe {
+            (*frame_ptr).set_vararg(safe_location, vararg_count);
+        }
+        
+        // Now copy from safe location to destination (no overlap possible)
+        if c == 0 {
+            for i in 0..vararg_count {
+                vm.register_stack[dest_base + i] = vm.register_stack[safe_location + i];
+            }
+            // Update frame top
+            let new_top = a + vararg_count;
+            unsafe {
+                let current_top = (*frame_ptr).top as usize;
+                (*frame_ptr).top = (new_top.max(current_top)) as u32;
+            }
+        } else {
+            // Fixed count
+            let count = c - 1;
+            let copy_count = count.min(vararg_count);
+            for i in 0..copy_count {
+                vm.register_stack[dest_base + i] = vm.register_stack[safe_location + i];
+            }
+            // Fill remaining with nil
+            let nil_val = LuaValue::nil();
+            for i in copy_count..count {
+                vm.register_stack[dest_base + i] = nil_val;
+            }
+        }
+        
+        return Ok(());
+    }
+    
     let reg_ptr = vm.register_stack.as_mut_ptr();
 
     if c == 0 {
@@ -179,8 +244,8 @@ pub fn exec_vararg(
             (*frame_ptr).top = (new_top.max(top)) as u32;
         }
 
-        // OPTIMIZED: Use ptr::copy for bulk transfer when possible
         if vararg_count > 0 && vararg_start + vararg_count <= vm.register_stack.len() {
+            // No overlap (handled above) - use fast copy
             unsafe {
                 std::ptr::copy(
                     reg_ptr.add(vararg_start),
@@ -204,11 +269,11 @@ pub fn exec_vararg(
         }
     } else {
         // Fixed number of results (c-1 values)
+        // Overlap case was already handled above
         let count = c - 1;
         let copy_count = count.min(vararg_count);
         let nil_count = count.saturating_sub(vararg_count);
 
-        // OPTIMIZED: Bulk copy available varargs
         if copy_count > 0 && vararg_start + copy_count <= vm.register_stack.len() {
             unsafe {
                 std::ptr::copy(

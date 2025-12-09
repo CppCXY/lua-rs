@@ -403,20 +403,39 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             } else {
                 alloc_register(c)
             };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Add, result_reg, left_reg, right_reg),
-            );
-            emit(
-                c,
-                Instruction::create_abck(
-                    OpCode::MmBin,
-                    left_reg,
-                    right_reg,
-                    TagMethod::Add.as_u32(),
-                    false,
-                ),
-            );
+            if can_use_rk {
+                // Right is constant, use ADDK
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::AddK, result_reg, left_reg, const_idx),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBinK,
+                        left_reg,
+                        const_idx,
+                        TagMethod::Add.as_u32(),
+                        false,
+                    ),
+                );
+            } else {
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Add, result_reg, left_reg, right_reg),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBin,
+                        left_reg,
+                        right_reg,
+                        TagMethod::Add.as_u32(),
+                        false,
+                    ),
+                );
+            }
         }
         BinaryOperator::OpSub => {
             result_reg = if can_reuse_left {
@@ -424,20 +443,39 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             } else {
                 alloc_register(c)
             };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Sub, result_reg, left_reg, right_reg),
-            );
-            emit(
-                c,
-                Instruction::create_abck(
-                    OpCode::MmBin,
-                    left_reg,
-                    right_reg,
-                    TagMethod::Sub.as_u32(),
-                    false,
-                ),
-            );
+            if can_use_rk {
+                // Right is constant, use SUBK
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::SubK, result_reg, left_reg, const_idx),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBinK,
+                        left_reg,
+                        const_idx,
+                        TagMethod::Sub.as_u32(),
+                        false,
+                    ),
+                );
+            } else {
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Sub, result_reg, left_reg, right_reg),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBin,
+                        left_reg,
+                        right_reg,
+                        TagMethod::Sub.as_u32(),
+                        false,
+                    ),
+                );
+            }
         }
         BinaryOperator::OpMul => {
             result_reg = if can_reuse_left {
@@ -2642,33 +2680,68 @@ pub fn compile_call_expr_with_returns_and_dest(
                     alloc_register(c);
                 }
 
+                let mut inner_last_arg_is_vararg_or_call = false;
                 for (j, call_arg) in call_arg_exprs.iter().enumerate() {
                     let call_arg_dest = call_args_start + j as u32;
+                    let is_last_inner_arg = j == call_arg_exprs.len() - 1;
+                    
                     // Reset freereg before each argument to protect argument slots
                     if c.freereg < call_args_end {
                         c.freereg = call_args_end;
                     }
+                    
+                    // Check if last inner argument is vararg
+                    if is_last_inner_arg {
+                        if let LuaExpr::LiteralExpr(lit_expr) = call_arg {
+                            if matches!(lit_expr.get_literal(), Some(LuaLiteralToken::Dots(_))) {
+                                // Vararg as last argument: VARARG with C=0 (all out)
+                                emit(c, Instruction::encode_abc(OpCode::Vararg, call_arg_dest, 0, 0));
+                                call_arg_regs.push(call_arg_dest);
+                                inner_last_arg_is_vararg_or_call = true;
+                                continue;
+                            }
+                        }
+                        // Check if last arg is a call expression - compile it with "all out"
+                        if let LuaExpr::CallExpr(inner_call_expr) = call_arg {
+                            // Recursively compile this call with returns=usize::MAX (all out)
+                            let inner_call_reg = compile_call_expr_with_returns_and_dest(c, inner_call_expr, usize::MAX, Some(call_arg_dest))?;
+                            if inner_call_reg != call_arg_dest {
+                                while c.freereg <= call_arg_dest {
+                                    alloc_register(c);
+                                }
+                                emit_move(c, call_arg_dest, inner_call_reg);
+                            }
+                            call_arg_regs.push(call_arg_dest);
+                            inner_last_arg_is_vararg_or_call = true;
+                            continue;
+                        }
+                    }
+                    
                     let arg_reg = compile_expr_to(c, call_arg, Some(call_arg_dest))?;
                     call_arg_regs.push(arg_reg);
                 }
 
-                // Move call arguments if needed
-                for (j, &reg) in call_arg_regs.iter().enumerate() {
-                    let target = call_args_start + j as u32;
-                    if reg != target {
-                        while c.freereg <= target {
-                            alloc_register(c);
+                // Move call arguments if needed (skip if we emitted VARARG directly)
+                if !inner_last_arg_is_vararg_or_call {
+                    for (j, &reg) in call_arg_regs.iter().enumerate() {
+                        let target = call_args_start + j as u32;
+                        if reg != target {
+                            while c.freereg <= target {
+                                alloc_register(c);
+                            }
+                            emit_move(c, target, reg);
                         }
-                        emit_move(c, target, reg);
                     }
                 }
 
                 // Emit call with "all out" (C=0)
-                let inner_arg_count = call_arg_exprs.len();
-                let inner_b_param = if inner_is_method {
-                    (inner_arg_count + 2) as u32 // +1 for self, +1 for Lua convention
+                // B = number of arguments + 1, or 0 if last arg was vararg/call
+                let inner_b_param = if inner_last_arg_is_vararg_or_call {
+                    0 // B=0: variable number of args
+                } else if inner_is_method {
+                    (num_call_args + 2) as u32 // +1 for self, +1 for Lua convention
                 } else {
-                    (inner_arg_count + 1) as u32
+                    (num_call_args + 1) as u32
                 };
                 emit(
                     c,
@@ -2743,6 +2816,7 @@ pub fn compile_call_expr_with_returns_and_dest(
     // B = number of arguments + 1, or 0 if last arg was "all out" call
     //     For method calls, B includes the implicit self parameter
     // C = number of expected return values + 1 (1 means 0 returns, 2 means 1 return, 0 means all returns)
+    //     SPECIAL: when num_returns = usize::MAX, it means "all out" mode (C=0)
     let arg_count = arg_exprs.len();
     let b_param = if last_arg_is_call_all_out {
         0 // B=0: all in
@@ -2751,7 +2825,13 @@ pub fn compile_call_expr_with_returns_and_dest(
         let total_args = if is_method { arg_count + 1 } else { arg_count };
         (total_args + 1) as u32
     };
-    let c_param = (num_returns + 1) as u32;
+    // C=0 means "all out", C=1 means 0 returns, C=2 means 1 return, etc.
+    // When caller passes num_returns=usize::MAX, they mean "all out" (C=0)
+    let c_param = if num_returns == usize::MAX {
+        0 // C=0: all out (take all return values)
+    } else {
+        (num_returns + 1) as u32
+    };
 
     emit(
         c,
@@ -2996,6 +3076,16 @@ fn compile_table_expr_to(
     let mut array_idx = 0;
     let values_start = reg + 1;
     let mut has_vararg_at_end = false;
+    
+    // CRITICAL: Pre-reserve registers for array elements BEFORE processing any fields.
+    // This prevents hash field value expressions (like `select('#', ...)`) from
+    // allocating temporary registers that conflict with array element positions.
+    // Without this, `{n = select('#', ...), ...}` would have `select` use reg+1,
+    // which should be reserved for the first vararg element.
+    let array_values_end = values_start + array_count as u32;
+    while c.freereg < array_values_end {
+        alloc_register(c);
+    }
     let mut has_call_at_end = false;
 
     // Process all fields in source order

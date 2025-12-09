@@ -755,7 +755,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
 
             // Compile arguments to consecutive registers after function
-            let mut last_is_vararg_all_out = false;
+            let mut last_is_vararg_or_call_all_out = false;
             for (i, arg) in args.iter().enumerate() {
                 let target_reg = reserved_regs[i + 1];
                 let is_last_arg = i == args.len() - 1;
@@ -769,9 +769,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                         ) {
                             // Vararg as last argument: use "all out" mode
                             emit(c, Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0));
-                            last_is_vararg_all_out = true;
+                            last_is_vararg_or_call_all_out = true;
                             continue;
                         }
+                    }
+                    // Check if last argument is a function call
+                    if let LuaExpr::CallExpr(inner_call) = arg {
+                        // Compile the inner call with "all out" mode (num_returns = usize::MAX)
+                        compile_call_expr_with_returns_and_dest(c, inner_call, usize::MAX, Some(target_reg))?;
+                        last_is_vararg_or_call_all_out = true;
+                        continue;
                     }
                 }
 
@@ -782,8 +789,8 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
 
             // Emit TailCall instruction
-            // A = function register, B = num_args + 1 (or 0 if last arg is vararg "all out")
-            let b_param = if last_is_vararg_all_out {
+            // A = function register, B = num_args + 1 (or 0 if last arg is vararg/call "all out")
+            let b_param = if last_is_vararg_or_call_all_out {
                 0 // B=0: all in (variable number of args from vararg)
             } else {
                 (num_args + 1) as u32
@@ -858,7 +865,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         } else if let LuaExpr::CallExpr(call_expr) = last_expr {
             // Call expression: compile with "all out" mode
             let last_target_reg = base_reg + (num_exprs - 1) as u32;
-            compile_call_expr_with_returns_and_dest(c, call_expr, 0, Some(last_target_reg))?;
+            compile_call_expr_with_returns_and_dest(c, call_expr, usize::MAX, Some(last_target_reg))?;
             // Return with B=0 (all out)
             emit(
                 c,
