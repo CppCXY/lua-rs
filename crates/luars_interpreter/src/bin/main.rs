@@ -307,8 +307,10 @@ fn main() {
     for code in &opts.execute_strings {
         match vm.compile(code) {
             Ok(chunk) => {
-                if let Err(e) = vm.execute(Rc::new(chunk)) {
-                    eprintln!("lua: {}", e);
+                if let Err(_) = vm.execute(Rc::new(chunk)) {
+                    let error_msg = vm.get_error_message();
+                    let traceback = vm.generate_traceback(error_msg);
+                    eprintln!("lua: Runtime Error: {}", traceback);
                     std::process::exit(1);
                 }
             }

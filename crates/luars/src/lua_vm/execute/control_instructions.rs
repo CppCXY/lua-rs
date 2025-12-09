@@ -1,10 +1,10 @@
 /// Control flow instructions
 ///
-/// These instructions handle function calls, returns, jumps, and coroutine operations.
+/// These instructions handle function calls, returns, and comparisons.
 use crate::lua_value::LuaValueKind;
 use crate::lua_vm::{LuaCallFrame, LuaError, LuaResult, LuaVM};
 use crate::{FunctionId, LuaValue};
-use crate::{get_a, get_b, get_c, get_k, get_sb, get_sj};
+use crate::{get_a, get_b, get_c, get_k, get_sb};
 
 /// RETURN A B C k
 /// return R[A], ... ,R[A+B-2]
@@ -135,46 +135,7 @@ pub fn exec_return(
     }
 }
 
-// ============ Jump Instructions ============
-
-/// JMP sJ
-/// pc += sJ
-#[allow(dead_code)]
-#[inline(always)]
-pub fn exec_jmp(instr: u32, pc: &mut usize) {
-    let sj = get_sj!(instr);
-
-    // PC already incremented by dispatcher, so we add offset directly
-    *pc = (*pc as i32 + sj) as usize;
-}
-
 // ============ Test Instructions ============
-
-/// TEST A k
-/// if (not R[A] == k) then pc++
-/// ULTRA-OPTIMIZED: Direct type tag check, single branch
-#[allow(dead_code)]
-#[inline(always)]
-pub fn exec_test(vm: &mut LuaVM, instr: u32, pc: &mut usize, base_ptr: usize) {
-    let a = get_a!(instr);
-    let k = get_k!(instr);
-
-    unsafe {
-        // OPTIMIZATION: Direct unsafe access and type tag comparison
-        let value = *vm.register_stack.as_ptr().add(base_ptr + a);
-
-        // OPTIMIZATION: Fast truthiness check using type tags
-        // nil = TAG_NIL, false = VALUE_FALSE
-        // Only nil and false are falsy
-        use crate::lua_value::{TAG_NIL, VALUE_FALSE};
-        let is_truthy = value.primary != TAG_NIL && value.primary != VALUE_FALSE;
-
-        // If (not value) == k, skip next instruction
-        if !is_truthy == k {
-            *pc += 1;
-        }
-    }
-}
 
 /// TESTSET A B k
 /// if (not R[B] == k) then R[A] := R[B] else pc++
@@ -955,48 +916,209 @@ pub fn exec_call(
     }
 
     // Slow path: Check for __call metamethod (for Table and Userdata)
-    let metatable_opt = match func.kind() {
-        LuaValueKind::Table => func.as_table_id().and_then(|table_id| {
-            vm.object_pool
-                .get_table(table_id)
-                .and_then(|t| t.get_metatable())
-        }),
-        LuaValueKind::Userdata => func.as_userdata_id().and_then(|ud_id| {
-            vm.object_pool
-                .get_userdata(ud_id)
-                .map(|ud| ud.get_metatable())
-                .filter(|mt| !mt.is_nil())
-        }),
-        _ => None,
-    };
+    // Need to handle chains of __call metamethods by inserting extra arguments
+    let mut current_func = func;
+    let mut extra_args: Vec<LuaValue> = Vec::new(); // Tables in the chain to insert as args
+    let mut depth = 0;
+    const MAX_CALL_CHAIN: usize = 200; // Prevent infinite loops
 
-    if let Some(metatable) = metatable_opt {
-        // Use pre-cached __call StringId
-        let call_key = LuaValue::string(vm.object_pool.tm_call);
-        if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
-            if call_func.is_callable() {
-                if call_func.is_cfunction() {
-                    exec_call_cfunction(vm, call_func, a, b, c, base, true, func, frame_ptr_ptr)?;
+    loop {
+        let metatable_opt = match current_func.kind() {
+            LuaValueKind::Table => current_func.as_table_id().and_then(|table_id| {
+                vm.object_pool
+                    .get_table(table_id)
+                    .and_then(|t| t.get_metatable())
+            }),
+            LuaValueKind::Userdata => current_func.as_userdata_id().and_then(|ud_id| {
+                vm.object_pool
+                    .get_userdata(ud_id)
+                    .map(|ud| ud.get_metatable())
+                    .filter(|mt| !mt.is_nil())
+            }),
+            _ => break, // Not a table/userdata, cannot have __call
+        };
+
+        if let Some(metatable) = metatable_opt {
+            // Use pre-cached __call StringId
+            let call_key = LuaValue::string(vm.object_pool.tm_call);
+            if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
+                // Add current_func to the extra args (at the front)
+                extra_args.insert(0, current_func);
+
+                if call_func.is_callable() {
+                    // Found a callable __call metamethod
+                    // Now we need to insert all extra_args before the original arguments
+                    exec_call_with_extra_args(vm, call_func, a, b, c, base, &extra_args, frame_ptr_ptr)?;
                     return Ok(());
+                } else if call_func.is_table() || call_func.is_userdata() {
+                    // __call is itself a table/userdata, follow the chain
+                    current_func = call_func;
+                    depth += 1;
+                    if depth >= MAX_CALL_CHAIN {
+                        return Err(vm.error("'__call' chain too long; possible loop".to_string()));
+                    }
+                    continue;
                 } else {
-                    exec_call_lua_function(
-                        vm,
-                        call_func,
-                        a,
-                        b,
-                        c,
-                        base,
-                        true,
-                        func,
-                        frame_ptr_ptr,
-                    )?;
-                    return Ok(());
+                    break; // __call is not callable and not a table
                 }
+            } else {
+                break; // No __call metamethod
             }
+        } else {
+            break; // No metatable
         }
     }
 
     Err(vm.error(format!("attempt to call a {} value", func.type_name())))
+}
+
+/// Execute a call with extra arguments inserted at the front (for __call chains)
+/// extra_args are inserted before the original arguments
+#[inline(never)]
+fn exec_call_with_extra_args(
+    vm: &mut LuaVM,
+    call_func: LuaValue,
+    a: usize,
+    b: usize,
+    c: usize,
+    base: usize,
+    extra_args: &[LuaValue],
+    frame_ptr_ptr: &mut *mut LuaCallFrame,
+) -> LuaResult<()> {
+    // Calculate original argument count
+    let orig_arg_count = if b == 0 {
+        let frame = vm.current_frame();
+        if frame.top as usize > a + 1 {
+            (frame.top as usize) - (a + 1)
+        } else {
+            0
+        }
+    } else {
+        vm.current_frame_mut().top = (a + b) as u32;
+        b - 1
+    };
+
+    let extra_count = extra_args.len();
+    let total_arg_count = extra_count + orig_arg_count;
+    let return_count = if c == 0 { usize::MAX } else { c - 1 };
+
+    // New frame base = R[A+1] in caller's frame
+    let new_base = base + a + 1;
+
+    // Ensure we have enough stack space
+    // First, make room for the extra args by shifting original args
+    let required_capacity = new_base + total_arg_count + 10; // Extra buffer
+    vm.ensure_stack_capacity(required_capacity);
+
+    // Shift original arguments to make room for extra_args at the front
+    if orig_arg_count > 0 && extra_count > 0 {
+        // Move original args from [new_base..new_base+orig_arg_count] 
+        // to [new_base+extra_count..new_base+extra_count+orig_arg_count]
+        unsafe {
+            let reg_ptr = vm.register_stack.as_mut_ptr();
+            // Copy in reverse to avoid overwriting
+            for i in (0..orig_arg_count).rev() {
+                *reg_ptr.add(new_base + extra_count + i) = *reg_ptr.add(new_base + i);
+            }
+        }
+    }
+
+    // Insert extra_args at the front
+    for (i, arg) in extra_args.iter().enumerate() {
+        vm.register_stack[new_base + i] = *arg;
+    }
+
+    // Update top to reflect new argument count
+    vm.current_frame_mut().top = (a + 1 + total_arg_count) as u32;
+
+    // Now call the function
+    if call_func.is_cfunction() {
+        let c_func = call_func.as_cfunction().unwrap();
+        // For C function, we need to set up the frame manually
+        let call_base = base + a;
+        vm.register_stack[call_base] = call_func;
+        
+        let temp_frame = LuaCallFrame::new_c_function(call_base, total_arg_count + 1);
+        *frame_ptr_ptr = vm.push_frame(temp_frame);
+        
+        let result = c_func(vm)?;
+        vm.pop_frame_discard();
+        
+        // Restore frame_ptr to caller's frame
+        *frame_ptr_ptr = vm.current_frame_ptr();
+        
+        // Write results
+        let vals = result.all_values();
+        let count = if return_count == usize::MAX {
+            vals.len()
+        } else {
+            vals.len().min(return_count)
+        };
+        
+        for i in 0..count {
+            vm.register_stack[base + a + i] = vals[i];
+        }
+        
+        // Fill remaining expected results with nil
+        if return_count != usize::MAX {
+            for i in count..return_count {
+                vm.register_stack[base + a + i] = LuaValue::nil();
+            }
+        }
+        
+        // Update caller's top if variable return
+        if return_count == usize::MAX {
+            vm.current_frame_mut().top = (a + count) as u32;
+        }
+        
+        Ok(())
+    } else {
+        // Lua function
+        let func_id = match call_func.as_function_id() {
+            Some(id) => id,
+            None => return Err(vm.error("not a function".to_string())),
+        };
+        let func_ref = match vm.object_pool.get_function(func_id) {
+            Some(f) => f,
+            None => return Err(vm.error("invalid function".to_string())),
+        };
+        let chunk = func_ref.lua_chunk();
+        
+        let max_stack_size = chunk.max_stack_size;
+        let num_params = chunk.param_count;
+        let is_vararg = chunk.is_vararg;
+        let code_ptr = chunk.code.as_ptr();
+        let constants_ptr = chunk.constants.as_ptr();
+        let upvalues_ptr = func_ref.upvalues.as_ptr();
+        
+        // Ensure stack capacity
+        let required_size = new_base + max_stack_size;
+        vm.ensure_stack_capacity(required_size);
+        
+        // Fill missing arguments with nil
+        if total_arg_count < num_params && !is_vararg {
+            for i in total_arg_count..num_params {
+                vm.register_stack[new_base + i] = LuaValue::nil();
+            }
+        }
+        
+        // Create and push new frame
+        let nresults = if return_count == usize::MAX { -1i16 } else { return_count as i16 };
+        let new_frame = LuaCallFrame::new_lua_function(
+            func_id,
+            code_ptr,
+            constants_ptr,
+            upvalues_ptr,
+            new_base,
+            total_arg_count,
+            a,
+            nresults,
+            max_stack_size,
+        );
+        
+        *frame_ptr_ptr = vm.push_frame(new_frame);
+        Ok(())
+    }
 }
 
 /// Slow path for vararg Lua function calls
@@ -1061,193 +1183,6 @@ fn exec_call_lua_vararg(
         new_base,
         arg_count,
         a,
-        nresults,
-        max_stack_size,
-    );
-
-    *frame_ptr_ptr = vm.push_frame(new_frame);
-    Ok(())
-}
-
-/// Slow path for Lua function calls with metamethod
-/// OPTIMIZED: Minimize branches and memory operations for common case
-#[inline(always)]
-fn exec_call_lua_function(
-    vm: &mut LuaVM,
-    func: LuaValue,
-    a: usize,
-    b: usize,
-    c: usize,
-    caller_base: usize,
-    use_call_metamethod: bool,
-    call_metamethod_self: LuaValue,
-    frame_ptr_ptr: &mut *mut LuaCallFrame, // Use passed frame_ptr!
-) -> LuaResult<()> {
-    // Get function ID - FAST PATH: assume valid function
-    let func_id = unsafe { func.as_function_id().unwrap_unchecked() };
-
-    // Extract chunk info from ObjectPool - use unchecked for hot path
-    let func_ref = unsafe { vm.object_pool.get_function_unchecked(func_id) };
-    let chunk = func_ref.lua_chunk();
-
-    let (max_stack_size, num_params, is_vararg, code_ptr, constants_ptr, upvalues_ptr) = (
-        chunk.max_stack_size,
-        chunk.param_count,
-        chunk.is_vararg,
-        chunk.code.as_ptr(),
-        chunk.constants.as_ptr(),
-        func_ref.upvalues.as_ptr(),
-    );
-
-    // Calculate argument count - use frame_ptr directly!
-    let arg_count = if b == 0 {
-        unsafe { (**frame_ptr_ptr).top.saturating_sub((a + 1) as u32) as usize }
-    } else {
-        unsafe {
-            (**frame_ptr_ptr).top = (a + b) as u32;
-        }
-        b - 1
-    };
-
-    let return_count = if c == 0 { usize::MAX } else { c - 1 };
-
-    // Zero-copy: new frame base = R[A+1]
-    let new_base = caller_base + a + 1;
-
-    // Check if this call would overwrite parent frame's vararg
-    // If the parent frame has vararg at vararg_start..vararg_start+vararg_count,
-    // and new_base + max_stack_size > vararg_start, we need to relocate vararg
-    let parent_frame = unsafe { &mut **frame_ptr_ptr };
-    let parent_vararg_start = parent_frame.get_vararg_start();
-    let parent_vararg_count = parent_frame.get_vararg_count();
-
-    if parent_vararg_count > 0 {
-        let new_frame_end = new_base + max_stack_size;
-        if new_frame_end > parent_vararg_start {
-            // Vararg would be overwritten! Relocate it to after new frame's stack
-            let new_vararg_start = new_frame_end;
-            let required_capacity = new_vararg_start + parent_vararg_count;
-            vm.ensure_stack_capacity(required_capacity);
-            if vm.register_stack.len() < required_capacity {
-                vm.register_stack.resize(required_capacity, LuaValue::nil());
-            }
-
-            // Copy vararg values to new location (copy forward, no overlap issue since new > old)
-            for i in 0..parent_vararg_count {
-                vm.register_stack[new_vararg_start + i] =
-                    vm.register_stack[parent_vararg_start + i];
-            }
-
-            // Update parent frame's vararg position
-            // Need to get mutable reference again after potential reallocation
-            let parent_frame = unsafe { &mut **frame_ptr_ptr };
-            parent_frame.set_vararg(new_vararg_start, parent_vararg_count);
-        }
-    }
-
-    // FAST PATH: No metamethod, no vararg (most common case)
-    if !use_call_metamethod && !is_vararg {
-        // Simple case: just ensure capacity and push frame
-        let required_capacity = new_base + max_stack_size;
-
-        // Ensure capacity - single branch
-        if vm.register_stack.len() < required_capacity {
-            vm.register_stack.resize(required_capacity, LuaValue::nil());
-        }
-
-        // LIKE LUA C: Only fill missing arguments (arg_count < num_params)
-        // NOT all stack slots! This is the key optimization.
-        // For add(a,b) called with add(1,5): arg_count=2, num_params=2 → no fill!
-        if arg_count < num_params {
-            unsafe {
-                let reg_ptr = vm.register_stack.as_mut_ptr().add(new_base);
-                let nil_val = LuaValue::nil();
-                for i in arg_count..num_params {
-                    *reg_ptr.add(i) = nil_val;
-                }
-            }
-        }
-
-        // Create and push new frame - inline nresults calculation
-        let nresults = if c == 0 { -1i16 } else { (c - 1) as i16 };
-        let new_frame = LuaCallFrame::new_lua_function(
-            func_id,
-            code_ptr,
-            constants_ptr,
-            upvalues_ptr,
-            new_base,
-            arg_count, // top = number of arguments
-            a,         // result_reg
-            nresults,
-            max_stack_size,
-        );
-
-        *frame_ptr_ptr = vm.push_frame(new_frame);
-        return Ok(());
-    }
-
-    // SLOW PATH: Handle metamethod or vararg
-    let actual_arg_count = if use_call_metamethod {
-        arg_count + 1
-    } else {
-        arg_count
-    };
-    let actual_stack_size = max_stack_size.max(actual_arg_count);
-    let total_stack_size = if is_vararg && actual_arg_count > 0 {
-        actual_stack_size + actual_arg_count
-    } else {
-        actual_stack_size
-    };
-
-    // Ensure stack capacity
-    let required_capacity = new_base + total_stack_size;
-    if vm.register_stack.len() < required_capacity {
-        vm.ensure_stack_capacity(required_capacity);
-        vm.register_stack.resize(required_capacity, LuaValue::nil());
-    }
-
-    // Initialize registers
-    unsafe {
-        let reg_ptr = vm.register_stack.as_mut_ptr();
-        let nil_val = LuaValue::nil();
-
-        // Initialize local variable slots beyond arguments
-        for i in actual_arg_count..actual_stack_size {
-            *reg_ptr.add(new_base + i) = nil_val;
-        }
-
-        // Vararg extra space
-        if is_vararg && actual_arg_count > 0 {
-            for i in actual_stack_size..total_stack_size {
-                *reg_ptr.add(new_base + i) = nil_val;
-            }
-        }
-
-        // __call metamethod: shift arguments and insert self
-        if use_call_metamethod && arg_count > 0 {
-            for i in (0..arg_count).rev() {
-                *reg_ptr.add(new_base + 1 + i) = *reg_ptr.add(new_base + i);
-            }
-            *reg_ptr.add(new_base) = call_metamethod_self;
-        } else if use_call_metamethod {
-            *reg_ptr.add(new_base) = call_metamethod_self;
-        }
-    }
-
-    // Create and push new frame
-    let nresults = if return_count == usize::MAX {
-        -1i16
-    } else {
-        return_count as i16
-    };
-    let new_frame = LuaCallFrame::new_lua_function(
-        func_id,
-        code_ptr,
-        constants_ptr,
-        upvalues_ptr,
-        new_base,
-        actual_arg_count, // top = number of arguments
-        a,                // result_reg
         nresults,
         max_stack_size,
     );
@@ -1698,6 +1633,7 @@ pub fn exec_tailcall(
             };
             let chunk = func_ref.lua_chunk();
             let max_stack_size = chunk.max_stack_size;
+            let num_params = chunk.param_count;
             let code_ptr = chunk.code.as_ptr();
             let constants_ptr = chunk.constants.as_ptr();
             let upvalues_ptr = func_ref.upvalues.as_ptr();
@@ -1717,6 +1653,14 @@ pub fn exec_tailcall(
             // Copy arguments to frame base
             for (i, arg) in args.iter().enumerate() {
                 vm.register_stack[old_base + i] = *arg;
+            }
+
+            // CRITICAL: Fill missing parameters with nil
+            // If fewer arguments were passed than parameters expected, fill with nil
+            if arg_count < num_params {
+                for i in arg_count..num_params {
+                    vm.register_stack[old_base + i] = LuaValue::nil();
+                }
             }
 
             // Create new frame at same location
@@ -1814,123 +1758,128 @@ pub fn exec_tailcall(
 
             Ok(())
         }
+        LuaValueKind::Table => {
+            // Table with __call metamethod
+            // Need to find __call and call it with the table as first argument
+            
+            // Get __call metamethod
+            let call_mm = match vm.get_metamethod(&func, "__call") {
+                Some(mm) => mm,
+                None => return Err(vm.error("attempt to call a table value".to_string())),
+            };
+            
+            // Prepare arguments: table (self) + original args
+            let mut new_args = Vec::with_capacity(args.len() + 1);
+            new_args.push(func); // The table itself as first argument
+            new_args.extend(args.iter().copied());
+            
+            // Check if metamethod is a Lua function or C function
+            match call_mm.kind() {
+                LuaValueKind::Function => {
+                    let Some(func_id) = call_mm.as_function_id() else {
+                        return Err(vm.error("invalid __call metamethod".to_string()));
+                    };
+                    
+                    // Extract all info from func_ref before calling mutable methods
+                    let (max_stack_size, code_ptr, constants_ptr, upvalues_ptr, num_params) = {
+                        let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+                            return Err(vm.error("Invalid function ID".to_string()));
+                        };
+                        let chunk = func_ref.lua_chunk();
+                        (
+                            chunk.max_stack_size,
+                            chunk.code.as_ptr(),
+                            chunk.constants.as_ptr(),
+                            func_ref.upvalues.as_ptr(),
+                            chunk.param_count,
+                        )
+                    };
+
+                    vm.close_upvalues_from(base);
+                    let old_base = base;
+                    vm.pop_frame_discard();
+
+                    vm.ensure_stack_capacity(old_base + max_stack_size);
+
+                    // Copy arguments to frame base
+                    for (i, arg) in new_args.iter().enumerate() {
+                        vm.register_stack[old_base + i] = *arg;
+                    }
+
+                    // Fill remaining parameters with nil
+                    for i in new_args.len()..num_params {
+                        vm.register_stack[old_base + i] = LuaValue::nil();
+                    }
+
+                    let nresults = if return_count == usize::MAX {
+                        -1i16
+                    } else {
+                        return_count as i16
+                    };
+                    let new_frame = LuaCallFrame::new_lua_function(
+                        func_id,
+                        code_ptr,
+                        constants_ptr,
+                        upvalues_ptr,
+                        old_base,
+                        new_args.len(),
+                        result_reg,
+                        nresults,
+                        max_stack_size,
+                    );
+
+                    *frame_ptr_ptr = vm.push_frame(new_frame);
+                    Ok(())
+                }
+                LuaValueKind::CFunction => {
+                    let Some(c_func) = call_mm.as_cfunction() else {
+                        return Err(vm.error("invalid __call metamethod".to_string()));
+                    };
+
+                    let call_base = base;
+                    vm.ensure_stack_capacity(call_base + new_args.len() + 1);
+
+                    vm.register_stack[call_base] = call_mm;
+                    for (i, arg) in new_args.iter().enumerate() {
+                        vm.register_stack[call_base + 1 + i] = *arg;
+                    }
+
+                    let temp_frame = LuaCallFrame::new_c_function(call_base, new_args.len() + 1);
+                    vm.push_frame(temp_frame);
+                    let result = c_func(vm)?;
+                    vm.pop_frame_discard();
+
+                    vm.pop_frame_discard();
+
+                    if !vm.frames_is_empty() {
+                        *frame_ptr_ptr = vm.current_frame_ptr();
+
+                        let parent_base = vm.current_frame().base_ptr as usize;
+                        let vals = result.all_values();
+                        let count = if return_count == usize::MAX {
+                            vals.len()
+                        } else {
+                            vals.len().min(return_count)
+                        };
+
+                        for i in 0..count {
+                            vm.register_stack[parent_base + result_reg + i] = vals[i];
+                        }
+
+                        if return_count != usize::MAX {
+                            for i in count..return_count {
+                                vm.register_stack[parent_base + result_reg + i] = LuaValue::nil();
+                            }
+                        }
+
+                        vm.current_frame_mut().top = (result_reg + count) as u32;
+                    }
+
+                    Ok(())
+                }
+                _ => Err(vm.error("attempt to call a table value (invalid __call)".to_string())),
+            }
+        }
         _ => Err(vm.error(format!("attempt to call a {} value", func.type_name()))),
     }
-}
-
-/// RETURN0
-/// return (no values)
-/// ULTRA-OPTIMIZED: Minimal work for the common case (Lua->Lua call with no upvalues)
-/// NOTE: Currently inlined in main loop for performance, but kept for potential future use
-#[inline(always)]
-#[allow(dead_code)]
-pub fn exec_return0(
-    vm: &mut LuaVM,
-    _instr: u32,
-    frame_ptr_ptr: &mut *mut LuaCallFrame,
-) -> LuaResult<()> {
-    // Like Lua C: check if we have a Lua caller (most common case)
-    if vm.frame_count > 1 {
-        // FAST PATH: Calculate caller frame pointer BEFORE pop
-        let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
-
-        // Pop frame - just decrement counter (like Lua C: L->ci = ci->previous)
-        vm.frame_count -= 1;
-
-        // Check if caller is Lua function
-        if unsafe { (*caller_ptr).is_lua() } {
-            // Get info we need
-            let (result_reg, num_results) = unsafe {
-                (
-                    (**frame_ptr_ptr).get_result_reg(),
-                    (**frame_ptr_ptr).get_num_results(),
-                )
-            };
-
-            // Update frame_ptr to caller
-            *frame_ptr_ptr = caller_ptr;
-
-            // Only fill nil if caller expects results
-            // Like Lua C: for (nres = ci->nresults; l_unlikely(nres > 0); nres--)
-            if num_results > 0 && num_results != usize::MAX {
-                let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
-                let dest_base = caller_base + result_reg;
-                unsafe {
-                    let reg_ptr = vm.register_stack.as_mut_ptr();
-                    let nil_val = LuaValue::nil();
-                    for i in 0..num_results {
-                        *reg_ptr.add(dest_base + i) = nil_val;
-                    }
-                }
-            }
-
-            return Ok(());
-        } else {
-            // C function caller
-            *frame_ptr_ptr = caller_ptr;
-            vm.return_values.clear();
-            return Err(LuaError::Exit);
-        }
-    }
-
-    // No caller - exit VM
-    vm.frame_count -= 1;
-    vm.return_values.clear();
-    Err(LuaError::Exit)
-}
-
-/// RETURN1 A
-/// return R[A]
-/// ULTRA-OPTIMIZED: Minimal work for single-value return (most common case)
-/// NOTE: Currently inlined in main loop for performance, but kept for potential future use
-#[inline(always)]
-#[allow(dead_code)]
-pub fn exec_return1(
-    vm: &mut LuaVM,
-    instr: u32,
-    frame_ptr_ptr: &mut *mut LuaCallFrame,
-) -> LuaResult<()> {
-    let a = get_a!(instr);
-
-    // Get base_ptr and return value FIRST
-    let base_ptr = unsafe { (**frame_ptr_ptr).base_ptr } as usize;
-    let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
-
-    // Like Lua C: check if we have a Lua caller (most common case)
-    if vm.frame_count > 1 {
-        // FAST PATH: Calculate caller frame pointer BEFORE pop
-        let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
-
-        // Pop frame - just decrement counter
-        vm.frame_count -= 1;
-
-        // Check if caller is Lua function
-        if unsafe { (*caller_ptr).is_lua() } {
-            let result_reg = unsafe { (**frame_ptr_ptr).get_result_reg() };
-
-            // Update frame_ptr to caller
-            *frame_ptr_ptr = caller_ptr;
-
-            // Write return value directly to caller's register
-            let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
-            unsafe {
-                *vm.register_stack
-                    .get_unchecked_mut(caller_base + result_reg) = return_value;
-            }
-
-            return Ok(());
-        } else {
-            // C function caller
-            *frame_ptr_ptr = caller_ptr;
-            vm.return_values.clear();
-            vm.return_values.push(return_value);
-            return Err(LuaError::Exit);
-        }
-    }
-
-    // No caller - exit VM
-    vm.frame_count -= 1;
-    vm.return_values.clear();
-    vm.return_values.push(return_value);
-    Err(LuaError::Exit)
 }

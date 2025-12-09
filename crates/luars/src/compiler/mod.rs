@@ -83,11 +83,14 @@ pub(crate) struct Local {
     pub register: u32,
     pub is_const: bool,        // <const> attribute
     pub is_to_be_closed: bool, // <close> attribute
+    pub needs_close: bool,     // True if captured by a closure (needs CLOSE on scope exit)
 }
 
 /// Loop information for break statements
 pub(crate) struct LoopInfo {
-    pub break_jumps: Vec<usize>, // Positions of break statements to patch
+    pub break_jumps: Vec<usize>,   // Positions of break statements to patch
+    pub scope_depth: usize,        // Scope depth at loop start
+    pub first_local_register: u32, // First register of loop-local variables (for CLOSE on break)
 }
 
 /// Label definition

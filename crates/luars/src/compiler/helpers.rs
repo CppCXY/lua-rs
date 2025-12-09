@@ -199,6 +199,7 @@ pub fn add_local_with_attrs(
         register,
         is_const,
         is_to_be_closed,
+        needs_close: false,
     };
     c.scope_chain.borrow_mut().locals.push(local);
 
@@ -271,9 +272,11 @@ pub fn resolve_upvalue_from_chain(c: &mut Compiler, name: &str) -> Option<usize>
 fn resolve_in_parent_scope(scope: &Rc<RefCell<ScopeChain>>, name: &str) -> Option<(bool, u32)> {
     // First, search in this scope's locals
     {
-        let scope_ref = scope.borrow();
-        if let Some(local) = scope_ref.locals.iter().rev().find(|l| l.name == name) {
+        let mut scope_ref = scope.borrow_mut();
+        if let Some(local) = scope_ref.locals.iter_mut().rev().find(|l| l.name == name) {
             let register = local.register;
+            // Mark this local as captured by a closure - needs CLOSE on scope exit
+            local.needs_close = true;
             // Found as local - return (true, register)
             return Some((true, register));
         }
@@ -568,8 +571,15 @@ pub fn try_expr_as_constant(c: &mut Compiler, expr: &emmylua_parser::LuaExpr) ->
 
 /// Begin a new loop (for break statement support)
 pub fn begin_loop(c: &mut Compiler) {
+    begin_loop_with_register(c, c.freereg);
+}
+
+/// Begin a new loop with a specific first register for CLOSE
+pub fn begin_loop_with_register(c: &mut Compiler, first_reg: u32) {
     c.loop_stack.push(super::LoopInfo {
         break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: first_reg,
     });
 }
 
@@ -587,6 +597,35 @@ pub fn end_loop(c: &mut Compiler) {
 pub fn emit_break(c: &mut Compiler) -> Result<(), String> {
     if c.loop_stack.is_empty() {
         return Err("break statement outside loop".to_string());
+    }
+
+    // Before breaking, check if we need to close any captured upvalues
+    // This is needed when break jumps past the CLOSE instruction that would
+    // normally be executed at the end of each iteration
+    let loop_info = c.loop_stack.last().unwrap();
+    let loop_scope_depth = loop_info.scope_depth;
+    let first_reg = loop_info.first_local_register;
+    
+    // Find minimum register of captured locals in the loop scope
+    let mut min_close_reg: Option<u32> = None;
+    {
+        let scope = c.scope_chain.borrow();
+        for local in scope.locals.iter().rev() {
+            if local.depth < loop_scope_depth {
+                break; // Only check loop scope and nested scopes
+            }
+            if local.needs_close && local.register >= first_reg {
+                min_close_reg = Some(match min_close_reg {
+                    None => local.register,
+                    Some(min_reg) => min_reg.min(local.register),
+                });
+            }
+        }
+    }
+    
+    // Emit CLOSE if needed
+    if let Some(reg) = min_close_reg {
+        emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
     }
 
     let jump_pos = emit_jump(c, OpCode::Jmp);
@@ -674,4 +713,78 @@ pub fn check_unresolved_gotos(c: &Compiler) -> Result<(), String> {
 /// Clear labels when leaving a scope
 pub fn clear_scope_labels(c: &mut Compiler) {
     c.labels.retain(|l| l.scope_depth < c.scope_depth);
+}
+
+/// Check if an expression is a vararg (...) literal
+pub fn is_vararg_expr(expr: &LuaExpr) -> bool {
+    if let LuaExpr::LiteralExpr(lit) = expr {
+        matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_)))
+    } else {
+        false
+    }
+}
+
+/// Result of parsing a Lua number literal
+#[derive(Debug, Clone, Copy)]
+pub enum ParsedNumber {
+    /// Successfully parsed as integer
+    Int(i64),
+    /// Number is too large for i64, use float instead
+    Float(f64),
+}
+
+/// Parse a Lua integer literal from text, handling hex numbers that overflow i64
+/// Lua treats 0xFFFFFFFFFFFFFFFF as -1 (two's complement interpretation)
+/// For decimal numbers that overflow i64 range, returns Float instead
+pub fn parse_lua_int(text: &str) -> ParsedNumber {
+    let text = text.trim();
+    if text.starts_with("0x") || text.starts_with("0X") {
+        // Hex number - parse as u64 first, then reinterpret as i64
+        // This handles the case like 0xFFFFFFFFFFFFFFFF which should be -1
+        let hex_part = &text[2..];
+        // Remove any trailing decimal part (e.g., 0xFF.0)
+        let hex_part = hex_part.split('.').next().unwrap_or(hex_part);
+        if let Ok(val) = u64::from_str_radix(hex_part, 16) {
+            return ParsedNumber::Int(val as i64); // Reinterpret bits as signed
+        }
+    }
+    // Decimal case: parse as i64 only, if overflow use float
+    // (Unlike hex, decimal numbers should NOT be reinterpreted as two's complement)
+    if let Ok(val) = text.parse::<i64>() {
+        return ParsedNumber::Int(val);
+    }
+    // Decimal number is too large for i64, parse as float
+    if let Ok(val) = text.parse::<f64>() {
+        return ParsedNumber::Float(val);
+    }
+    // Default fallback
+    ParsedNumber::Int(0)
+}
+
+/// Lua left shift: x << n (returns 0 if |n| >= 64)
+/// Negative n means right shift
+#[inline(always)]
+pub fn lua_shl(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shl(r as u32) as i64
+    } else {
+        // Negative shift means right shift (logical)
+        (l as u64).wrapping_shr((-r) as u32) as i64
+    }
+}
+
+/// Lua right shift: x >> n (logical shift, returns 0 if |n| >= 64)
+/// Negative n means left shift
+#[inline(always)]
+pub fn lua_shr(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shr(r as u32) as i64
+    } else {
+        // Negative shift means left shift
+        (l as u64).wrapping_shl((-r) as u32) as i64
+    }
 }

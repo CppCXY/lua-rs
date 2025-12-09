@@ -242,16 +242,16 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
             if is_dots && remaining_vars > 0 {
                 // Varargs expansion: generate VarArg instruction into pre-allocated registers
-                // VarArg instruction: R(target_base)..R(target_base+remaining_vars-1) = ...
-                // B = remaining_vars + 1 (or 0 for all)
-                let b_value = if remaining_vars == 1 {
+                // VARARG A C: R(A), ..., R(A+C-2) = vararg
+                // C = remaining_vars + 1 (or 0 for all)
+                let c_value = if remaining_vars == 1 {
                     2
                 } else {
                     (remaining_vars + 1) as u32
                 };
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::Vararg, target_base, b_value, 0),
+                    Instruction::encode_abc(OpCode::Vararg, target_base, 0, c_value),
                 );
 
                 // Add all registers
@@ -262,17 +262,29 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             // Check if last expression is a function call (which might return multiple values)
             else if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
-                    // Multi-return call: compile with dest = target_base
+                    // Multi-return call: DON'T pass dest to avoid overwriting pre-allocated registers
+                    // Let the call compile into safe temporary position, results will be in target_base
+                    // because we've pre-allocated the registers
+                    // 
+                    // CRITICAL: We need to compile without dest, then the results will naturally
+                    // end up in sequential registers starting from wherever the function was placed.
+                    // Since we pre-allocated target_base..target_base+remaining_vars, freereg points
+                    // past them, so the call will compile into fresh registers.
                     let result_base = compile_call_expr_with_returns_and_dest(
                         c,
                         call_expr,
                         remaining_vars,
-                        Some(target_base),
+                        None, // Don't specify dest - let call choose safe location
                     )?;
 
-                    // Add all return registers
+                    // Move results to target registers if needed
                     for i in 0..remaining_vars {
-                        regs.push(result_base + i as u32);
+                        let src = result_base + i as u32;
+                        let dst = target_base + i as u32;
+                        if src != dst {
+                            emit_move(c, dst, src);
+                        }
+                        regs.push(dst);
                     }
 
                     // Define locals and return
@@ -627,6 +639,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 return Err("Tail call missing function expression".to_string());
             };
 
+            // Check if this is a method call (obj:method syntax)
+            let is_method = if let LuaExpr::IndexExpr(index_expr) = &func_expr {
+                index_expr
+                    .get_index_token()
+                    .map(|t| t.is_colon())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
             // Get arguments first to know how many we have
             let args = if let Some(args_list) = call_expr.get_args_list() {
                 args_list.get_args().collect::<Vec<_>>()
@@ -634,14 +656,110 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 Vec::new()
             };
 
-            // Reserve all registers we'll need (func + args)
-            let num_total = 1 + args.len();
+            // For method calls, we need an extra slot for self
+            let num_args = args.len();
+            let num_total = if is_method {
+                2 + num_args // func + self + explicit args
+            } else {
+                1 + num_args // func + args
+            };
+
+            // Reserve all registers we'll need
             let mut reserved_regs = Vec::new();
             for _ in 0..num_total {
                 reserved_regs.push(alloc_register(c));
             }
             let base_reg = reserved_regs[0];
 
+            // Handle method call with SELF instruction
+            if is_method {
+                if let LuaExpr::IndexExpr(index_expr) = &func_expr {
+                    // Method call: obj:method(args) → SELF instruction
+                    // SELF A B C: R(A+1) = R(B); R(A) = R(B)[C]
+
+                    // Compile object (table)
+                    let obj_expr = index_expr
+                        .get_prefix_expr()
+                        .ok_or("Method call missing object")?;
+                    let obj_reg = compile_expr(c, &obj_expr)?;
+
+                    // Get method name
+                    let method_name = if let Some(emmylua_parser::LuaIndexKey::Name(name_token)) =
+                        index_expr.get_index_key()
+                    {
+                        name_token.get_name_text().to_string()
+                    } else {
+                        return Err("Method call requires name index".to_string());
+                    };
+
+                    // Add method name to constants
+                    let lua_str = create_string_value(c, &method_name);
+                    let key_idx = add_constant_dedup(c, lua_str);
+
+                    // Emit SELF instruction: R(base_reg+1) = R(obj_reg); R(base_reg) = R(obj_reg)[key]
+                    emit(
+                        c,
+                        Instruction::create_abck(
+                            OpCode::Self_,
+                            base_reg,
+                            obj_reg,
+                            key_idx,
+                            true, // k=1: C is constant index
+                        ),
+                    );
+
+                    // Compile explicit arguments to consecutive registers after self (base_reg+2, ...)
+                    let mut last_is_vararg_all_out = false;
+                    for (i, arg) in args.iter().enumerate() {
+                        let target_reg = base_reg + 2 + i as u32; // +2 for func and self
+                        let is_last_arg = i == num_args - 1;
+
+                        // Check if last argument is ... (vararg)
+                        if is_last_arg {
+                            if let LuaExpr::LiteralExpr(lit) = arg {
+                                if matches!(
+                                    lit.get_literal(),
+                                    Some(emmylua_parser::LuaLiteralToken::Dots(_))
+                                ) {
+                                    emit(
+                                        c,
+                                        Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0),
+                                    );
+                                    last_is_vararg_all_out = true;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let arg_reg = compile_expr(c, &arg)?;
+                        if arg_reg != target_reg {
+                            emit_move(c, target_reg, arg_reg);
+                        }
+                    }
+
+                    // Emit TailCall instruction
+                    // For method call, B includes implicit self parameter
+                    let b_param = if last_is_vararg_all_out {
+                        0
+                    } else {
+                        (num_args + 2) as u32 // +1 for self, +1 for Lua convention
+                    };
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
+                    );
+
+                    // After TAILCALL, emit RETURN
+                    emit(
+                        c,
+                        Instruction::create_abck(OpCode::Return, base_reg, 0, 0, false),
+                    );
+
+                    return Ok(());
+                }
+            }
+
+            // Regular function call (not method)
             // Compile function to the first reserved register
             let func_reg = compile_expr(c, &func_expr)?;
             if func_reg != base_reg {
@@ -649,7 +767,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
 
             // Compile arguments to consecutive registers after function
-            let mut last_is_vararg_all_out = false;
+            let mut last_is_vararg_or_call_all_out = false;
             for (i, arg) in args.iter().enumerate() {
                 let target_reg = reserved_regs[i + 1];
                 let is_last_arg = i == args.len() - 1;
@@ -663,9 +781,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                         ) {
                             // Vararg as last argument: use "all out" mode
                             emit(c, Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0));
-                            last_is_vararg_all_out = true;
+                            last_is_vararg_or_call_all_out = true;
                             continue;
                         }
+                    }
+                    // Check if last argument is a function call
+                    if let LuaExpr::CallExpr(inner_call) = arg {
+                        // Compile the inner call with "all out" mode (num_returns = usize::MAX)
+                        compile_call_expr_with_returns_and_dest(c, inner_call, usize::MAX, Some(target_reg))?;
+                        last_is_vararg_or_call_all_out = true;
+                        continue;
                     }
                 }
 
@@ -676,9 +801,8 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
 
             // Emit TailCall instruction
-            // A = function register, B = num_args + 1 (or 0 if last arg is vararg "all out")
-            let num_args = args.len();
-            let b_param = if last_is_vararg_all_out {
+            // A = function register, B = num_args + 1 (or 0 if last arg is vararg/call "all out")
+            let b_param = if last_is_vararg_or_call_all_out {
                 0 // B=0: all in (variable number of args from vararg)
             } else {
                 (num_args + 1) as u32
@@ -753,7 +877,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         } else if let LuaExpr::CallExpr(call_expr) = last_expr {
             // Call expression: compile with "all out" mode
             let last_target_reg = base_reg + (num_exprs - 1) as u32;
-            compile_call_expr_with_returns_and_dest(c, call_expr, 0, Some(last_target_reg))?;
+            compile_call_expr_with_returns_and_dest(c, call_expr, usize::MAX, Some(last_target_reg))?;
             // Return with B=0 (all out)
             emit(
                 c,
@@ -949,7 +1073,10 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
 fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), String> {
     // Structure: while <condition> do <block> end
 
-    // Begin loop
+    // Begin scope for the loop body (to track locals for CLOSE)
+    begin_scope(c);
+    
+    // Begin loop - record first_reg for break CLOSE
     begin_loop(c);
 
     // Mark loop start
@@ -992,6 +1119,31 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         compile_block(c, &body)?;
     }
 
+    // Before jumping back, emit CLOSE if any local in the loop body was captured
+    {
+        let loop_info = c.loop_stack.last().unwrap();
+        let loop_scope_depth = loop_info.scope_depth;
+        let first_reg = loop_info.first_local_register;
+        
+        let scope = c.scope_chain.borrow();
+        let mut min_close_reg: Option<u32> = None;
+        for local in scope.locals.iter().rev() {
+            if local.depth < loop_scope_depth {
+                break;
+            }
+            if local.needs_close && local.register >= first_reg {
+                min_close_reg = Some(match min_close_reg {
+                    None => local.register,
+                    Some(min_reg) => min_reg.min(local.register),
+                });
+            }
+        }
+        drop(scope);
+        if let Some(reg) = min_close_reg {
+            emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
+        }
+    }
+
     // Jump back to loop start
     let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
     emit(c, Instruction::create_sj(OpCode::Jmp, -jump_offset));
@@ -1003,6 +1155,9 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 
     // End loop (patches all break statements)
     end_loop(c);
+    
+    // End scope
+    end_scope(c);
 
     Ok(())
 }
@@ -1099,9 +1254,12 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     // Begin new scope for loop body
     begin_scope(c);
 
+    // Begin loop with var_reg as first register, so break can close it
+    // Using var_reg instead of c.freereg because var_reg is the loop variable
+    begin_loop_with_register(c, var_reg);
+
     // The loop variable is at R(base+3)
     add_local(c, var_name, var_reg);
-    begin_loop(c);
 
     // Loop body starts here
     let loop_body_start = c.chunk.code.len();
@@ -1111,7 +1269,29 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
         compile_block(c, &body)?;
     }
 
-    // FORLOOP comes AFTER the body
+    // Before FORLOOP, emit CLOSE if any local in the loop body was captured
+    // Find the minimum register of captured locals in the current scope (loop body)
+    {
+        let scope = c.scope_chain.borrow();
+        let mut min_close_reg: Option<u32> = None;
+        for local in scope.locals.iter().rev() {
+            if local.depth < c.scope_depth {
+                break; // Only check current scope (loop body)
+            }
+            if local.depth == c.scope_depth && local.needs_close {
+                min_close_reg = Some(match min_close_reg {
+                    None => local.register,
+                    Some(min_reg) => min_reg.min(local.register),
+                });
+            }
+        }
+        drop(scope);
+        if let Some(reg) = min_close_reg {
+            emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
+        }
+    }
+
+    // FORLOOP comes AFTER the body (and CLOSE if needed)
     let forloop_pc = c.chunk.code.len();
     // Emit FORLOOP: increments index, checks condition, copies to var, jumps back to body
     // Bx is the backward jump distance. Since PC is incremented before dispatch,
@@ -1392,6 +1572,7 @@ fn compile_local_function_stat(
         register: func_reg,
         is_const: false,
         is_to_be_closed: false,
+        needs_close: false,
     });
     c.chunk.locals.push(func_name.clone());
 

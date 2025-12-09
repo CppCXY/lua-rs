@@ -20,88 +20,6 @@ use emmylua_parser::{
     LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
 };
 
-//======================================================================================
-// Helper functions
-//======================================================================================
-
-/// Check if an expression is a vararg (...) literal
-fn is_vararg_expr(expr: &LuaExpr) -> bool {
-    if let LuaExpr::LiteralExpr(lit) = expr {
-        matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_)))
-    } else {
-        false
-    }
-}
-
-/// Result of parsing a Lua number literal
-#[derive(Debug, Clone, Copy)]
-enum ParsedNumber {
-    /// Successfully parsed as integer
-    Int(i64),
-    /// Number is too large for i64, use float instead
-    Float(f64),
-}
-
-/// Parse a Lua integer literal from text, handling hex numbers that overflow i64
-/// Lua treats 0xFFFFFFFFFFFFFFFF as -1 (two's complement interpretation)
-/// For decimal numbers that overflow i64 range, returns Float instead
-fn parse_lua_int(text: &str) -> ParsedNumber {
-    let text = text.trim();
-    if text.starts_with("0x") || text.starts_with("0X") {
-        // Hex number - parse as u64 first, then reinterpret as i64
-        // This handles the case like 0xFFFFFFFFFFFFFFFF which should be -1
-        let hex_part = &text[2..];
-        // Remove any trailing decimal part (e.g., 0xFF.0)
-        let hex_part = hex_part.split('.').next().unwrap_or(hex_part);
-        if let Ok(val) = u64::from_str_radix(hex_part, 16) {
-            return ParsedNumber::Int(val as i64); // Reinterpret bits as signed
-        }
-    }
-    // Decimal case: parse as i64 only, if overflow use float
-    // (Unlike hex, decimal numbers should NOT be reinterpreted as two's complement)
-    if let Ok(val) = text.parse::<i64>() {
-        return ParsedNumber::Int(val);
-    }
-    // Decimal number is too large for i64, parse as float
-    if let Ok(val) = text.parse::<f64>() {
-        return ParsedNumber::Float(val);
-    }
-    // Default fallback
-    ParsedNumber::Int(0)
-}
-
-/// Lua left shift: x << n (returns 0 if |n| >= 64)
-/// Negative n means right shift
-#[inline(always)]
-fn lua_shl(l: i64, r: i64) -> i64 {
-    if r >= 64 || r <= -64 {
-        0
-    } else if r >= 0 {
-        (l as u64).wrapping_shl(r as u32) as i64
-    } else {
-        // Negative shift means right shift (logical)
-        (l as u64).wrapping_shr((-r) as u32) as i64
-    }
-}
-
-/// Lua right shift: x >> n (logical shift, returns 0 if |n| >= 64)
-/// Negative n means left shift
-#[inline(always)]
-fn lua_shr(l: i64, r: i64) -> i64 {
-    if r >= 64 || r <= -64 {
-        0
-    } else if r >= 0 {
-        (l as u64).wrapping_shr(r as u32) as i64
-    } else {
-        // Negative shift means left shift
-        (l as u64).wrapping_shl((-r) as u32) as i64
-    }
-}
-
-//======================================================================================
-// NEW API: ExpDesc-based expression compilation (Lua 5.4 compatible)
-//======================================================================================
-
 /// Core function: Compile expression and return ExpDesc
 /// This is the NEW primary API that replaces the old u32-based compile_expr
 pub fn compile_expr_desc(c: &mut Compiler, expr: &LuaExpr) -> Result<ExpDesc, String> {
@@ -206,8 +124,10 @@ fn compile_literal_expr_desc(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<
         LuaLiteralToken::Dots(_) => {
             // Variable arguments: ...
             // Allocate register and emit VARARG
+            // VARARG A C: R(A), ..., R(A+C-2) = vararg
+            // C=0 means all varargs, C>0 means C-1 values
             let reg = alloc_register(c);
-            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 2, 0));
+            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 0, 2));
             Ok(ExpDesc::new_nonreloc(reg))
         }
         _ => Err("Unsupported literal type".to_string()),
@@ -401,20 +321,39 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             } else {
                 alloc_register(c)
             };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Add, result_reg, left_reg, right_reg),
-            );
-            emit(
-                c,
-                Instruction::create_abck(
-                    OpCode::MmBin,
-                    left_reg,
-                    right_reg,
-                    TagMethod::Add.as_u32(),
-                    false,
-                ),
-            );
+            if can_use_rk {
+                // Right is constant, use ADDK
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::AddK, result_reg, left_reg, const_idx),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBinK,
+                        left_reg,
+                        const_idx,
+                        TagMethod::Add.as_u32(),
+                        false,
+                    ),
+                );
+            } else {
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Add, result_reg, left_reg, right_reg),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBin,
+                        left_reg,
+                        right_reg,
+                        TagMethod::Add.as_u32(),
+                        false,
+                    ),
+                );
+            }
         }
         BinaryOperator::OpSub => {
             result_reg = if can_reuse_left {
@@ -422,20 +361,39 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
             } else {
                 alloc_register(c)
             };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Sub, result_reg, left_reg, right_reg),
-            );
-            emit(
-                c,
-                Instruction::create_abck(
-                    OpCode::MmBin,
-                    left_reg,
-                    right_reg,
-                    TagMethod::Sub.as_u32(),
-                    false,
-                ),
-            );
+            if can_use_rk {
+                // Right is constant, use SUBK
+                let const_idx = ensure_constant(c, &saved_right_desc)?;
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::SubK, result_reg, left_reg, const_idx),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBinK,
+                        left_reg,
+                        const_idx,
+                        TagMethod::Sub.as_u32(),
+                        false,
+                    ),
+                );
+            } else {
+                emit(
+                    c,
+                    Instruction::encode_abc(OpCode::Sub, result_reg, left_reg, right_reg),
+                );
+                emit(
+                    c,
+                    Instruction::create_abck(
+                        OpCode::MmBin,
+                        left_reg,
+                        right_reg,
+                        TagMethod::Sub.as_u32(),
+                        false,
+                    ),
+                );
+            }
         }
         BinaryOperator::OpMul => {
             result_reg = if can_reuse_left {
@@ -934,12 +892,10 @@ fn compile_literal_expr(
         }
         LuaLiteralToken::Dots(_) => {
             // Variable arguments: ...
-            // VarArg instruction: R(A), ..., R(A+B-2) = vararg
-            // B=1 means load 0 varargs (empty)
-            // B=2 means load 1 vararg into R(A)
-            // B=0 means load all varargs starting from R(A)
-            // For expression context, we load 1 vararg into the register
-            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 2, 0));
+            // VARARG A C: R(A), ..., R(A+C-2) = vararg
+            // C=0 means all varargs, C>0 means C-1 values
+            // For expression context, we load 1 vararg into the register (C=2 means 1 value)
+            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 0, 2));
         }
         _ => {}
     }
@@ -1131,7 +1087,8 @@ fn compile_binary_expr_to(
                 BinaryOperator::OpMul => Some(left_val * right_val),
                 BinaryOperator::OpDiv => Some(left_val / right_val),
                 BinaryOperator::OpIDiv => Some((left_val / right_val).floor()),
-                BinaryOperator::OpMod => Some(left_val % right_val),
+                // Lua modulo: a % b = a - floor(a/b) * b (same sign as divisor)
+                BinaryOperator::OpMod => Some(left_val - (left_val / right_val).floor() * right_val),
                 BinaryOperator::OpPow => Some(left_val.powf(right_val)),
                 BinaryOperator::OpBAnd => Some((left_int & right_int) as f64),
                 BinaryOperator::OpBOr => Some((left_int | right_int) as f64),
@@ -1198,7 +1155,8 @@ fn compile_binary_expr_to(
                 BinaryOperator::OpMul => Some(left_val * right_val),
                 BinaryOperator::OpDiv => Some(left_val / right_val),
                 BinaryOperator::OpIDiv => Some((left_val / right_val).floor()),
-                BinaryOperator::OpMod => Some(left_val % right_val),
+                // Lua modulo: a % b = a - floor(a/b) * b (same sign as divisor)
+                BinaryOperator::OpMod => Some(left_val - (left_val / right_val).floor() * right_val),
                 BinaryOperator::OpPow => Some(left_val.powf(right_val)),
                 // Bitwise operations require integers
                 BinaryOperator::OpBAnd
@@ -2319,7 +2277,6 @@ pub fn compile_call_expr_with_returns_and_dest(
     } else {
         false
     };
-
     // Track if we need to move return values back to original dest
     let mut need_move_to_dest = false;
     let original_dest = dest;
@@ -2373,117 +2330,82 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
     } else {
         // Regular call: compile function expression
-        let temp_func_reg = compile_expr(c, &prefix_expr)?;
-
-        // CRITICAL FIX: When function call returns values and will be used in an expression,
-        // we need to avoid overwriting the function value itself.
-        //
-        // Example: `f()` where f is in R[0] - if we call directly, return value overwrites f!
-        // Solution: If temp_func_reg is an "old" register (< freereg when we started),
-        // move the function to a new register first.
-        //
-        // However, we need to distinguish:
-        // - `f = load(...)` - first assignment, can reuse register ✓
-        // - `assert(f() == 30)` - f exists, must preserve it ✓
-        //
-        // The key insight: If dest is specified, caller wants a specific target.
-        // If dest is NOT specified AND we need returns, allocate fresh register to be safe.
-
+        // OPTIMIZATION: If dest is specified and safe (>= nactvar), compile function directly to dest
+        // This avoids unnecessary MOVE instructions
+        let nactvar = c.nactvar as u32;
+        
         let func_reg = if let Some(d) = dest {
-            // Caller specified a destination - use it
-            // CRITICAL CHECK: Verify that arguments won't overwrite active local variables!
-            // Arguments will be placed at R[d+1], R[d+2], etc.
-            // If any of these overlap with active locals (< nactvar), we need to use a different register
-            let nactvar = c.nactvar as u32;
+            // Check if we can safely use dest for function
             let args_start = d + 1;
-
-            // Check if dest or args would overwrite active locals
-            // Active locals occupy R[0] through R[nactvar-1]
-            // - If d < nactvar: moving function to d would overwrite a local before args are compiled!
-            // - If args_start < nactvar: arguments would overwrite locals!
-            // 
-            // Example: `x = tonumber(x)` where x is in R[0]:
-            //   - d = 0, nactvar = 1, args_start = 1
-            //   - If we move tonumber to R[0] first, we overwrite x before reading it as argument!
-            if d < nactvar || args_start < nactvar {
-                // Conflict! Either dest or arguments would overwrite active locals
-                // Solution: Place function at freereg (after all locals) and move result back later
-                let new_func_reg = if c.freereg < nactvar {
-                    // Ensure freereg is at least nactvar
-                    c.freereg = nactvar;
-                    alloc_register(c)
-                } else {
-                    alloc_register(c)
-                };
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_func_reg, temp_func_reg, 0),
-                );
-                need_move_to_dest = true; // Remember to move result back to original dest
-                new_func_reg
-            } else {
-                // No conflict - safe to use dest
-                if d != temp_func_reg {
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::Move, d, temp_func_reg, 0),
-                    );
+            if d >= nactvar && args_start >= nactvar {
+                // Safe to compile directly to dest
+                let temp_func_reg = compile_expr_to(c, &prefix_expr, Some(d))?;
+                // Ensure we got the register we asked for (or move if needed)
+                if temp_func_reg != d {
+                    ensure_register(c, d);
+                    emit_move(c, d, temp_func_reg);
                 }
-                // CRITICAL: Reset freereg to just past func_reg
-                // This ensures arguments compile into consecutive registers starting from func_reg+1
+                // Reset freereg to just past func_reg
                 c.freereg = d + 1;
                 d
-            }
-        } else if num_returns > 0 {
-            // No dest specified, but need return values - this is expression context!
-            // CRITICAL: Must preserve local variables!
-            // Check if temp_func_reg is a local variable (< nactvar)
-            let nactvar = c.nactvar as u32;
-            if temp_func_reg < nactvar {
-                // Function is a local variable - must preserve it!
-                let new_reg = alloc_register(c);
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
-                );
-                new_reg
-            } else if temp_func_reg + 1 == c.freereg {
-                // Function was just loaded into a fresh temporary register - safe to reuse
-                temp_func_reg
             } else {
-                // Function is in an "old" temporary register - must preserve it!
-                let new_reg = alloc_register(c);
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
-                );
-                new_reg
-            }
-        } else {
-            // num_returns == 0: Statement context, no return values needed
-            // BUT we still need to ensure arguments don't overwrite local variables!
-            // Arguments will go to temp_func_reg + 1, temp_func_reg + 2, etc.
-            // If these overlap with local variables (< nactvar), we must relocate!
-            let nactvar = c.nactvar as u32;
-            let args_would_start_at = temp_func_reg + 1;
-
-            if args_would_start_at < nactvar || temp_func_reg < nactvar {
-                // Arguments would overwrite local variables!
-                // Move function to a safe register (at or after nactvar)
-                let new_reg = if c.freereg < nactvar {
+                // dest < nactvar: we need to use a safe temporary register
+                let temp_func_reg = compile_expr(c, &prefix_expr)?;
+                let new_func_reg = if c.freereg < nactvar {
                     c.freereg = nactvar;
                     alloc_register(c)
                 } else {
                     alloc_register(c)
                 };
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Move, new_reg, temp_func_reg, 0),
-                );
-                new_reg
+                if temp_func_reg != new_func_reg {
+                    emit_move(c, new_func_reg, temp_func_reg);
+                }
+                need_move_to_dest = true;
+                new_func_reg
+            }
+        } else {
+            // No dest specified - use default behavior
+            let temp_func_reg = compile_expr(c, &prefix_expr)?;
+            
+            if num_returns > 0 {
+                // Expression context - need return values
+                // CRITICAL: Must preserve local variables!
+                let nactvar = c.nactvar as u32;
+                if temp_func_reg < nactvar {
+                    // Function is a local variable - must preserve it!
+                    let new_reg = alloc_register(c);
+                    emit_move(c, new_reg, temp_func_reg);
+                    new_reg
+                } else if temp_func_reg + 1 == c.freereg {
+                    // Function was just loaded into a fresh temporary register - safe to reuse
+                    temp_func_reg
+                } else {
+                    // Function is in an "old" temporary register - must preserve it!
+                    let new_reg = alloc_register(c);
+                    emit_move(c, new_reg, temp_func_reg);
+                    new_reg
+                }
             } else {
-                // Safe - neither function nor arguments overlap with locals
-                temp_func_reg
+                // num_returns == 0: Statement context, no return values needed
+                // BUT we still need to ensure arguments don't overwrite local variables!
+                let nactvar = c.nactvar as u32;
+                let args_would_start_at = temp_func_reg + 1;
+
+                if args_would_start_at < nactvar || temp_func_reg < nactvar {
+                    // Arguments would overwrite local variables!
+                    // Move function to a safe register (at or after nactvar)
+                    let new_reg = if c.freereg < nactvar {
+                        c.freereg = nactvar;
+                        alloc_register(c)
+                    } else {
+                        alloc_register(c)
+                    };
+                    emit_move(c, new_reg, temp_func_reg);
+                    new_reg
+                } else {
+                    // Safe - neither function nor arguments overlap with locals
+                    temp_func_reg
+                }
             }
         };
 
@@ -2547,156 +2469,29 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
 
         // OPTIMIZATION: If last argument is a call, use "all out" mode
-        // Use recursive compile_call_expr_with_returns to support method calls (SELF instruction)
+        // Simply recursively compile the call with usize::MAX returns - do NOT manually handle inner args
         if is_last && matches!(arg_expr, LuaExpr::CallExpr(_)) {
-            if let LuaExpr::CallExpr(call_expr) = arg_expr {
-                // Compile inner call with "all out" mode (num_returns = 0 means variable returns)
-                // Note: We need to handle this specially for method calls
-                let inner_prefix = call_expr.get_prefix_expr().ok_or("missing call prefix")?;
-
-                // Check if inner call is a method call
-                let inner_is_method = if let LuaExpr::IndexExpr(index_expr) = &inner_prefix {
-                    index_expr
-                        .get_index_token()
-                        .map(|t| t.is_colon())
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-
-                // Handle method call with SELF instruction
-                let call_reg = if inner_is_method {
-                    if let LuaExpr::IndexExpr(index_expr) = &inner_prefix {
-                        let func_reg = alloc_register(c);
-                        alloc_register(c); // Reserve A+1 for self
-
-                        let obj_expr = index_expr
-                            .get_prefix_expr()
-                            .ok_or("Method call missing object")?;
-                        let obj_reg = compile_expr(c, &obj_expr)?;
-
-                        let method_name = if let Some(LuaIndexKey::Name(name_token)) =
-                            index_expr.get_index_key()
-                        {
-                            name_token.get_name_text().to_string()
-                        } else {
-                            return Err("Method call requires name index".to_string());
-                        };
-
-                        let lua_str = create_string_value(c, &method_name);
-                        let key_idx = add_constant_dedup(c, lua_str);
-
-                        emit(
-                            c,
-                            Instruction::create_abck(
-                                OpCode::Self_,
-                                func_reg,
-                                obj_reg,
-                                key_idx,
-                                true,
-                            ),
-                        );
-
-                        func_reg
-                    } else {
-                        unreachable!("inner_is_method but not IndexExpr")
-                    }
-                } else {
-                    // For regular call, we need to place it at arg_dest (outer call's argument position)
-                    // to avoid register conflicts
-                    let temp_func_reg = compile_expr(c, &inner_prefix)?;
-                    if temp_func_reg != arg_dest {
-                        ensure_register(c, arg_dest);
-                        emit_move(c, arg_dest, temp_func_reg);
-                        arg_dest
-                    } else {
-                        temp_func_reg
-                    }
-                };
-
-                // Compile call arguments
-                let call_args_start = if inner_is_method {
-                    call_reg + 2
-                } else {
-                    call_reg + 1
-                };
-                let call_arg_exprs = call_expr
-                    .get_args_list()
-                    .ok_or("missing args list")?
-                    .get_args()
-                    .collect::<Vec<_>>();
-
-                // CRITICAL: Reset freereg so inner call's arguments compile into correct positions
-                c.freereg = call_args_start;
-
-                let mut call_arg_regs = Vec::new();
-                // CRITICAL: Allocate all argument registers upfront to prevent conflicts
-                let num_call_args = call_arg_exprs.len();
-                let call_args_end = call_args_start + num_call_args as u32;
-                while c.freereg < call_args_end {
-                    alloc_register(c);
+            if let LuaExpr::CallExpr(inner_call) = arg_expr {
+                // Use a simple approach: compile inner call to arg_dest with "all out" mode
+                // The recursive call will handle everything including method calls and nested calls
+                let call_result = compile_call_expr_with_returns_and_dest(c, inner_call, usize::MAX, Some(arg_dest))?;
+                if call_result != arg_dest {
+                    ensure_register(c, arg_dest);
+                    emit_move(c, arg_dest, call_result);
                 }
-
-                for (j, call_arg) in call_arg_exprs.iter().enumerate() {
-                    let call_arg_dest = call_args_start + j as u32;
-                    // Reset freereg before each argument to protect argument slots
-                    if c.freereg < call_args_end {
-                        c.freereg = call_args_end;
-                    }
-                    let arg_reg = compile_expr_to(c, call_arg, Some(call_arg_dest))?;
-                    call_arg_regs.push(arg_reg);
-                }
-
-                // Move call arguments if needed
-                for (j, &reg) in call_arg_regs.iter().enumerate() {
-                    let target = call_args_start + j as u32;
-                    if reg != target {
-                        while c.freereg <= target {
-                            alloc_register(c);
-                        }
-                        emit_move(c, target, reg);
-                    }
-                }
-
-                // Emit call with "all out" (C=0)
-                let inner_arg_count = call_arg_exprs.len();
-                let inner_b_param = if inner_is_method {
-                    (inner_arg_count + 2) as u32 // +1 for self, +1 for Lua convention
-                } else {
-                    (inner_arg_count + 1) as u32
-                };
-                emit(
-                    c,
-                    Instruction::encode_abc(
-                        OpCode::Call,
-                        call_reg,
-                        inner_b_param,
-                        0, // C=0: all out
-                    ),
-                );
-
-                arg_regs.push(call_reg);
+                arg_regs.push(arg_dest);
                 last_arg_is_call_all_out = true;
                 break;
             }
         }
 
         // Compile argument directly to its target position
-        let arg_reg = if matches!(arg_expr, LuaExpr::CallExpr(_)) {
-            // Pass dest to allow nested expressions to use correct registers
-            let call_reg = compile_expr_to(c, arg_expr, Some(arg_dest))?;
-            // Move result to target position if needed
-            if call_reg != arg_dest {
-                ensure_register(c, arg_dest);
-                emit_move(c, arg_dest, call_reg);
-                arg_dest
-            } else {
-                call_reg
-            }
-        } else {
-            compile_expr_to(c, arg_expr, Some(arg_dest))?
-        };
-        arg_regs.push(arg_reg);
+        let arg_reg = compile_expr_to(c, arg_expr, Some(arg_dest))?;
+        if arg_reg != arg_dest {
+            ensure_register(c, arg_dest);
+            emit_move(c, arg_dest, arg_reg);
+        }
+        arg_regs.push(arg_dest);
     }
 
     // Restore freereg to saved value or update to after last argument
@@ -2738,6 +2533,7 @@ pub fn compile_call_expr_with_returns_and_dest(
     // B = number of arguments + 1, or 0 if last arg was "all out" call
     //     For method calls, B includes the implicit self parameter
     // C = number of expected return values + 1 (1 means 0 returns, 2 means 1 return, 0 means all returns)
+    //     SPECIAL: when num_returns = usize::MAX, it means "all out" mode (C=0)
     let arg_count = arg_exprs.len();
     let b_param = if last_arg_is_call_all_out {
         0 // B=0: all in
@@ -2746,7 +2542,13 @@ pub fn compile_call_expr_with_returns_and_dest(
         let total_args = if is_method { arg_count + 1 } else { arg_count };
         (total_args + 1) as u32
     };
-    let c_param = (num_returns + 1) as u32;
+    // C=0 means "all out", C=1 means 0 returns, C=2 means 1 return, etc.
+    // When caller passes num_returns=usize::MAX, they mean "all out" (C=0)
+    let c_param = if num_returns == usize::MAX {
+        0 // C=0: all out (take all return values)
+    } else {
+        (num_returns + 1) as u32
+    };
 
     emit(
         c,
@@ -2757,21 +2559,28 @@ pub fn compile_call_expr_with_returns_and_dest(
     // CALL places return values starting at func_reg
     // If num_returns == 0, CALL discards all returns
     // If num_returns > 0, return values are in func_reg .. func_reg + num_returns - 1
+    // If num_returns == usize::MAX, it's "all out" mode - we don't know how many returns
     //
     // CRITICAL: freereg can only be set to func_reg + num_returns if that's >= nactvar
     // We cannot reclaim registers occupied by active local variables!
-    let new_freereg = func_reg + num_returns as u32;
-    if new_freereg >= c.nactvar as u32 {
-        c.freereg = new_freereg;
+    if num_returns != usize::MAX {
+        let new_freereg = func_reg + num_returns as u32;
+        if new_freereg >= c.nactvar as u32 {
+            c.freereg = new_freereg;
+        }
     }
-    // If new_freereg < nactvar, keep freereg unchanged (locals are still alive)
+    // For "all out" mode (num_returns == usize::MAX), keep freereg unchanged
+    // The caller (table constructor, etc.) will handle the stack properly
 
     // If we had to move function to avoid conflicts, move return values back to original dest
     if need_move_to_dest {
         if let Some(d) = original_dest {
             // Move return values from func_reg to original dest
-            for i in 0..num_returns {
-                emit_move(c, d + i as u32, func_reg + i as u32);
+            // CRITICAL: Don't do this for "all out" mode - we don't know how many values
+            if num_returns != usize::MAX {
+                for i in 0..num_returns {
+                    emit_move(c, d + i as u32, func_reg + i as u32);
+                }
             }
             return Ok(d);
         }
@@ -2923,9 +2732,36 @@ fn compile_table_expr_to(
     expr: &LuaTableExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    let reg = get_result_reg(c, dest);
+    // Get all fields first to check if we need to use a temporary register
+    let fields: Vec<_> = expr.get_fields().collect();
+    
+    // CRITICAL FIX: When dest is a local variable register (< nactvar) and we have
+    // non-empty table constructor, we must NOT use dest directly. This is because
+    // table elements will be compiled into consecutive registers starting from reg+1,
+    // which could overwrite other local variables.
+    //
+    // Example: `local a,b,c; a = {f()}` where a=R0, b=R1, c=R2
+    // If we create table at R0, function and args go to R1, R2... overwriting b, c!
+    //
+    // Solution: When dest < nactvar AND table is non-empty, ignore dest and use
+    // a fresh temporary register. At the end, we move the result to dest.
+    let original_dest = dest;
+    let need_move_to_dest = if let Some(d) = dest {
+        !fields.is_empty() && d < c.nactvar as u32
+    } else {
+        false
+    };
+    
+    // If we need to protect locals, ignore dest and allocate a fresh register
+    let effective_dest = if need_move_to_dest {
+        None
+    } else {
+        dest
+    };
+    
+    let reg = get_result_reg(c, effective_dest);
 
-    // Get all fields
+    // Fields already collected above
     let fields: Vec<_> = expr.get_fields().collect();
 
     // Separate array part from hash part to count sizes
@@ -2991,7 +2827,17 @@ fn compile_table_expr_to(
     let mut array_idx = 0;
     let values_start = reg + 1;
     let mut has_vararg_at_end = false;
-    let mut has_call_at_end = false;
+    
+    // CRITICAL: Pre-reserve registers for array elements BEFORE processing any fields.
+    // This prevents hash field value expressions (like `select('#', ...)`) from
+    // allocating temporary registers that conflict with array element positions.
+    // Without this, `{n = select('#', ...), ...}` would have `select` use reg+1,
+    // which should be reserved for the first vararg element.
+    let array_values_end = values_start + array_count as u32;
+    while c.freereg < array_values_end {
+        alloc_register(c);
+    }
+    let mut call_at_end_idx: Option<usize> = None;
 
     // Process all fields in source order
     // Array elements are loaded to registers, hash fields are set immediately
@@ -3012,7 +2858,7 @@ fn compile_table_expr_to(
                 } else if is_last_field && is_call {
                     // Call as last element: returns multiple values
                     // Will be handled after all hash fields
-                    has_call_at_end = true;
+                    call_at_end_idx = Some(field_idx);
                     continue;
                 }
 
@@ -3241,18 +3087,46 @@ fn compile_table_expr_to(
         emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, c_param));
 
         c.freereg = reg + 1;
+        // Move result to original destination if needed
+        if need_move_to_dest {
+            if let Some(d) = original_dest {
+                emit_move(c, d, reg);
+                return Ok(d);
+            }
+        }
         return Ok(reg);
     }
 
-    if has_call_at_end {
-        // Call as last element - for now treat as single value
-        // TODO: handle multiple return values properly
+    if let Some(idx) = call_at_end_idx {
+        // Call as last element: compile call with all return values
         let target_reg = values_start + array_idx;
         while c.freereg <= target_reg {
             alloc_register(c);
         }
-        // Simplified: just count as one more array element
-        array_idx += 1;
+        
+        // Get the call expression and compile it
+        if let Some(field) = fields.get(idx) {
+            if let Some(value_expr) = field.get_value_expr() {
+                if let LuaExpr::CallExpr(call_expr) = value_expr {
+                    // Compile the call with all return values (usize::MAX means all)
+                    compile_call_expr_with_returns_and_dest(c, &call_expr, usize::MAX, Some(target_reg))?;
+                }
+            }
+        }
+        
+        // SetList with B=0 (all remaining values including call returns)
+        let c_param = (array_idx as usize / 50) as u32;
+        emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, c_param));
+        
+        c.freereg = reg + 1;
+        // Move result to original destination if needed
+        if need_move_to_dest {
+            if let Some(d) = original_dest {
+                emit_move(c, d, reg);
+                return Ok(d);
+            }
+        }
+        return Ok(reg);
     }
 
     // Emit SETLIST for all array elements at the end
@@ -3278,6 +3152,14 @@ fn compile_table_expr_to(
     // Free temporary registers used during table construction
     // Reset to table_reg + 1 to match luac's register allocation behavior
     c.freereg = reg + 1;
+
+    // Move result to original destination if needed
+    if need_move_to_dest {
+        if let Some(d) = original_dest {
+            emit_move(c, d, reg);
+            return Ok(d);
+        }
+    }
 
     Ok(reg)
 }
@@ -3453,6 +3335,7 @@ pub fn compile_closure_expr_to(
                 register: 0,
                 is_const: false,
                 is_to_be_closed: false,
+                needs_close: false,
             });
         func_compiler.chunk.locals.push("self".to_string());
         param_offset = 1;
@@ -3487,6 +3370,7 @@ pub fn compile_closure_expr_to(
                 register: reg_index,
                 is_const: false,
                 is_to_be_closed: false,
+                needs_close: false,
             });
         func_compiler.chunk.locals.push(param_name);
         regular_param_count += 1;
@@ -3495,6 +3379,7 @@ pub fn compile_closure_expr_to(
     func_compiler.chunk.param_count = regular_param_count + param_offset;
     func_compiler.chunk.is_vararg = has_vararg;
     func_compiler.freereg = (regular_param_count + param_offset) as u32;
+    func_compiler.peak_freereg = func_compiler.freereg; // CRITICAL: Initialize peak_freereg with parameters!
     func_compiler.nactvar = (regular_param_count + param_offset) as usize;
 
     // Emit VarargPrep instruction if function accepts varargs
