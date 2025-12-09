@@ -2567,8 +2567,13 @@ pub fn compile_call_expr_with_returns_and_dest(
                 // Handle method call with SELF instruction
                 let call_reg = if inner_is_method {
                     if let LuaExpr::IndexExpr(index_expr) = &inner_prefix {
-                        let func_reg = alloc_register(c);
-                        alloc_register(c); // Reserve A+1 for self
+                        // CRITICAL FIX: For method call as last argument, we need to place
+                        // the function at arg_dest so the call result ends up at the correct position.
+                        // SELF A B C: R[A+1] = R[B]; R[A] = R[B][C]
+                        // So we want A = arg_dest, and need to reserve arg_dest+1 for self
+                        let func_reg = arg_dest;
+                        ensure_register(c, func_reg);
+                        ensure_register(c, func_reg + 1); // Reserve for self
 
                         let obj_expr = index_expr
                             .get_prefix_expr()
@@ -3495,6 +3500,7 @@ pub fn compile_closure_expr_to(
     func_compiler.chunk.param_count = regular_param_count + param_offset;
     func_compiler.chunk.is_vararg = has_vararg;
     func_compiler.freereg = (regular_param_count + param_offset) as u32;
+    func_compiler.peak_freereg = func_compiler.freereg; // CRITICAL: Initialize peak_freereg with parameters!
     func_compiler.nactvar = (regular_param_count + param_offset) as usize;
 
     // Emit VarargPrep instruction if function accepts varargs

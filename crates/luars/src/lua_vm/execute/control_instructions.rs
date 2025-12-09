@@ -1814,6 +1814,128 @@ pub fn exec_tailcall(
 
             Ok(())
         }
+        LuaValueKind::Table => {
+            // Table with __call metamethod
+            // Need to find __call and call it with the table as first argument
+            
+            // Get __call metamethod
+            let call_mm = match vm.get_metamethod(&func, "__call") {
+                Some(mm) => mm,
+                None => return Err(vm.error("attempt to call a table value".to_string())),
+            };
+            
+            // Prepare arguments: table (self) + original args
+            let mut new_args = Vec::with_capacity(args.len() + 1);
+            new_args.push(func); // The table itself as first argument
+            new_args.extend(args.iter().copied());
+            
+            // Check if metamethod is a Lua function or C function
+            match call_mm.kind() {
+                LuaValueKind::Function => {
+                    let Some(func_id) = call_mm.as_function_id() else {
+                        return Err(vm.error("invalid __call metamethod".to_string()));
+                    };
+                    
+                    // Extract all info from func_ref before calling mutable methods
+                    let (max_stack_size, code_ptr, constants_ptr, upvalues_ptr, num_params) = {
+                        let Some(func_ref) = vm.object_pool.get_function(func_id) else {
+                            return Err(vm.error("Invalid function ID".to_string()));
+                        };
+                        let chunk = func_ref.lua_chunk();
+                        (
+                            chunk.max_stack_size,
+                            chunk.code.as_ptr(),
+                            chunk.constants.as_ptr(),
+                            func_ref.upvalues.as_ptr(),
+                            chunk.param_count,
+                        )
+                    };
+
+                    vm.close_upvalues_from(base);
+                    let old_base = base;
+                    vm.pop_frame_discard();
+
+                    vm.ensure_stack_capacity(old_base + max_stack_size);
+
+                    // Copy arguments to frame base
+                    for (i, arg) in new_args.iter().enumerate() {
+                        vm.register_stack[old_base + i] = *arg;
+                    }
+
+                    // Fill remaining parameters with nil
+                    for i in new_args.len()..num_params {
+                        vm.register_stack[old_base + i] = LuaValue::nil();
+                    }
+
+                    let nresults = if return_count == usize::MAX {
+                        -1i16
+                    } else {
+                        return_count as i16
+                    };
+                    let new_frame = LuaCallFrame::new_lua_function(
+                        func_id,
+                        code_ptr,
+                        constants_ptr,
+                        upvalues_ptr,
+                        old_base,
+                        new_args.len(),
+                        result_reg,
+                        nresults,
+                        max_stack_size,
+                    );
+
+                    *frame_ptr_ptr = vm.push_frame(new_frame);
+                    Ok(())
+                }
+                LuaValueKind::CFunction => {
+                    let Some(c_func) = call_mm.as_cfunction() else {
+                        return Err(vm.error("invalid __call metamethod".to_string()));
+                    };
+
+                    let call_base = base;
+                    vm.ensure_stack_capacity(call_base + new_args.len() + 1);
+
+                    vm.register_stack[call_base] = call_mm;
+                    for (i, arg) in new_args.iter().enumerate() {
+                        vm.register_stack[call_base + 1 + i] = *arg;
+                    }
+
+                    let temp_frame = LuaCallFrame::new_c_function(call_base, new_args.len() + 1);
+                    vm.push_frame(temp_frame);
+                    let result = c_func(vm)?;
+                    vm.pop_frame_discard();
+
+                    vm.pop_frame_discard();
+
+                    if !vm.frames_is_empty() {
+                        *frame_ptr_ptr = vm.current_frame_ptr();
+
+                        let parent_base = vm.current_frame().base_ptr as usize;
+                        let vals = result.all_values();
+                        let count = if return_count == usize::MAX {
+                            vals.len()
+                        } else {
+                            vals.len().min(return_count)
+                        };
+
+                        for i in 0..count {
+                            vm.register_stack[parent_base + result_reg + i] = vals[i];
+                        }
+
+                        if return_count != usize::MAX {
+                            for i in count..return_count {
+                                vm.register_stack[parent_base + result_reg + i] = LuaValue::nil();
+                            }
+                        }
+
+                        vm.current_frame_mut().top = (result_reg + count) as u32;
+                    }
+
+                    Ok(())
+                }
+                _ => Err(vm.error("attempt to call a table value (invalid __call)".to_string())),
+            }
+        }
         _ => Err(vm.error(format!("attempt to call a {} value", func.type_name()))),
     }
 }

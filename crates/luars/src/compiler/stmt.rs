@@ -627,6 +627,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 return Err("Tail call missing function expression".to_string());
             };
 
+            // Check if this is a method call (obj:method syntax)
+            let is_method = if let LuaExpr::IndexExpr(index_expr) = &func_expr {
+                index_expr
+                    .get_index_token()
+                    .map(|t| t.is_colon())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
             // Get arguments first to know how many we have
             let args = if let Some(args_list) = call_expr.get_args_list() {
                 args_list.get_args().collect::<Vec<_>>()
@@ -634,14 +644,110 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 Vec::new()
             };
 
-            // Reserve all registers we'll need (func + args)
-            let num_total = 1 + args.len();
+            // For method calls, we need an extra slot for self
+            let num_args = args.len();
+            let num_total = if is_method {
+                2 + num_args // func + self + explicit args
+            } else {
+                1 + num_args // func + args
+            };
+
+            // Reserve all registers we'll need
             let mut reserved_regs = Vec::new();
             for _ in 0..num_total {
                 reserved_regs.push(alloc_register(c));
             }
             let base_reg = reserved_regs[0];
 
+            // Handle method call with SELF instruction
+            if is_method {
+                if let LuaExpr::IndexExpr(index_expr) = &func_expr {
+                    // Method call: obj:method(args) → SELF instruction
+                    // SELF A B C: R(A+1) = R(B); R(A) = R(B)[C]
+
+                    // Compile object (table)
+                    let obj_expr = index_expr
+                        .get_prefix_expr()
+                        .ok_or("Method call missing object")?;
+                    let obj_reg = compile_expr(c, &obj_expr)?;
+
+                    // Get method name
+                    let method_name = if let Some(emmylua_parser::LuaIndexKey::Name(name_token)) =
+                        index_expr.get_index_key()
+                    {
+                        name_token.get_name_text().to_string()
+                    } else {
+                        return Err("Method call requires name index".to_string());
+                    };
+
+                    // Add method name to constants
+                    let lua_str = create_string_value(c, &method_name);
+                    let key_idx = add_constant_dedup(c, lua_str);
+
+                    // Emit SELF instruction: R(base_reg+1) = R(obj_reg); R(base_reg) = R(obj_reg)[key]
+                    emit(
+                        c,
+                        Instruction::create_abck(
+                            OpCode::Self_,
+                            base_reg,
+                            obj_reg,
+                            key_idx,
+                            true, // k=1: C is constant index
+                        ),
+                    );
+
+                    // Compile explicit arguments to consecutive registers after self (base_reg+2, ...)
+                    let mut last_is_vararg_all_out = false;
+                    for (i, arg) in args.iter().enumerate() {
+                        let target_reg = base_reg + 2 + i as u32; // +2 for func and self
+                        let is_last_arg = i == num_args - 1;
+
+                        // Check if last argument is ... (vararg)
+                        if is_last_arg {
+                            if let LuaExpr::LiteralExpr(lit) = arg {
+                                if matches!(
+                                    lit.get_literal(),
+                                    Some(emmylua_parser::LuaLiteralToken::Dots(_))
+                                ) {
+                                    emit(
+                                        c,
+                                        Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0),
+                                    );
+                                    last_is_vararg_all_out = true;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let arg_reg = compile_expr(c, &arg)?;
+                        if arg_reg != target_reg {
+                            emit_move(c, target_reg, arg_reg);
+                        }
+                    }
+
+                    // Emit TailCall instruction
+                    // For method call, B includes implicit self parameter
+                    let b_param = if last_is_vararg_all_out {
+                        0
+                    } else {
+                        (num_args + 2) as u32 // +1 for self, +1 for Lua convention
+                    };
+                    emit(
+                        c,
+                        Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
+                    );
+
+                    // After TAILCALL, emit RETURN
+                    emit(
+                        c,
+                        Instruction::create_abck(OpCode::Return, base_reg, 0, 0, false),
+                    );
+
+                    return Ok(());
+                }
+            }
+
+            // Regular function call (not method)
             // Compile function to the first reserved register
             let func_reg = compile_expr(c, &func_expr)?;
             if func_reg != base_reg {
@@ -677,7 +783,6 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 
             // Emit TailCall instruction
             // A = function register, B = num_args + 1 (or 0 if last arg is vararg "all out")
-            let num_args = args.len();
             let b_param = if last_is_vararg_all_out {
                 0 // B=0: all in (variable number of args from vararg)
             } else {
