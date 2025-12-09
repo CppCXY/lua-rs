@@ -242,16 +242,16 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
 
             if is_dots && remaining_vars > 0 {
                 // Varargs expansion: generate VarArg instruction into pre-allocated registers
-                // VarArg instruction: R(target_base)..R(target_base+remaining_vars-1) = ...
-                // B = remaining_vars + 1 (or 0 for all)
-                let b_value = if remaining_vars == 1 {
+                // VARARG A C: R(A), ..., R(A+C-2) = vararg
+                // C = remaining_vars + 1 (or 0 for all)
+                let c_value = if remaining_vars == 1 {
                     2
                 } else {
                     (remaining_vars + 1) as u32
                 };
                 emit(
                     c,
-                    Instruction::encode_abc(OpCode::Vararg, target_base, b_value, 0),
+                    Instruction::encode_abc(OpCode::Vararg, target_base, 0, c_value),
                 );
 
                 // Add all registers

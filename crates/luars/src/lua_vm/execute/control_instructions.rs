@@ -955,48 +955,209 @@ pub fn exec_call(
     }
 
     // Slow path: Check for __call metamethod (for Table and Userdata)
-    let metatable_opt = match func.kind() {
-        LuaValueKind::Table => func.as_table_id().and_then(|table_id| {
-            vm.object_pool
-                .get_table(table_id)
-                .and_then(|t| t.get_metatable())
-        }),
-        LuaValueKind::Userdata => func.as_userdata_id().and_then(|ud_id| {
-            vm.object_pool
-                .get_userdata(ud_id)
-                .map(|ud| ud.get_metatable())
-                .filter(|mt| !mt.is_nil())
-        }),
-        _ => None,
-    };
+    // Need to handle chains of __call metamethods by inserting extra arguments
+    let mut current_func = func;
+    let mut extra_args: Vec<LuaValue> = Vec::new(); // Tables in the chain to insert as args
+    let mut depth = 0;
+    const MAX_CALL_CHAIN: usize = 200; // Prevent infinite loops
 
-    if let Some(metatable) = metatable_opt {
-        // Use pre-cached __call StringId
-        let call_key = LuaValue::string(vm.object_pool.tm_call);
-        if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
-            if call_func.is_callable() {
-                if call_func.is_cfunction() {
-                    exec_call_cfunction(vm, call_func, a, b, c, base, true, func, frame_ptr_ptr)?;
+    loop {
+        let metatable_opt = match current_func.kind() {
+            LuaValueKind::Table => current_func.as_table_id().and_then(|table_id| {
+                vm.object_pool
+                    .get_table(table_id)
+                    .and_then(|t| t.get_metatable())
+            }),
+            LuaValueKind::Userdata => current_func.as_userdata_id().and_then(|ud_id| {
+                vm.object_pool
+                    .get_userdata(ud_id)
+                    .map(|ud| ud.get_metatable())
+                    .filter(|mt| !mt.is_nil())
+            }),
+            _ => break, // Not a table/userdata, cannot have __call
+        };
+
+        if let Some(metatable) = metatable_opt {
+            // Use pre-cached __call StringId
+            let call_key = LuaValue::string(vm.object_pool.tm_call);
+            if let Some(call_func) = vm.table_get_with_meta(&metatable, &call_key) {
+                // Add current_func to the extra args (at the front)
+                extra_args.insert(0, current_func);
+
+                if call_func.is_callable() {
+                    // Found a callable __call metamethod
+                    // Now we need to insert all extra_args before the original arguments
+                    exec_call_with_extra_args(vm, call_func, a, b, c, base, &extra_args, frame_ptr_ptr)?;
                     return Ok(());
+                } else if call_func.is_table() || call_func.is_userdata() {
+                    // __call is itself a table/userdata, follow the chain
+                    current_func = call_func;
+                    depth += 1;
+                    if depth >= MAX_CALL_CHAIN {
+                        return Err(vm.error("'__call' chain too long; possible loop".to_string()));
+                    }
+                    continue;
                 } else {
-                    exec_call_lua_function(
-                        vm,
-                        call_func,
-                        a,
-                        b,
-                        c,
-                        base,
-                        true,
-                        func,
-                        frame_ptr_ptr,
-                    )?;
-                    return Ok(());
+                    break; // __call is not callable and not a table
                 }
+            } else {
+                break; // No __call metamethod
             }
+        } else {
+            break; // No metatable
         }
     }
 
     Err(vm.error(format!("attempt to call a {} value", func.type_name())))
+}
+
+/// Execute a call with extra arguments inserted at the front (for __call chains)
+/// extra_args are inserted before the original arguments
+#[inline(never)]
+fn exec_call_with_extra_args(
+    vm: &mut LuaVM,
+    call_func: LuaValue,
+    a: usize,
+    b: usize,
+    c: usize,
+    base: usize,
+    extra_args: &[LuaValue],
+    frame_ptr_ptr: &mut *mut LuaCallFrame,
+) -> LuaResult<()> {
+    // Calculate original argument count
+    let orig_arg_count = if b == 0 {
+        let frame = vm.current_frame();
+        if frame.top as usize > a + 1 {
+            (frame.top as usize) - (a + 1)
+        } else {
+            0
+        }
+    } else {
+        vm.current_frame_mut().top = (a + b) as u32;
+        b - 1
+    };
+
+    let extra_count = extra_args.len();
+    let total_arg_count = extra_count + orig_arg_count;
+    let return_count = if c == 0 { usize::MAX } else { c - 1 };
+
+    // New frame base = R[A+1] in caller's frame
+    let new_base = base + a + 1;
+
+    // Ensure we have enough stack space
+    // First, make room for the extra args by shifting original args
+    let required_capacity = new_base + total_arg_count + 10; // Extra buffer
+    vm.ensure_stack_capacity(required_capacity);
+
+    // Shift original arguments to make room for extra_args at the front
+    if orig_arg_count > 0 && extra_count > 0 {
+        // Move original args from [new_base..new_base+orig_arg_count] 
+        // to [new_base+extra_count..new_base+extra_count+orig_arg_count]
+        unsafe {
+            let reg_ptr = vm.register_stack.as_mut_ptr();
+            // Copy in reverse to avoid overwriting
+            for i in (0..orig_arg_count).rev() {
+                *reg_ptr.add(new_base + extra_count + i) = *reg_ptr.add(new_base + i);
+            }
+        }
+    }
+
+    // Insert extra_args at the front
+    for (i, arg) in extra_args.iter().enumerate() {
+        vm.register_stack[new_base + i] = *arg;
+    }
+
+    // Update top to reflect new argument count
+    vm.current_frame_mut().top = (a + 1 + total_arg_count) as u32;
+
+    // Now call the function
+    if call_func.is_cfunction() {
+        let c_func = call_func.as_cfunction().unwrap();
+        // For C function, we need to set up the frame manually
+        let call_base = base + a;
+        vm.register_stack[call_base] = call_func;
+        
+        let temp_frame = LuaCallFrame::new_c_function(call_base, total_arg_count + 1);
+        *frame_ptr_ptr = vm.push_frame(temp_frame);
+        
+        let result = c_func(vm)?;
+        vm.pop_frame_discard();
+        
+        // Restore frame_ptr to caller's frame
+        *frame_ptr_ptr = vm.current_frame_ptr();
+        
+        // Write results
+        let vals = result.all_values();
+        let count = if return_count == usize::MAX {
+            vals.len()
+        } else {
+            vals.len().min(return_count)
+        };
+        
+        for i in 0..count {
+            vm.register_stack[base + a + i] = vals[i];
+        }
+        
+        // Fill remaining expected results with nil
+        if return_count != usize::MAX {
+            for i in count..return_count {
+                vm.register_stack[base + a + i] = LuaValue::nil();
+            }
+        }
+        
+        // Update caller's top if variable return
+        if return_count == usize::MAX {
+            vm.current_frame_mut().top = (a + count) as u32;
+        }
+        
+        Ok(())
+    } else {
+        // Lua function
+        let func_id = match call_func.as_function_id() {
+            Some(id) => id,
+            None => return Err(vm.error("not a function".to_string())),
+        };
+        let func_ref = match vm.object_pool.get_function(func_id) {
+            Some(f) => f,
+            None => return Err(vm.error("invalid function".to_string())),
+        };
+        let chunk = func_ref.lua_chunk();
+        
+        let max_stack_size = chunk.max_stack_size;
+        let num_params = chunk.param_count;
+        let is_vararg = chunk.is_vararg;
+        let code_ptr = chunk.code.as_ptr();
+        let constants_ptr = chunk.constants.as_ptr();
+        let upvalues_ptr = func_ref.upvalues.as_ptr();
+        
+        // Ensure stack capacity
+        let required_size = new_base + max_stack_size;
+        vm.ensure_stack_capacity(required_size);
+        
+        // Fill missing arguments with nil
+        if total_arg_count < num_params && !is_vararg {
+            for i in total_arg_count..num_params {
+                vm.register_stack[new_base + i] = LuaValue::nil();
+            }
+        }
+        
+        // Create and push new frame
+        let nresults = if return_count == usize::MAX { -1i16 } else { return_count as i16 };
+        let new_frame = LuaCallFrame::new_lua_function(
+            func_id,
+            code_ptr,
+            constants_ptr,
+            upvalues_ptr,
+            new_base,
+            total_arg_count,
+            a,
+            nresults,
+            max_stack_size,
+        );
+        
+        *frame_ptr_ptr = vm.push_frame(new_frame);
+        Ok(())
+    }
 }
 
 /// Slow path for vararg Lua function calls
@@ -1698,6 +1859,7 @@ pub fn exec_tailcall(
             };
             let chunk = func_ref.lua_chunk();
             let max_stack_size = chunk.max_stack_size;
+            let num_params = chunk.param_count;
             let code_ptr = chunk.code.as_ptr();
             let constants_ptr = chunk.constants.as_ptr();
             let upvalues_ptr = func_ref.upvalues.as_ptr();
@@ -1717,6 +1879,14 @@ pub fn exec_tailcall(
             // Copy arguments to frame base
             for (i, arg) in args.iter().enumerate() {
                 vm.register_stack[old_base + i] = *arg;
+            }
+
+            // CRITICAL: Fill missing parameters with nil
+            // If fewer arguments were passed than parameters expected, fill with nil
+            if arg_count < num_params {
+                for i in arg_count..num_params {
+                    vm.register_stack[old_base + i] = LuaValue::nil();
+                }
             }
 
             // Create new frame at same location

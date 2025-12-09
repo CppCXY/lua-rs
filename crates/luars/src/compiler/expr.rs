@@ -206,8 +206,10 @@ fn compile_literal_expr_desc(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<
         LuaLiteralToken::Dots(_) => {
             // Variable arguments: ...
             // Allocate register and emit VARARG
+            // VARARG A C: R(A), ..., R(A+C-2) = vararg
+            // C=0 means all varargs, C>0 means C-1 values
             let reg = alloc_register(c);
-            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 2, 0));
+            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 0, 2));
             Ok(ExpDesc::new_nonreloc(reg))
         }
         _ => Err("Unsupported literal type".to_string()),
@@ -934,12 +936,10 @@ fn compile_literal_expr(
         }
         LuaLiteralToken::Dots(_) => {
             // Variable arguments: ...
-            // VarArg instruction: R(A), ..., R(A+B-2) = vararg
-            // B=1 means load 0 varargs (empty)
-            // B=2 means load 1 vararg into R(A)
-            // B=0 means load all varargs starting from R(A)
-            // For expression context, we load 1 vararg into the register
-            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 2, 0));
+            // VARARG A C: R(A), ..., R(A+C-2) = vararg
+            // C=0 means all varargs, C>0 means C-1 values
+            // For expression context, we load 1 vararg into the register (C=2 means 1 value)
+            emit(c, Instruction::encode_abc(OpCode::Vararg, reg, 0, 2));
         }
         _ => {}
     }
