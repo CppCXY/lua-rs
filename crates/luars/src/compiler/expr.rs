@@ -1087,7 +1087,8 @@ fn compile_binary_expr_to(
                 BinaryOperator::OpMul => Some(left_val * right_val),
                 BinaryOperator::OpDiv => Some(left_val / right_val),
                 BinaryOperator::OpIDiv => Some((left_val / right_val).floor()),
-                BinaryOperator::OpMod => Some(left_val % right_val),
+                // Lua modulo: a % b = a - floor(a/b) * b (same sign as divisor)
+                BinaryOperator::OpMod => Some(left_val - (left_val / right_val).floor() * right_val),
                 BinaryOperator::OpPow => Some(left_val.powf(right_val)),
                 BinaryOperator::OpBAnd => Some((left_int & right_int) as f64),
                 BinaryOperator::OpBOr => Some((left_int | right_int) as f64),
@@ -1154,7 +1155,8 @@ fn compile_binary_expr_to(
                 BinaryOperator::OpMul => Some(left_val * right_val),
                 BinaryOperator::OpDiv => Some(left_val / right_val),
                 BinaryOperator::OpIDiv => Some((left_val / right_val).floor()),
-                BinaryOperator::OpMod => Some(left_val % right_val),
+                // Lua modulo: a % b = a - floor(a/b) * b (same sign as divisor)
+                BinaryOperator::OpMod => Some(left_val - (left_val / right_val).floor() * right_val),
                 BinaryOperator::OpPow => Some(left_val.powf(right_val)),
                 // Bitwise operations require integers
                 BinaryOperator::OpBAnd
