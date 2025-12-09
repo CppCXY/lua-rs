@@ -675,3 +675,77 @@ pub fn check_unresolved_gotos(c: &Compiler) -> Result<(), String> {
 pub fn clear_scope_labels(c: &mut Compiler) {
     c.labels.retain(|l| l.scope_depth < c.scope_depth);
 }
+
+/// Check if an expression is a vararg (...) literal
+pub fn is_vararg_expr(expr: &LuaExpr) -> bool {
+    if let LuaExpr::LiteralExpr(lit) = expr {
+        matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_)))
+    } else {
+        false
+    }
+}
+
+/// Result of parsing a Lua number literal
+#[derive(Debug, Clone, Copy)]
+pub enum ParsedNumber {
+    /// Successfully parsed as integer
+    Int(i64),
+    /// Number is too large for i64, use float instead
+    Float(f64),
+}
+
+/// Parse a Lua integer literal from text, handling hex numbers that overflow i64
+/// Lua treats 0xFFFFFFFFFFFFFFFF as -1 (two's complement interpretation)
+/// For decimal numbers that overflow i64 range, returns Float instead
+pub fn parse_lua_int(text: &str) -> ParsedNumber {
+    let text = text.trim();
+    if text.starts_with("0x") || text.starts_with("0X") {
+        // Hex number - parse as u64 first, then reinterpret as i64
+        // This handles the case like 0xFFFFFFFFFFFFFFFF which should be -1
+        let hex_part = &text[2..];
+        // Remove any trailing decimal part (e.g., 0xFF.0)
+        let hex_part = hex_part.split('.').next().unwrap_or(hex_part);
+        if let Ok(val) = u64::from_str_radix(hex_part, 16) {
+            return ParsedNumber::Int(val as i64); // Reinterpret bits as signed
+        }
+    }
+    // Decimal case: parse as i64 only, if overflow use float
+    // (Unlike hex, decimal numbers should NOT be reinterpreted as two's complement)
+    if let Ok(val) = text.parse::<i64>() {
+        return ParsedNumber::Int(val);
+    }
+    // Decimal number is too large for i64, parse as float
+    if let Ok(val) = text.parse::<f64>() {
+        return ParsedNumber::Float(val);
+    }
+    // Default fallback
+    ParsedNumber::Int(0)
+}
+
+/// Lua left shift: x << n (returns 0 if |n| >= 64)
+/// Negative n means right shift
+#[inline(always)]
+pub fn lua_shl(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shl(r as u32) as i64
+    } else {
+        // Negative shift means right shift (logical)
+        (l as u64).wrapping_shr((-r) as u32) as i64
+    }
+}
+
+/// Lua right shift: x >> n (logical shift, returns 0 if |n| >= 64)
+/// Negative n means left shift
+#[inline(always)]
+pub fn lua_shr(l: i64, r: i64) -> i64 {
+    if r >= 64 || r <= -64 {
+        0
+    } else if r >= 0 {
+        (l as u64).wrapping_shr(r as u32) as i64
+    } else {
+        // Negative shift means left shift
+        (l as u64).wrapping_shl((-r) as u32) as i64
+    }
+}

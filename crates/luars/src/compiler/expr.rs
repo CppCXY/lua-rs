@@ -20,88 +20,6 @@ use emmylua_parser::{
     LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
 };
 
-//======================================================================================
-// Helper functions
-//======================================================================================
-
-/// Check if an expression is a vararg (...) literal
-fn is_vararg_expr(expr: &LuaExpr) -> bool {
-    if let LuaExpr::LiteralExpr(lit) = expr {
-        matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_)))
-    } else {
-        false
-    }
-}
-
-/// Result of parsing a Lua number literal
-#[derive(Debug, Clone, Copy)]
-enum ParsedNumber {
-    /// Successfully parsed as integer
-    Int(i64),
-    /// Number is too large for i64, use float instead
-    Float(f64),
-}
-
-/// Parse a Lua integer literal from text, handling hex numbers that overflow i64
-/// Lua treats 0xFFFFFFFFFFFFFFFF as -1 (two's complement interpretation)
-/// For decimal numbers that overflow i64 range, returns Float instead
-fn parse_lua_int(text: &str) -> ParsedNumber {
-    let text = text.trim();
-    if text.starts_with("0x") || text.starts_with("0X") {
-        // Hex number - parse as u64 first, then reinterpret as i64
-        // This handles the case like 0xFFFFFFFFFFFFFFFF which should be -1
-        let hex_part = &text[2..];
-        // Remove any trailing decimal part (e.g., 0xFF.0)
-        let hex_part = hex_part.split('.').next().unwrap_or(hex_part);
-        if let Ok(val) = u64::from_str_radix(hex_part, 16) {
-            return ParsedNumber::Int(val as i64); // Reinterpret bits as signed
-        }
-    }
-    // Decimal case: parse as i64 only, if overflow use float
-    // (Unlike hex, decimal numbers should NOT be reinterpreted as two's complement)
-    if let Ok(val) = text.parse::<i64>() {
-        return ParsedNumber::Int(val);
-    }
-    // Decimal number is too large for i64, parse as float
-    if let Ok(val) = text.parse::<f64>() {
-        return ParsedNumber::Float(val);
-    }
-    // Default fallback
-    ParsedNumber::Int(0)
-}
-
-/// Lua left shift: x << n (returns 0 if |n| >= 64)
-/// Negative n means right shift
-#[inline(always)]
-fn lua_shl(l: i64, r: i64) -> i64 {
-    if r >= 64 || r <= -64 {
-        0
-    } else if r >= 0 {
-        (l as u64).wrapping_shl(r as u32) as i64
-    } else {
-        // Negative shift means right shift (logical)
-        (l as u64).wrapping_shr((-r) as u32) as i64
-    }
-}
-
-/// Lua right shift: x >> n (logical shift, returns 0 if |n| >= 64)
-/// Negative n means left shift
-#[inline(always)]
-fn lua_shr(l: i64, r: i64) -> i64 {
-    if r >= 64 || r <= -64 {
-        0
-    } else if r >= 0 {
-        (l as u64).wrapping_shr(r as u32) as i64
-    } else {
-        // Negative shift means left shift
-        (l as u64).wrapping_shl((-r) as u32) as i64
-    }
-}
-
-//======================================================================================
-// NEW API: ExpDesc-based expression compilation (Lua 5.4 compatible)
-//======================================================================================
-
 /// Core function: Compile expression and return ExpDesc
 /// This is the NEW primary API that replaces the old u32-based compile_expr
 pub fn compile_expr_desc(c: &mut Compiler, expr: &LuaExpr) -> Result<ExpDesc, String> {
@@ -2357,7 +2275,6 @@ pub fn compile_call_expr_with_returns_and_dest(
     } else {
         false
     };
-
     // Track if we need to move return values back to original dest
     let mut need_move_to_dest = false;
     let original_dest = dest;
@@ -3086,7 +3003,7 @@ fn compile_table_expr_to(
     while c.freereg < array_values_end {
         alloc_register(c);
     }
-    let mut has_call_at_end = false;
+    let mut call_at_end_idx: Option<usize> = None;
 
     // Process all fields in source order
     // Array elements are loaded to registers, hash fields are set immediately
@@ -3107,7 +3024,7 @@ fn compile_table_expr_to(
                 } else if is_last_field && is_call {
                     // Call as last element: returns multiple values
                     // Will be handled after all hash fields
-                    has_call_at_end = true;
+                    call_at_end_idx = Some(field_idx);
                     continue;
                 }
 
@@ -3339,15 +3256,32 @@ fn compile_table_expr_to(
         return Ok(reg);
     }
 
-    if has_call_at_end {
-        // Call as last element - for now treat as single value
-        // TODO: handle multiple return values properly
+    if let Some(idx) = call_at_end_idx {
+        // Call as last element: compile call with all return values
         let target_reg = values_start + array_idx;
+        eprintln!("[DEBUG] call_at_end: target_reg={}, freereg={}, values_start={}, array_idx={}", target_reg, c.freereg, values_start, array_idx);
         while c.freereg <= target_reg {
             alloc_register(c);
         }
-        // Simplified: just count as one more array element
-        array_idx += 1;
+        
+        // Get the call expression and compile it
+        if let Some(field) = fields.get(idx) {
+            if let Some(value_expr) = field.get_value_expr() {
+                if let LuaExpr::CallExpr(call_expr) = value_expr {
+                    // Compile the call with all return values (usize::MAX means all)
+                    eprintln!("[DEBUG] before compile_call_expr");
+                    compile_call_expr_with_returns_and_dest(c, &call_expr, usize::MAX, Some(target_reg))?;
+                    eprintln!("[DEBUG] after compile_call_expr");
+                }
+            }
+        }
+        
+        // SetList with B=0 (all remaining values including call returns)
+        let c_param = (array_idx as usize / 50) as u32;
+        emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, c_param));
+        
+        c.freereg = reg + 1;
+        return Ok(reg);
     }
 
     // Emit SETLIST for all array elements at the end

@@ -1450,7 +1450,7 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         break;
                     }
                 }
-                let n: usize = if size_str.is_empty() {
+                let _n: usize = if size_str.is_empty() {
                     std::mem::size_of::<usize>() // default size_t
                 } else {
                     size_str.parse().unwrap_or(std::mem::size_of::<usize>())
