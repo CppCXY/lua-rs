@@ -1073,7 +1073,10 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
 fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), String> {
     // Structure: while <condition> do <block> end
 
-    // Begin loop
+    // Begin scope for the loop body (to track locals for CLOSE)
+    begin_scope(c);
+    
+    // Begin loop - record first_reg for break CLOSE
     begin_loop(c);
 
     // Mark loop start
@@ -1116,6 +1119,31 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         compile_block(c, &body)?;
     }
 
+    // Before jumping back, emit CLOSE if any local in the loop body was captured
+    {
+        let loop_info = c.loop_stack.last().unwrap();
+        let loop_scope_depth = loop_info.scope_depth;
+        let first_reg = loop_info.first_local_register;
+        
+        let scope = c.scope_chain.borrow();
+        let mut min_close_reg: Option<u32> = None;
+        for local in scope.locals.iter().rev() {
+            if local.depth < loop_scope_depth {
+                break;
+            }
+            if local.needs_close && local.register >= first_reg {
+                min_close_reg = Some(match min_close_reg {
+                    None => local.register,
+                    Some(min_reg) => min_reg.min(local.register),
+                });
+            }
+        }
+        drop(scope);
+        if let Some(reg) = min_close_reg {
+            emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
+        }
+    }
+
     // Jump back to loop start
     let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
     emit(c, Instruction::create_sj(OpCode::Jmp, -jump_offset));
@@ -1127,6 +1155,9 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 
     // End loop (patches all break statements)
     end_loop(c);
+    
+    // End scope
+    end_scope(c);
 
     Ok(())
 }
