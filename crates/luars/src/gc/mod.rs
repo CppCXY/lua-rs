@@ -331,6 +331,8 @@ impl GC {
                     while let Some(gc_id) = self.grayagain.pop() {
                         self.mark_one(gc_id, pool);
                     }
+                    // Clear weak table entries before sweep
+                    self.clear_weak_tables(pool);
                     // Start sweep
                     self.sweep_index = 0;
                     self.state = GcState::Sweep;
@@ -505,27 +507,53 @@ impl GC {
 
         match gc_id.gc_type() {
             GcObjectType::Table => {
-                if let Some(table) = pool.tables.get_mut(gc_id.index()) {
-                    if table.header.is_gray() {
+                // First pass: collect all needed info without mutating
+                let (should_mark, entries, mt_value, weak_mode) = {
+                    if let Some(table) = pool.tables.get(gc_id.index()) {
+                        if table.header.is_gray() {
+                            let entries = table.data.iter_all();
+                            let mt = table.data.get_metatable();
+                            
+                            // Check weak mode from metatable
+                            let weak = if let Some(mt_id) = mt.and_then(|v| v.as_table_id()) {
+                                if let Some(mt_table) = pool.tables.get(mt_id.0) {
+                                    self.get_weak_mode(mt_table, pool)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            
+                            (true, entries, mt, weak)
+                        } else {
+                            (false, vec![], None, None)
+                        }
+                    } else {
+                        (false, vec![], None, None)
+                    }
+                };
+                
+                if should_mark {
+                    // Now mark the table as black
+                    if let Some(table) = pool.tables.get_mut(gc_id.index()) {
                         table.header.make_black();
                         work += table.data.len();
-
-                        // Collect references to mark
-                        let refs: Vec<LuaValue> = table
-                            .data
-                            .iter_all()
-                            .into_iter()
-                            .flat_map(|(k, v)| [k, v])
-                            .collect();
-                        let mt = table.data.get_metatable();
-
-                        // Mark references
-                        for v in refs {
+                    }
+                    
+                    let (weak_keys, weak_values) = weak_mode.unwrap_or((false, false));
+                    
+                    // Mark references (skip weak references)
+                    for (k, v) in entries {
+                        if !weak_keys {
+                            self.mark_value(&k, pool);
+                        }
+                        if !weak_values {
                             self.mark_value(&v, pool);
                         }
-                        if let Some(mt) = mt {
-                            self.mark_value(&mt, pool);
-                        }
+                    }
+                    if let Some(mt) = mt_value {
+                        self.mark_value(&mt, pool);
                     }
                 }
             }
@@ -1077,7 +1105,10 @@ impl GC {
         // Phase 2: Mark from roots
         self.mark_roots(roots, pool);
 
-        // Phase 3: Sweep (only traverse allgc, not entire pools!)
+        // Phase 3: Clear weak table entries (before sweep!)
+        self.clear_weak_tables(pool);
+
+        // Phase 4: Sweep (only traverse allgc, not entire pools!)
         let collected = self.sweep(pool);
 
         // Like Lua's setpause: set debt based on memory and pause factor
@@ -1141,31 +1172,63 @@ impl GC {
             match value.kind() {
                 crate::lua_value::LuaValueKind::Table => {
                     if let Some(id) = value.as_table_id() {
-                        if let Some(table) = pool.tables.get_mut(id.0) {
-                            // For fixed tables: traverse if not yet traversed
-                            // For non-fixed tables: traverse if white (not yet marked)
-                            let is_fixed = table.header.is_fixed();
-                            let should_traverse = if is_fixed {
-                                traversed_fixed.insert(id.0)  // Returns true if newly inserted
+                        // First pass: collect info without mutating
+                        let (should_traverse, is_fixed, entries, mt_value, weak_mode) = {
+                            if let Some(table) = pool.tables.get(id.0) {
+                                let is_fixed = table.header.is_fixed();
+                                let should = if is_fixed {
+                                    !traversed_fixed.contains(&id.0)
+                                } else {
+                                    table.header.is_white()
+                                };
+                                
+                                if should {
+                                    let entries = table.data.iter_all();
+                                    let mt = table.data.get_metatable();
+                                    
+                                    // Check weak mode from metatable
+                                    let weak = if let Some(mt_id) = mt.and_then(|v| v.as_table_id()) {
+                                        if let Some(mt_table) = pool.tables.get(mt_id.0) {
+                                            self.get_weak_mode(mt_table, pool)
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    
+                                    (true, is_fixed, entries, mt, weak)
+                                } else {
+                                    (false, is_fixed, vec![], None, None)
+                                }
                             } else {
-                                table.header.is_white()
-                            };
-                            
-                            if should_traverse {
-                                // Mark non-fixed tables as black
-                                if !is_fixed {
+                                (false, false, vec![], None, None)
+                            }
+                        };
+                        
+                        if should_traverse {
+                            // Mark the traversal
+                            if is_fixed {
+                                traversed_fixed.insert(id.0);
+                            } else {
+                                if let Some(table) = pool.tables.get_mut(id.0) {
                                     table.header.make_black();
                                 }
-                                // Add table contents to worklist
-                                let entries = table.data.iter_all();
-                                let mt = table.data.get_metatable();
-                                for (k, v) in entries {
+                            }
+                            
+                            let (weak_keys, weak_values) = weak_mode.unwrap_or((false, false));
+                            
+                            // Add table contents to worklist (skip weak references)
+                            for (k, v) in entries {
+                                if !weak_keys {
                                     worklist.push(k);
+                                }
+                                if !weak_values {
                                     worklist.push(v);
                                 }
-                                if let Some(mt) = mt {
-                                    worklist.push(mt);
-                                }
+                            }
+                            if let Some(mt) = mt_value {
+                                worklist.push(mt);
                             }
                         }
                     }
@@ -1250,6 +1313,116 @@ impl GC {
                 _ => {} // Numbers, booleans, nil, CFunction - no marking needed
             }
         }
+    }
+
+    /// Check if a LuaValue points to a dead (white/unmarked) GC object
+    fn is_value_dead(&self, value: &LuaValue, pool: &ObjectPool) -> bool {
+        use crate::lua_value::LuaValueKind;
+        match value.kind() {
+            LuaValueKind::Table => {
+                if let Some(id) = value.as_table_id() {
+                    if let Some(t) = pool.tables.get(id.0) {
+                        return !t.header.is_fixed() && t.header.is_white();
+                    }
+                }
+                false
+            }
+            LuaValueKind::Function => {
+                if let Some(id) = value.as_function_id() {
+                    if let Some(f) = pool.functions.get(id.0) {
+                        return !f.header.is_fixed() && f.header.is_white();
+                    }
+                }
+                false
+            }
+            LuaValueKind::Thread => {
+                if let Some(id) = value.as_thread_id() {
+                    if let Some(t) = pool.threads.get(id.0) {
+                        return !t.header.is_fixed() && t.header.is_white();
+                    }
+                }
+                false
+            }
+            LuaValueKind::String => {
+                if let Some(id) = value.as_string_id() {
+                    if let Some(s) = pool.strings.get(id.0) {
+                        return !s.header.is_fixed() && s.header.is_white();
+                    }
+                }
+                false
+            }
+            // Numbers, booleans, nil, CFunction, Userdata - not GC managed or always live
+            _ => false,
+        }
+    }
+
+    /// Clear weak table entries that point to dead (white) objects
+    /// This must be called after marking but before sweeping
+    fn clear_weak_tables(&self, pool: &mut ObjectPool) {
+        // Collect tables with weak mode and their entries to remove
+        let mut tables_to_clear: Vec<(u32, Vec<LuaValue>)> = Vec::new();
+
+        for (id, table) in pool.tables.iter() {
+            // Check if this table has a metatable with __mode
+            if let Some(mt_id) = table.data.get_metatable().and_then(|v| v.as_table_id()) {
+                if let Some(mt) = pool.tables.get(mt_id.0) {
+                    // Look for __mode key in metatable
+                    // We need to find the string "__mode" in the metatable
+                    let mode = self.get_weak_mode(mt, pool);
+                    if let Some((weak_keys, weak_values)) = mode {
+                        // Collect keys to remove
+                        let mut keys_to_remove = Vec::new();
+                        for (key, value) in table.data.iter_all() {
+                            let key_dead = weak_keys && self.is_value_dead(&key, pool);
+                            let value_dead = weak_values && self.is_value_dead(&value, pool);
+                            if key_dead || value_dead {
+                                keys_to_remove.push(key);
+                            }
+                        }
+                        if !keys_to_remove.is_empty() {
+                            tables_to_clear.push((id, keys_to_remove));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now actually remove the entries
+        for (table_id, keys) in tables_to_clear {
+            if let Some(table) = pool.tables.get_mut(table_id) {
+                for key in keys {
+                    table.data.raw_set(key, LuaValue::nil());
+                }
+            }
+        }
+    }
+
+    /// Get weak mode from metatable's __mode field
+    /// Returns Some((weak_keys, weak_values)) if __mode is set
+    fn get_weak_mode(&self, metatable: &GcTable, pool: &ObjectPool) -> Option<(bool, bool)> {
+        // Find __mode key - it should be a string "k", "v", or "kv" (or "vk")
+        for (key, value) in metatable.data.iter_all() {
+            // Check if key is the string "__mode"
+            if let Some(key_str_id) = key.as_string_id() {
+                if let Some(key_str) = pool.strings.get(key_str_id.0) {
+                    if key_str.data.as_str() == "__mode" {
+                        // Found __mode, now check the value
+                        if let Some(val_str_id) = value.as_string_id() {
+                            if let Some(val_str) = pool.strings.get(val_str_id.0) {
+                                let mode_str = val_str.data.as_str();
+                                let weak_keys = mode_str.contains('k');
+                                let weak_values = mode_str.contains('v');
+                                if weak_keys || weak_values {
+                                    return Some((weak_keys, weak_values));
+                                }
+                            }
+                        }
+                        return None;
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Sweep phase - iterate pools directly instead of allgc
