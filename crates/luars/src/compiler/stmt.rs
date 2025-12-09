@@ -1223,9 +1223,12 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     // Begin new scope for loop body
     begin_scope(c);
 
+    // Begin loop with var_reg as first register, so break can close it
+    // Using var_reg instead of c.freereg because var_reg is the loop variable
+    begin_loop_with_register(c, var_reg);
+
     // The loop variable is at R(base+3)
     add_local(c, var_name, var_reg);
-    begin_loop(c);
 
     // Loop body starts here
     let loop_body_start = c.chunk.code.len();
@@ -1235,7 +1238,29 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
         compile_block(c, &body)?;
     }
 
-    // FORLOOP comes AFTER the body
+    // Before FORLOOP, emit CLOSE if any local in the loop body was captured
+    // Find the minimum register of captured locals in the current scope (loop body)
+    {
+        let scope = c.scope_chain.borrow();
+        let mut min_close_reg: Option<u32> = None;
+        for local in scope.locals.iter().rev() {
+            if local.depth < c.scope_depth {
+                break; // Only check current scope (loop body)
+            }
+            if local.depth == c.scope_depth && local.needs_close {
+                min_close_reg = Some(match min_close_reg {
+                    None => local.register,
+                    Some(min_reg) => min_reg.min(local.register),
+                });
+            }
+        }
+        drop(scope);
+        if let Some(reg) = min_close_reg {
+            emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
+        }
+    }
+
+    // FORLOOP comes AFTER the body (and CLOSE if needed)
     let forloop_pc = c.chunk.code.len();
     // Emit FORLOOP: increments index, checks condition, copies to var, jumps back to body
     // Bx is the backward jump distance. Since PC is incremented before dispatch,
@@ -1516,6 +1541,7 @@ fn compile_local_function_stat(
         register: func_reg,
         is_const: false,
         is_to_be_closed: false,
+        needs_close: false,
     });
     c.chunk.locals.push(func_name.clone());
 

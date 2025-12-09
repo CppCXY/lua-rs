@@ -199,6 +199,7 @@ pub fn add_local_with_attrs(
         register,
         is_const,
         is_to_be_closed,
+        needs_close: false,
     };
     c.scope_chain.borrow_mut().locals.push(local);
 
@@ -271,9 +272,11 @@ pub fn resolve_upvalue_from_chain(c: &mut Compiler, name: &str) -> Option<usize>
 fn resolve_in_parent_scope(scope: &Rc<RefCell<ScopeChain>>, name: &str) -> Option<(bool, u32)> {
     // First, search in this scope's locals
     {
-        let scope_ref = scope.borrow();
-        if let Some(local) = scope_ref.locals.iter().rev().find(|l| l.name == name) {
+        let mut scope_ref = scope.borrow_mut();
+        if let Some(local) = scope_ref.locals.iter_mut().rev().find(|l| l.name == name) {
             let register = local.register;
+            // Mark this local as captured by a closure - needs CLOSE on scope exit
+            local.needs_close = true;
             // Found as local - return (true, register)
             return Some((true, register));
         }
@@ -568,8 +571,15 @@ pub fn try_expr_as_constant(c: &mut Compiler, expr: &emmylua_parser::LuaExpr) ->
 
 /// Begin a new loop (for break statement support)
 pub fn begin_loop(c: &mut Compiler) {
+    begin_loop_with_register(c, c.freereg);
+}
+
+/// Begin a new loop with a specific first register for CLOSE
+pub fn begin_loop_with_register(c: &mut Compiler, first_reg: u32) {
     c.loop_stack.push(super::LoopInfo {
         break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: first_reg,
     });
 }
 
@@ -587,6 +597,35 @@ pub fn end_loop(c: &mut Compiler) {
 pub fn emit_break(c: &mut Compiler) -> Result<(), String> {
     if c.loop_stack.is_empty() {
         return Err("break statement outside loop".to_string());
+    }
+
+    // Before breaking, check if we need to close any captured upvalues
+    // This is needed when break jumps past the CLOSE instruction that would
+    // normally be executed at the end of each iteration
+    let loop_info = c.loop_stack.last().unwrap();
+    let loop_scope_depth = loop_info.scope_depth;
+    let first_reg = loop_info.first_local_register;
+    
+    // Find minimum register of captured locals in the loop scope
+    let mut min_close_reg: Option<u32> = None;
+    {
+        let scope = c.scope_chain.borrow();
+        for local in scope.locals.iter().rev() {
+            if local.depth < loop_scope_depth {
+                break; // Only check loop scope and nested scopes
+            }
+            if local.needs_close && local.register >= first_reg {
+                min_close_reg = Some(match min_close_reg {
+                    None => local.register,
+                    Some(min_reg) => min_reg.min(local.register),
+                });
+            }
+        }
+    }
+    
+    // Emit CLOSE if needed
+    if let Some(reg) = min_close_reg {
+        emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
     }
 
     let jump_pos = emit_jump(c, OpCode::Jmp);

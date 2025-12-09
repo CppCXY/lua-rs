@@ -3333,6 +3333,7 @@ pub fn compile_closure_expr_to(
                 register: 0,
                 is_const: false,
                 is_to_be_closed: false,
+                needs_close: false,
             });
         func_compiler.chunk.locals.push("self".to_string());
         param_offset = 1;
@@ -3367,6 +3368,7 @@ pub fn compile_closure_expr_to(
                 register: reg_index,
                 is_const: false,
                 is_to_be_closed: false,
+                needs_close: false,
             });
         func_compiler.chunk.locals.push(param_name);
         regular_param_count += 1;
