@@ -21,8 +21,8 @@ use std::rc::Rc;
 pub type LuaResult<T> = Result<T, LuaError>;
 
 /// Maximum call stack depth (similar to LUAI_MAXCCALLS in Lua)
-/// Lua uses 200 for the limit, we use 256 for power-of-2 alignment
-pub const MAX_CALL_DEPTH: usize = 256;
+/// Using a lower limit because Rust stack space is limited
+pub const MAX_CALL_DEPTH: usize = 64;
 
 pub struct LuaVM {
     // Global environment table (_G and _ENV point to this)
@@ -405,10 +405,31 @@ impl LuaVM {
 
     /// Push a new frame onto the call stack and return stable pointer
     /// OPTIMIZED: Direct index write when capacity allows, grow on demand otherwise
+    /// Returns None if call stack overflow (for pcall error handling)
+    #[inline(always)]
+    pub(crate) fn try_push_frame(&mut self, frame: LuaCallFrame) -> Option<*mut LuaCallFrame> {
+        let idx = self.frame_count;
+        if idx >= MAX_CALL_DEPTH {
+            return None; // Stack overflow
+        }
+
+        // Fast path: direct write if Vec is pre-filled or has space
+        if idx < self.frames.len() {
+            self.frames[idx] = frame;
+        } else {
+            // Slow path: grow the Vec (for coroutines with on-demand allocation)
+            self.frames.push(frame);
+        }
+        self.frame_count = idx + 1;
+        Some(&mut self.frames[idx] as *mut LuaCallFrame)
+    }
+
+    /// Push a new frame onto the call stack and return stable pointer
+    /// OPTIMIZED: Direct index write when capacity allows, grow on demand otherwise
     #[inline(always)]
     pub(crate) fn push_frame(&mut self, frame: LuaCallFrame) -> *mut LuaCallFrame {
         let idx = self.frame_count;
-        debug_assert!(idx < MAX_CALL_DEPTH, "call stack overflow");
+        assert!(idx < MAX_CALL_DEPTH, "call stack overflow");
 
         // Fast path: direct write if Vec is pre-filled or has space
         if idx < self.frames.len() {
@@ -2767,7 +2788,9 @@ impl LuaVM {
                 }
 
                 let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
-                self.push_frame(temp_frame);
+                if self.try_push_frame(temp_frame).is_none() {
+                    return Err(self.error("C stack overflow".to_string()));
+                }
 
                 match cfunc(self) {
                     Ok(r) => {
@@ -2823,9 +2846,11 @@ impl LuaVM {
                     }
                 }
 
-                // Push boundary frame and Lua function frame
+                // Push boundary frame and Lua function frame - check for stack overflow
                 let boundary_frame = LuaCallFrame::new_c_function(new_base, 0);
-                self.push_frame(boundary_frame);
+                if self.try_push_frame(boundary_frame).is_none() {
+                    return Err(self.error("C stack overflow".to_string()));
+                }
 
                 let new_frame = LuaCallFrame::new_lua_function(
                     func_id,
@@ -2838,7 +2863,10 @@ impl LuaVM {
                     -1,
                     max_stack_size,
                 );
-                self.push_frame(new_frame);
+                if self.try_push_frame(new_frame).is_none() {
+                    self.pop_frame_discard(); // Pop the boundary frame
+                    return Err(self.error("C stack overflow".to_string()));
+                }
 
                 let exec_result = execute::luavm_execute(self);
 
@@ -2940,7 +2968,9 @@ impl LuaVM {
 
                 // Create C function frame
                 let temp_frame = LuaCallFrame::new_c_function(new_base, stack_size);
-                self.push_frame(temp_frame);
+                if self.try_push_frame(temp_frame).is_none() {
+                    return Err(self.error("C stack overflow".to_string()));
+                }
 
                 // Call CFunction
                 let result = match cfunc(self) {
@@ -3006,7 +3036,9 @@ impl LuaVM {
 
                 // Push C function boundary frame - RETURN will detect this and write to return_values
                 let boundary_frame = LuaCallFrame::new_c_function(new_base, 0);
-                self.push_frame(boundary_frame);
+                if self.try_push_frame(boundary_frame).is_none() {
+                    return Err(self.error("C stack overflow".to_string()));
+                }
 
                 // Push Lua function frame
                 let new_frame = LuaCallFrame::new_lua_function(
@@ -3020,7 +3052,10 @@ impl LuaVM {
                     -1, // LUA_MULTRET
                     max_stack_size,
                 );
-                self.push_frame(new_frame);
+                if self.try_push_frame(new_frame).is_none() {
+                    self.pop_frame_discard(); // Pop the boundary frame
+                    return Err(self.error("C stack overflow".to_string()));
+                }
 
                 // Execute using the main dispatcher - no duplicate code!
                 let exec_result = execute::luavm_execute(self);

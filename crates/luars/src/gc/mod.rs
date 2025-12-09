@@ -1134,20 +1134,36 @@ impl GC {
     /// Uses a worklist algorithm to avoid recursion and handle borrowing correctly
     fn mark_roots(&self, roots: &[LuaValue], pool: &mut ObjectPool) {
         let mut worklist: Vec<LuaValue> = roots.to_vec();
+        // Track which fixed tables we've already traversed (to avoid infinite loops)
+        let mut traversed_fixed: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         while let Some(value) = worklist.pop() {
             match value.kind() {
                 crate::lua_value::LuaValueKind::Table => {
                     if let Some(id) = value.as_table_id() {
                         if let Some(table) = pool.tables.get_mut(id.0) {
-                            if table.header.is_white() {
-                                table.header.make_black();
+                            // For fixed tables: traverse if not yet traversed
+                            // For non-fixed tables: traverse if white (not yet marked)
+                            let is_fixed = table.header.is_fixed();
+                            let should_traverse = if is_fixed {
+                                traversed_fixed.insert(id.0)  // Returns true if newly inserted
+                            } else {
+                                table.header.is_white()
+                            };
+                            
+                            if should_traverse {
+                                // Mark non-fixed tables as black
+                                if !is_fixed {
+                                    table.header.make_black();
+                                }
                                 // Add table contents to worklist
-                                for (k, v) in table.data.iter_all() {
+                                let entries = table.data.iter_all();
+                                let mt = table.data.get_metatable();
+                                for (k, v) in entries {
                                     worklist.push(k);
                                     worklist.push(v);
                                 }
-                                if let Some(mt) = table.data.get_metatable() {
+                                if let Some(mt) = mt {
                                     worklist.push(mt);
                                 }
                             }
