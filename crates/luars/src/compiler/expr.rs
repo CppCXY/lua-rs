@@ -2502,196 +2502,29 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
 
         // OPTIMIZATION: If last argument is a call, use "all out" mode
-        // Use recursive compile_call_expr_with_returns to support method calls (SELF instruction)
+        // Simply recursively compile the call with usize::MAX returns - do NOT manually handle inner args
         if is_last && matches!(arg_expr, LuaExpr::CallExpr(_)) {
-            if let LuaExpr::CallExpr(call_expr) = arg_expr {
-                // Compile inner call with "all out" mode (num_returns = 0 means variable returns)
-                // Note: We need to handle this specially for method calls
-                let inner_prefix = call_expr.get_prefix_expr().ok_or("missing call prefix")?;
-
-                // Check if inner call is a method call
-                let inner_is_method = if let LuaExpr::IndexExpr(index_expr) = &inner_prefix {
-                    index_expr
-                        .get_index_token()
-                        .map(|t| t.is_colon())
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-
-                // Handle method call with SELF instruction
-                let call_reg = if inner_is_method {
-                    if let LuaExpr::IndexExpr(index_expr) = &inner_prefix {
-                        // CRITICAL FIX: For method call as last argument, we need to place
-                        // the function at arg_dest so the call result ends up at the correct position.
-                        // SELF A B C: R[A+1] = R[B]; R[A] = R[B][C]
-                        // So we want A = arg_dest, and need to reserve arg_dest+1 for self
-                        let func_reg = arg_dest;
-                        ensure_register(c, func_reg);
-                        ensure_register(c, func_reg + 1); // Reserve for self
-
-                        let obj_expr = index_expr
-                            .get_prefix_expr()
-                            .ok_or("Method call missing object")?;
-                        let obj_reg = compile_expr(c, &obj_expr)?;
-
-                        let method_name = if let Some(LuaIndexKey::Name(name_token)) =
-                            index_expr.get_index_key()
-                        {
-                            name_token.get_name_text().to_string()
-                        } else {
-                            return Err("Method call requires name index".to_string());
-                        };
-
-                        let lua_str = create_string_value(c, &method_name);
-                        let key_idx = add_constant_dedup(c, lua_str);
-
-                        emit(
-                            c,
-                            Instruction::create_abck(
-                                OpCode::Self_,
-                                func_reg,
-                                obj_reg,
-                                key_idx,
-                                true,
-                            ),
-                        );
-
-                        func_reg
-                    } else {
-                        unreachable!("inner_is_method but not IndexExpr")
-                    }
-                } else {
-                    // For regular call, we need to place it at arg_dest (outer call's argument position)
-                    // to avoid register conflicts
-                    let temp_func_reg = compile_expr(c, &inner_prefix)?;
-                    if temp_func_reg != arg_dest {
-                        ensure_register(c, arg_dest);
-                        emit_move(c, arg_dest, temp_func_reg);
-                        arg_dest
-                    } else {
-                        temp_func_reg
-                    }
-                };
-
-                // Compile call arguments
-                let call_args_start = if inner_is_method {
-                    call_reg + 2
-                } else {
-                    call_reg + 1
-                };
-                let call_arg_exprs = call_expr
-                    .get_args_list()
-                    .ok_or("missing args list")?
-                    .get_args()
-                    .collect::<Vec<_>>();
-
-                // CRITICAL: Reset freereg so inner call's arguments compile into correct positions
-                c.freereg = call_args_start;
-
-                let mut call_arg_regs = Vec::new();
-                // CRITICAL: Allocate all argument registers upfront to prevent conflicts
-                let num_call_args = call_arg_exprs.len();
-                let call_args_end = call_args_start + num_call_args as u32;
-                while c.freereg < call_args_end {
-                    alloc_register(c);
+            if let LuaExpr::CallExpr(inner_call) = arg_expr {
+                // Use a simple approach: compile inner call to arg_dest with "all out" mode
+                // The recursive call will handle everything including method calls and nested calls
+                let call_result = compile_call_expr_with_returns_and_dest(c, inner_call, usize::MAX, Some(arg_dest))?;
+                if call_result != arg_dest {
+                    ensure_register(c, arg_dest);
+                    emit_move(c, arg_dest, call_result);
                 }
-
-                let mut inner_last_arg_is_vararg_or_call = false;
-                for (j, call_arg) in call_arg_exprs.iter().enumerate() {
-                    let call_arg_dest = call_args_start + j as u32;
-                    let is_last_inner_arg = j == call_arg_exprs.len() - 1;
-                    
-                    // Reset freereg before each argument to protect argument slots
-                    if c.freereg < call_args_end {
-                        c.freereg = call_args_end;
-                    }
-                    
-                    // Check if last inner argument is vararg
-                    if is_last_inner_arg {
-                        if let LuaExpr::LiteralExpr(lit_expr) = call_arg {
-                            if matches!(lit_expr.get_literal(), Some(LuaLiteralToken::Dots(_))) {
-                                // Vararg as last argument: VARARG with C=0 (all out)
-                                emit(c, Instruction::encode_abc(OpCode::Vararg, call_arg_dest, 0, 0));
-                                call_arg_regs.push(call_arg_dest);
-                                inner_last_arg_is_vararg_or_call = true;
-                                continue;
-                            }
-                        }
-                        // Check if last arg is a call expression - compile it with "all out"
-                        if let LuaExpr::CallExpr(inner_call_expr) = call_arg {
-                            // Recursively compile this call with returns=usize::MAX (all out)
-                            let inner_call_reg = compile_call_expr_with_returns_and_dest(c, inner_call_expr, usize::MAX, Some(call_arg_dest))?;
-                            if inner_call_reg != call_arg_dest {
-                                while c.freereg <= call_arg_dest {
-                                    alloc_register(c);
-                                }
-                                emit_move(c, call_arg_dest, inner_call_reg);
-                            }
-                            call_arg_regs.push(call_arg_dest);
-                            inner_last_arg_is_vararg_or_call = true;
-                            continue;
-                        }
-                    }
-                    
-                    let arg_reg = compile_expr_to(c, call_arg, Some(call_arg_dest))?;
-                    call_arg_regs.push(arg_reg);
-                }
-
-                // Move call arguments if needed (skip if we emitted VARARG directly)
-                if !inner_last_arg_is_vararg_or_call {
-                    for (j, &reg) in call_arg_regs.iter().enumerate() {
-                        let target = call_args_start + j as u32;
-                        if reg != target {
-                            while c.freereg <= target {
-                                alloc_register(c);
-                            }
-                            emit_move(c, target, reg);
-                        }
-                    }
-                }
-
-                // Emit call with "all out" (C=0)
-                // B = number of arguments + 1, or 0 if last arg was vararg/call
-                let inner_b_param = if inner_last_arg_is_vararg_or_call {
-                    0 // B=0: variable number of args
-                } else if inner_is_method {
-                    (num_call_args + 2) as u32 // +1 for self, +1 for Lua convention
-                } else {
-                    (num_call_args + 1) as u32
-                };
-                emit(
-                    c,
-                    Instruction::encode_abc(
-                        OpCode::Call,
-                        call_reg,
-                        inner_b_param,
-                        0, // C=0: all out
-                    ),
-                );
-
-                arg_regs.push(call_reg);
+                arg_regs.push(arg_dest);
                 last_arg_is_call_all_out = true;
                 break;
             }
         }
 
         // Compile argument directly to its target position
-        let arg_reg = if matches!(arg_expr, LuaExpr::CallExpr(_)) {
-            // Pass dest to allow nested expressions to use correct registers
-            let call_reg = compile_expr_to(c, arg_expr, Some(arg_dest))?;
-            // Move result to target position if needed
-            if call_reg != arg_dest {
-                ensure_register(c, arg_dest);
-                emit_move(c, arg_dest, call_reg);
-                arg_dest
-            } else {
-                call_reg
-            }
-        } else {
-            compile_expr_to(c, arg_expr, Some(arg_dest))?
-        };
-        arg_regs.push(arg_reg);
+        let arg_reg = compile_expr_to(c, arg_expr, Some(arg_dest))?;
+        if arg_reg != arg_dest {
+            ensure_register(c, arg_dest);
+            emit_move(c, arg_dest, arg_reg);
+        }
+        arg_regs.push(arg_dest);
     }
 
     // Restore freereg to saved value or update to after last argument
@@ -2759,21 +2592,28 @@ pub fn compile_call_expr_with_returns_and_dest(
     // CALL places return values starting at func_reg
     // If num_returns == 0, CALL discards all returns
     // If num_returns > 0, return values are in func_reg .. func_reg + num_returns - 1
+    // If num_returns == usize::MAX, it's "all out" mode - we don't know how many returns
     //
     // CRITICAL: freereg can only be set to func_reg + num_returns if that's >= nactvar
     // We cannot reclaim registers occupied by active local variables!
-    let new_freereg = func_reg + num_returns as u32;
-    if new_freereg >= c.nactvar as u32 {
-        c.freereg = new_freereg;
+    if num_returns != usize::MAX {
+        let new_freereg = func_reg + num_returns as u32;
+        if new_freereg >= c.nactvar as u32 {
+            c.freereg = new_freereg;
+        }
     }
-    // If new_freereg < nactvar, keep freereg unchanged (locals are still alive)
+    // For "all out" mode (num_returns == usize::MAX), keep freereg unchanged
+    // The caller (table constructor, etc.) will handle the stack properly
 
     // If we had to move function to avoid conflicts, move return values back to original dest
     if need_move_to_dest {
         if let Some(d) = original_dest {
             // Move return values from func_reg to original dest
-            for i in 0..num_returns {
-                emit_move(c, d + i as u32, func_reg + i as u32);
+            // CRITICAL: Don't do this for "all out" mode - we don't know how many values
+            if num_returns != usize::MAX {
+                for i in 0..num_returns {
+                    emit_move(c, d + i as u32, func_reg + i as u32);
+                }
             }
             return Ok(d);
         }
@@ -3259,7 +3099,6 @@ fn compile_table_expr_to(
     if let Some(idx) = call_at_end_idx {
         // Call as last element: compile call with all return values
         let target_reg = values_start + array_idx;
-        eprintln!("[DEBUG] call_at_end: target_reg={}, freereg={}, values_start={}, array_idx={}", target_reg, c.freereg, values_start, array_idx);
         while c.freereg <= target_reg {
             alloc_register(c);
         }
@@ -3269,9 +3108,7 @@ fn compile_table_expr_to(
             if let Some(value_expr) = field.get_value_expr() {
                 if let LuaExpr::CallExpr(call_expr) = value_expr {
                     // Compile the call with all return values (usize::MAX means all)
-                    eprintln!("[DEBUG] before compile_call_expr");
                     compile_call_expr_with_returns_and_dest(c, &call_expr, usize::MAX, Some(target_reg))?;
-                    eprintln!("[DEBUG] after compile_call_expr");
                 }
             }
         }
