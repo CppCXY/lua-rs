@@ -306,10 +306,156 @@ fn compile_call_expr_desc(c: &mut Compiler, expr: &LuaCallExpr) -> Result<ExpDes
     Ok(ExpDesc::new_nonreloc(reg))
 }
 
+/// Convert table+key to indexed ExpDesc (Aligned with luaK_indexed in lcode.c)
+/// This is THE KEY FUNCTION for converting table access to proper indexed form
+/// without generating GET instructions
+fn luak_indexed(c: &mut Compiler, table_desc: &mut ExpDesc, key_desc: &ExpDesc) -> Result<(), String> {
+    use super::expdesc::{ExpKind, IndexInfo};
+    use super::exp2reg::exp_to_any_reg;
+    
+    // CRITICAL: Do NOT discharge table here! Just validate it's in correct form.
+    // The table should already be VLOCAL, VNONRELOC, or VUPVAL from name resolution.
+    // We only convert other kinds to registers when absolutely necessary.
+    
+    // Check key type and set appropriate indexed form
+    match key_desc.kind {
+        ExpKind::VK => {
+            // String constant key
+            if table_desc.kind == ExpKind::VUpval {
+                // Global variable: _ENV[key]
+                table_desc.kind = ExpKind::VIndexUp;
+                table_desc.ind = IndexInfo {
+                    t: table_desc.info,  // upvalue index
+                    idx: key_desc.info,  // constant index
+                };
+            } else if table_desc.kind == ExpKind::VLocal {
+                // Local table with string key: t.field
+                table_desc.kind = ExpKind::VIndexStr;
+                table_desc.ind = IndexInfo {
+                    t: table_desc.var.ridx,  // local variable register
+                    idx: key_desc.info,  // constant index
+                };
+            } else if table_desc.kind == ExpKind::VNonReloc {
+                // Table in register with string key
+                table_desc.kind = ExpKind::VIndexStr;
+                table_desc.ind = IndexInfo {
+                    t: table_desc.info,  // register
+                    idx: key_desc.info,  // constant index
+                };
+            } else {
+                // Need to discharge table to register first
+                let table_reg = exp_to_any_reg(c, table_desc);
+                table_desc.kind = ExpKind::VIndexStr;
+                table_desc.ind = IndexInfo {
+                    t: table_reg,
+                    idx: key_desc.info,
+                };
+            }
+        }
+        ExpKind::VKInt => {
+            // Integer constant key
+            let int_val = key_desc.ival;
+            if int_val >= 0 && int_val <= 255 {
+                // Fits in SETI instruction
+                let table_reg = match table_desc.kind {
+                    ExpKind::VLocal => table_desc.var.ridx,
+                    ExpKind::VNonReloc => table_desc.info,
+                    _ => exp_to_any_reg(c, table_desc),
+                };
+                table_desc.kind = ExpKind::VIndexI;
+                table_desc.ind = IndexInfo {
+                    t: table_reg,
+                    idx: int_val as u32,
+                };
+            } else {
+                // Need general indexed form
+                let table_reg = match table_desc.kind {
+                    ExpKind::VLocal => table_desc.var.ridx,
+                    ExpKind::VNonReloc => table_desc.info,
+                    _ => exp_to_any_reg(c, table_desc),
+                };
+                // Convert key to register
+                let mut key_mut = key_desc.clone();
+                let key_reg = exp_to_any_reg(c, &mut key_mut);
+                table_desc.kind = ExpKind::VIndexed;
+                table_desc.ind = IndexInfo {
+                    t: table_reg,
+                    idx: key_reg,
+                };
+            }
+        }
+        _ => {
+            // General expression key: need register
+            let table_reg = match table_desc.kind {
+                ExpKind::VLocal => table_desc.var.ridx,
+                ExpKind::VNonReloc => table_desc.info,
+                _ => exp_to_any_reg(c, table_desc),
+            };
+            // Convert key to register
+            let mut key_mut = key_desc.clone();
+            let key_reg = exp_to_any_reg(c, &mut key_mut);
+            table_desc.kind = ExpKind::VIndexed;
+            table_desc.ind = IndexInfo {
+                t: table_reg,
+                idx: key_reg,
+            };
+        }
+    }
+    
+    Ok(())
+}
+
 /// NEW: Compile index expression (stub)
 fn compile_index_expr_desc(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<ExpDesc, String> {
-    let reg = compile_index_expr_to(c, expr, None)?;
-    Ok(ExpDesc::new_nonreloc(reg))
+    // Get table expression (prefix)
+    let prefix_expr = expr
+        .get_prefix_expr()
+        .ok_or("Index expression missing prefix")?;
+    
+    // Compile table to ExpDesc (don't discharge yet)
+    let mut table_desc = compile_expr_desc(c, &prefix_expr)?;
+    
+    // Get index key
+    let index_key = expr
+        .get_index_key()
+        .ok_or("Index expression missing key")?;
+    
+    // Compile key to ExpDesc
+    let key_desc = match &index_key {
+        LuaIndexKey::Expr(key_expr) => {
+            // t[expr] - general expression index
+            compile_expr_desc(c, key_expr)?
+        }
+        LuaIndexKey::Idx(idx_value) => {
+            // t[idx] - numeric index (converted by parser)
+            ExpDesc::new_int(*idx_value as i64)
+        }
+        LuaIndexKey::Name(name_token) => {
+            // t.field - convert to string constant
+            let field_name = name_token.get_name_text().to_string();
+            let lua_str = create_string_value(c, &field_name);
+            let const_idx = add_constant_dedup(c, lua_str);
+            ExpDesc::new_k(const_idx)
+        }
+        LuaIndexKey::String(str_token) => {
+            // t["string"] - string literal
+            let str_value = str_token.get_value();
+            let lua_str = create_string_value(c, &str_value);
+            let const_idx = add_constant_dedup(c, lua_str);
+            ExpDesc::new_k(const_idx)
+        }
+        LuaIndexKey::Integer(num_token) => {
+            // t[123] - integer literal
+            let int_val = num_token.get_int_value();
+            ExpDesc::new_int(int_val)
+        }
+    };
+    
+    // Call luaK_indexed to convert table+key to indexed ExpDesc
+    // This is THE KEY FUNCTION for left-value compilation
+    luak_indexed(c, &mut table_desc, &key_desc)?;
+    
+    Ok(table_desc)
 }
 
 /// NEW: Compile table constructor (stub)
@@ -2455,7 +2601,7 @@ pub fn compile_closure_expr_to(
     }
 
     // Add implicit return if needed
-    // Lua 5.4 ALWAYS adds a final RETURN0 at the end of functions for safety
+    // Lua 5.4 ALWAYS adds a final RETURN at the end of functions for safety
     // This serves as a fallthrough in case execution reaches the end
     if func_compiler.chunk.code.is_empty() {
         // Empty function - use Return0
@@ -2463,7 +2609,8 @@ pub fn compile_closure_expr_to(
         func_compiler.chunk.code.push(ret_instr);
     } else {
         let last_opcode = Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap());
-        if last_opcode != OpCode::Return0 {
+        // Don't add return if last instruction is already a return
+        if !matches!(last_opcode, OpCode::Return | OpCode::Return0 | OpCode::Return1 | OpCode::TailCall) {
             // Always add final Return0 for fallthrough protection
             let ret_instr = Instruction::encode_abc(OpCode::Return0, 0, 0, 0);
             func_compiler.chunk.code.push(ret_instr);
@@ -2477,6 +2624,9 @@ pub fn compile_closure_expr_to(
         func_compiler.peak_freereg as usize,
         func_compiler.chunk.max_stack_size,
     );
+    
+    // Finish function: convert RETURN0/RETURN1 and set k/C flags (对齐lcode.c的luaK_finish)
+    finish_function(&mut func_compiler);
 
     // Store upvalue information from scope_chain
     let upvalues = func_compiler.scope_chain.borrow().upvalues.clone();
@@ -2488,6 +2638,13 @@ pub fn compile_closure_expr_to(
             index: uv.index,
         })
         .collect();
+    
+    // Check if this function captures any local variables from parent
+    // If so, mark parent's needclose (对齐lparser.c的markupval)
+    let has_local_captures = upvalues.iter().any(|uv| uv.is_local);
+    if has_local_captures {
+        mark_upvalue(c);
+    }
 
     // Move child chunks from func_compiler to its own chunk's child_protos
     let child_protos: Vec<std::rc::Rc<Chunk>> = func_compiler

@@ -105,12 +105,9 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
                 format!("TAILCALL {} {}{}", a, b, k_str)
             }
             OpCode::Return => {
-                // k=0: show "0k", k=1: show "1" (no k suffix)
-                if k {
-                    format!("RETURN {} {} 1", a, b)
-                } else {
-                    format!("RETURN {} {} 0k", a, b)
-                }
+                // k=1: show "1k", k=0: show "1" (no k suffix)
+                let k_suffix = if k { "k" } else { "" };
+                format!("RETURN {} {} {}{}", a, b, c, k_suffix)
             }
             OpCode::Return0 => format!("RETURN0"),
             OpCode::Return1 => format!("RETURN1 {}", a),
@@ -171,26 +168,58 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Len => format!("LEN {} {}", a, b),
             OpCode::GetI => {
                 // GETI A B C: R[A] := R[B][C] - C is unsigned integer index
-                format!("GetI {} {} {}", a, b, c)
+                format!("GETI {} {} {}", a, b, c)
             }
             OpCode::SetI => {
                 // SETI A B C/k: R[A][B] := RK(C) - B is unsigned integer index
                 let k_str = if k { "k" } else { "" };
-                format!("SetI {} {} {}{}", a, b, c, k_str)
+                format!("SETI {} {} {}{}", a, b, c, k_str)
             }
             OpCode::EqK => {
                 // EQK A B k: if ((R[A] == K[B]) ~= k) then pc++
                 let k_str = if k { "k" } else { "" };
-                format!("EqK {} {} {}{}", a, b, k as u32, k_str)
+                format!("EQK {} {} {}{}", a, b, k as u32, k_str)
             }
             OpCode::SetList => {
                 // SETLIST A B C k: for i = 1, B do R[A][C+i] := R[A+i] end
                 let k_str = if k { "k" } else { "" };
-                format!("SetList {} {} {}{}", a, b, c, k_str)
+                format!("SETLIST {} {} {}{}", a, b, c, k_str)
             }
             OpCode::ExtraArg => format!("EXTRAARG {}", bx),
             OpCode::Tbc => format!("TBC {}", a),
             OpCode::Close => format!("CLOSE {}", a),
+            
+            // Bitwise operations
+            OpCode::BAnd => format!("BAND {} {} {}", a, b, c),
+            OpCode::BOr => format!("BOR {} {} {}", a, b, c),
+            OpCode::BXor => format!("BXOR {} {} {}", a, b, c),
+            OpCode::Shl => format!("SHL {} {} {}", a, b, c),
+            OpCode::Shr => format!("SHR {} {} {}", a, b, c),
+            OpCode::BNot => format!("BNOT {} {}", a, b),
+            
+            // Bitwise with constant
+            OpCode::BAndK => format!("BANDK {} {} {}", a, b, c),
+            OpCode::BOrK => format!("BORK {} {} {}", a, b, c),
+            OpCode::BXorK => format!("BXORK {} {} {}", a, b, c),
+            OpCode::ShrI => {
+                let sc = Instruction::get_sc(instr);
+                format!("SHRI {} {} {}", a, b, sc)
+            }
+            OpCode::ShlI => {
+                let sc = Instruction::get_sc(instr);
+                format!("SHLI {} {} {}", a, b, sc)
+            }
+            
+            // Load float/boolean
+            OpCode::LoadF => {
+                // LOADF loads a float from sBx field
+                // The sBx field encodes a float value
+                format!("LOADF {} {}", a, sbx)
+            }
+            OpCode::LoadFalse => format!("LOADFALSE {}", a),
+            OpCode::LoadTrue => format!("LOADTRUE {}", a),
+            OpCode::LFalseSkip => format!("LFALSESKIP {}", a),
+            
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
 

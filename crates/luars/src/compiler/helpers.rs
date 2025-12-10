@@ -185,6 +185,11 @@ pub fn add_local(c: &mut Compiler, name: String, register: u32) {
     add_local_with_attrs(c, name, register, false, false);
 }
 
+/// Mark that an upvalue needs to be closed (对齐lparser.c的markupval)
+pub(crate) fn mark_upvalue(c: &mut Compiler) {
+    c.needclose = true;
+}
+
 /// Add a new local variable with <const> and <close> attributes
 pub fn add_local_with_attrs(
     c: &mut Compiler,
@@ -261,6 +266,12 @@ pub fn resolve_upvalue_from_chain(c: &mut Compiler, name: &str) -> Option<usize>
         });
         scope.upvalues.len() - 1
     };
+    
+    // Mark that we need to close upvalues ONLY if capturing a local variable
+    // (对齐lparser.c的markupval逻辑)
+    if is_local {
+        mark_upvalue(c);
+    }
 
     Some(upvalue_index)
 }
@@ -331,6 +342,103 @@ fn resolve_in_parent_scope(scope: &Rc<RefCell<ScopeChain>>, name: &str) -> Optio
 /// Begin a new scope
 pub fn begin_scope(c: &mut Compiler) {
     c.scope_depth += 1;
+}
+
+/// Enter a new block (对齐lparser.c的enterblock)
+pub(crate) fn enterblock(c: &mut Compiler, isloop: bool) {
+    let bl = super::BlockCnt {
+        previous: c.block.take(),
+        first_label: c.labels.len(),
+        first_goto: c.gotos.len(),
+        nactvar: c.nactvar,
+        upval: false,
+        isloop,
+        insidetbc: c.block.as_ref().map_or(false, |b| b.insidetbc),
+    };
+    c.block = Some(Box::new(bl));
+    
+    // Verify freereg == nactvar (对齐lua_assert)
+    debug_assert_eq!(c.freereg as usize, c.nactvar);
+}
+
+/// Leave the current block (对齐lparser.c的leaveblock)
+pub(crate) fn leaveblock(c: &mut Compiler) {
+    let bl = c.block.take().expect("leaveblock called without matching enterblock");
+    let stklevel = bl.nactvar as u32; // level outside the block
+    
+    // Remove block locals (removevars)
+    remove_vars_to_level(c, bl.nactvar);
+    
+    // Verify we're back to level on entry
+    debug_assert_eq!(bl.nactvar, c.nactvar);
+    
+    // Handle loop: fix pending breaks
+    let mut hasclose = false;
+    if bl.isloop {
+        // Create "break" label and resolve break jumps
+        hasclose = create_label_internal(c, "break", 0);
+    }
+    
+    // Emit CLOSE if needed
+    if !hasclose && bl.previous.is_some() && bl.upval {
+        emit(c, Instruction::encode_abc(OpCode::Close, stklevel, 0, 0));
+    }
+    
+    // Free registers
+    c.freereg = stklevel;
+    
+    // Remove local labels
+    c.labels.truncate(bl.first_label);
+    
+    // Restore previous block
+    c.block = bl.previous;
+    
+    // Move gotos out if was nested block
+    // TODO: implement movegotosout logic
+}
+
+/// Remove variables to a specific level (对齐lparser.c的removevars)
+fn remove_vars_to_level(c: &mut Compiler, level: usize) {
+    c.nactvar = level;
+    c.scope_chain.borrow_mut().locals.truncate(level);
+}
+
+/// Create a label internally (returns whether close instruction was added)
+fn create_label_internal(c: &mut Compiler, name: &str, _line: u32) -> bool {
+    // Resolve pending gotos to this label
+    let mut needs_close = false;
+    let label_pc = c.chunk.code.len();
+    
+    for i in (0..c.gotos.len()).rev() {
+        if c.gotos[i].name == name {
+            // Patch the jump
+            let jump_pos = c.gotos[i].jump_position;
+            let jump_offset = (label_pc as i32) - (jump_pos as i32) - 1;
+            c.chunk.code[jump_pos] = Instruction::create_sj(OpCode::Jmp, jump_offset);
+            
+            // Remove resolved goto
+            c.gotos.remove(i);
+            
+            // Check if needs close (simplified - official checks more)
+            needs_close = true;
+        }
+    }
+    
+    // Add label
+    c.labels.push(super::Label {
+        name: name.to_string(),
+        position: label_pc,
+        scope_depth: c.scope_depth,
+    });
+    
+    // Emit CLOSE if needed
+    if needs_close {
+        let stklevel = c.nactvar as u32;
+        emit(c, Instruction::encode_abc(OpCode::Close, stklevel, 0, 0));
+        true
+    } else {
+        false
+    }
 }
 
 /// End the current scope
@@ -547,6 +655,9 @@ pub fn try_expr_as_constant(c: &mut Compiler, expr: &emmylua_parser::LuaExpr) ->
     if let LuaExpr::LiteralExpr(lit_expr) = expr {
         if let Some(literal_token) = lit_expr.get_literal() {
             match literal_token {
+                LuaLiteralToken::Nil(_) => {
+                    return try_add_constant_k(c, LuaValue::nil());
+                }
                 LuaLiteralToken::Bool(b) => {
                     return try_add_constant_k(c, LuaValue::boolean(b.is_true()));
                 }
@@ -786,5 +897,49 @@ pub fn lua_shr(l: i64, r: i64) -> i64 {
     } else {
         // Negative shift means left shift
         (l as u64).wrapping_shl((-r) as u32) as i64
+    }
+}
+/// Finish function compilation (对齐lcode.c的luaK_finish)
+/// Converts RETURN0/RETURN1 to RETURN when needed and sets k/C flags
+pub(crate) fn finish_function(c: &mut Compiler) {
+    let needclose = c.needclose;
+    let is_vararg = c.chunk.is_vararg;
+    let param_count = c.chunk.param_count;
+    
+    for i in 0..c.chunk.code.len() {
+        let instr = c.chunk.code[i];
+        let opcode = Instruction::get_opcode(instr);
+        
+        match opcode {
+            OpCode::Return0 | OpCode::Return1 => {
+                if needclose || is_vararg {
+                    // Convert RETURN0/RETURN1 to RETURN
+                    let a = Instruction::get_a(instr);
+                    let b = if opcode == OpCode::Return0 { 1 } else { 2 }; // nret + 1
+                    let c_val = if is_vararg { (param_count + 1) as u32 } else { 0 };
+                    let new_instr = Instruction::create_abck(OpCode::Return, a, b, c_val, needclose);
+                    
+                    c.chunk.code[i] = new_instr;
+                }
+            }
+            OpCode::Return | OpCode::TailCall => {
+                if needclose || is_vararg {
+                    let mut new_instr = instr;
+                    
+                    // Set k flag if needs to close upvalues
+                    if needclose {
+                        Instruction::set_k(&mut new_instr, true);
+                    }
+                    
+                    // Set C flag if vararg (C = numparams + 1)
+                    if is_vararg {
+                        Instruction::set_c(&mut new_instr, (param_count + 1) as u32);
+                    }
+                    
+                    c.chunk.code[i] = new_instr;
+                }
+            }
+            _ => {}
+        }
     }
 }

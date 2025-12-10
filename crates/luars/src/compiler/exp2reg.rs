@@ -292,8 +292,7 @@ fn code_abrk(c: &mut Compiler, op: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
 
 /// Convert expression to RK operand (register or constant)
 /// Lua equivalent: exp2RK
-#[allow(dead_code)]
-fn exp_to_rk(c: &mut Compiler, e: &mut ExpDesc) -> bool {
+pub fn exp_to_rk(c: &mut Compiler, e: &mut ExpDesc) -> bool {
     match e.kind {
         ExpKind::VTrue | ExpKind::VFalse | ExpKind::VNil => {
             // Small constants: can fit in instruction

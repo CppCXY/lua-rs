@@ -1,5 +1,6 @@
 // Statement compilation
 
+use super::assign::compile_assign_stat_new;
 use super::expr::{
     compile_call_expr, compile_call_expr_with_returns_and_dest, compile_expr, compile_expr_to,
     compile_var_expr,
@@ -167,7 +168,8 @@ pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
 
     let result = match stat {
         LuaStat::LocalStat(s) => compile_local_stat(c, s),
-        LuaStat::AssignStat(s) => compile_assign_stat(c, s),
+        // Use NEW assignment logic (aligned with official luaK_storevar)
+        LuaStat::AssignStat(s) => compile_assign_stat_new(c, s),
         LuaStat::CallExprStat(s) => compile_call_stat(c, s),
         LuaStat::ReturnStat(s) => compile_return_stat(c, s),
         LuaStat::IfStat(s) => compile_if_stat(c, s),
@@ -265,7 +267,7 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
                     // Multi-return call: DON'T pass dest to avoid overwriting pre-allocated registers
                     // Let the call compile into safe temporary position, results will be in target_base
                     // because we've pre-allocated the registers
-                    // 
+                    //
                     // CRITICAL: We need to compile without dest, then the results will naturally
                     // end up in sequential registers starting from wherever the function was placed.
                     // Since we pre-allocated target_base..target_base+remaining_vars, freereg points
@@ -392,26 +394,22 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                     c,
                     Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0),
                 );
-                // Note: We don't free the register here to maintain compatibility
-                // Standard Lua may reuse it, but we need more careful analysis
                 return Ok(());
             }
 
             // OPTIMIZATION: global = constant -> SETTABUP with k=1
-            if resolve_upvalue_from_chain(c, &name).is_none() {
-                // It's a global - add key to constants first (IMPORTANT: luac adds key before value!)
-                let lua_str = create_string_value(c, &name);
-                let key_idx = add_constant_dedup(c, lua_str);
+            // It's a global - add key to constants first (IMPORTANT: luac adds key before value!)
+            let lua_str = create_string_value(c, &name);
+            let key_idx = add_constant_dedup(c, lua_str);
 
-                // Then check if value is constant
-                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                    if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
-                        emit(
-                            c,
-                            Instruction::create_abck(OpCode::SetTabUp, 0, key_idx, const_idx, true),
-                        );
-                        return Ok(());
-                    }
+            // Then check if value is constant
+            if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
+                if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
+                    emit(
+                        c,
+                        Instruction::create_abck(OpCode::SetTabUp, 0, key_idx, const_idx, true),
+                    );
+                    return Ok(());
                 }
             }
         }
@@ -433,6 +431,70 @@ fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), Str
                     let key_idx = add_constant_dedup(c, lua_str);
 
                     // Emit SetField with k=1 (value is constant)
+                    if const_idx <= Instruction::MAX_C && key_idx <= Instruction::MAX_B {
+                        emit(
+                            c,
+                            Instruction::create_abck(
+                                OpCode::SetField,
+                                table_reg,
+                                key_idx,
+                                const_idx,
+                                true, // k=1: C is constant index
+                            ),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
+            // OPTIMIZATION: For table[integer] = constant, use SETI with RK
+            if let Some(LuaIndexKey::Integer(number_token)) = index_expr.get_index_key() {
+                let int_value = number_token.get_int_value();
+                // SETI: B field is unsigned byte, range 0-255
+                if int_value >= 0 && int_value <= 255 {
+                    // Try to compile value as constant
+                    if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
+                        // Compile table expression
+                        let prefix_expr = index_expr
+                            .get_prefix_expr()
+                            .ok_or("Index expression missing table")?;
+                        let table_reg = compile_expr(c, &prefix_expr)?;
+
+                        // Emit SETI with k=1 (value is constant)
+                        if const_idx <= Instruction::MAX_C {
+                            let encoded_b = int_value as u32;
+                            emit(
+                                c,
+                                Instruction::create_abck(
+                                    OpCode::SetI,
+                                    table_reg,
+                                    encoded_b,
+                                    const_idx,
+                                    true, // k=1: C is constant index
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            // OPTIMIZATION: For table[string_literal] = constant, use SETFIELD with RK
+            // This handles cases like: package.loaded["test"] = nil
+            if let Some(LuaIndexKey::String(str_token)) = index_expr.get_index_key() {
+                // Try to compile value as constant
+                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
+                    // Compile table expression
+                    let prefix_expr = index_expr
+                        .get_prefix_expr()
+                        .ok_or("Index expression missing table")?;
+                    let table_reg = compile_expr(c, &prefix_expr)?;
+
+                    // Get string literal as constant
+                    let lua_str = create_string_value(c, &str_token.get_value());
+                    let key_idx = add_constant_dedup(c, lua_str);
+
+                    // Emit SETFIELD with k=1 (value is constant)
                     if const_idx <= Instruction::MAX_C && key_idx <= Instruction::MAX_B {
                         emit(
                             c,
@@ -788,7 +850,12 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                     // Check if last argument is a function call
                     if let LuaExpr::CallExpr(inner_call) = arg {
                         // Compile the inner call with "all out" mode (num_returns = usize::MAX)
-                        compile_call_expr_with_returns_and_dest(c, inner_call, usize::MAX, Some(target_reg))?;
+                        compile_call_expr_with_returns_and_dest(
+                            c,
+                            inner_call,
+                            usize::MAX,
+                            Some(target_reg),
+                        )?;
                         last_is_vararg_or_call_all_out = true;
                         continue;
                     }
@@ -877,7 +944,12 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         } else if let LuaExpr::CallExpr(call_expr) = last_expr {
             // Call expression: compile with "all out" mode
             let last_target_reg = base_reg + (num_exprs - 1) as u32;
-            compile_call_expr_with_returns_and_dest(c, call_expr, usize::MAX, Some(last_target_reg))?;
+            compile_call_expr_with_returns_and_dest(
+                c,
+                call_expr,
+                usize::MAX,
+                Some(last_target_reg),
+            )?;
             // Return with B=0 (all out)
             emit(
                 c,
@@ -908,9 +980,13 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     }
 
     // Use optimized Return0/Return1 when possible
-    if num_exprs == 1 {
+    if num_exprs == 0 {
+        // No return values - use Return0
+        emit(c, Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0));
+    } else if num_exprs == 1 {
         // return single_value - use Return1 optimization
-        emit(c, Instruction::encode_abc(OpCode::Return1, base_reg, 0, 0));
+        // B = nret + 1 = 2 (like official lcode.c luaK_ret)
+        emit(c, Instruction::encode_abc(OpCode::Return1, base_reg, 2, 0));
     } else {
         // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1, k = 1
         emit(
@@ -1077,7 +1153,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 
     // Begin scope for the loop body (to track locals for CLOSE)
     begin_scope(c);
-    
+
     // Begin loop - record first_reg for break CLOSE
     begin_loop(c);
 
@@ -1105,7 +1181,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
     // for GC: if we don't reset, the condition value stays on the register
     // stack and becomes a GC root, preventing weak table values from being collected.
     let freereg_before_cond = c.freereg;
-    
+
     let end_jump = if is_infinite_loop {
         // Infinite loop: no condition check, no exit jump
         // Just compile body and jump back
@@ -1122,7 +1198,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
         Some(emit_jump(c, OpCode::Jmp))
     };
-    
+
     // Reset freereg after condition test to release temporary registers
     // This matches official Lua's behavior: freeexp(fs, e) after condition
     c.freereg = freereg_before_cond;
@@ -1137,7 +1213,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         let loop_info = c.loop_stack.last().unwrap();
         let loop_scope_depth = loop_info.scope_depth;
         let first_reg = loop_info.first_local_register;
-        
+
         let scope = c.scope_chain.borrow();
         let mut min_close_reg: Option<u32> = None;
         for local in scope.locals.iter().rev() {
@@ -1168,7 +1244,7 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 
     // End loop (patches all break statements)
     end_loop(c);
-    
+
     // End scope
     end_scope(c);
 
@@ -1325,7 +1401,23 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     end_scope(c);
 
     // Free the 4 loop control registers (base, limit, step, var)
+    // and remove the 3 hidden state variables from the local scope
     c.freereg = base_reg;
+
+    // Remove the 3 state variables from locals (they were added before begin_scope)
+    // Find and remove them by checking their registers
+    let mut removed = 0;
+    c.scope_chain.borrow_mut().locals.retain(|l| {
+        if l.register >= base_reg && l.register < base_reg + 3 && l.name == "(for state)" {
+            if !l.is_const {
+                removed += 1;
+            }
+            false
+        } else {
+            true
+        }
+    });
+    c.nactvar = c.nactvar.saturating_sub(removed);
 
     Ok(())
 }

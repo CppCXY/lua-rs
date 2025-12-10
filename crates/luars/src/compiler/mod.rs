@@ -1,5 +1,6 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
+mod assign;
 mod binop;
 mod exp2reg;
 mod expdesc;
@@ -65,7 +66,20 @@ pub struct Compiler<'a> {
     pub(crate) vm_ptr: *mut LuaVM,       // VM pointer for string pool access
     pub(crate) last_line: u32,           // Last line number for line_info (not used currently)
     pub(crate) line_index: &'a LineIndex, // Line index for error reporting
+    pub(crate) needclose: bool,          // Function needs to close upvalues when returning
+    pub(crate) block: Option<Box<BlockCnt>>, // Current block (对齐FuncState.bl)
     pub(crate) _phantom: std::marker::PhantomData<&'a mut LuaVM>,
+}
+
+/// Block control structure (对齐lparser.c的BlockCnt)
+pub(crate) struct BlockCnt {
+    pub previous: Option<Box<BlockCnt>>, // Previous block in chain
+    pub first_label: usize,              // Index of first label in this block
+    pub first_goto: usize,               // Index of first pending goto in this block
+    pub nactvar: usize,                  // Number of active locals outside the block
+    pub upval: bool,                     // true if some variable in the block is an upvalue
+    pub isloop: bool,                    // true if 'block' is a loop
+    pub insidetbc: bool,                 // true if inside the scope of a to-be-closed var
 }
 
 /// Upvalue information
@@ -125,6 +139,8 @@ impl<'a> Compiler<'a> {
             vm_ptr: vm as *mut LuaVM,
             last_line: 1,
             line_index,
+            needclose: false,
+            block: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -150,6 +166,8 @@ impl<'a> Compiler<'a> {
             vm_ptr,
             last_line: current_line,
             line_index,
+            needclose: false,
+            block: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -183,6 +201,9 @@ impl<'a> Compiler<'a> {
 
         let chunk_node = tree.get_chunk_node();
         compile_chunk(&mut compiler, &chunk_node)?;
+        
+        // Finish function: convert RETURN0/RETURN1 and set k/C flags (对齐lcode.c的luaK_finish)
+        finish_function(&mut compiler);
 
         // Optimize child chunks first
         let optimized_children: Vec<std::rc::Rc<Chunk>> = compiler
@@ -235,18 +256,33 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     // Check for unresolved gotos before finishing
     check_unresolved_gotos(c)?;
 
-    // Emit return at the end
+    // Emit return at the end (k/C flags will be set by finish_function)
     let freereg = c.freereg;
     emit(
         c,
-        Instruction::create_abck(OpCode::Return, freereg, 1, 0, true),
+        Instruction::create_abck(OpCode::Return, freereg, 1, 0, false),
     );
     Ok(())
 }
 
-/// Compile a block of statements
+/// Compile a block of statements (对齐lparser.c的block)
 fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+    // block -> statlist
+    enterblock(c, false);
+    compile_statlist(c, block)?;
+    leaveblock(c);
+    Ok(())
+}
+
+/// Compile a statement list (对齐lparser.c的statlist)
+fn compile_statlist(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+    // statlist -> { stat [';'] }
     for stat in block.get_stats() {
+        // Check for return statement - it must be last
+        if let emmylua_parser::LuaStat::ReturnStat(_) = stat {
+            compile_stat(c, &stat)?;
+            return Ok(()); // 'return' must be last statement
+        }
         compile_stat(c, &stat)?;
     }
     Ok(())
