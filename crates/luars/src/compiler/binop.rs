@@ -171,3 +171,117 @@ fn ensure_constant_idx(c: &mut Compiler, e: &ExpDesc) -> u32 {
         _ => 0,
     }
 }
+
+//======================================================================================
+// Register-based helpers for compile_binary_expr_to
+//======================================================================================
+
+/// Emit arithmetic operation with immediate constant (for compile_binary_expr_to)
+/// Returns Some(result_reg) if immediate/constant form was used, None otherwise
+pub fn emit_arith_imm(
+    c: &mut Compiler,
+    op: BinaryOperator,
+    left_reg: u32,
+    int_val: i64,
+    result_reg: u32,
+) -> Option<u32> {
+    let imm = ((int_val + 127) & 0xff) as u32;
+    let imm_mmbini = ((int_val + 128) & 0xff) as u32;
+
+    match op {
+        BinaryOperator::OpAdd => {
+            emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm));
+            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, TagMethod::Add.as_u32(), false));
+            Some(result_reg)
+        }
+        BinaryOperator::OpSub => {
+            let neg_imm = ((-int_val + 127) & 0xff) as u32;
+            emit(c, Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, neg_imm));
+            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, TagMethod::Sub.as_u32(), false));
+            Some(result_reg)
+        }
+        _ => None,
+    }
+}
+
+/// Emit arithmetic operation with constant from K table (for compile_binary_expr_to)
+pub fn emit_arith_k(
+    c: &mut Compiler,
+    op: BinaryOperator,
+    left_reg: u32,
+    const_idx: u32,
+    result_reg: u32,
+) -> Option<u32> {
+    let (op_k, tm) = match op {
+        BinaryOperator::OpAdd => (OpCode::AddK, TagMethod::Add),
+        BinaryOperator::OpSub => (OpCode::SubK, TagMethod::Sub),
+        BinaryOperator::OpMul => (OpCode::MulK, TagMethod::Mul),
+        BinaryOperator::OpDiv => (OpCode::DivK, TagMethod::Div),
+        BinaryOperator::OpIDiv => (OpCode::IDivK, TagMethod::IDiv),
+        BinaryOperator::OpMod => (OpCode::ModK, TagMethod::Mod),
+        BinaryOperator::OpPow => (OpCode::PowK, TagMethod::Pow),
+        _ => return None,
+    };
+
+    emit(c, Instruction::encode_abc(op_k, result_reg, left_reg, const_idx));
+    emit(c, Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, tm.as_u32(), false));
+    Some(result_reg)
+}
+
+/// Emit shift operation with immediate (for compile_binary_expr_to)
+pub fn emit_shift_imm(
+    c: &mut Compiler,
+    op: BinaryOperator,
+    left_reg: u32,
+    int_val: i64,
+    result_reg: u32,
+) -> Option<u32> {
+    let imm = ((int_val + 127) & 0xff) as u32;
+    let imm_mmbini = ((int_val + 128) & 0xff) as u32;
+
+    match op {
+        BinaryOperator::OpShr => {
+            emit(c, Instruction::encode_abc(OpCode::ShrI, result_reg, left_reg, imm));
+            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, TagMethod::Shr.as_u32(), false));
+            Some(result_reg)
+        }
+        BinaryOperator::OpShl => {
+            // x << n is equivalent to x >> -n
+            let neg_imm = ((-int_val + 127) & 0xff) as u32;
+            emit(c, Instruction::encode_abc(OpCode::ShrI, result_reg, left_reg, neg_imm));
+            emit(c, Instruction::create_abck(OpCode::MmBinI, left_reg, imm_mmbini, TagMethod::Shl.as_u32(), false));
+            Some(result_reg)
+        }
+        _ => None,
+    }
+}
+
+/// Emit register-register binary operation with MMBIN
+pub fn emit_binop_rr(
+    c: &mut Compiler,
+    op: BinaryOperator,
+    left_reg: u32,
+    right_reg: u32,
+    result_reg: u32,
+) {
+    let (opcode, tm) = match op {
+        BinaryOperator::OpAdd => (OpCode::Add, Some(TagMethod::Add)),
+        BinaryOperator::OpSub => (OpCode::Sub, Some(TagMethod::Sub)),
+        BinaryOperator::OpMul => (OpCode::Mul, Some(TagMethod::Mul)),
+        BinaryOperator::OpDiv => (OpCode::Div, Some(TagMethod::Div)),
+        BinaryOperator::OpIDiv => (OpCode::IDiv, Some(TagMethod::IDiv)),
+        BinaryOperator::OpMod => (OpCode::Mod, Some(TagMethod::Mod)),
+        BinaryOperator::OpPow => (OpCode::Pow, Some(TagMethod::Pow)),
+        BinaryOperator::OpBAnd => (OpCode::BAnd, Some(TagMethod::BAnd)),
+        BinaryOperator::OpBOr => (OpCode::BOr, Some(TagMethod::BOr)),
+        BinaryOperator::OpBXor => (OpCode::BXor, Some(TagMethod::BXor)),
+        BinaryOperator::OpShl => (OpCode::Shl, Some(TagMethod::Shl)),
+        BinaryOperator::OpShr => (OpCode::Shr, Some(TagMethod::Shr)),
+        _ => return,
+    };
+
+    emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
+    if let Some(tm) = tm {
+        emit(c, Instruction::create_abck(OpCode::MmBin, left_reg, right_reg, tm.as_u32(), false));
+    }
+}
