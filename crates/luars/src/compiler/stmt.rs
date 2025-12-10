@@ -1038,6 +1038,8 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
             } else {
                 let cond_reg = compile_expr(c, &cond)?;
                 emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
+                // Reset freereg after condition - temp registers are no longer needed
+                reset_freereg(c);
                 emit_jump(c, OpCode::Jmp)
             };
 
