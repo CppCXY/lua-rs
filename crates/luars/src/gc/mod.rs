@@ -780,6 +780,9 @@ impl GC {
             self.mark_one(gc_id, pool);
         }
 
+        // Clear weak table entries before sweep
+        self.clear_weak_tables(pool);
+
         // Sweep young objects and age them
         let collected = self.sweep_young(pool);
         self.stats.objects_collected += collected;
@@ -951,6 +954,8 @@ impl GC {
         // Do a full mark-sweep
         self.clear_marks(pool);
         self.mark_roots(roots, pool);
+        // Clear weak table entries before sweep
+        self.clear_weak_tables(pool);
         let collected = self.sweep(pool);
 
         // Reset generational state
