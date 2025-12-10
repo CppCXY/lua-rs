@@ -1,7 +1,7 @@
 // Expression compilation - Using ExpDesc system (Lua 5.4 compatible)
 
 use super::Compiler;
-use super::TagMethod;
+use super::binop::{emit_arith_op, emit_bitwise_op, emit_cmp_op, emit_arith_imm, emit_arith_k, emit_shift_imm, emit_binop_rr};
 use super::exp2reg::*;
 use super::expdesc::*;
 use super::helpers::*;
@@ -45,28 +45,6 @@ pub fn compile_expr_desc(c: &mut Compiler, expr: &LuaExpr) -> Result<ExpDesc, St
 /// If dest is Some(reg), try to compile directly into that register to avoid extra Move
 pub fn compile_expr(c: &mut Compiler, expr: &LuaExpr) -> Result<u32, String> {
     compile_expr_to(c, expr, None)
-}
-
-//======================================================================================
-// NEW IMPLEMENTATIONS: ExpDesc-based expression compilation
-//======================================================================================
-
-/// Helper: Ensure ExpDesc constant is in constant table and return its index
-fn ensure_constant(c: &mut Compiler, e: &ExpDesc) -> Result<u32, String> {
-    match e.kind {
-        ExpKind::VKInt => {
-            let val = LuaValue::integer(e.ival);
-            Ok(add_constant_dedup(c, val))
-        }
-        ExpKind::VKFlt => {
-            let val = LuaValue::number(e.nval);
-            Ok(add_constant_dedup(c, val))
-        }
-        ExpKind::VK => {
-            Ok(e.info) // Already in constant table
-        }
-        _ => Err(format!("Cannot get constant index for {:?}", e.kind)),
-    }
 }
 
 /// NEW: Compile literal expression (returns ExpDesc)
@@ -202,9 +180,6 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
         .ok_or("Binary expression missing operator")?;
     let op_kind = op.get_op();
 
-    // For now, use simplified implementation that discharges to registers
-    // TODO: Add constant folding, immediate operands, etc.
-
     // Compile left operand to ExpDesc
     let mut left_desc = compile_expr_desc(c, &left)?;
 
@@ -219,547 +194,96 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
 
     // Determine if we can reuse left's register
     // We can only reuse if left_reg is a temporary register (>= nactvar)
-    // If left_reg < nactvar, it's an active local variable - DO NOT modify!
     let nactvar = nvarstack(c) as u32;
     let can_reuse_left = left_reg >= nactvar;
 
     // Compile right operand to ExpDesc
     let mut right_desc = compile_expr_desc(c, &right)?;
 
-    // Check if we can use RK (constant in K table) instructions
-    // For MUL/DIV/MOD/POW, if right is a constant, use *K variant
-    // Check BEFORE discharging to register
-    let can_use_rk = matches!(
-        right_desc.kind,
-        ExpKind::VKInt | ExpKind::VKFlt | ExpKind::VK
-    );
-
-    // For arithmetic operations, check if right is a small integer constant
-    // and can use immediate instruction (takes precedence over RK)
-    let use_immediate = if let ExpKind::VKInt = right_desc.kind {
-        let int_val = right_desc.ival;
-        int_val >= -256 && int_val <= 255
-    } else {
-        false
-    };
-
-    // Save constant info before discharging
-    let saved_right_desc = right_desc.clone();
-
-    // Discharge right to register ONLY if not using RK or immediate
-    // This prevents unnecessary LOADK instructions before *K opcodes
-    let right_reg = if !can_use_rk && !use_immediate {
-        exp_to_any_reg(c, &mut right_desc)
-    } else {
-        0 // Dummy value, won't be used in RK/immediate paths
-    };
-
-    // Handle immediate instructions for ADD/SUB
-    if use_immediate && matches!(op_kind, BinaryOperator::OpAdd | BinaryOperator::OpSub) {
-        let int_val = right_desc.ival;
-        // Use immediate instruction with sC field encoding (add OFFSET_SC = 127)
-        let imm = ((int_val + 127) & 0xff) as u32;
-        // For MMBINI, we need the signed B field encoding (add OFFSET_SB = 128)
-        let imm_mmbini = ((int_val + 128) & 0xff) as u32;
-
-        // Allocate result register (can't reuse left if it's a local variable)
-        let result_reg = if can_reuse_left {
-            left_reg
-        } else {
-            alloc_register(c)
-        };
-
-        match op_kind {
-            BinaryOperator::OpAdd => {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinI,
-                        left_reg,
-                        imm_mmbini,
-                        TagMethod::Add.as_u32(),
-                        false,
-                    ),
-                );
-                return Ok(ExpDesc::new_nonreloc(result_reg));
-            }
-            BinaryOperator::OpSub => {
-                // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
-                let neg_imm = ((-int_val + 127) & 0xff) as u32;
-                let neg_imm_mmbini = ((-int_val + 128) & 0xff) as u32;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, neg_imm),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinI,
-                        left_reg,
-                        neg_imm_mmbini,
-                        TagMethod::Sub.as_u32(),
-                        false,
-                    ),
-                );
-                return Ok(ExpDesc::new_nonreloc(result_reg));
-            }
-            _ => unreachable!(),
+    // Use helper functions for arithmetic and bitwise operations
+    match op_kind {
+        // Arithmetic operations - use emit_arith_op helper
+        BinaryOperator::OpAdd
+        | BinaryOperator::OpSub
+        | BinaryOperator::OpMul
+        | BinaryOperator::OpDiv
+        | BinaryOperator::OpIDiv
+        | BinaryOperator::OpMod
+        | BinaryOperator::OpPow => {
+            let result_reg = emit_arith_op(c, op_kind, left_reg, &mut right_desc, can_reuse_left)?;
+            free_exp(c, &right_desc);
+            return Ok(ExpDesc::new_nonreloc(result_reg));
         }
+
+        // Bitwise operations - use emit_bitwise_op helper
+        BinaryOperator::OpBAnd
+        | BinaryOperator::OpBOr
+        | BinaryOperator::OpBXor
+        | BinaryOperator::OpShl
+        | BinaryOperator::OpShr => {
+            let result_reg = emit_bitwise_op(c, op_kind, left_reg, &mut right_desc, can_reuse_left)?;
+            free_exp(c, &right_desc);
+            return Ok(ExpDesc::new_nonreloc(result_reg));
+        }
+
+        // Comparison operations - use emit_cmp_op helper
+        BinaryOperator::OpEq
+        | BinaryOperator::OpNe
+        | BinaryOperator::OpLt
+        | BinaryOperator::OpLe
+        | BinaryOperator::OpGt
+        | BinaryOperator::OpGe => {
+            let right_reg = exp_to_any_reg(c, &mut right_desc);
+            let result_reg = emit_cmp_op(c, op_kind, left_reg, right_reg, can_reuse_left);
+            free_exp(c, &right_desc);
+            return Ok(ExpDesc::new_nonreloc(result_reg));
+        }
+
+        // Special cases handled inline
+        _ => {}
     }
 
-    // Determine result register - will be set in each branch
+    // Discharge right for remaining operators
+    let right_reg = exp_to_any_reg(c, &mut right_desc);
     let result_reg;
 
     match op_kind {
-        BinaryOperator::OpAdd => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            if can_use_rk {
-                // Right is constant, use ADDK
-                let const_idx = ensure_constant(c, &saved_right_desc)?;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::AddK, result_reg, left_reg, const_idx),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinK,
-                        left_reg,
-                        const_idx,
-                        TagMethod::Add.as_u32(),
-                        false,
-                    ),
-                );
-            } else {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Add, result_reg, left_reg, right_reg),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBin,
-                        left_reg,
-                        right_reg,
-                        TagMethod::Add.as_u32(),
-                        false,
-                    ),
-                );
-            }
-        }
-        BinaryOperator::OpSub => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            if can_use_rk {
-                // Right is constant, use SUBK
-                let const_idx = ensure_constant(c, &saved_right_desc)?;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::SubK, result_reg, left_reg, const_idx),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinK,
-                        left_reg,
-                        const_idx,
-                        TagMethod::Sub.as_u32(),
-                        false,
-                    ),
-                );
-            } else {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Sub, result_reg, left_reg, right_reg),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBin,
-                        left_reg,
-                        right_reg,
-                        TagMethod::Sub.as_u32(),
-                        false,
-                    ),
-                );
-            }
-        }
-        BinaryOperator::OpMul => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            if can_use_rk {
-                // Right is constant, use MULK
-                let const_idx = ensure_constant(c, &saved_right_desc)?;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::MulK, result_reg, left_reg, const_idx),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinK,
-                        left_reg,
-                        const_idx,
-                        TagMethod::Mul.as_u32(),
-                        false,
-                    ),
-                );
-            } else {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Mul, result_reg, left_reg, right_reg),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBin,
-                        left_reg,
-                        right_reg,
-                        TagMethod::Mul.as_u32(),
-                        false,
-                    ),
-                );
-            }
-        }
-        BinaryOperator::OpDiv => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            if can_use_rk {
-                let const_idx = ensure_constant(c, &saved_right_desc)?;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::DivK, result_reg, left_reg, const_idx),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinK,
-                        left_reg,
-                        const_idx,
-                        TagMethod::Div.as_u32(),
-                        false,
-                    ),
-                );
-            } else {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Div, result_reg, left_reg, right_reg),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBin,
-                        left_reg,
-                        right_reg,
-                        TagMethod::Div.as_u32(),
-                        false,
-                    ),
-                );
-            }
-        }
-        BinaryOperator::OpIDiv => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            if can_use_rk {
-                let const_idx = ensure_constant(c, &saved_right_desc)?;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::IDivK, result_reg, left_reg, const_idx),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(OpCode::MmBinK, left_reg, const_idx, 10, false),
-                );
-            } else {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::IDiv, result_reg, left_reg, right_reg),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBin,
-                        left_reg,
-                        right_reg,
-                        TagMethod::IDiv.as_u32(),
-                        false,
-                    ),
-                );
-            }
-        }
-        BinaryOperator::OpMod => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            if can_use_rk {
-                let const_idx = ensure_constant(c, &saved_right_desc)?;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::ModK, result_reg, left_reg, const_idx),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinK,
-                        left_reg,
-                        const_idx,
-                        TagMethod::Mod.as_u32(),
-                        false,
-                    ),
-                );
-            } else {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Mod, result_reg, left_reg, right_reg),
-                );
-            }
-        }
-        BinaryOperator::OpPow => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            if can_use_rk {
-                let const_idx = ensure_constant(c, &saved_right_desc)?;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::PowK, result_reg, left_reg, const_idx),
-                );
-                emit(
-                    c,
-                    Instruction::create_abck(
-                        OpCode::MmBinK,
-                        left_reg,
-                        const_idx,
-                        TagMethod::Pow.as_u32(),
-                        false,
-                    ),
-                );
-            } else {
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Pow, result_reg, left_reg, right_reg),
-                );
-            }
-        }
-        BinaryOperator::OpBAnd => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::BAnd, result_reg, left_reg, right_reg),
-            );
-        }
-        BinaryOperator::OpBOr => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::BOr, result_reg, left_reg, right_reg),
-            );
-        }
-        BinaryOperator::OpBXor => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::BXor, result_reg, left_reg, right_reg),
-            );
-        }
-        BinaryOperator::OpShl => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Shl, result_reg, left_reg, right_reg),
-            );
-        }
-        BinaryOperator::OpShr => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Shr, result_reg, left_reg, right_reg),
-            );
-        }
         BinaryOperator::OpConcat => {
             // CONCAT A B: concatenate R[A] to R[A+B], result in R[A]
-            // CRITICAL: CONCAT reads all operands BEFORE writing result to R[A]
-            // So it's ALWAYS safe to reuse left_reg, even if it's a local variable!
-            // The instruction will read R[A]'s old value, then overwrite it with the result.
-
-            // Check if operands are already consecutive
             if right_reg == left_reg + 1 {
-                // Perfect case: operands are consecutive, reuse left for result
                 result_reg = left_reg;
                 emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, 1, 0));
-                // CRITICAL: freereg should be result_reg + 1, not beyond right_reg
-                // because CONCAT consumes the right operand
                 c.freereg = result_reg + 1;
             } else {
-                // Need to arrange operands to be consecutive
-                // CRITICAL FIX: Use fresh registers starting from freereg to avoid
-                // overwriting already allocated values (like function references)
                 let concat_base = c.freereg;
-                alloc_register(c); // for left operand copy
-                alloc_register(c); // for right operand
-
+                alloc_register(c);
+                alloc_register(c);
                 emit_move(c, concat_base, left_reg);
                 emit_move(c, concat_base + 1, right_reg);
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Concat, concat_base, 1, 0),
-                );
-
+                emit(c, Instruction::encode_abc(OpCode::Concat, concat_base, 1, 0));
                 result_reg = concat_base;
-                // Reset freereg to result_reg + 1 (concat consumes right operand)
                 c.freereg = result_reg + 1;
             }
         }
-        BinaryOperator::OpEq => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Eq, result_reg, left_reg, right_reg),
-            );
-        }
-        BinaryOperator::OpNe => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Eq, result_reg, left_reg, right_reg),
-            );
-            // NEQ is EQ with negated result - handled by control flow
-        }
-        BinaryOperator::OpLt => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Lt, result_reg, left_reg, right_reg),
-            );
-        }
-        BinaryOperator::OpLe => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Le, result_reg, left_reg, right_reg),
-            );
-        }
-        BinaryOperator::OpGt => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            // GT is LT with swapped operands
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Lt, result_reg, right_reg, left_reg),
-            );
-        }
-        BinaryOperator::OpGe => {
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            // GE is LE with swapped operands
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Le, result_reg, right_reg, left_reg),
-            );
-        }
-        BinaryOperator::OpAnd | BinaryOperator::OpOr => {
-            // Boolean operators with proper short-circuit evaluation
-            // Pattern: TESTSET + JMP + MOVE
-            // and: if left is false, return left; else return right
-            // or: if left is true, return left; else return right
-            result_reg = if can_reuse_left {
-                left_reg
-            } else {
-                alloc_register(c)
-            };
-            
-            let k_flag = matches!(op_kind, BinaryOperator::OpOr);
 
-            // TestSet: if (is_truthy == k) then R[A] := R[B] else pc++
-            emit(
-                c,
-                Instruction::create_abck(OpCode::TestSet, result_reg, left_reg, 0, k_flag),
-            );
-            // JMP: skip the MOVE if TestSet assigned the value
+        BinaryOperator::OpAnd | BinaryOperator::OpOr => {
+            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
+            let k_flag = matches!(op_kind, BinaryOperator::OpOr);
+            emit(c, Instruction::create_abck(OpCode::TestSet, result_reg, left_reg, 0, k_flag));
             let jump_pos = emit_jump(c, OpCode::Jmp);
-            // MOVE: use right operand if TestSet didn't assign
-            emit(
-                c,
-                Instruction::create_abc(OpCode::Move, result_reg, right_reg, 0),
-            );
-            // Patch the jump to point after MOVE
+            emit(c, Instruction::create_abc(OpCode::Move, result_reg, right_reg, 0));
             patch_jump(c, jump_pos);
         }
+
         BinaryOperator::OpNop => {
             return Err("Invalid binary operator OpNop".to_string());
         }
+
+        // Already handled above
+        _ => unreachable!("Operator {:?} should have been handled above", op_kind),
     }
 
-    // Free the right register if it's temporary
     free_exp(c, &right_desc);
-
-    // Result is in left_reg (which we reused)
     Ok(ExpDesc::new_nonreloc(result_reg))
 }
 
@@ -1221,383 +745,54 @@ fn compile_binary_expr_to(
                 let int_val = num.get_int_value();
                 // Use signed 9-bit immediate: range [-256, 255]
                 if int_val >= -256 && int_val <= 255 {
-                    // Encode immediate value for sC field (8-bit signed with OFFSET_SC)
-                    let imm = ((int_val + 127) & 0xff) as u32;
-                    // For MMBINI, encode with OFFSET_SB (128) instead of OFFSET_SC (127)
-                    let imm_mmbini = ((int_val + 128) & 0xff) as u32;
+                    // Helper to prepare operands and get result register
+                    let prepare_regs = |c: &mut Compiler, dest: Option<u32>, left: &LuaExpr| -> Result<(u32, u32), String> {
+                        if let Some(d) = dest {
+                            ensure_register(c, d);
+                            if c.freereg < d + 1 {
+                                c.freereg = d + 1;
+                            }
+                        }
+                        let left_reg = compile_expr(c, left)?;
+                        let nvarstack = nvarstack(c);
+                        let can_reuse_left = left_reg >= nvarstack;
+                        let result_reg = dest.unwrap_or_else(|| {
+                            if can_reuse_left { left_reg } else { alloc_register(c) }
+                        });
+                        Ok((left_reg, result_reg))
+                    };
 
-                    // Try immediate arithmetic instructions
-                    // Only compile left operand if we actually use immediate instruction
                     match op_kind {
-                        BinaryOperator::OpAdd => {
-                            // CRITICAL: Protect freereg if dest specified
-                            if let Some(d) = dest {
-                                ensure_register(c, d);
-                                if c.freereg < d + 1 {
-                                    c.freereg = d + 1;
-                                }
+                        // Immediate ADD/SUB
+                        BinaryOperator::OpAdd | BinaryOperator::OpSub => {
+                            let (left_reg, result_reg) = prepare_regs(c, dest, &left)?;
+                            if emit_arith_imm(c, op_kind, left_reg, int_val, result_reg).is_some() {
+                                return Ok(result_reg);
                             }
-                            // Compile left operand first to get its register
-                            let left_reg = compile_expr(c, &left)?;
-                            // Use dest if provided, otherwise check if left_reg can be reused
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            emit(
-                                c,
-                                Instruction::encode_abc(OpCode::AddI, result_reg, left_reg, imm),
-                            );
-                            // Emit MMBINI for metamethod call (TM_ADD = 6)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinI,
-                                    left_reg,
-                                    imm_mmbini,
-                                    6,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
                         }
-                        BinaryOperator::OpSub => {
-                            if let Some(d) = dest {
-                                ensure_register(c, d);
-                                if c.freereg < d + 1 {
-                                    c.freereg = d + 1;
-                                }
+                        // Constant MUL/DIV/IDIV/MOD/POW - use *K instructions
+                        BinaryOperator::OpMul | BinaryOperator::OpDiv | BinaryOperator::OpIDiv 
+                        | BinaryOperator::OpMod | BinaryOperator::OpPow => {
+                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
+                            let (left_reg, result_reg) = prepare_regs(c, dest, &left)?;
+                            if emit_arith_k(c, op_kind, left_reg, const_idx, result_reg).is_some() {
+                                return Ok(result_reg);
                             }
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: Subtraction uses ADDI with negated immediate (x - N => x + (-N))
-                            // Encode -int_val with OFFSET_SC
-                            let neg_imm = ((-int_val + 127) & 0xff) as u32;
-                            emit(
-                                c,
-                                Instruction::encode_abc(
-                                    OpCode::AddI,
-                                    result_reg,
-                                    left_reg,
-                                    neg_imm,
-                                ),
-                            );
-                            // Emit MMBINI for metamethod call - use ORIGINAL immediate value from source (TM_SUB = 7)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinI,
-                                    left_reg,
-                                    imm_mmbini,
-                                    7,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
                         }
-                        BinaryOperator::OpMul => {
-                            // For MulK, need to add constant to constant table
-                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: Use MulK for constant operand
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MulK,
-                                    result_reg,
-                                    left_reg,
-                                    const_idx,
-                                    false,
-                                ),
-                            );
-                            // Emit MMBINK for metamethod call (TM_MUL = 8)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinK,
-                                    left_reg,
-                                    const_idx,
-                                    8,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
-                        }
-                        BinaryOperator::OpMod => {
-                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: Use ModK for constant operand
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::ModK,
-                                    result_reg,
-                                    left_reg,
-                                    const_idx,
-                                    false,
-                                ),
-                            );
-                            // Emit MMBINK for metamethod call (TM_MOD = 9)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinK,
-                                    left_reg,
-                                    const_idx,
-                                    9,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
-                        }
-                        BinaryOperator::OpPow => {
-                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: Use PowK for constant operand
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::PowK,
-                                    result_reg,
-                                    left_reg,
-                                    const_idx,
-                                    false,
-                                ),
-                            );
-                            // Emit MMBINK for metamethod call (TM_POW = 10)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinK,
-                                    left_reg,
-                                    const_idx,
-                                    10,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
-                        }
-                        BinaryOperator::OpDiv => {
-                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: Use DivK for constant operand
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::DivK,
-                                    result_reg,
-                                    left_reg,
-                                    const_idx,
-                                    false,
-                                ),
-                            );
-                            // Emit MMBINK for metamethod call (TM_DIV = 11)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinK,
-                                    left_reg,
-                                    const_idx,
-                                    11,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
-                        }
-                        BinaryOperator::OpIDiv => {
-                            let const_idx = add_constant_dedup(c, LuaValue::integer(int_val));
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: Use IDivK for constant operand
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::IDivK,
-                                    result_reg,
-                                    left_reg,
-                                    const_idx,
-                                    false,
-                                ),
-                            );
-                            // Emit MMBINK for metamethod call (TM_IDIV = 12)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinK,
-                                    left_reg,
-                                    const_idx,
-                                    12,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
-                        }
-                        BinaryOperator::OpShr => {
-                            if let Some(d) = dest {
-                                ensure_register(c, d);
-                                if c.freereg < d + 1 {
-                                    c.freereg = d + 1;
-                                }
+                        // Immediate SHL/SHR
+                        BinaryOperator::OpShl | BinaryOperator::OpShr => {
+                            let (left_reg, result_reg) = prepare_regs(c, dest, &left)?;
+                            if emit_shift_imm(c, op_kind, left_reg, int_val, result_reg).is_some() {
+                                return Ok(result_reg);
                             }
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: Use ShrI for immediate right shift
-                            emit(
-                                c,
-                                Instruction::encode_abc(OpCode::ShrI, result_reg, left_reg, imm),
-                            );
-                            // Emit MMBINI for metamethod call (TM_SHR = 17)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinI,
-                                    left_reg,
-                                    imm_mmbini,
-                                    17,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
-                        }
-                        BinaryOperator::OpShl => {
-                            if let Some(d) = dest {
-                                ensure_register(c, d);
-                                if c.freereg < d + 1 {
-                                    c.freereg = d + 1;
-                                }
-                            }
-                            let left_reg = compile_expr(c, &left)?;
-                            // CRITICAL: Never reuse a local variable's register!
-                            let nvarstack = nvarstack(c);
-                            let can_reuse_left = left_reg >= nvarstack;
-                            let result_reg = dest.unwrap_or_else(|| {
-                                if can_reuse_left {
-                                    left_reg
-                                } else {
-                                    alloc_register(c)
-                                }
-                            });
-                            // Lua 5.4: x << n is equivalent to x >> -n
-                            // Use ShrI with negated immediate: R[A] = R[B] >> sC
-                            // sC encoding: (val + 127) & 0xff, where val = -n
-                            let neg_imm = ((-int_val + 127) & 0xff) as u32;
-                            emit(
-                                c,
-                                Instruction::encode_abc(
-                                    OpCode::ShrI,
-                                    result_reg,
-                                    left_reg,
-                                    neg_imm,
-                                ),
-                            );
-                            // Emit MMBINI for metamethod call (TM_SHL = 16)
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::MmBinI,
-                                    left_reg,
-                                    imm_mmbini,
-                                    16,
-                                    false,
-                                ),
-                            );
-                            return Ok(result_reg);
                         }
                         // Immediate comparison operators - generate boolean result
-                        BinaryOperator::OpEq
-                        | BinaryOperator::OpNe
-                        | BinaryOperator::OpLt
-                        | BinaryOperator::OpLe
-                        | BinaryOperator::OpGt
-                        | BinaryOperator::OpGe => {
-                            // Comparison instructions use sB field: range [-128, 127]
+                        BinaryOperator::OpEq | BinaryOperator::OpNe | BinaryOperator::OpLt
+                        | BinaryOperator::OpLe | BinaryOperator::OpGt | BinaryOperator::OpGe => {
                             if int_val >= -128 && int_val <= 127 {
                                 let left_reg = compile_expr(c, &left)?;
-                                // Allocate a new register for the boolean result
-                                // (can't reuse left_reg because comparison needs the original value)
                                 let result_reg = get_result_reg(c, dest);
-
-                                // Use immediate comparison instruction with boolean result pattern
-                                return compile_comparison_imm_to_bool(
-                                    c,
-                                    op_kind,
-                                    left_reg,
-                                    result_reg,
-                                    int_val as i32,
-                                );
+                                return compile_comparison_imm_to_bool(c, op_kind, left_reg, result_reg, int_val as i32);
                             }
                         }
                         _ => {}
@@ -1611,33 +806,35 @@ fn compile_binary_expr_to(
     // Generate *K instructions for MUL/DIV/MOD/POW with constant operands
     if let LuaExpr::LiteralExpr(lit) = &right {
         if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
-            // Handle both float and integer literals
             let is_float_lit = num.is_float();
-            let const_val = if is_float_lit {
-                LuaValue::float(num.get_float_value())
-            } else {
-                // Integer literal - still use *K instruction instead of immediate
+            
+            // Skip ADD/SUB small integers (already handled by immediate optimization)
+            let skip_optimization = if !is_float_lit {
                 let int_val = num.get_int_value();
-                // Skip small integers that were already handled by immediate optimization
-                if int_val >= -256 && int_val <= 255 {
-                    match op_kind {
-                        BinaryOperator::OpAdd | BinaryOperator::OpSub => {
-                            // Already handled by ADDI above
-                            // Fall through to normal code path
-                            LuaValue::integer(int_val) // dummy, won't be used
-                        }
-                        _ => LuaValue::integer(int_val),
-                    }
-                } else {
-                    LuaValue::integer(int_val)
-                }
+                int_val >= -256 && int_val <= 255 && matches!(op_kind, BinaryOperator::OpAdd | BinaryOperator::OpSub)
+            } else {
+                false
             };
 
-            // Generate *K instruction for supported operations
-            match op_kind {
-                BinaryOperator::OpMul => {
+            if !skip_optimization {
+                // Check if this is a *K-supported operation
+                let is_k_op = matches!(op_kind, 
+                    BinaryOperator::OpMul | BinaryOperator::OpDiv | BinaryOperator::OpMod 
+                    | BinaryOperator::OpPow | BinaryOperator::OpIDiv
+                );
+                
+                // IDiv only for integer constants
+                let idiv_ok = op_kind != BinaryOperator::OpIDiv || !is_float_lit;
+
+                if is_k_op && idiv_ok {
+                    let const_val = if is_float_lit {
+                        LuaValue::float(num.get_float_value())
+                    } else {
+                        LuaValue::integer(num.get_int_value())
+                    };
                     let const_idx = add_constant_dedup(c, const_val);
-                    // CRITICAL: Protect freereg if dest specified
+
+                    // Prepare registers
                     if let Some(d) = dest {
                         ensure_register(c, d);
                         if c.freereg < d + 1 {
@@ -1646,133 +843,10 @@ fn compile_binary_expr_to(
                     }
                     let left_reg = compile_expr(c, &left)?;
                     let result_reg = get_result_reg(c, dest);
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::MulK, result_reg, left_reg, const_idx),
-                    );
-                    emit(
-                        c,
-                        Instruction::create_abck(
-                            OpCode::MmBinK,
-                            left_reg,
-                            const_idx,
-                            TagMethod::Mul.as_u32(),
-                            false,
-                        ),
-                    );
-                    return Ok(result_reg);
-                }
-                BinaryOperator::OpDiv => {
-                    let const_idx = add_constant_dedup(c, const_val);
-                    // CRITICAL: Protect freereg if dest specified
-                    if let Some(d) = dest {
-                        ensure_register(c, d);
-                        if c.freereg < d + 1 {
-                            c.freereg = d + 1;
-                        }
+
+                    if emit_arith_k(c, op_kind, left_reg, const_idx, result_reg).is_some() {
+                        return Ok(result_reg);
                     }
-                    let left_reg = compile_expr(c, &left)?;
-                    let result_reg = get_result_reg(c, dest);
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::DivK, result_reg, left_reg, const_idx),
-                    );
-                    emit(
-                        c,
-                        Instruction::create_abck(
-                            OpCode::MmBinK,
-                            left_reg,
-                            const_idx,
-                            TagMethod::Div.as_u32(),
-                            false,
-                        ),
-                    );
-                    return Ok(result_reg);
-                }
-                BinaryOperator::OpMod => {
-                    let const_idx = add_constant_dedup(c, const_val);
-                    // CRITICAL: Protect freereg if dest specified
-                    if let Some(d) = dest {
-                        ensure_register(c, d);
-                        if c.freereg < d + 1 {
-                            c.freereg = d + 1;
-                        }
-                    }
-                    let left_reg = compile_expr(c, &left)?;
-                    let result_reg = get_result_reg(c, dest);
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::ModK, result_reg, left_reg, const_idx),
-                    );
-                    emit(
-                        c,
-                        Instruction::create_abck(
-                            OpCode::MmBinK,
-                            left_reg,
-                            const_idx,
-                            TagMethod::Mod.as_u32(),
-                            false,
-                        ),
-                    );
-                    return Ok(result_reg);
-                }
-                BinaryOperator::OpPow => {
-                    let const_idx = add_constant_dedup(c, const_val);
-                    // CRITICAL: Protect freereg if dest specified
-                    if let Some(d) = dest {
-                        ensure_register(c, d);
-                        if c.freereg < d + 1 {
-                            c.freereg = d + 1;
-                        }
-                    }
-                    let left_reg = compile_expr(c, &left)?;
-                    let result_reg = get_result_reg(c, dest);
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::PowK, result_reg, left_reg, const_idx),
-                    );
-                    emit(
-                        c,
-                        Instruction::create_abck(
-                            OpCode::MmBinK,
-                            left_reg,
-                            const_idx,
-                            TagMethod::Pow.as_u32(),
-                            false,
-                        ),
-                    );
-                    return Ok(result_reg);
-                }
-                BinaryOperator::OpIDiv if !is_float_lit => {
-                    // IDiv only for integer constants
-                    let const_idx = add_constant_dedup(c, const_val);
-                    // CRITICAL: Protect freereg if dest specified
-                    if let Some(d) = dest {
-                        ensure_register(c, d);
-                        if c.freereg < d + 1 {
-                            c.freereg = d + 1;
-                        }
-                    }
-                    let left_reg = compile_expr(c, &left)?;
-                    let result_reg = get_result_reg(c, dest);
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::IDivK, result_reg, left_reg, const_idx),
-                    );
-                    emit(
-                        c,
-                        Instruction::create_abck(
-                            OpCode::MmBinK,
-                            left_reg,
-                            const_idx,
-                            TagMethod::IDiv.as_u32(),
-                            false,
-                        ),
-                    );
-                    return Ok(result_reg);
-                }
-                _ => {
-                    // Not a *K-supported operation, fall through
                 }
             }
         }
@@ -1800,20 +874,16 @@ fn compile_binary_expr_to(
     // Then allocate result register
     let result_reg = get_result_reg(c, dest);
 
-    // Determine opcode and metamethod event (TM)
-    let (opcode, mm_event_opt) = match op_kind {
-        BinaryOperator::OpAdd => (OpCode::Add, Some(TagMethod::Add)),
-        BinaryOperator::OpSub => (OpCode::Sub, Some(TagMethod::Sub)),
-        BinaryOperator::OpMul => (OpCode::Mul, Some(TagMethod::Mul)),
-        BinaryOperator::OpMod => (OpCode::Mod, Some(TagMethod::Mod)),
-        BinaryOperator::OpPow => (OpCode::Pow, Some(TagMethod::Pow)),
-        BinaryOperator::OpDiv => (OpCode::Div, Some(TagMethod::Div)),
-        BinaryOperator::OpIDiv => (OpCode::IDiv, Some(TagMethod::IDiv)),
-        BinaryOperator::OpBAnd => (OpCode::BAnd, Some(TagMethod::BAnd)),
-        BinaryOperator::OpBOr => (OpCode::BOr, Some(TagMethod::BOr)),
-        BinaryOperator::OpBXor => (OpCode::BXor, Some(TagMethod::BXor)),
-        BinaryOperator::OpShl => (OpCode::Shl, Some(TagMethod::Shl)),
-        BinaryOperator::OpShr => (OpCode::Shr, Some(TagMethod::Shr)),
+    // Determine opcode - for arithmetic/bitwise ops, use emit_binop_rr at the end
+    match op_kind {
+        // Arithmetic and bitwise operators use emit_binop_rr helper
+        BinaryOperator::OpAdd | BinaryOperator::OpSub | BinaryOperator::OpMul |
+        BinaryOperator::OpDiv | BinaryOperator::OpIDiv | BinaryOperator::OpMod |
+        BinaryOperator::OpPow | BinaryOperator::OpBAnd | BinaryOperator::OpBOr |
+        BinaryOperator::OpBXor | BinaryOperator::OpShl | BinaryOperator::OpShr => {
+            emit_binop_rr(c, op_kind, left_reg, right_reg, result_reg);
+            return Ok(result_reg);
+        }
         BinaryOperator::OpConcat => {
             // CONCAT has special instruction format: CONCAT A B
             // Concatenates R[A] through R[A+B] (B+1 values), result in R[A]
@@ -1936,23 +1006,7 @@ fn compile_binary_expr_to(
         }
 
         _ => return Err(format!("Unsupported binary operator: {:?}", op_kind)),
-    };
-
-    emit(
-        c,
-        Instruction::encode_abc(opcode, result_reg, left_reg, right_reg),
-    );
-
-    // Emit MMBIN instruction for metamethod call if this is an arithmetic/bitwise operation
-    // Lua 5.4: MMBIN follows the main instruction to call metamethod if operation fails
-    if let Some(mm_event) = mm_event_opt {
-        emit(
-            c,
-            Instruction::create_abck(OpCode::MmBin, left_reg, right_reg, mm_event.as_u32(), false),
-        );
     }
-
-    Ok(result_reg)
 }
 
 /// Compile comparison operator to produce boolean result

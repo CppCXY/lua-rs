@@ -7,9 +7,9 @@ use crate::{LuaVM, TableId};
 /// Hash node - mimics Lua 5.4's Node structure
 /// Contains key+value pair
 #[derive(Clone, Copy)]
-struct Node {
-    key: LuaValue,
-    value: LuaValue,
+pub struct Node {
+    pub key: LuaValue,
+    pub value: LuaValue,
 }
 
 impl Node {
@@ -53,7 +53,7 @@ pub struct LuaTable {
     /// Hash part: open-addressed hash table with linear probing
     /// This matches Lua 5.4's design for better iteration performance
     /// Always initialized (empty Vec if no hash elements)
-    nodes: Vec<Node>,
+    pub(crate) nodes: Vec<Node>,
 
     /// Number of occupied slots in hash part (O(1) load factor tracking)
     hash_size: usize,

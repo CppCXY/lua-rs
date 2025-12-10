@@ -31,6 +31,7 @@ local function f(x)
 end
 
 local a = f(10)
+print("f(10)")
 -- force a GC in this level
 local x = {[1] = {}}   -- to detect a GC
 setmetatable(x, {__mode = 'kv'})
@@ -49,7 +50,7 @@ assert(a[8]() == 10+A)
 assert(getmetatable(x).__mode == 'kv')
 assert(B.g == 19)
 
-
+print("B.g == 19")
 -- testing equality
 a = {}
 

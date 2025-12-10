@@ -118,7 +118,7 @@ pub struct GC {
 
     // Generational mode state
     last_atomic: usize, // Objects traversed in last atomic (0 = good collection)
-    gc_estimate: usize, // Estimate of memory in use after major collection
+    pub(crate) gc_estimate: usize, // Estimate of memory in use after major collection
 
     // Generation boundaries (indices into allgc-style tracking)
     // In our design, we track these via object ages in headers
@@ -162,8 +162,8 @@ impl GC {
             sweep_index: 0,
             propagate_work: 0,
             gc_pause: 200,
-            gen_minor_mul: 20,  // Minor GC when memory grows 20%
-            gen_major_mul: 50,  // Major GC when memory grows 50% (降低以更频繁触发major GC清除weak tables)
+            gen_minor_mul: 20, // Minor GC when memory grows 20%
+            gen_major_mul: 50, // Major GC when memory grows 50% (降低以更频繁触发major GC清除weak tables)
             last_atomic: 0,
             gc_estimate: 0,
             young_list: Vec::with_capacity(1024),
@@ -271,6 +271,15 @@ impl GC {
 
     /// Generational GC step - like Lua's genstep
     fn gen_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+        // First time entering generational mode: initialize gc_estimate
+        // Like Lua's entergen(), we need to do an initial full collection
+        if self.gc_estimate == 0 && self.last_atomic == 0 {
+            // First collection: do a full gen to initialize gc_estimate
+            self.full_gen(roots, pool);
+            self.set_minor_debt();
+            return;
+        }
+
         if self.last_atomic != 0 {
             // Last collection was bad, do a full step
             self.step_gen_full(roots, pool);
@@ -306,7 +315,7 @@ impl GC {
             self.start_cycle(roots, pool);
             self.state = GcState::Propagate;
         }
-        
+
         // Propagate -> Mark all gray objects
         if self.state == GcState::Propagate {
             while let Some(gc_id) = self.gray.pop() {
@@ -314,7 +323,7 @@ impl GC {
             }
             self.state = GcState::Atomic;
         }
-        
+
         // Atomic -> Process grayagain and clear weak tables
         if self.state == GcState::Atomic {
             while let Some(gc_id) = self.grayagain.pop() {
@@ -324,7 +333,7 @@ impl GC {
             self.sweep_index = 0;
             self.state = GcState::Sweep;
         }
-        
+
         // Sweep -> Clean up dead objects
         if self.state == GcState::Sweep {
             self.sweep_step(pool, usize::MAX);
@@ -460,6 +469,7 @@ impl GC {
     }
 
     /// Do one step of propagation - process some gray objects
+    #[allow(unused)]
     fn propagate_step(&mut self, pool: &mut ObjectPool, max_work: usize) -> usize {
         let mut work = 0;
 
@@ -486,7 +496,7 @@ impl GC {
                         if table.header.is_gray() {
                             let entries = table.data.iter_all();
                             let mt = table.data.get_metatable();
-                            
+
                             // Check weak mode from metatable
                             let weak = if let Some(mt_id) = mt.and_then(|v| v.as_table_id()) {
                                 if let Some(mt_table) = pool.tables.get(mt_id.0) {
@@ -497,7 +507,7 @@ impl GC {
                             } else {
                                 None
                             };
-                            
+
                             (true, entries, mt, weak)
                         } else {
                             (false, vec![], None, None)
@@ -506,16 +516,16 @@ impl GC {
                         (false, vec![], None, None)
                     }
                 };
-                
+
                 if should_mark {
                     // Now mark the table as black
                     if let Some(table) = pool.tables.get_mut(gc_id.index()) {
                         table.header.make_black();
                         work += table.data.len();
                     }
-                    
+
                     let (weak_keys, weak_values) = weak_mode.unwrap_or((false, false));
-                    
+
                     // Mark references (skip weak references)
                     for (k, v) in entries {
                         if !weak_keys {
@@ -735,6 +745,12 @@ impl GC {
         // Clear gray lists
         self.gray.clear();
         self.grayagain.clear();
+
+        // CRITICAL: Make all young objects white before marking
+        // This ensures unmarked objects will be considered dead
+        for gc_id in &self.young_list {
+            self.make_white(*gc_id, pool);
+        }
 
         // Mark roots
         for value in roots {
@@ -1162,13 +1178,14 @@ impl GC {
                                 } else {
                                     table.header.is_white()
                                 };
-                                
+
                                 if should {
                                     let entries = table.data.iter_all();
                                     let mt = table.data.get_metatable();
-                                    
+
                                     // Check weak mode from metatable
-                                    let weak = if let Some(mt_id) = mt.and_then(|v| v.as_table_id()) {
+                                    let weak = if let Some(mt_id) = mt.and_then(|v| v.as_table_id())
+                                    {
                                         if let Some(mt_table) = pool.tables.get(mt_id.0) {
                                             self.get_weak_mode(mt_table, pool)
                                         } else {
@@ -1177,7 +1194,7 @@ impl GC {
                                     } else {
                                         None
                                     };
-                                    
+
                                     (true, is_fixed, entries, mt, weak)
                                 } else {
                                     (false, is_fixed, vec![], None, None)
@@ -1186,7 +1203,7 @@ impl GC {
                                 (false, false, vec![], None, None)
                             }
                         };
-                        
+
                         if should_traverse {
                             // Mark the traversal
                             if is_fixed {
@@ -1196,9 +1213,9 @@ impl GC {
                                     table.header.make_black();
                                 }
                             }
-                            
+
                             let (weak_keys, weak_values) = weak_mode.unwrap_or((false, false));
-                            
+
                             // Add table contents to worklist (skip weak references)
                             for (k, v) in entries {
                                 if !weak_keys {
@@ -1339,9 +1356,10 @@ impl GC {
 
     /// Clear weak table entries that point to dead (white) objects
     /// This must be called after marking but before sweeping
-    fn clear_weak_tables(&self, pool: &mut ObjectPool) {
+    fn clear_weak_tables(&self, pool: &mut ObjectPool) -> usize {
         // Collect tables with weak mode and their entries to remove
         let mut tables_to_clear: Vec<(u32, Vec<LuaValue>)> = Vec::new();
+        let mut total_cleared = 0;
 
         for (id, table) in pool.tables.iter() {
             // Check if this table has a metatable with __mode
@@ -1355,7 +1373,7 @@ impl GC {
                         for (key, value) in table.data.iter_all() {
                             let key_dead = weak_keys && self.is_value_dead(&key, pool);
                             let value_dead = weak_values && self.is_value_dead(&value, pool);
-                            
+
                             if key_dead || value_dead {
                                 keys_to_remove.push(key);
                             }
@@ -1373,36 +1391,40 @@ impl GC {
             if let Some(table) = pool.tables.get_mut(table_id) {
                 for key in keys {
                     table.data.raw_set(key, LuaValue::nil());
+                    total_cleared += 1;
                 }
             }
         }
+
+        total_cleared
     }
 
     /// Get weak mode from metatable's __mode field
     /// Returns Some((weak_keys, weak_values)) if __mode is set
     fn get_weak_mode(&self, metatable: &GcTable, pool: &ObjectPool) -> Option<(bool, bool)> {
         // Find __mode key - it should be a string "k", "v", or "kv" (or "vk")
-        for (key, value) in metatable.data.iter_all() {
+        for n in metatable.data.nodes.iter() {
+            let key = &n.key;
             // Check if key is the string "__mode"
             if let Some(key_str_id) = key.as_string_id() {
-                if let Some(key_str) = pool.strings.get(key_str_id.0) {
-                    if key_str.data.as_str() == "__mode" {
-                        // Found __mode, now check the value
-                        if let Some(val_str_id) = value.as_string_id() {
-                            if let Some(val_str) = pool.strings.get(val_str_id.0) {
-                                let mode_str = val_str.data.as_str();
-                                let weak_keys = mode_str.contains('k');
-                                let weak_values = mode_str.contains('v');
-                                if weak_keys || weak_values {
-                                    return Some((weak_keys, weak_values));
-                                }
+                if key_str_id == pool.tm_mode {
+                    let value = &n.value;
+                    // Found __mode, now check the value
+                    if let Some(val_str_id) = value.as_string_id() {
+                        if let Some(val_str) = pool.strings.get(val_str_id.0) {
+                            let mode_str = val_str.data.as_str();
+                            let weak_keys = mode_str.contains('k');
+                            let weak_values = mode_str.contains('v');
+                            if weak_keys || weak_values {
+                                return Some((weak_keys, weak_values));
                             }
                         }
-                        return None;
                     }
+                    return None;
                 }
             }
         }
+
         None
     }
 
