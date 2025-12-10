@@ -638,42 +638,42 @@ impl ObjectPool {
 
         // Pre-create all metamethod name strings (like Lua's luaT_init)
         // These strings are interned and will never be collected
-        pool.tm_index = pool.create_string("__index");
-        pool.tm_newindex = pool.create_string("__newindex");
-        pool.tm_call = pool.create_string("__call");
-        pool.tm_tostring = pool.create_string("__tostring");
-        pool.tm_len = pool.create_string("__len");
-        pool.tm_pairs = pool.create_string("__pairs");
-        pool.tm_ipairs = pool.create_string("__ipairs");
-        pool.tm_gc = pool.create_string("__gc");
-        pool.tm_close = pool.create_string("__close");
-        pool.tm_mode = pool.create_string("__mode");
-        pool.tm_name = pool.create_string("__name");
-        pool.tm_eq = pool.create_string("__eq");
-        pool.tm_lt = pool.create_string("__lt");
-        pool.tm_le = pool.create_string("__le");
-        pool.tm_add = pool.create_string("__add");
-        pool.tm_sub = pool.create_string("__sub");
-        pool.tm_mul = pool.create_string("__mul");
-        pool.tm_div = pool.create_string("__div");
-        pool.tm_mod = pool.create_string("__mod");
-        pool.tm_pow = pool.create_string("__pow");
-        pool.tm_unm = pool.create_string("__unm");
-        pool.tm_idiv = pool.create_string("__idiv");
-        pool.tm_band = pool.create_string("__band");
-        pool.tm_bor = pool.create_string("__bor");
-        pool.tm_bxor = pool.create_string("__bxor");
-        pool.tm_bnot = pool.create_string("__bnot");
-        pool.tm_shl = pool.create_string("__shl");
-        pool.tm_shr = pool.create_string("__shr");
-        pool.tm_concat = pool.create_string("__concat");
-        pool.tm_metatable = pool.create_string("__metatable");
+        pool.tm_index = pool.create_string("__index").0;
+        pool.tm_newindex = pool.create_string("__newindex").0;
+        pool.tm_call = pool.create_string("__call").0;
+        pool.tm_tostring = pool.create_string("__tostring").0;
+        pool.tm_len = pool.create_string("__len").0;
+        pool.tm_pairs = pool.create_string("__pairs").0;
+        pool.tm_ipairs = pool.create_string("__ipairs").0;
+        pool.tm_gc = pool.create_string("__gc").0;
+        pool.tm_close = pool.create_string("__close").0;
+        pool.tm_mode = pool.create_string("__mode").0;
+        pool.tm_name = pool.create_string("__name").0;
+        pool.tm_eq = pool.create_string("__eq").0;
+        pool.tm_lt = pool.create_string("__lt").0;
+        pool.tm_le = pool.create_string("__le").0;
+        pool.tm_add = pool.create_string("__add").0;
+        pool.tm_sub = pool.create_string("__sub").0;
+        pool.tm_mul = pool.create_string("__mul").0;
+        pool.tm_div = pool.create_string("__div").0;
+        pool.tm_mod = pool.create_string("__mod").0;
+        pool.tm_pow = pool.create_string("__pow").0;
+        pool.tm_unm = pool.create_string("__unm").0;
+        pool.tm_idiv = pool.create_string("__idiv").0;
+        pool.tm_band = pool.create_string("__band").0;
+        pool.tm_bor = pool.create_string("__bor").0;
+        pool.tm_bxor = pool.create_string("__bxor").0;
+        pool.tm_bnot = pool.create_string("__bnot").0;
+        pool.tm_shl = pool.create_string("__shl").0;
+        pool.tm_shr = pool.create_string("__shr").0;
+        pool.tm_concat = pool.create_string("__concat").0;
+        pool.tm_metatable = pool.create_string("__metatable").0;
 
         // Pre-create coroutine status strings
-        pool.str_suspended = pool.create_string("suspended");
-        pool.str_running = pool.create_string("running");
-        pool.str_normal = pool.create_string("normal");
-        pool.str_dead = pool.create_string("dead");
+        pool.str_suspended = pool.create_string("suspended").0;
+        pool.str_running = pool.create_string("running").0;
+        pool.str_normal = pool.create_string("normal").0;
+        pool.str_dead = pool.create_string("dead").0;
 
         // Fix all metamethod name strings - they should never be collected
         // (like Lua's luaC_fix in luaT_init)
@@ -757,8 +757,9 @@ impl ObjectPool {
     // ==================== String Operations ====================
 
     /// Create or intern a string (Lua-style with proper hash collision handling)
+    /// Returns (StringId, is_new) where is_new indicates if a new string was created
     #[inline]
-    pub fn create_string(&mut self, s: &str) -> StringId {
+    pub fn create_string(&mut self, s: &str) -> (StringId, bool) {
         let len = s.len();
         let hash = Self::hash_string(s);
 
@@ -775,7 +776,7 @@ impl ObjectPool {
             match self.string_intern.find_or_insert_index(hash, compare) {
                 Ok(existing_id) => {
                     // Found existing string with same content
-                    return existing_id;
+                    return (existing_id, false);
                 }
                 Err(insert_idx) => {
                     // Not found, create new interned string with pre-computed hash
@@ -789,7 +790,7 @@ impl ObjectPool {
                     // Check if resize needed (pass dummy closure since we just inserted)
                     self.string_intern.maybe_resize(|_| hash);
 
-                    return id;
+                    return (id, true);
                 }
             }
         } else {
@@ -798,13 +799,14 @@ impl ObjectPool {
                 header: GcHeader::default(),
                 data: LuaString::with_hash(s.to_string(), hash),
             };
-            StringId(self.strings.alloc(gc_string))
+            (StringId(self.strings.alloc(gc_string)), true)
         }
     }
 
     /// Create string from owned String (avoids clone if not interned)
+    /// Returns (StringId, is_new) where is_new indicates if a new string was created
     #[inline]
-    pub fn create_string_owned(&mut self, s: String) -> StringId {
+    pub fn create_string_owned(&mut self, s: String) -> (StringId, bool) {
         let len = s.len();
         let hash = Self::hash_string(&s);
 
@@ -820,7 +822,7 @@ impl ObjectPool {
             match self.string_intern.find_or_insert_index(hash, compare) {
                 Ok(existing_id) => {
                     // Found existing string - drop the owned string
-                    return existing_id;
+                    return (existing_id, false);
                 }
                 Err(insert_idx) => {
                     // Not found, create new interned string with owned data and pre-computed hash
@@ -834,7 +836,7 @@ impl ObjectPool {
                     // Check if resize needed
                     self.string_intern.maybe_resize(|_| hash);
 
-                    return id;
+                    return (id, true);
                 }
             }
         } else {
@@ -843,7 +845,7 @@ impl ObjectPool {
                 header: GcHeader::default(),
                 data: LuaString::with_hash(s, hash),
             };
-            StringId(self.strings.alloc(gc_string))
+            (StringId(self.strings.alloc(gc_string)), true)
         }
     }
 
@@ -880,7 +882,7 @@ impl ObjectPool {
         // First phase: get substring info and check intern table
         let intern_result = {
             let Some(gs) = self.strings.get(source_id.0) else {
-                return self.create_string("");
+                return self.create_string("").0;
             };
             let s = gs.data.as_str();
 
@@ -889,7 +891,7 @@ impl ObjectPool {
             let end = end.min(s.len());
 
             if start >= end {
-                return self.create_string("");
+                return self.create_string("").0;
             }
 
             // Fast path: return original if full range
@@ -1374,13 +1376,13 @@ mod tests {
     fn test_string_interning() {
         let mut pool = ObjectPool::new();
 
-        let id1 = pool.create_string("hello");
-        let id2 = pool.create_string("hello");
+        let id1 = pool.create_string("hello").0;
+        let id2 = pool.create_string("hello").0;
 
         // Same string should return same ID
         assert_eq!(id1, id2);
 
-        let id3 = pool.create_string("world");
+        let id3 = pool.create_string("world").0;
         assert_ne!(id1, id3);
 
         // Verify content
@@ -1429,7 +1431,7 @@ mod tests {
         // Create 1000 different strings
         for i in 0..1000 {
             let s = format!("string_{}", i);
-            let id = pool.create_string(&s);
+            let id = pool.create_string(&s).0;
             ids.push((s, id));
         }
 
@@ -1446,7 +1448,7 @@ mod tests {
 
         // Verify interning works - same string should return same ID
         for (s, id) in &ids {
-            let id2 = pool.create_string(s);
+            let id2 = pool.create_string(s).0;
             assert_eq!(*id, id2, "Interning failed for '{}'", s);
         }
     }
@@ -1463,7 +1465,7 @@ mod tests {
 
         let mut ids = Vec::new();
         for s in &strings {
-            ids.push(pool.create_string(s));
+            ids.push(pool.create_string(s).0);
         }
 
         // All IDs should be unique (different strings)

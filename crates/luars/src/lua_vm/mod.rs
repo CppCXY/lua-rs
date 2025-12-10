@@ -5,11 +5,11 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
-use crate::gc::{FunctionId, GC, GcFunction, TableId, ThreadId, UpvalueId};
+use crate::gc::{FunctionId, GC, GcFunction, GcId, TableId, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
-    Chunk, CoroutineStatus, LuaString, LuaTable, LuaThread, LuaValue, LuaValueKind,
+    tm_flags, Chunk, CoroutineStatus, LuaString, LuaTable, LuaThread, LuaValue, LuaValueKind
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
@@ -32,10 +32,6 @@ pub struct LuaVM {
     // Used to store objects that should be protected from GC but not visible to Lua code
     // This is a GC root and all values in it are protected
     pub(crate) registry: TableId,
-
-    // Hot path GC debt counter - placed early in struct for cache locality
-    // This is updated on every allocation and checked frequently
-    pub(crate) gc_debt_local: isize,
 
     // GC roots buffer - pre-allocated to avoid allocation during GC
     gc_roots_buffer: Vec<LuaValue>,
@@ -127,7 +123,6 @@ impl LuaVM {
         let mut vm = LuaVM {
             global: TableId(0),                       // Will be initialized below
             registry: TableId(1),                     // Will be initialized below
-            gc_debt_local: -(200 * 1024), // Start with negative debt (can allocate 200KB before GC)
             gc_roots_buffer: Vec::with_capacity(512), // Pre-allocate roots buffer
             frames,
             frame_count: 0,
@@ -178,6 +173,11 @@ impl LuaVM {
 
         // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
         vm.registry_set_integer(1, globals_value);
+
+        // Reset GC debt after initialization (like Lua's luaC_fullgc at start)
+        // The objects created during initialization should not count towards the first GC
+        vm.gc.gc_debt = -(8 * 1024);
+        vm.gc.gc_estimate = vm.gc.total_bytes;
 
         vm
     }
@@ -235,6 +235,11 @@ impl LuaVM {
         // Register async functions
         #[cfg(feature = "async")]
         crate::stdlib::async_lib::register_async_functions(self);
+
+        // Reset GC state after loading standard libraries
+        // Like Lua's initial full GC after loading base libs
+        self.gc.gc_debt = -(8 * 1024);
+        self.gc.gc_estimate = self.gc.total_bytes;
     }
 
     /// Execute a chunk directly (convenience method)
@@ -981,7 +986,7 @@ impl LuaVM {
             } else {
                 // __index not found - cache this fact for future lookups
                 if let Some(metatable) = self.object_pool.get_table_mut(meta_id) {
-                    metatable.set_tm_absent(crate::lua_value::tm_flags::TM_INDEX);
+                    metatable.set_tm_absent(tm_flags::TM_INDEX);
                 }
             }
         }
@@ -1712,8 +1717,11 @@ impl LuaVM {
     /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
-        let id = self.object_pool.create_string(s);
-        self.gc_debt_local += (32 + s.len()) as isize;
+        let (id, is_new) = self.object_pool.create_string(s);
+        if is_new {
+            let size = 32 + s.len();
+            self.gc.track_object(GcId::StringId(id), size);
+        }
         LuaValue::string(id)
     }
 
@@ -1721,10 +1729,11 @@ impl LuaVM {
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let len = s.len();
-        let id = self.object_pool.create_string_owned(s);
-        let size = (32 + len) as isize;
-        self.gc_debt_local += size;
-        self.gc.total_bytes = self.gc.total_bytes.saturating_add(size as usize);
+        let (id, is_new) = self.object_pool.create_string_owned(s);
+        if is_new {
+            let size = 32 + len;
+            self.gc.track_object(GcId::StringId(id), size);
+        }
         LuaValue::string(id)
     }
 
@@ -1808,8 +1817,8 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
-        self.gc_debt_local += 256;
-        self.gc.total_bytes = self.gc.total_bytes.saturating_add(256);
+        // Track object for GC - adds to young_list in generational mode and updates gc_debt
+        self.gc.track_object(GcId::TableId(id), 256);
         LuaValue::table(id)
     }
 
@@ -1911,7 +1920,7 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         let id = self.object_pool.create_function(chunk, upvalue_ids);
-        self.gc_debt_local += 128;
+        self.gc.track_object(GcId::FunctionId(id), 128);
         LuaValue::function(id)
     }
 
@@ -1930,7 +1939,7 @@ impl LuaVM {
             .collect();
 
         let id = self.object_pool.create_c_closure(func, upvalue_ids);
-        self.gc_debt_local += 128;
+        self.gc.track_object(GcId::FunctionId(id), 128);
         LuaValue::function(id)
     }
 
@@ -1943,7 +1952,7 @@ impl LuaVM {
         upvalue: LuaValue,
     ) -> LuaValue {
         let id = self.object_pool.create_c_closure_inline1(func, upvalue);
-        self.gc_debt_local += 128;
+        self.gc.track_object(GcId::FunctionId(id), 128);
         LuaValue::function(id)
     }
 
@@ -1951,7 +1960,7 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let id = self.object_pool.create_upvalue_open(stack_index);
-        self.gc_debt_local += 64;
+        self.gc.track_object(GcId::UpvalueId(id), 64);
         id
     }
 
@@ -1959,7 +1968,7 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let id = self.object_pool.create_upvalue_closed(value);
-        self.gc_debt_local += 64;
+        self.gc.track_object(GcId::UpvalueId(id), 64);
         id
     }
 
@@ -2116,11 +2125,13 @@ impl LuaVM {
     /// OPTIMIZATION: Fast path is inlined, slow path is separate function
     #[inline(always)]
     fn check_gc(&mut self) {
-        // Fast path: check if gc_debt_local > 0
+        // Fast path: check if gc_debt > 0
         // Once debt becomes positive, trigger GC step
-        if self.gc_debt_local <= 0 {
+        if self.gc.gc_debt <= 0 {
             return;
         }
+        // Debug: print when GC is triggered
+        eprintln!("[GC] debt={} triggering GC step", self.gc.gc_debt);
         // Slow path: actual GC work
         self.check_gc_slow();
     }
@@ -2136,9 +2147,6 @@ impl LuaVM {
     #[cold]
     #[inline(never)]
     fn check_gc_slow(&mut self) {
-        // Sync local debt to GC
-        self.gc.gc_debt = self.gc_debt_local;
-
         // Collect roots using pre-allocated buffer (avoid allocation)
         self.gc_roots_buffer.clear();
 
@@ -2203,9 +2211,6 @@ impl LuaVM {
 
         // Perform GC step with complete root set
         self.gc.step(&self.gc_roots_buffer, &mut self.object_pool);
-
-        // Sync debt back from GC (it may have been reset to negative after collection)
-        self.gc_debt_local = self.gc.gc_debt;
     }
 
     // ============ GC Management ============
