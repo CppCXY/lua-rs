@@ -58,7 +58,6 @@ fn lua_print(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     } else {
         println!();
     }
-    println!(); // Extra blank line for visibility
 
     Ok(MultiValue::empty())
 }
