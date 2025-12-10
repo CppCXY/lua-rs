@@ -1320,13 +1320,7 @@ impl GC {
             LuaValueKind::Table => {
                 if let Some(id) = value.as_table_id() {
                     if let Some(t) = pool.tables.get(id.0) {
-                        let is_white = t.header.is_white();
-                        let is_fixed = t.header.is_fixed();
-                        eprintln!(
-                            "[GC] is_value_dead: table {} is_white={} is_fixed={}",
-                            id.0, is_white, is_fixed
-                        );
-                        return !is_fixed && is_white;
+                        return !t.header.is_fixed() && t.header.is_white();
                     }
                 }
                 false
@@ -1366,7 +1360,6 @@ impl GC {
         // Collect tables with weak mode and their entries to remove
         let mut tables_to_clear: Vec<(u32, Vec<LuaValue>)> = Vec::new();
         let mut total_cleared = 0;
-        let mut weak_tables_found = 0;
 
         for (id, table) in pool.tables.iter() {
             // Check if this table has a metatable with __mode
@@ -1375,20 +1368,11 @@ impl GC {
                     // Look for __mode key in metatable
                     let mode = self.get_weak_mode(mt, pool);
                     if let Some((weak_keys, weak_values)) = mode {
-                        weak_tables_found += 1;
                         // Collect keys to remove
                         let mut keys_to_remove = Vec::new();
                         for (key, value) in table.data.iter_all() {
                             let key_dead = weak_keys && self.is_value_dead(&key, pool);
                             let value_dead = weak_values && self.is_value_dead(&value, pool);
-
-                            // Debug: print value status
-                            if weak_values {
-                                eprintln!(
-                                    "[GC] weak table entry: value_dead={}, value={:?}",
-                                    value_dead, value
-                                );
-                            }
 
                             if key_dead || value_dead {
                                 keys_to_remove.push(key);
@@ -1401,8 +1385,6 @@ impl GC {
                 }
             }
         }
-
-        eprintln!("[GC] found {} weak tables", weak_tables_found);
 
         // Now actually remove the entries
         for (table_id, keys) in tables_to_clear {

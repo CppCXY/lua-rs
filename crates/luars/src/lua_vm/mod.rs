@@ -2130,8 +2130,6 @@ impl LuaVM {
         if self.gc.gc_debt <= 0 {
             return;
         }
-        // Debug: print when GC is triggered
-        eprintln!("[GC] debt={} triggering GC step", self.gc.gc_debt);
         // Slow path: actual GC work
         self.check_gc_slow();
     }
