@@ -1722,7 +1722,9 @@ impl LuaVM {
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let len = s.len();
         let id = self.object_pool.create_string_owned(s);
-        self.gc_debt_local += (32 + len) as isize;
+        let size = (32 + len) as isize;
+        self.gc_debt_local += size;
+        self.gc.total_bytes = self.gc.total_bytes.saturating_add(size as usize);
         LuaValue::string(id)
     }
 
@@ -1807,6 +1809,7 @@ impl LuaVM {
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let id = self.object_pool.create_table(array_size, hash_size);
         self.gc_debt_local += 256;
+        self.gc.total_bytes = self.gc.total_bytes.saturating_add(256);
         LuaValue::table(id)
     }
 
@@ -2113,12 +2116,9 @@ impl LuaVM {
     /// OPTIMIZATION: Fast path is inlined, slow path is separate function
     #[inline(always)]
     fn check_gc(&mut self) {
-        // Fast path: check if gc_debt_local > threshold
-        // Use a larger threshold to reduce GC frequency
-        // 1MB threshold = about 16000 small object allocations before GC
-        // The incremental GC will catch up during collection anyway
-        const GC_THRESHOLD: isize = 1024 * 1024;
-        if self.gc_debt_local <= GC_THRESHOLD {
+        // Fast path: check if gc_debt_local > 0
+        // Once debt becomes positive, trigger GC step
+        if self.gc_debt_local <= 0 {
             return;
         }
         // Slow path: actual GC work
@@ -2164,7 +2164,11 @@ impl LuaVM {
             let top = frame.top as usize;
             for i in 0..top {
                 if base_ptr + i < self.register_stack.len() {
-                    self.gc_roots_buffer.push(self.register_stack[base_ptr + i]);
+                    let value = self.register_stack[base_ptr + i];
+                    // Skip nil values - they don't need to be roots
+                    if !value.is_nil() {
+                        self.gc_roots_buffer.push(value);
+                    }
                 }
             }
         }

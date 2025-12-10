@@ -86,6 +86,20 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
 
         let opcode = get_op!(instr);
 
+        // CRITICAL: Implement Lua 5.4's top management (lvm.c line 1183)
+        // lua_assert(isIT(i) || (cast_void(L->top.p = base), 1));
+        // For non-IT instructions, reset top to base to prevent temporary values
+        // from being kept alive by GC.
+        // In Lua 5.4: base = ci->func.p + 1 (first register of current function)
+        // In our VM: base_ptr is already the first register position
+        // So we set top = 0 (relative to base_ptr), meaning no registers are "active"
+        // for GC purposes. IT instructions will set top correctly when needed.
+        unsafe {
+            if !opcode.uses_top() {
+                (*frame_ptr).top = 0;
+            }
+        }
+        
         match opcode {
             // ============ HOT PATH: Inline simple instructions (< 10 lines) ============
 

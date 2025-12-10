@@ -160,6 +160,30 @@ impl OpCode {
         unsafe { std::mem::transmute(byte) }
     }
 
+    /// Check if instruction uses "top" (IT mode - In Top)
+    /// These instructions depend on the value of 'top' from previous instruction
+    /// For all other instructions, top should be reset to base + nactvar
+    #[inline(always)]
+    /// Check if this opcode uses "top" from previous instruction (isIT in Lua 5.4)
+    /// These instructions expect top to be set correctly by previous instruction.
+    /// For all other instructions, Lua 5.4 resets top = base before execution.
+    /// 
+    /// From Lua 5.4 lopcodes.c:
+    /// - CALL: IT=1 (uses top for vararg count)
+    /// - TAILCALL: IT=1
+    /// - RETURN: IT=1 (uses top for return count)
+    /// - SETLIST: IT=1 (uses top for list size)
+    /// - VARARGPREP: IT=1 (sets up varargs)
+    /// 
+    /// Note: RETURN0, RETURN1, Vararg, Concat are NOT IT instructions in Lua 5.4!
+    pub fn uses_top(self) -> bool {
+        use OpCode::*;
+        matches!(
+            self,
+            Call | TailCall | Return | SetList | VarargPrep
+        )
+    }
+
     /// Get the instruction format mode for this opcode
     /// Based on Lua 5.4 lopcodes.c luaP_opmodes table
     pub fn get_mode(self) -> OpMode {

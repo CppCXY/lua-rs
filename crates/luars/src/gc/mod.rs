@@ -158,12 +158,12 @@ impl GC {
             total_bytes: 0,
             state: GcState::Pause,
             current_white: 0,
-            gc_kind: GcKind::Generational, // Default to generational mode like Lua 5.4
+            gc_kind: GcKind::Generational, // Use generational mode like Lua 5.4
             sweep_index: 0,
             propagate_work: 0,
-            gc_pause: 200,      // Like Lua: 200 = wait until memory doubles
-            gen_minor_mul: 25,  // Minor GC when memory grows 25%
-            gen_major_mul: 100, // Major GC when memory grows 100% since last major
+            gc_pause: 200,
+            gen_minor_mul: 20,  // Minor GC when memory grows 20%
+            gen_major_mul: 50,  // Major GC when memory grows 50% (降低以更频繁触发major GC清除weak tables)
             last_atomic: 0,
             gc_estimate: 0,
             young_list: Vec::with_capacity(1024),
@@ -299,63 +299,36 @@ impl GC {
         }
     }
 
-    /// Incremental GC step - original incremental mode
+    /// Incremental GC step - complete one full cycle
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        const WORK_PER_STEP: usize = 4096;
-        let mut work = 0;
-
-        // State machine for incremental GC
-        loop {
-            match self.state {
-                GcState::Pause => {
-                    // Start new cycle: mark roots and transition to propagate
-                    self.start_cycle(roots, pool);
-                    self.state = GcState::Propagate;
-                    work += 100; // Small fixed cost
-                }
-
-                GcState::Propagate => {
-                    // Incremental marking: process some gray objects
-                    let marked = self.propagate_step(pool, WORK_PER_STEP - work);
-                    work += marked;
-
-                    if self.gray.is_empty() && self.grayagain.is_empty() {
-                        // All marking done, go to atomic phase
-                        self.state = GcState::Atomic;
-                    }
-                }
-
-                GcState::Atomic => {
-                    // Atomic phase - must finish marking (like Lua's atomic)
-                    // Process any grayagain objects
-                    while let Some(gc_id) = self.grayagain.pop() {
-                        self.mark_one(gc_id, pool);
-                    }
-                    // Clear weak table entries before sweep
-                    self.clear_weak_tables(pool);
-                    // Start sweep
-                    self.sweep_index = 0;
-                    self.state = GcState::Sweep;
-                    work += 50;
-                }
-
-                GcState::Sweep => {
-                    // Complete sweep in one step (pools are iterated directly)
-                    let swept = self.sweep_step(pool, WORK_PER_STEP - work);
-                    work += swept;
-                    // sweep_step handles state transition and finish_cycle
-                    break;
-                }
-            }
-
-            // Check if we've done enough work for this step
-            if work >= WORK_PER_STEP {
-                break;
-            }
+        // Pause -> Start cycle and mark roots
+        if self.state == GcState::Pause {
+            self.start_cycle(roots, pool);
+            self.state = GcState::Propagate;
         }
-
-        // Reduce debt by work done (convert work to "bytes paid off")
-        self.gc_debt -= (work as isize) * 2;
+        
+        // Propagate -> Mark all gray objects
+        if self.state == GcState::Propagate {
+            while let Some(gc_id) = self.gray.pop() {
+                self.mark_one(gc_id, pool);
+            }
+            self.state = GcState::Atomic;
+        }
+        
+        // Atomic -> Process grayagain and clear weak tables
+        if self.state == GcState::Atomic {
+            while let Some(gc_id) = self.grayagain.pop() {
+                self.mark_one(gc_id, pool);
+            }
+            self.clear_weak_tables(pool);
+            self.sweep_index = 0;
+            self.state = GcState::Sweep;
+        }
+        
+        // Sweep -> Clean up dead objects
+        if self.state == GcState::Sweep {
+            self.sweep_step(pool, usize::MAX);
+        }
     }
 
     /// Start a new GC cycle - mark roots and build gray list
@@ -664,6 +637,7 @@ impl GC {
         }
         for id in dead_tables {
             pool.tables.free(id);
+            self.total_bytes = self.total_bytes.saturating_sub(256);
             self.record_deallocation(256);
             collected += 1;
         }
@@ -677,6 +651,7 @@ impl GC {
         }
         for id in dead_funcs {
             pool.functions.free(id);
+            self.total_bytes = self.total_bytes.saturating_sub(128);
             self.record_deallocation(128);
             collected += 1;
         }
@@ -703,6 +678,7 @@ impl GC {
         }
         for id in dead_strings {
             pool.strings.free(id);
+            self.total_bytes = self.total_bytes.saturating_sub(64);
             self.record_deallocation(64);
             collected += 1;
         }
@@ -1372,7 +1348,6 @@ impl GC {
             if let Some(mt_id) = table.data.get_metatable().and_then(|v| v.as_table_id()) {
                 if let Some(mt) = pool.tables.get(mt_id.0) {
                     // Look for __mode key in metatable
-                    // We need to find the string "__mode" in the metatable
                     let mode = self.get_weak_mode(mt, pool);
                     if let Some((weak_keys, weak_values)) = mode {
                         // Collect keys to remove
@@ -1380,6 +1355,7 @@ impl GC {
                         for (key, value) in table.data.iter_all() {
                             let key_dead = weak_keys && self.is_value_dead(&key, pool);
                             let value_dead = weak_values && self.is_value_dead(&value, pool);
+                            
                             if key_dead || value_dead {
                                 keys_to_remove.push(key);
                             }
