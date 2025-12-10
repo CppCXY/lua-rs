@@ -1097,6 +1097,13 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         false
     };
 
+    // Record freereg before condition compilation
+    // After condition is tested, we must reset freereg so the condition's
+    // temporary register can be reused by the loop body. This is critical
+    // for GC: if we don't reset, the condition value stays on the register
+    // stack and becomes a GC root, preventing weak table values from being collected.
+    let freereg_before_cond = c.freereg;
+    
     let end_jump = if is_infinite_loop {
         // Infinite loop: no condition check, no exit jump
         // Just compile body and jump back
@@ -1113,6 +1120,10 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
         Some(emit_jump(c, OpCode::Jmp))
     };
+    
+    // Reset freereg after condition test to release temporary registers
+    // This matches official Lua's behavior: freeexp(fs, e) after condition
+    c.freereg = freereg_before_cond;
 
     // Compile body
     if let Some(body) = stat.get_block() {
