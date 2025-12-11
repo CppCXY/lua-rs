@@ -203,9 +203,44 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
     Ok(v)
 }
 
-/// NEW: Compile unary expression (stub - uses old implementation)
+/// NEW: Compile unary expression (returns ExpDesc with jump lists for NOT operator)
+/// Aligned with luaK_prefix in lcode.c for boolean optimization
 fn compile_unary_expr_desc(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<ExpDesc, String> {
-    // For now, call old implementation
+    use crate::compiler::expdesc::ExpKind;
+    
+    let op = expr.get_op_token().ok_or("Unary expression missing operator")?;
+    let op_kind = op.get_op();
+    // Special handling for NOT operator - swap jump lists for boolean optimization
+    if op_kind == UnaryOperator::OpNot {
+        let operand = expr.get_expr().ok_or("Unary expression missing operand")?;
+        let mut e = compile_expr_desc(c, &operand)?;
+        
+        // Constant folding for NOT
+        match e.kind {
+            ExpKind::VNil | ExpKind::VFalse => {
+                // not nil -> true, not false -> true
+                e.kind = ExpKind::VTrue;
+                e.t = -1;
+                e.f = -1;
+                return Ok(e);
+            }
+            ExpKind::VTrue | ExpKind::VK | ExpKind::VKInt | ExpKind::VKFlt => {
+                // not true -> false, not constant -> false
+                e.kind = ExpKind::VFalse;
+                e.t = -1;
+                e.f = -1;
+                return Ok(e);
+            }
+            _ => {}
+        }
+        
+        // For other expressions: swap t and f jump lists
+        // This is the KEY optimization: "not x" has opposite boolean behavior
+        std::mem::swap(&mut e.t, &mut e.f);
+        return Ok(e);
+    }
+    
+    // For other unary operators, fall back to old implementation
     let reg = compile_unary_expr_to(c, expr, None)?;
     Ok(ExpDesc::new_nonreloc(reg))
 }

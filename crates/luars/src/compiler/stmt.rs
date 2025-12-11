@@ -3,8 +3,10 @@
 use super::assign::compile_assign_stat_new;
 use super::expr::{
     compile_call_expr, compile_call_expr_with_returns_and_dest, compile_expr, compile_expr_to,
-    compile_var_expr,
+    compile_var_expr, compile_expr_desc,
 };
+use super::expdesc::{ExpDesc, ExpKind};
+use super::exp2reg::{exp_to_any_reg, discharge_vars};
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
 use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr_to};
@@ -858,6 +860,53 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     Ok(())
 }
 
+/// Convert ExpDesc to boolean condition with TEST instruction
+/// Returns the jump position to patch (jump if condition is FALSE)
+/// This function handles the jump lists in ExpDesc (t and f fields)
+/// Aligned with official Lua's approach: TEST directly on the source register
+fn exp_to_condition(c: &mut Compiler, e: &mut ExpDesc) -> usize {
+    discharge_vars(c, e);
+    
+    // Check if expression has inverted semantics (from NOT operator)
+    // If t and f were swapped by NOT, we need to invert the TEST condition
+    // Official Lua checks if (e->f != NO_JUMP) to determine inversion
+    let inverted = e.f != -1;
+    let test_c = if inverted { 1 } else { 0 };
+    
+    // Standard case: emit TEST instruction
+    match e.kind {
+        ExpKind::VNil | ExpKind::VFalse => {
+            // Always false - emit unconditional jump
+            return emit_jump(c, OpCode::Jmp);
+        }
+        ExpKind::VTrue | ExpKind::VK | ExpKind::VKInt | ExpKind::VKFlt => {
+            // Always true - no jump needed (will be optimized away by patch_jump)
+            return emit_jump(c, OpCode::Jmp);
+        }
+        ExpKind::VLocal => {
+            // Local variable: TEST directly on the variable's register
+            // NO MOVE needed! This is key for matching official Lua bytecode
+            let reg = e.var.ridx;
+            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, test_c));
+            return emit_jump(c, OpCode::Jmp);
+        }
+        ExpKind::VNonReloc => {
+            // Already in a register: TEST directly
+            let reg = e.info;
+            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, test_c));
+            reset_freereg(c);
+            return emit_jump(c, OpCode::Jmp);
+        }
+        _ => {
+            // Other cases: need to put in a register first
+            let reg = exp_to_any_reg(c, e);
+            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, test_c));
+            reset_freereg(c);
+            return emit_jump(c, OpCode::Jmp);
+        }
+    }
+}
+
 /// Compile if statement
 fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
     // Structure: if <condition> then <block> [elseif <condition> then <block>]* [else <block>] end
@@ -916,42 +965,22 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
                 emit_jump(c, OpCode::Jmp)
             }
         } else {
-            // Standard path: compile expression + Test
-            let cond_reg = compile_expr(c, &cond)?;
-            let test_c = if invert { 1 } else { 0 };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Test, cond_reg, 0, test_c),
-            );
-            // Reset freereg after condition - temp registers are no longer needed
-            reset_freereg(c);
-
+            // Standard path: compile expression as ExpDesc for boolean optimization
+            let mut cond_desc = compile_expr_desc(c, &cond)?;
+            
+            // exp_to_condition will handle NOT optimization (swapped jump lists)
+            let next_jump = exp_to_condition(c, &mut cond_desc);
+            
             if invert {
-                // Same inverted optimization logic for Test instruction
-                let jump_pos = emit_jump(c, OpCode::Jmp);
-                if let Some(body) = then_body {
-                    let stats: Vec<_> = body.get_stats().collect();
-                    if stats.len() == 1 {
-                        match &stats[0] {
-                            LuaStat::BreakStat(_) => {
-                                c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
-                            }
-                            LuaStat::ReturnStat(ret_stat) => {
-                                compile_return_stat(c, ret_stat)?;
-                            }
-                            _ => unreachable!(
-                                "is_single_jump_block should only return true for break/return"
-                            ),
-                        }
-                    }
-                }
-                return Ok(());
+                // Inverted mode (currently disabled)
+                // Would need different handling here
+                unreachable!("Inverted mode is currently disabled");
             }
-
-            emit_jump(c, OpCode::Jmp)
+            
+            next_jump
         };
 
-        // Compile then block (only in normal mode, already handled in inverted mode)
+        // Compile then block
         if let Some(body) = then_body {
             compile_block(c, &body)?;
         }
@@ -972,11 +1001,9 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
             let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, false)? {
                 emit_jump(c, OpCode::Jmp)
             } else {
-                let cond_reg = compile_expr(c, &cond)?;
-                emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-                // Reset freereg after condition - temp registers are no longer needed
-                reset_freereg(c);
-                emit_jump(c, OpCode::Jmp)
+                // Use ExpDesc compilation for boolean optimization
+                let mut cond_desc = compile_expr_desc(c, &cond)?;
+                exp_to_condition(c, &mut cond_desc)
             };
 
             // Compile elseif block
@@ -1053,10 +1080,9 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
         // OPTIMIZATION: register comparison (e.g., i < n)
         Some(emit_jump(c, OpCode::Jmp))
     } else {
-        // Standard path: compile expression + Test
-        let cond_reg = compile_expr(c, &cond)?;
-        emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-        Some(emit_jump(c, OpCode::Jmp))
+        // Standard path: use ExpDesc for boolean optimization
+        let mut cond_desc = compile_expr_desc(c, &cond)?;
+        Some(exp_to_condition(c, &mut cond_desc))
     };
 
     // Reset freereg after condition test to release temporary registers
