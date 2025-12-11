@@ -220,6 +220,10 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::LoadTrue => format!("LOADTRUE {}", a),
             OpCode::LFalseSkip => format!("LFALSESKIP {}", a),
             
+            // Test instructions (iAk format)
+            OpCode::Test => format!("TEST {} {}", a, k as u32),
+            OpCode::TestSet => format!("TESTSET {} {} {}", a, b, k as u32),
+            
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
 

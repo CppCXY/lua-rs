@@ -185,10 +185,7 @@ pub fn add_local(c: &mut Compiler, name: String, register: u32) {
     add_local_with_attrs(c, name, register, false, false);
 }
 
-/// Mark that an upvalue needs to be closed (对齐lparser.c的markupval)
-pub(crate) fn mark_upvalue(c: &mut Compiler) {
-    c.needclose = true;
-}
+
 
 /// Add a new local variable with <const> and <close> attributes
 pub fn add_local_with_attrs(
@@ -217,6 +214,8 @@ pub fn add_local_with_attrs(
     }
 
     // Emit TBC instruction for to-be-closed variables
+    // NOTE: <close> variables use TBC instruction for cleanup, NOT the needclose flag!
+    // needclose is ONLY for upvalues (captured locals), not for <close> variables
     if is_to_be_closed {
         emit(c, Instruction::encode_abc(OpCode::Tbc, register, 0, 0));
     }
@@ -267,10 +266,17 @@ pub fn resolve_upvalue_from_chain(c: &mut Compiler, name: &str) -> Option<usize>
         scope.upvalues.len() - 1
     };
     
-    // Mark that we need to close upvalues ONLY if capturing a local variable
-    // (对齐lparser.c的markupval逻辑)
+    // CRITICAL: If capturing parent's local variable, mark PARENT's block.upval=true
+    // (对齐lparser.c的markupval: mark parent block's upval flag)
+    // This will propagate to needclose when parent's block is closed
     if is_local {
-        mark_upvalue(c);
+        if let Some(prev_ptr) = c.prev {
+            unsafe {
+                if let Some(ref mut block) = (*prev_ptr).block {
+                    block.upval = true;
+                }
+            }
+        }
     }
 
     Some(upvalue_index)
@@ -382,6 +388,13 @@ pub(crate) fn leaveblock(c: &mut Compiler) {
     // Emit CLOSE if needed
     if !hasclose && bl.previous.is_some() && bl.upval {
         emit(c, Instruction::encode_abc(OpCode::Close, stklevel, 0, 0));
+    }
+    
+    // CRITICAL: If block has upvalues, mark function's needclose flag
+    // (对齐Official Lua: block.upval propagates to fs->needclose)
+    // This ensures RETURN instructions will have k flag set
+    if bl.upval {
+        c.needclose = true;
     }
     
     // Free registers

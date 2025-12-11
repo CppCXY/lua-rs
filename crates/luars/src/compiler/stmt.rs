@@ -266,29 +266,22 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
             // Check if last expression is a function call (which might return multiple values)
             else if let LuaExpr::CallExpr(call_expr) = last_expr {
                 if remaining_vars > 1 {
-                    // Multi-return call: DON'T pass dest to avoid overwriting pre-allocated registers
-                    // Let the call compile into safe temporary position, results will be in target_base
-                    // because we've pre-allocated the registers
-                    //
-                    // CRITICAL: We need to compile without dest, then the results will naturally
-                    // end up in sequential registers starting from wherever the function was placed.
-                    // Since we pre-allocated target_base..target_base+remaining_vars, freereg points
-                    // past them, so the call will compile into fresh registers.
+                    // Multi-return call: pass target_base as dest so results go directly there
+                    // OFFICIAL LUA: funcargs() in lparser.c passes expdesc with VLocal/VNonReloc
+                    // which tells luaK_storevar/discharge to use that register as base
                     let result_base = compile_call_expr_with_returns_and_dest(
                         c,
                         call_expr,
                         remaining_vars,
-                        None, // Don't specify dest - let call choose safe location
+                        Some(target_base), // Pass dest to compile results directly into target registers
                     )?;
 
-                    // Move results to target registers if needed
+                    // Verify results are in target registers (should be guaranteed)
+                    debug_assert_eq!(result_base, target_base, "Call should place results in target registers");
+                    
+                    // Add all result registers
                     for i in 0..remaining_vars {
-                        let src = result_base + i as u32;
-                        let dst = target_base + i as u32;
-                        if src != dst {
-                            emit_move(c, dst, src);
-                        }
-                        regs.push(dst);
+                        regs.push(target_base + i as u32);
                     }
 
                     // Define locals and return
@@ -445,9 +438,10 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 Some(last_target_reg),
             )?;
             // Return with B=0 (all out)
+            // NOTE: k flag initially false, will be set by finish_function if needclose=true
             emit(
                 c,
-                Instruction::create_abck(OpCode::Return, first, 0, 0, true),
+                Instruction::create_abck(OpCode::Return, first, 0, 0, false),
             );
 
             // Tail call optimization (官方lparser.c L1824-1827)
@@ -535,10 +529,11 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             }
         }
 
-        // Return instruction: OpCode::Return, A = first, B = num_values + 1, k = 1
+        // Return instruction: OpCode::Return, A = first, B = num_values + 1
+        // NOTE: k flag initially false, will be set by finish_function if needclose=true
         emit(
             c,
-            Instruction::create_abck(OpCode::Return, first, (num_exprs + 1) as u32, 0, true),
+            Instruction::create_abck(OpCode::Return, first, (num_exprs + 1) as u32, 0, false),
         );
     }
 
@@ -576,20 +571,20 @@ fn exp_to_condition(c: &mut Compiler, e: &mut ExpDesc) -> usize {
             // Local variable: TEST directly on the variable's register
             // NO MOVE needed! This is key for matching official Lua bytecode
             let reg = e.var.ridx;
-            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, test_c));
+            emit(c, Instruction::create_abck(OpCode::Test, reg, 0, 0, test_c != 0));
             return emit_jump(c, OpCode::Jmp);
         }
         ExpKind::VNonReloc => {
             // Already in a register: TEST directly
             let reg = e.info;
-            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, test_c));
+            emit(c, Instruction::create_abck(OpCode::Test, reg, 0, 0, test_c != 0));
             reset_freereg(c);
             return emit_jump(c, OpCode::Jmp);
         }
         _ => {
             // Other cases: need to put in a register first
             let reg = exp_to_any_reg(c, e);
-            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, test_c));
+            emit(c, Instruction::create_abck(OpCode::Test, reg, 0, 0, test_c != 0));
             reset_freereg(c);
             return emit_jump(c, OpCode::Jmp);
         }
@@ -865,7 +860,7 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
         } else {
             // Standard path
             let cond_reg = compile_expr(c, &cond_expr)?;
-            emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
+            emit(c, Instruction::create_abck(OpCode::Test, cond_reg, 0, 0, false));
             let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
             emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
         }

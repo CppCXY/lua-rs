@@ -83,6 +83,11 @@ pub fn luak_posfix(
         }
         BinaryOperator::OpConcat => {
             // e1 .. e2
+            // CRITICAL: Ensure e2 goes to the register right after e1
+            // If e1 is VReloc (previous CONCAT), get its register from var.ridx
+            let e1_reg = if e1.kind == ExpKind::VReloc { e1.var.ridx } else { e1.info };
+            // Set freereg to e1_reg+1 so exp_to_next_reg puts e2 there
+            c.freereg = e1_reg + 1;
             // Force e2 to next register (consecutive with e1)
             exp_to_next_reg(c, e2);
             codeconcat(c, e1, e2)?;
@@ -132,16 +137,22 @@ fn codeconcat(c: &mut Compiler, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), St
             let ie2 = c.chunk.code[ie2_pc];
             if Instruction::get_opcode(ie2) == OpCode::Concat {
                 let n = Instruction::get_b(ie2); // # of elements concatenated in e2
+                // Get e1's register: if VReloc use var.ridx, else use info
+                let e1_reg = if e1.kind == ExpKind::VReloc { e1.var.ridx } else { e1.info };
+                // Check if e1 ends just before e2's concatenation starts
+                let e2_start_reg = Instruction::get_a(ie2);
                 lua_assert(
-                    e1.info == Instruction::get_a(ie2) - 1,
+                    e1_reg == e2_start_reg - 1,
                     "CONCAT merge: e1 must be just before e2",
                 );
-                let result_reg = e1.info;
+                let result_reg = e1_reg;
                 free_exp(c, e1);
-                // Correct first element and increase count
+                // Merge: extend e2's CONCAT to include e1
                 c.chunk.code[ie2_pc] = Instruction::encode_abc(OpCode::Concat, result_reg, n + 1, 0);
-                e1.kind = ExpKind::VNonReloc;
-                e1.info = result_reg;
+                // Result is still VReloc pointing to the merged instruction
+                e1.kind = ExpKind::VReloc;
+                e1.info = ie2_pc as u32;
+                e1.var.ridx = result_reg;
                 return Ok(());
             }
         }
@@ -151,13 +162,15 @@ fn codeconcat(c: &mut Compiler, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), St
     // CRITICAL: Do NOT call exp_to_next_reg(e1) - e1 is already in the correct register!
     // Official Lua: luaK_codeABC(fs, OP_CONCAT, e1->u.info, 2, 0);
     let a_value = e1.info;
-    let _pc = c.chunk.code.len();
+    let pc = c.chunk.code.len();
     emit(c, Instruction::encode_abc(OpCode::Concat, a_value, 2, 0));
     free_exp(c, e2);
-    // OPTIMIZATION: Keep result as VNONRELOC instead of VRELOC
-    // This avoids unnecessary register reallocation in assignments
-    e1.kind = ExpKind::VNonReloc;
-    e1.info = a_value;  // Result is in the same register as e1
+    // CRITICAL: Result must be VReloc pointing to the CONCAT instruction
+    // This allows subsequent CONCAT operations to detect and merge
+    // Store register in var.ridx for merge comparison
+    e1.kind = ExpKind::VReloc;
+    e1.info = pc as u32;      // Point to the CONCAT instruction
+    e1.var.ridx = a_value;    // Save register for merge check
     Ok(())
 }
 
@@ -342,7 +355,7 @@ fn luak_goiftrue(c: &mut Compiler, e: &mut ExpDesc) {
         _ => {
             // Emit TEST instruction
             let reg = exp_to_any_reg(c, e);
-            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, 0));
+            emit(c, Instruction::create_abck(OpCode::Test, reg, 0, 0, false));
             let pc = emit_jump(c, OpCode::Jmp);
             luak_concat(c, &mut e.f, pc as i32);
             e.t = NO_JUMP;
@@ -367,7 +380,7 @@ fn luak_goiffalse(c: &mut Compiler, e: &mut ExpDesc) {
         _ => {
             // Emit TEST instruction with inverted condition
             let reg = exp_to_any_reg(c, e);
-            emit(c, Instruction::encode_abc(OpCode::Test, reg, 0, 1));
+            emit(c, Instruction::create_abck(OpCode::Test, reg, 0, 0, true));
             let pc = emit_jump(c, OpCode::Jmp);
             luak_concat(c, &mut e.t, pc as i32);
             e.f = NO_JUMP;

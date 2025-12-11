@@ -65,8 +65,9 @@ pub struct Compiler<'a> {
     pub(crate) vm_ptr: *mut LuaVM,       // VM pointer for string pool access
     pub(crate) last_line: u32,           // Last line number for line_info (not used currently)
     pub(crate) line_index: &'a LineIndex, // Line index for error reporting
-    pub(crate) needclose: bool,          // Function needs to close upvalues when returning
+    pub(crate) needclose: bool,          // Function needs to close upvalues when returning (对齐lparser.h FuncState.needclose)
     pub(crate) block: Option<Box<BlockCnt>>, // Current block (对齐FuncState.bl)
+    pub(crate) prev: Option<*mut Compiler<'a>>, // Enclosing function (对齐lparser.h FuncState.prev)
     pub(crate) _phantom: std::marker::PhantomData<&'a mut LuaVM>,
 }
 
@@ -140,16 +141,18 @@ impl<'a> Compiler<'a> {
             line_index,
             needclose: false,
             block: None,
+            prev: None, // Main compiler has no parent
             _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Create a new compiler with a parent scope chain
+    /// Create a new compiler with a parent scope chain and parent compiler
     pub fn new_with_parent(
         parent_scope: Rc<RefCell<ScopeChain>>,
         vm_ptr: *mut LuaVM,
         line_index: &'a LineIndex,
         current_line: u32,
+        prev: Option<*mut Compiler<'a>>, // Parent compiler
     ) -> Self {
         Compiler {
             chunk: Chunk::new(),
@@ -167,6 +170,7 @@ impl<'a> Compiler<'a> {
             line_index,
             needclose: false,
             block: None,
+            prev,
             _phantom: std::marker::PhantomData,
         }
     }

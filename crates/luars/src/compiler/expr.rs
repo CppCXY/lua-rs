@@ -651,46 +651,6 @@ fn compile_binary_expr_to(
     expr: &LuaBinaryExpr,
     dest: Option<u32>,
 ) -> Result<u32, String> {
-    // CONCAT OPTIMIZATION: If dest is specified, compile directly to dest
-    // This eliminates MOVE instructions for function call arguments
-    let (left, right) = expr.get_exprs().ok_or("error")?;
-    let op = expr.get_op_token().ok_or("error")?;
-    let op_kind = op.get_op();
-
-    if matches!(op_kind, BinaryOperator::OpConcat) && dest.is_some() {
-        let d = dest.unwrap();
-
-        // Compile left operand and force it to dest
-        let mut v = compile_expr_desc(c, &left)?;
-        discharge_to_reg(c, &mut v, d);
-        c.freereg = d + 1; // Ensure next allocation is d+1
-
-        // Compile right operand to d+1
-        let mut v2 = compile_expr_desc(c, &right)?;
-        discharge_to_reg(c, &mut v2, d + 1);
-        c.freereg = d + 2;
-
-        // Check for CONCAT merge optimization
-        if c.chunk.code.len() > 0 {
-            let last_idx = c.chunk.code.len() - 1;
-            let ie2 = c.chunk.code[last_idx];
-            if Instruction::get_opcode(ie2) == OpCode::Concat {
-                let n = Instruction::get_b(ie2);
-                if d + 1 == Instruction::get_a(ie2) {
-                    // Merge
-                    c.chunk.code[last_idx] = Instruction::encode_abc(OpCode::Concat, d, n + 1, 0);
-                    c.freereg = d + 1;
-                    return Ok(d);
-                }
-            }
-        }
-
-        // Emit CONCAT
-        emit(c, Instruction::encode_abc(OpCode::Concat, d, 2, 0));
-        c.freereg = d + 1;
-        return Ok(d);
-    }
-
     // OPTIMIZATION: If dest is specified, temporarily set freereg to dest
     // This allows arithmetic/bitwise operations to allocate directly into dest
     let saved_freereg = if let Some(d) = dest {
@@ -701,7 +661,7 @@ fn compile_binary_expr_to(
         None
     };
 
-    // Use new infix/posfix system for other operators
+    // Use new infix/posfix system for all operators
     let mut result_desc = compile_binary_expr_desc(c, expr)?;
 
     // Restore freereg if we modified it
@@ -971,38 +931,29 @@ pub fn compile_call_expr_with_returns_and_dest(
         }
     } else {
         // Regular call: compile function expression
-        // OPTIMIZATION: If dest is specified and safe (>= nactvar), compile function directly to dest
-        // This avoids unnecessary MOVE instructions
-        let nactvar = c.nactvar as u32;
-
+        // OFFICIAL LUA STRATEGY: Always compile function to natural position (freereg)
+        // Let it allocate naturally, then move result to dest if needed after call
         let func_reg = if let Some(d) = dest {
-            // Check if we can safely use dest for function
-            let args_start = d + 1;
-            if d >= nactvar && args_start >= nactvar {
-                // Safe to compile directly to dest
+            let nactvar = c.nactvar as u32;
+            // Check if dest can be safely used for the function itself
+            // It's safe ONLY if: d >= nactvar AND d+1 >= nactvar (arguments won't overlap locals)
+            if d >= nactvar {
+                // Try to compile directly to dest
                 let temp_func_reg = compile_expr_to(c, &prefix_expr, Some(d))?;
-                // Ensure we got the register we asked for (or move if needed)
-                if temp_func_reg != d {
-                    ensure_register(c, d);
-                    emit_move(c, d, temp_func_reg);
-                }
-                // Reset freereg to just past func_reg
-                c.freereg = d + 1;
-                d
-            } else {
-                // dest < nactvar: we need to use a safe temporary register
-                let temp_func_reg = compile_expr(c, &prefix_expr)?;
-                let new_func_reg = if c.freereg < nactvar {
-                    c.freereg = nactvar;
-                    alloc_register(c)
+                if temp_func_reg == d {
+                    // Successfully compiled to dest
+                    c.freereg = d + 1;
+                    d
                 } else {
-                    alloc_register(c)
-                };
-                if temp_func_reg != new_func_reg {
-                    emit_move(c, new_func_reg, temp_func_reg);
+                    // Compiled elsewhere - use it directly (don't copy unnecessarily)
+                    need_move_to_dest = true;
+                    temp_func_reg
                 }
+            } else {
+                // dest overlaps with locals - compile function naturally
+                // Result will be moved to dest after the call
                 need_move_to_dest = true;
-                new_func_reg
+                compile_expr(c, &prefix_expr)?
             }
         } else {
             // No dest specified - use default behavior
@@ -1972,10 +1923,10 @@ pub fn compile_closure_expr_to(
     // Handle empty function body (e.g., function noop() end)
     let has_body = closure.get_block().is_some();
 
-    // Create a new compiler for the function body with parent scope chain
+    // Create a new compiler for the function body with parent scope chain and parent compiler
     // No need to sync anymore - scope_chain is already current
     let mut func_compiler =
-        Compiler::new_with_parent(c.scope_chain.clone(), c.vm_ptr, c.line_index, c.last_line);
+        Compiler::new_with_parent(c.scope_chain.clone(), c.vm_ptr, c.line_index, c.last_line, Some(c as *mut Compiler));
     func_compiler.chunk.source_name = func_name;
     // For methods (function defined with colon syntax), add implicit 'self' parameter
     let mut param_offset = 0;
@@ -2069,23 +2020,11 @@ pub fn compile_closure_expr_to(
     // Add implicit return if needed (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
     let base_reg = freereg_before_leave;
 
-    if func_compiler.chunk.code.is_empty() {
-        // Empty function - use Return0 with correct base
-        let ret_instr = Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0);
-        func_compiler.chunk.code.push(ret_instr);
-    } else {
-        let last_opcode = Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap());
-        // Don't add return if last instruction is already a return
-        if !matches!(
-            last_opcode,
-            OpCode::Return | OpCode::Return0 | OpCode::Return1 | OpCode::TailCall
-        ) {
-            // Add final return with correct base register (aligns with luaK_ret(fs, nvarstack, 0))
-            // nret=0 means we use Return0 opcode
-            let ret_instr = Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0);
-            func_compiler.chunk.code.push(ret_instr);
-        }
-    }
+    // Add implicit return (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
+    // Official Lua ALWAYS adds final return, no matter what the last instruction is!
+    // This matches lparser.c:761: luaK_ret(fs, luaY_nvarstack(fs), 0);  /* final return */
+    let ret_instr = Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0);
+    func_compiler.chunk.code.push(ret_instr);
 
     // Set max_stack_size to the maximum of peak_freereg and current max_stack_size
     // peak_freereg tracks registers allocated via alloc_register()
@@ -2108,13 +2047,11 @@ pub fn compile_closure_expr_to(
             index: uv.index,
         })
         .collect();
-
-    // Check if this function captures any local variables from parent
-    // If so, mark parent's needclose (对齐lparser.c的markupval)
-    let has_local_captures = upvalues.iter().any(|uv| uv.is_local);
-    if has_local_captures {
-        mark_upvalue(c);
-    }
+    
+    // NOTE: needclose is now handled by BlockCnt.upval mechanism in resolve_upvalue_from_chain
+    // When sub-function captures parent's local, parent's block.upval is set to true
+    // Then leaveblock propagates block.upval to c.needclose
+    // This aligns with Official Lua's architecture (lparser.c markupval + leaveblock)
 
     // Move child chunks from func_compiler to its own chunk's child_protos
     let child_protos: Vec<std::rc::Rc<Chunk>> = func_compiler
