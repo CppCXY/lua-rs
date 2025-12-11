@@ -170,6 +170,18 @@ pub fn exp_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) -> u32 {
         // Fall through: it's a local variable, need to copy to new register
     }
 
+    if e.kind == ExpKind::VReloc {
+        // CRITICAL: VReloc means result is already in a register (saved in var.ridx)
+        // The instruction at e.info can be patched if needed, but the value is live
+        // DO NOT allocate a new register - just return the existing one
+        // This is essential for CONCAT and other operations that return VReloc
+        // Convert to VNonReloc to avoid confusion
+        let reg = e.var.ridx;
+        e.kind = ExpKind::VNonReloc;
+        e.info = reg;
+        return reg;
+    }
+
     // Need to allocate a new register
     reserve_registers(c, 1);
     discharge_to_reg(c, e, c.freereg - 1);

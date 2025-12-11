@@ -165,6 +165,10 @@ fn codeconcat(c: &mut Compiler, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), St
     let pc = c.chunk.code.len();
     emit(c, Instruction::encode_abc(OpCode::Concat, a_value, 2, 0));
     free_exp(c, e2);
+    // CRITICAL: CONCAT consumes R[A+1] to R[A+B-1], result is in R[A]
+    // Set freereg to R[A+1] since only R[A] is live after CONCAT
+    // This is ESSENTIAL to prevent exp_to_any_reg from allocating wrong registers
+    c.freereg = a_value + 1;
     // CRITICAL: Result must be VReloc pointing to the CONCAT instruction
     // This allows subsequent CONCAT operations to detect and merge
     // Store register in var.ridx for merge comparison
