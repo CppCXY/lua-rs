@@ -204,15 +204,19 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
 }
 
 /// NEW: Compile unary expression (returns ExpDesc with jump lists for NOT operator)
-/// Aligned with luaK_prefix in lcode.c for boolean optimization
+/// Aligned with Official Lua's codenot in lcode.c
 fn compile_unary_expr_desc(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<ExpDesc, String> {
     use crate::compiler::expdesc::ExpKind;
+    use crate::compiler::exp2reg::discharge_vars;
+    use crate::lua_vm::{Instruction, OpCode};
+    use crate::compiler::helpers::emit;
 
     let op = expr
         .get_op_token()
         .ok_or("Unary expression missing operator")?;
     let op_kind = op.get_op();
-    // Special handling for NOT operator - swap jump lists for boolean optimization
+    
+    // Special handling for NOT operator - Official Lua's codenot
     if op_kind == UnaryOperator::OpNot {
         let operand = expr.get_expr().ok_or("Unary expression missing operand")?;
         let mut e = compile_expr_desc(c, &operand)?;
@@ -236,15 +240,35 @@ fn compile_unary_expr_desc(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<ExpD
             _ => {}
         }
 
-        // For other expressions: swap t and f jump lists
-        // This is the KEY optimization: "not x" has opposite boolean behavior
-        // Special case: if both are NO_JUMP (-1), set f to a marker value (-2)
-        // to indicate inversion without actual jump lists
-        if e.t == -1 && e.f == -1 {
-            e.f = -2; // Marker: inverted, but no jumps
-        } else {
-            std::mem::swap(&mut e.t, &mut e.f);
-        }
+        // For VRELOC/VNONRELOC: discharge to register, emit NOT, set as VReloc
+        // This is CRITICAL for jumponcond optimization in exp_to_condition!
+        // Official Lua's codenot: discharge2anyreg(fs, e); freeexp(fs, e);
+        discharge_vars(c, &mut e);
+        
+        // Get operand register after discharge
+        let operand_reg = match e.kind {
+            ExpKind::VNonReloc => e.info,
+            _ => {
+                // Need to put in a register
+                let reg = c.freereg;
+                c.freereg += 1;
+                discharge_to_reg(c, &mut e, reg);
+                reg
+            }
+        };
+
+        // Emit NOT instruction
+        let pc = c.chunk.code.len() as i32;
+        emit(c, Instruction::encode_abc(OpCode::Not, 0, operand_reg, 0));
+        
+        // CRITICAL: Set ExpDesc to VReloc pointing to NOT instruction
+        // This allows jumponcond to detect and optimize away the NOT
+        e.kind = ExpKind::VReloc;
+        e.info = pc as u32;
+        
+        // Swap t and f jump lists (Official Lua's behavior)
+        std::mem::swap(&mut e.t, &mut e.f);
+        
         return Ok(e);
     }
 

@@ -547,15 +547,25 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 fn exp_to_condition(c: &mut Compiler, e: &mut ExpDesc) -> usize {
     discharge_vars(c, e);
 
-    // Determine if TEST should be inverted
-    // e.f == -2: marker for inverted simple expression (from NOT)
-    // e.f == -1: normal expression (not inverted)
-    // e.f >= 0: has actual jump list (from AND/OR/NOT with jumps)
-    let test_c = if e.f == -2 || (e.f != -1 && e.f >= 0) {
-        1
-    } else {
-        0
-    };
+    // CRITICAL: Optimize NOT expressions (Official Lua's jumponcond optimization)
+    // If expression is VReloc pointing to a NOT instruction, remove NOT and invert condition
+    let mut test_c = 0; // Default: jump when false (k=0)
+    
+    if e.kind == ExpKind::VReloc {
+        let pc = e.info as usize;
+        if pc < c.chunk.code.len() {
+            let instr = c.chunk.code[pc];
+            if Instruction::get_opcode(instr) == OpCode::Not {
+                // Remove NOT instruction and invert condition
+                c.chunk.code.pop();
+                test_c = 1; // Inverted: jump when true
+                // Get the register from NOT's B field
+                let reg = Instruction::get_b(instr);
+                emit(c, Instruction::create_abck(OpCode::Test, reg, 0, 0, test_c != 0));
+                return emit_jump(c, OpCode::Jmp);
+            }
+        }
+    }
 
     // Standard case: emit TEST instruction
     match e.kind {
