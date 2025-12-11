@@ -691,8 +691,23 @@ fn compile_binary_expr_to(
         return Ok(d);
     }
 
+    // OPTIMIZATION: If dest is specified, temporarily set freereg to dest
+    // This allows arithmetic/bitwise operations to allocate directly into dest
+    let saved_freereg = if let Some(d) = dest {
+        let saved = c.freereg;
+        c.freereg = d;
+        Some(saved)
+    } else {
+        None
+    };
+
     // Use new infix/posfix system for other operators
     let mut result_desc = compile_binary_expr_desc(c, expr)?;
+
+    // Restore freereg if we modified it
+    if let Some(saved) = saved_freereg {
+        c.freereg = saved;
+    }
 
     // Discharge result to dest if specified
     if let Some(d) = dest {

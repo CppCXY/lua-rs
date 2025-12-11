@@ -34,10 +34,10 @@ pub fn luak_infix(c: &mut Compiler, op: BinaryOperator, v: &mut ExpDesc) {
         | BinaryOperator::OpBXor
         | BinaryOperator::OpShl
         | BinaryOperator::OpShr => {
-            // For arithmetic/bitwise: discharge to any register if not already a numeral
-            // Official Lua checks tonumeral() here, but we'll simplify
-            if !matches!(v.kind, ExpKind::VKInt | ExpKind::VKFlt) {
-                let _reg = exp_to_any_reg(c, v);
+            // For arithmetic/bitwise: only discharge if not already in a register or constant
+            // VLocal and VNonReloc are already in registers, don't copy them!
+            if !matches!(v.kind, ExpKind::VKInt | ExpKind::VKFlt | ExpKind::VLocal | ExpKind::VNonReloc) {
+                discharge_vars(c, v);
             }
         }
         BinaryOperator::OpEq | BinaryOperator::OpNe => {
@@ -163,18 +163,36 @@ fn codeconcat(c: &mut Compiler, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), St
 
 /// Commutative arithmetic operations (ADD, MUL)
 fn codecommutative(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), String> {
-    // For now, use simplified version - full version needs constant folding
-    let left_reg = exp_to_any_reg(c, e1);
-    let right_reg = exp_to_any_reg(c, &mut e2.clone());
+    use crate::compiler::tagmethod::TagMethod;
     
-    let opcode = match op {
-        BinaryOperator::OpAdd => OpCode::Add,
-        BinaryOperator::OpMul => OpCode::Mul,
+    // Get register numbers without copying locals
+    let left_reg = match e1.kind {
+        ExpKind::VLocal => e1.var.ridx,
+        ExpKind::VNonReloc => e1.info,
+        _ => exp_to_any_reg(c, e1),
+    };
+    
+    let mut e2_clone = e2.clone();
+    let right_reg = match e2_clone.kind {
+        ExpKind::VLocal => e2_clone.var.ridx,
+        ExpKind::VNonReloc => e2_clone.info,
+        _ => exp_to_any_reg(c, &mut e2_clone),
+    };
+    
+    let (opcode, tm) = match op {
+        BinaryOperator::OpAdd => (OpCode::Add, TagMethod::Add),
+        BinaryOperator::OpMul => (OpCode::Mul, TagMethod::Mul),
         _ => unreachable!(),
     };
     
+    // Allocate result register (will be optimized by caller if possible)
     let result_reg = alloc_register(c);
     emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
+    
+    // Emit MMBIN for metamethod binding (Lua 5.4 optimization)
+    emit(c, Instruction::encode_abc(OpCode::MmBin, left_reg, right_reg, tm as u32));
+    
+    free_exp(c, e2);
     
     e1.kind = ExpKind::VNonReloc;
     e1.info = result_reg;
@@ -183,20 +201,39 @@ fn codecommutative(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &
 
 /// Non-commutative arithmetic operations
 fn codearith(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), String> {
-    let left_reg = exp_to_any_reg(c, e1);
-    let right_reg = exp_to_any_reg(c, &mut e2.clone());
+    use crate::compiler::tagmethod::TagMethod;
     
-    let opcode = match op {
-        BinaryOperator::OpSub => OpCode::Sub,
-        BinaryOperator::OpDiv => OpCode::Div,
-        BinaryOperator::OpIDiv => OpCode::IDiv,
-        BinaryOperator::OpMod => OpCode::Mod,
-        BinaryOperator::OpPow => OpCode::Pow,
+    // Get register numbers without copying locals
+    let left_reg = match e1.kind {
+        ExpKind::VLocal => e1.var.ridx,
+        ExpKind::VNonReloc => e1.info,
+        _ => exp_to_any_reg(c, e1),
+    };
+    
+    let mut e2_clone = e2.clone();
+    let right_reg = match e2_clone.kind {
+        ExpKind::VLocal => e2_clone.var.ridx,
+        ExpKind::VNonReloc => e2_clone.info,
+        _ => exp_to_any_reg(c, &mut e2_clone),
+    };
+    
+    let (opcode, tm) = match op {
+        BinaryOperator::OpSub => (OpCode::Sub, TagMethod::Sub),
+        BinaryOperator::OpDiv => (OpCode::Div, TagMethod::Div),
+        BinaryOperator::OpIDiv => (OpCode::IDiv, TagMethod::IDiv),
+        BinaryOperator::OpMod => (OpCode::Mod, TagMethod::Mod),
+        BinaryOperator::OpPow => (OpCode::Pow, TagMethod::Pow),
         _ => unreachable!(),
     };
     
+    // Allocate result register (will be optimized by caller if possible)
     let result_reg = alloc_register(c);
     emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
+    
+    // Emit MMBIN for metamethod binding (Lua 5.4 optimization)
+    emit(c, Instruction::encode_abc(OpCode::MmBin, left_reg, right_reg, tm as u32));
+    
+    free_exp(c, e2);
     
     e1.kind = ExpKind::VNonReloc;
     e1.info = result_reg;
@@ -205,20 +242,39 @@ fn codearith(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDes
 
 /// Bitwise operations
 fn codebitwise(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), String> {
-    let left_reg = exp_to_any_reg(c, e1);
-    let right_reg = exp_to_any_reg(c, &mut e2.clone());
+    use crate::compiler::tagmethod::TagMethod;
     
-    let opcode = match op {
-        BinaryOperator::OpBAnd => OpCode::BAnd,
-        BinaryOperator::OpBOr => OpCode::BOr,
-        BinaryOperator::OpBXor => OpCode::BXor,
-        BinaryOperator::OpShl => OpCode::Shl,
-        BinaryOperator::OpShr => OpCode::Shr,
+    // Get register numbers without copying locals
+    let left_reg = match e1.kind {
+        ExpKind::VLocal => e1.var.ridx,
+        ExpKind::VNonReloc => e1.info,
+        _ => exp_to_any_reg(c, e1),
+    };
+    
+    let mut e2_clone = e2.clone();
+    let right_reg = match e2_clone.kind {
+        ExpKind::VLocal => e2_clone.var.ridx,
+        ExpKind::VNonReloc => e2_clone.info,
+        _ => exp_to_any_reg(c, &mut e2_clone),
+    };
+    
+    let (opcode, tm) = match op {
+        BinaryOperator::OpBAnd => (OpCode::BAnd, TagMethod::BAnd),
+        BinaryOperator::OpBOr => (OpCode::BOr, TagMethod::BOr),
+        BinaryOperator::OpBXor => (OpCode::BXor, TagMethod::BXor),
+        BinaryOperator::OpShl => (OpCode::Shl, TagMethod::Shl),
+        BinaryOperator::OpShr => (OpCode::Shr, TagMethod::Shr),
         _ => unreachable!(),
     };
     
+    // Allocate result register (will be optimized by caller if possible)
     let result_reg = alloc_register(c);
     emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
+    
+    // Emit MMBIN for metamethod binding (Lua 5.4 optimization)
+    emit(c, Instruction::encode_abc(OpCode::MmBin, left_reg, right_reg, tm as u32));
+    
+    free_exp(c, e2);
     
     e1.kind = ExpKind::VNonReloc;
     e1.info = result_reg;

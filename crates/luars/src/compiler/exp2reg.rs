@@ -303,14 +303,24 @@ fn code_abrk(c: &mut Compiler, op: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
 pub fn exp_to_rk(c: &mut Compiler, e: &mut ExpDesc) -> bool {
     match e.kind {
         ExpKind::VTrue | ExpKind::VFalse | ExpKind::VNil => {
-            // Small constants: can fit in instruction
-            if e.kind == ExpKind::VTrue {
-                e.info = 1;
+            // OFFICIAL LUA: These constants must be added to constant table for RK encoding
+            // lcode.c exp2RK always calls boolF/boolT/nilK which add to constant table
+            let value = if e.kind == ExpKind::VTrue {
+                LuaValue::boolean(true)
+            } else if e.kind == ExpKind::VFalse {
+                LuaValue::boolean(false)
             } else {
-                e.info = 0;
+                LuaValue::nil()
+            };
+            let const_idx = add_constant_dedup(c, value);
+            if const_idx <= Instruction::MAX_C {
+                e.info = const_idx;
+                e.kind = ExpKind::VK;
+                return true;
             }
-            e.kind = ExpKind::VK;
-            true
+            // If constant table is full, discharge to register
+            exp_to_any_reg(c, e);
+            false
         }
         ExpKind::VKInt => {
             // Try to fit integer in constant table
