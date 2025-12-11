@@ -206,16 +206,16 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
     let names: Vec<_> = stat.get_local_name_list().collect();
     let exprs: Vec<_> = stat.get_value_exprs().collect();
 
-    // CRITICAL FIX: Pre-allocate registers for local variables
-    // This ensures expressions compile into the correct target registers
-    // Example: `local a = f()` should place f's result directly into a's register
+    // CRITICAL: Reserve registers but do NOT increase nactvar yet!
+    // Official Lua: adjustlocalvars() is called AFTER explist compilation
+    // This keeps nactvar unchanged during expression compilation, allowing dest optimization
+    // Example: `local code = io.open()` with nactvar=0 allows io.open to use R0 directly
     let base_reg = c.freereg;
     let num_vars = names.len();
-
-    // Pre-allocate registers for all local variables
-    for _ in 0..num_vars {
-        alloc_register(c);
-    }
+    
+    // Reserve registers for local variables (increases freereg but NOT nactvar)
+    // This is like Official Lua's luaK_reserveregs() before adjust_assign()
+    reserve_registers(c, num_vars as u32);
 
     // Now compile init expressions into the pre-allocated registers
     let mut regs = Vec::new();

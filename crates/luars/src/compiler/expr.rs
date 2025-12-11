@@ -920,10 +920,27 @@ pub fn compile_call_expr_with_returns_and_dest(
             }
 
             // Compile object (table)
+            // CRITICAL: Only pass func_reg as dest for non-local expressions
+            // For locals (f:write), obj is already in register - don't force move
+            // For calls (io.open(...):read), compile to func_reg to enable SELF reuse
             let obj_expr = index_expr
                 .get_prefix_expr()
                 .ok_or("Method call missing object")?;
-            let obj_reg = compile_expr(c, &obj_expr)?;
+            
+            // Check if obj is a local variable (already in register)
+            let obj_is_local = if let LuaExpr::NameExpr(name_expr) = &obj_expr {
+                let name = name_expr.get_name_text().unwrap_or("".to_string());
+                resolve_local(c, &name).is_some()
+            } else {
+                false
+            };
+            
+            // Compile obj: pass dest=func_reg only for non-locals
+            let obj_reg = if obj_is_local {
+                compile_expr(c, &obj_expr)?
+            } else {
+                compile_expr_to(c, &obj_expr, Some(func_reg))?
+            };
 
             // Get method name
             let method_name =

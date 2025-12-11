@@ -83,12 +83,9 @@ pub fn luak_posfix(
         }
         BinaryOperator::OpConcat => {
             // e1 .. e2
-            // CRITICAL: Ensure e2 goes to the register right after e1
-            // If e1 is VReloc (previous CONCAT), get its register from var.ridx
-            let e1_reg = if e1.kind == ExpKind::VReloc { e1.var.ridx } else { e1.info };
-            // Set freereg to e1_reg+1 so exp_to_next_reg puts e2 there
-            c.freereg = e1_reg + 1;
-            // Force e2 to next register (consecutive with e1)
+            // CRITICAL: e2 must be in the register right after e1 (consecutive)
+            // Official Lua: luaK_exp2nextreg(fs, e2) - automatically places e2 in next register
+            // NOTE: Do NOT manually set freereg - exp_to_next_reg handles it correctly
             exp_to_next_reg(c, e2);
             codeconcat(c, e1, e2)?;
         }
@@ -165,13 +162,10 @@ fn codeconcat(c: &mut Compiler, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), St
     let pc = c.chunk.code.len();
     emit(c, Instruction::encode_abc(OpCode::Concat, a_value, 2, 0));
     free_exp(c, e2);
-    // CRITICAL: CONCAT consumes R[A+1] to R[A+B-1], result is in R[A]
-    // Set freereg to R[A+1] since only R[A] is live after CONCAT
-    // This is ESSENTIAL to prevent exp_to_any_reg from allocating wrong registers
-    c.freereg = a_value + 1;
     // CRITICAL: Result must be VReloc pointing to the CONCAT instruction
     // This allows subsequent CONCAT operations to detect and merge
     // Store register in var.ridx for merge comparison
+    // NOTE: Do NOT modify freereg here - Official Lua's codeconcat doesn't touch it
     e1.kind = ExpKind::VReloc;
     e1.info = pc as u32;      // Point to the CONCAT instruction
     e1.var.ridx = a_value;    // Save register for merge check
@@ -202,17 +196,20 @@ fn codecommutative(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &
         _ => unreachable!(),
     };
     
-    // Allocate result register (will be optimized by caller if possible)
-    let result_reg = alloc_register(c);
-    emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
+    // Free expression registers (Official Lua's freeexps pattern)
+    free_exp(c, e1);
+    free_exp(c, &mut e2_clone);
+    
+    // Emit instruction with A=0 (result goes to freereg, Official Lua pattern)
+    let pc = c.chunk.code.len();
+    emit(c, Instruction::encode_abc(opcode, 0, left_reg, right_reg));
     
     // Emit MMBIN for metamethod binding (Lua 5.4 optimization)
     emit(c, Instruction::encode_abc(OpCode::MmBin, left_reg, right_reg, tm as u32));
     
-    free_exp(c, e2);
-    
-    e1.kind = ExpKind::VNonReloc;
-    e1.info = result_reg;
+    // Set e1 to VReloc pointing to the instruction (Official Lua pattern)
+    e1.kind = ExpKind::VReloc;
+    e1.info = pc as u32;
     Ok(())
 }
 
@@ -243,37 +240,32 @@ fn codearith(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDes
         _ => unreachable!(),
     };
     
-    // Allocate result register (will be optimized by caller if possible)
-    let result_reg = alloc_register(c);
-    emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
+    // Free expression registers (Official Lua's freeexps pattern)
+    free_exp(c, e1);
+    free_exp(c, &mut e2_clone);
+    
+    // Emit instruction with A=0 (result goes to freereg, Official Lua pattern)
+    let pc = c.chunk.code.len();
+    emit(c, Instruction::encode_abc(opcode, 0, left_reg, right_reg));
     
     // Emit MMBIN for metamethod binding (Lua 5.4 optimization)
     emit(c, Instruction::encode_abc(OpCode::MmBin, left_reg, right_reg, tm as u32));
     
-    free_exp(c, e2);
-    
-    e1.kind = ExpKind::VNonReloc;
-    e1.info = result_reg;
+    // Set e1 to VReloc pointing to the instruction (Official Lua pattern)
+    e1.kind = ExpKind::VReloc;
+    e1.info = pc as u32;
     Ok(())
 }
 
-/// Bitwise operations
+/// Bitwise operations (Official Lua's finishbinexpval pattern)
 fn codebitwise(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), String> {
     use crate::compiler::tagmethod::TagMethod;
     
-    // Get register numbers without copying locals
-    let left_reg = match e1.kind {
-        ExpKind::VLocal => e1.var.ridx,
-        ExpKind::VNonReloc => e1.info,
-        _ => exp_to_any_reg(c, e1),
-    };
+    // Ensure e1 is in a register (Official Lua's luaK_exp2anyreg)
+    let v1 = exp_to_any_reg(c, e1);
     
-    let mut e2_clone = e2.clone();
-    let right_reg = match e2_clone.kind {
-        ExpKind::VLocal => e2_clone.var.ridx,
-        ExpKind::VNonReloc => e2_clone.info,
-        _ => exp_to_any_reg(c, &mut e2_clone),
-    };
+    // Ensure e2 is in a register
+    let v2 = exp_to_any_reg(c, &mut e2.clone());
     
     let (opcode, tm) = match op {
         BinaryOperator::OpBAnd => (OpCode::BAnd, TagMethod::BAnd),
@@ -284,17 +276,20 @@ fn codebitwise(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
         _ => unreachable!(),
     };
     
-    // Allocate result register (will be optimized by caller if possible)
-    let result_reg = alloc_register(c);
-    emit(c, Instruction::encode_abc(opcode, result_reg, left_reg, right_reg));
+    // Free expression registers (Official Lua's freeexps)
+    free_exp(c, e1);
+    free_exp(c, &mut e2.clone());
+    
+    // Emit instruction with A=0 (result goes to freereg, Official Lua pattern)
+    let pc = c.chunk.code.len();
+    emit(c, Instruction::encode_abc(opcode, 0, v1, v2));
     
     // Emit MMBIN for metamethod binding (Lua 5.4 optimization)
-    emit(c, Instruction::encode_abc(OpCode::MmBin, left_reg, right_reg, tm as u32));
+    emit(c, Instruction::encode_abc(OpCode::MmBin, v1, v2, tm as u32));
     
-    free_exp(c, e2);
-    
-    e1.kind = ExpKind::VNonReloc;
-    e1.info = result_reg;
+    // Set e1 to VReloc pointing to the instruction (Official Lua pattern)
+    e1.kind = ExpKind::VReloc;
+    e1.info = pc as u32;
     Ok(())
 }
 
