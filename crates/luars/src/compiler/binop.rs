@@ -1,7 +1,10 @@
-//! Binary operation compilation helpers
+//! Binary operation compilation helpers (OLD - kept for potential optimizations)
 //!
-//! This module consolidates the common patterns for compiling binary operations,
-//! eliminating code duplication in expr.rs.
+//! These functions are currently unused after refactoring to use official Lua's
+//! infix/posfix strategy in binop_infix.rs. They are kept as reference for
+//! future constant folding and immediate optimizations.
+
+#![allow(dead_code)]
 
 use super::exp2reg::exp_to_any_reg;
 use super::expdesc::*;

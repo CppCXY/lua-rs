@@ -31,10 +31,18 @@ pub fn compile_assign_stat_new(c: &mut Compiler, stat: &LuaAssignStat) -> Result
         // Compile left-value to ExpDesc (preserves VLOCAL, VINDEXSTR, etc.)
         let var_desc = compile_suffixed_expr_desc(c, var_expr)?;
         
-        // Compile value expression to ExpDesc
-        let mut value_desc = compile_expr_desc(c, value_expr)?;
+        // OPTIMIZATION: For local variables, compile value directly to target register
+        // This eliminates extra MOVE instructions for CONCAT and other operations
+        if matches!(var_desc.kind, ExpKind::VLocal) {
+            let target_reg = var_desc.var.ridx;
+            let value_reg = super::expr::compile_expr_to(c, value_expr, Some(target_reg))?;
+            // compile_expr_to guarantees result in target_reg, no MOVE needed
+            debug_assert_eq!(value_reg, target_reg);
+            return Ok(());
+        }
         
-        // Store using official luaK_storevar pattern
+        // For other variable types (global, upvalue, table index), use ExpDesc path
+        let mut value_desc = compile_expr_desc(c, value_expr)?;
         store_var(c, &var_desc, &mut value_desc)?;
         return Ok(());
     }

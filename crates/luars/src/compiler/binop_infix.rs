@@ -124,27 +124,40 @@ pub fn luak_posfix(
 
 /// Create code for '(e1 .. e2)' - Lua equivalent: codeconcat (lcode.c L1686-1700)
 fn codeconcat(c: &mut Compiler, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), String> {
+    // OFFICIAL LUA: lcode.c L1686-1700
     // Check if e2's last instruction is a CONCAT (merge optimization)
-    if c.chunk.code.len() > 0 {
-        let last_idx = c.chunk.code.len() - 1;
-        let ie2 = c.chunk.code[last_idx];
-        if Instruction::get_opcode(ie2) == OpCode::Concat {
-            let n = Instruction::get_b(ie2); // # of elements concatenated in e2
-            lua_assert(
-                e1.info + 1 == Instruction::get_a(ie2),
-                "CONCAT merge: e1 must be just before e2",
-            );
-            free_exp(c, e2);
-            // Correct first element and increase count
-            c.chunk.code[last_idx] = Instruction::encode_abc(OpCode::Concat, e1.info, n + 1, 0);
-            return Ok(());
+    if e2.kind == ExpKind::VReloc && c.chunk.code.len() > 0 {
+        let ie2_pc = e2.info as usize;
+        if ie2_pc < c.chunk.code.len() {
+            let ie2 = c.chunk.code[ie2_pc];
+            if Instruction::get_opcode(ie2) == OpCode::Concat {
+                let n = Instruction::get_b(ie2); // # of elements concatenated in e2
+                lua_assert(
+                    e1.info == Instruction::get_a(ie2) - 1,
+                    "CONCAT merge: e1 must be just before e2",
+                );
+                let result_reg = e1.info;
+                free_exp(c, e1);
+                // Correct first element and increase count
+                c.chunk.code[ie2_pc] = Instruction::encode_abc(OpCode::Concat, result_reg, n + 1, 0);
+                e1.kind = ExpKind::VNonReloc;
+                e1.info = result_reg;
+                return Ok(());
+            }
         }
     }
 
     // e2 is not a concatenation - emit new CONCAT
-    exp_to_next_reg(c, e1); // Ensure e1 is in a register
-    emit(c, Instruction::encode_abc(OpCode::Concat, e1.info, 2, 0));
+    // CRITICAL: Do NOT call exp_to_next_reg(e1) - e1 is already in the correct register!
+    // Official Lua: luaK_codeABC(fs, OP_CONCAT, e1->u.info, 2, 0);
+    let a_value = e1.info;
+    let _pc = c.chunk.code.len();
+    emit(c, Instruction::encode_abc(OpCode::Concat, a_value, 2, 0));
     free_exp(c, e2);
+    // OPTIMIZATION: Keep result as VNONRELOC instead of VRELOC
+    // This avoids unnecessary register reallocation in assignments
+    e1.kind = ExpKind::VNonReloc;
+    e1.info = a_value;  // Result is in the same register as e1
     Ok(())
 }
 

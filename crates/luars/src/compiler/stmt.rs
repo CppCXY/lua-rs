@@ -358,8 +358,9 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
     Ok(())
 }
 
-/// Compile assignment statement
-fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
+/// OLD assignment compilation (replaced by compile_assign_stat_new in assign.rs)
+#[allow(dead_code)]
+fn compile_assign_stat_OLD(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
     use super::exp2reg::exp_to_next_reg;
     use super::expr::{compile_expr_desc, compile_expr_to};
     use emmylua_parser::LuaIndexKey;
