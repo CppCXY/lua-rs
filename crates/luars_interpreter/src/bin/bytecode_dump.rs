@@ -101,8 +101,8 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Concat => format!("CONCAT {} {}", a, b),
             OpCode::Call => format!("CALL {} {} {}", a, b, c),
             OpCode::TailCall => {
-                let k_str = if k { " 1" } else { " 0" };
-                format!("TAILCALL {} {}{}", a, b, k_str)
+                // TAILCALL A B C: function at A, B args, C=0 (always 0 for tailcall)
+                format!("TAILCALL {} {} {}", a, b, c)
             }
             OpCode::Return => {
                 // k=1: show "1k", k=0: show "1" (no k suffix)

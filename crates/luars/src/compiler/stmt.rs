@@ -690,206 +690,16 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         return Ok(());
     }
 
-    // Tail call optimization: if return has a single call expression, use TailCall
-    if exprs.len() == 1 {
-        if let LuaExpr::CallExpr(call_expr) = &exprs[0] {
-            // This is a tail call: return func(...)
-            // Get function being called
-            let func_expr = if let Some(prefix) = call_expr.get_prefix_expr() {
-                prefix
-            } else {
-                return Err("Tail call missing function expression".to_string());
-            };
+    // Check if last expression is varargs (...) or function call - these can return multiple values
+    let last_is_multret = if let Some(last_expr) = exprs.last() {
+        matches!(last_expr, LuaExpr::CallExpr(_)) || is_vararg_expr(last_expr)
+    } else {
+        false
+    };
 
-            // Check if this is a method call (obj:method syntax)
-            let is_method = if let LuaExpr::IndexExpr(index_expr) = &func_expr {
-                index_expr
-                    .get_index_token()
-                    .map(|t| t.is_colon())
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-
-            // Get arguments first to know how many we have
-            let args = if let Some(args_list) = call_expr.get_args_list() {
-                args_list.get_args().collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-
-            // For method calls, we need an extra slot for self
-            let num_args = args.len();
-            let num_total = if is_method {
-                2 + num_args // func + self + explicit args
-            } else {
-                1 + num_args // func + args
-            };
-
-            // Reserve all registers we'll need
-            let mut reserved_regs = Vec::new();
-            for _ in 0..num_total {
-                reserved_regs.push(alloc_register(c));
-            }
-            let base_reg = reserved_regs[0];
-
-            // Handle method call with SELF instruction
-            if is_method {
-                if let LuaExpr::IndexExpr(index_expr) = &func_expr {
-                    // Method call: obj:method(args) → SELF instruction
-                    // SELF A B C: R(A+1) = R(B); R(A) = R(B)[C]
-
-                    // Compile object (table)
-                    let obj_expr = index_expr
-                        .get_prefix_expr()
-                        .ok_or("Method call missing object")?;
-                    let obj_reg = compile_expr(c, &obj_expr)?;
-
-                    // Get method name
-                    let method_name = if let Some(emmylua_parser::LuaIndexKey::Name(name_token)) =
-                        index_expr.get_index_key()
-                    {
-                        name_token.get_name_text().to_string()
-                    } else {
-                        return Err("Method call requires name index".to_string());
-                    };
-
-                    // Add method name to constants
-                    let lua_str = create_string_value(c, &method_name);
-                    let key_idx = add_constant_dedup(c, lua_str);
-
-                    // Emit SELF instruction: R(base_reg+1) = R(obj_reg); R(base_reg) = R(obj_reg)[key]
-                    emit(
-                        c,
-                        Instruction::create_abck(
-                            OpCode::Self_,
-                            base_reg,
-                            obj_reg,
-                            key_idx,
-                            true, // k=1: C is constant index
-                        ),
-                    );
-
-                    // Compile explicit arguments to consecutive registers after self (base_reg+2, ...)
-                    let mut last_is_vararg_all_out = false;
-                    for (i, arg) in args.iter().enumerate() {
-                        let target_reg = base_reg + 2 + i as u32; // +2 for func and self
-                        let is_last_arg = i == num_args - 1;
-
-                        // Check if last argument is ... (vararg)
-                        if is_last_arg {
-                            if let LuaExpr::LiteralExpr(lit) = arg {
-                                if matches!(
-                                    lit.get_literal(),
-                                    Some(emmylua_parser::LuaLiteralToken::Dots(_))
-                                ) {
-                                    emit(
-                                        c,
-                                        Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0),
-                                    );
-                                    last_is_vararg_all_out = true;
-                                    continue;
-                                }
-                            }
-                        }
-
-                        let arg_reg = compile_expr(c, &arg)?;
-                        if arg_reg != target_reg {
-                            emit_move(c, target_reg, arg_reg);
-                        }
-                    }
-
-                    // Emit TailCall instruction
-                    // For method call, B includes implicit self parameter
-                    let b_param = if last_is_vararg_all_out {
-                        0
-                    } else {
-                        (num_args + 2) as u32 // +1 for self, +1 for Lua convention
-                    };
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
-                    );
-
-                    // After TAILCALL, emit RETURN
-                    emit(
-                        c,
-                        Instruction::create_abck(OpCode::Return, base_reg, 0, 0, false),
-                    );
-
-                    return Ok(());
-                }
-            }
-
-            // Regular function call (not method)
-            // Compile function to the first reserved register
-            let func_reg = compile_expr(c, &func_expr)?;
-            if func_reg != base_reg {
-                emit_move(c, base_reg, func_reg);
-            }
-
-            // Compile arguments to consecutive registers after function
-            let mut last_is_vararg_or_call_all_out = false;
-            for (i, arg) in args.iter().enumerate() {
-                let target_reg = reserved_regs[i + 1];
-                let is_last_arg = i == args.len() - 1;
-
-                // Check if last argument is ... (vararg)
-                if is_last_arg {
-                    if let LuaExpr::LiteralExpr(lit) = arg {
-                        if matches!(
-                            lit.get_literal(),
-                            Some(emmylua_parser::LuaLiteralToken::Dots(_))
-                        ) {
-                            // Vararg as last argument: use "all out" mode
-                            emit(c, Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0));
-                            last_is_vararg_or_call_all_out = true;
-                            continue;
-                        }
-                    }
-                    // Check if last argument is a function call
-                    if let LuaExpr::CallExpr(inner_call) = arg {
-                        // Compile the inner call with "all out" mode (num_returns = usize::MAX)
-                        compile_call_expr_with_returns_and_dest(
-                            c,
-                            inner_call,
-                            usize::MAX,
-                            Some(target_reg),
-                        )?;
-                        last_is_vararg_or_call_all_out = true;
-                        continue;
-                    }
-                }
-
-                let arg_reg = compile_expr(c, &arg)?;
-                if arg_reg != target_reg {
-                    emit_move(c, target_reg, arg_reg);
-                }
-            }
-
-            // Emit TailCall instruction
-            // A = function register, B = num_args + 1 (or 0 if last arg is vararg/call "all out")
-            let b_param = if last_is_vararg_or_call_all_out {
-                0 // B=0: all in (variable number of args from vararg)
-            } else {
-                (num_args + 1) as u32
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
-            );
-
-            // After TAILCALL, emit RETURN 0 0 0 (all out) like Lua 5.4
-            // This handles the return value from the tail-called function
-            emit(
-                c,
-                Instruction::create_abck(OpCode::Return, base_reg, 0, 0, false),
-            );
-
-            return Ok(());
-        }
-    }
-
+    // 官方策略：先编译普通return，然后检测是否为tailcall并修改指令
+    // (lparser.c L1824-1827: 检测VCALL && nret==1，修改CALL为TAILCALL)
+    
     // Check if last expression is varargs (...) or function call - these can return multiple values
     let last_is_multret = if let Some(last_expr) = exprs.last() {
         matches!(last_expr, LuaExpr::CallExpr(_)) || is_vararg_expr(last_expr)
@@ -956,6 +766,25 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 c,
                 Instruction::create_abck(OpCode::Return, first, 0, 0, true),
             );
+            
+            // Tail call optimization (官方lparser.c L1824-1827)
+            // If this is a single call expression return, convert CALL to TAILCALL
+            if num_exprs == 1 && c.chunk.code.len() >= 2 {
+                let call_pc = c.chunk.code.len() - 2; // CALL is before RETURN
+                let call_inst_raw = c.chunk.code[call_pc];
+                let call_opcode = Instruction::get_opcode(call_inst_raw);
+                
+                if call_opcode == OpCode::Call {
+                    let call_a = Instruction::get_a(call_inst_raw);
+                    if call_a == first {
+                        // Patch CALL to TAILCALL
+                        let b = Instruction::get_b(call_inst_raw);
+                        c.chunk.code[call_pc] = Instruction::encode_abc(OpCode::TailCall, call_a, b, 0);
+                        // RETURN already has B=0 (all out), which is correct for TAILCALL
+                    }
+                }
+            }
+            
             return Ok(());
         }
     }
@@ -972,6 +801,29 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         // return single_value - use Return1 optimization
         // B = nret + 1 = 2, 使用actual_reg直接返回（无需MOVE）
         emit(c, Instruction::encode_abc(OpCode::Return1, actual_reg, 2, 0));
+        
+        // Tail call optimization for single return (官方lparser.c L1824-1827)
+        // Check if the single expression is a CallExpr
+        let is_single_call = matches!(&exprs[0], LuaExpr::CallExpr(_));
+        if is_single_call && c.chunk.code.len() >= 2 {
+            let call_pc = c.chunk.code.len() - 2; // CALL is before RETURN1
+            let call_inst_raw = c.chunk.code[call_pc];
+            let call_opcode = Instruction::get_opcode(call_inst_raw);
+            
+            if call_opcode == OpCode::Call {
+                // Verify that CALL's A register matches the return register
+                let call_a = Instruction::get_a(call_inst_raw);
+                if call_a == actual_reg {
+                    // Patch CALL to TAILCALL
+                    let b = Instruction::get_b(call_inst_raw);
+                    c.chunk.code[call_pc] = Instruction::encode_abc(OpCode::TailCall, call_a, b, 0);
+                    
+                    // Change RETURN1 to RETURN with B=0 (all out)
+                    let return_pc = c.chunk.code.len() - 1;
+                    c.chunk.code[return_pc] = Instruction::create_abck(OpCode::Return, call_a, 0, 0, false);
+                }
+            }
+        }
     } else if num_exprs == 0 {
         // No return values - use Return0
         emit(c, Instruction::encode_abc(OpCode::Return0, first, 0, 0));

@@ -171,6 +171,8 @@ fn compile_name_expr_desc(c: &mut Compiler, expr: &LuaNameExpr) -> Result<ExpDes
 /// NEW: Compile binary expression (returns ExpDesc)
 /// This is the CRITICAL optimization - uses delayed code generation
 fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<ExpDesc, String> {
+    use crate::compiler::binop_infix::{luak_infix, luak_posfix};
+    
     // Get operands and operator
     let (left, right) = expr
         .get_exprs()
@@ -180,116 +182,26 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
         .ok_or("Binary expression missing operator")?;
     let op_kind = op.get_op();
 
-    // Compile left operand to ExpDesc
-    let mut left_desc = compile_expr_desc(c, &left)?;
-
-    // Discharge left to any register (this will allocate if needed)
-    let left_reg = exp_to_any_reg(c, &mut left_desc);
-
-    // CRITICAL: Ensure freereg is at least left_reg+1 to prevent right expression
-    // from overwriting left's register during nested compilation
-    if c.freereg <= left_reg {
-        c.freereg = left_reg + 1;
-    }
-
-    // Determine if we can reuse left's register
-    // We can only reuse if left_reg is a temporary register (>= nactvar)
-    let nactvar = nvarstack(c) as u32;
-    let can_reuse_left = left_reg >= nactvar;
-
-    // Compile right operand to ExpDesc
-    let mut right_desc = compile_expr_desc(c, &right)?;
-
-    // Use helper functions for arithmetic and bitwise operations
-    match op_kind {
-        // Arithmetic operations - use emit_arith_op helper
-        BinaryOperator::OpAdd
-        | BinaryOperator::OpSub
-        | BinaryOperator::OpMul
-        | BinaryOperator::OpDiv
-        | BinaryOperator::OpIDiv
-        | BinaryOperator::OpMod
-        | BinaryOperator::OpPow => {
-            let result_reg = emit_arith_op(c, op_kind, left_reg, &mut right_desc, can_reuse_left)?;
-            free_exp(c, &right_desc);
-            return Ok(ExpDesc::new_nonreloc(result_reg));
-        }
-
-        // Bitwise operations - use emit_bitwise_op helper
-        BinaryOperator::OpBAnd
-        | BinaryOperator::OpBOr
-        | BinaryOperator::OpBXor
-        | BinaryOperator::OpShl
-        | BinaryOperator::OpShr => {
-            let result_reg = emit_bitwise_op(c, op_kind, left_reg, &mut right_desc, can_reuse_left)?;
-            free_exp(c, &right_desc);
-            return Ok(ExpDesc::new_nonreloc(result_reg));
-        }
-
-        // Comparison operations - use emit_cmp_op helper
-        BinaryOperator::OpEq
-        | BinaryOperator::OpNe
-        | BinaryOperator::OpLt
-        | BinaryOperator::OpLe
-        | BinaryOperator::OpGt
-        | BinaryOperator::OpGe => {
-            let right_reg = exp_to_any_reg(c, &mut right_desc);
-            let result_reg = emit_cmp_op(c, op_kind, left_reg, right_reg, can_reuse_left);
-            free_exp(c, &right_desc);
-            return Ok(ExpDesc::new_nonreloc(result_reg));
-        }
-
-        // Special cases handled inline
-        _ => {}
-    }
-
-    // Discharge right for remaining operators
-    let right_reg = exp_to_any_reg(c, &mut right_desc);
-    let result_reg;
-
-    match op_kind {
-        BinaryOperator::OpConcat => {
-            // CONCAT A B: R[A] := R[A] .. ... .. R[A+B-1]
-            // B is the number of values to concatenate
-            if right_reg == left_reg + 1 {
-                // Operands are already in consecutive registers
-                result_reg = left_reg;
-                let num_values = 2; // left and right
-                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, num_values, 0));
-                c.freereg = result_reg + 1;
-            } else {
-                // Need to move operands to consecutive registers
-                let concat_base = c.freereg;
-                alloc_register(c);
-                alloc_register(c);
-                emit_move(c, concat_base, left_reg);
-                emit_move(c, concat_base + 1, right_reg);
-                let num_values = 2;
-                emit(c, Instruction::encode_abc(OpCode::Concat, concat_base, num_values, 0));
-                result_reg = concat_base;
-                c.freereg = result_reg + 1;
-            }
-        }
-
-        BinaryOperator::OpAnd | BinaryOperator::OpOr => {
-            result_reg = if can_reuse_left { left_reg } else { alloc_register(c) };
-            let k_flag = matches!(op_kind, BinaryOperator::OpOr);
-            emit(c, Instruction::create_abck(OpCode::TestSet, result_reg, left_reg, 0, k_flag));
-            let jump_pos = emit_jump(c, OpCode::Jmp);
-            emit(c, Instruction::create_abc(OpCode::Move, result_reg, right_reg, 0));
-            patch_jump(c, jump_pos);
-        }
-
-        BinaryOperator::OpNop => {
-            return Err("Invalid binary operator OpNop".to_string());
-        }
-
-        // Already handled above
-        _ => unreachable!("Operator {:?} should have been handled above", op_kind),
-    }
-
-    free_exp(c, &right_desc);
-    Ok(ExpDesc::new_nonreloc(result_reg))
+    // OFFICIAL LUA STRATEGY (lparser.c L1273-1283):
+    // 1. Compile left operand
+    // 2. Call luaK_infix(op, v) - prepares left operand for the operation
+    // 3. Compile right operand
+    // 4. Call luaK_posfix(op, v, v2) - completes the operation
+    
+    // Step 1: Compile left operand
+    let mut v = compile_expr_desc(c, &left)?;
+    
+    // Step 2: Process left operand with infix
+    luak_infix(c, op_kind, &mut v);
+    
+    // Step 3: Compile right operand
+    let mut v2 = compile_expr_desc(c, &right)?;
+    
+    // Step 4: Complete operation with posfix
+    luak_posfix(c, op_kind, &mut v, &mut v2, 0)?;
+    
+    // Result is in v
+    Ok(v)
 }
 
 /// NEW: Compile unary expression (stub - uses old implementation)
@@ -691,6 +603,65 @@ fn try_eval_const_int(expr: &LuaExpr) -> Option<i64> {
 }
 
 fn compile_binary_expr_to(
+    c: &mut Compiler,
+    expr: &LuaBinaryExpr,
+    dest: Option<u32>,
+) -> Result<u32, String> {
+    // CONCAT OPTIMIZATION: If dest is specified, compile directly to dest
+    // This eliminates MOVE instructions for function call arguments
+    let (left, right) = expr.get_exprs().ok_or("error")?;
+    let op = expr.get_op_token().ok_or("error")?;
+    let op_kind = op.get_op();
+    
+    if matches!(op_kind, BinaryOperator::OpConcat) && dest.is_some() {
+        let d = dest.unwrap();
+        
+        // Compile left operand and force it to dest
+        let mut v = compile_expr_desc(c, &left)?;
+        discharge_to_reg(c, &mut v, d);
+        c.freereg = d + 1; // Ensure next allocation is d+1
+        
+        // Compile right operand to d+1
+        let mut v2 = compile_expr_desc(c, &right)?;
+        discharge_to_reg(c, &mut v2, d + 1);
+        c.freereg = d + 2;
+        
+        // Check for CONCAT merge optimization
+        if c.chunk.code.len() > 0 {
+            let last_idx = c.chunk.code.len() - 1;
+            let ie2 = c.chunk.code[last_idx];
+            if Instruction::get_opcode(ie2) == OpCode::Concat {
+                let n = Instruction::get_b(ie2);
+                if d + 1 == Instruction::get_a(ie2) {
+                    // Merge
+                    c.chunk.code[last_idx] = Instruction::encode_abc(OpCode::Concat, d, n + 1, 0);
+                    c.freereg = d + 1;
+                    return Ok(d);
+                }
+            }
+        }
+        
+        // Emit CONCAT
+        emit(c, Instruction::encode_abc(OpCode::Concat, d, 2, 0));
+        c.freereg = d + 1;
+        return Ok(d);
+    }
+    
+    // Use new infix/posfix system for other operators
+    let mut result_desc = compile_binary_expr_desc(c, expr)?;
+    
+    // Discharge result to dest if specified
+    if let Some(d) = dest {
+        discharge_to_reg(c, &mut result_desc, d);
+        return Ok(d);
+    }
+    
+    // Otherwise discharge to any register
+    let reg = exp_to_any_reg(c, &mut result_desc);
+    Ok(reg)
+}
+
+fn compile_binary_expr_to_OLD_KEEP_FOR_REFERENCE(
     c: &mut Compiler,
     expr: &LuaBinaryExpr,
     dest: Option<u32>,

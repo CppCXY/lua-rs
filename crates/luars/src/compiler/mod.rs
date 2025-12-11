@@ -2,6 +2,7 @@
 // Compiles Lua source code to bytecode using emmylua_parser
 mod assign;
 mod binop;
+mod binop_infix;
 mod exp2reg;
 mod expdesc;
 mod expr;
