@@ -1,7 +1,6 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
 mod assign;
-mod binop;
 mod binop_infix;
 mod exp2reg;
 mod expdesc;
@@ -11,7 +10,6 @@ mod stmt;
 mod tagmethod;
 
 use rowan::TextRange;
-pub(crate) use tagmethod::TagMethod;
 
 use crate::lua_value::Chunk;
 use crate::lua_value::UpvalueDesc;

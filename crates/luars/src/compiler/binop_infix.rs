@@ -321,10 +321,11 @@ fn luak_goiffalse(c: &mut Compiler, e: &mut ExpDesc) {
 
 /// Concatenate jump lists (Lua: luaK_concat in lcode.c L182-194)
 fn luak_concat(c: &mut Compiler, l1: &mut i32, l2: i32) {
-    if l2 == NO_JUMP {
+    // Skip marker values (like -2 for inverted simple expressions)
+    if l2 == NO_JUMP || l2 < -1 {
         return;
     }
-    if *l1 == NO_JUMP {
+    if *l1 == NO_JUMP || *l1 < -1 {
         *l1 = l2;
     } else {
         let mut list = *l1;
@@ -341,6 +342,10 @@ fn luak_concat(c: &mut Compiler, l1: &mut i32, l2: i32) {
 }
 
 fn get_jump(c: &Compiler, pc: usize) -> i32 {
+    // Safety check: if pc is out of bounds, it's likely a marker value like -2
+    if pc >= c.chunk.code.len() {
+        return NO_JUMP;
+    }
     let offset = Instruction::get_sj(c.chunk.code[pc]);
     if offset == NO_JUMP {
         NO_JUMP
@@ -350,6 +355,10 @@ fn get_jump(c: &Compiler, pc: usize) -> i32 {
 }
 
 fn fix_jump(c: &mut Compiler, pc: usize, dest: usize) {
+    // Safety check: if pc is out of bounds, skip (it's likely a marker value)
+    if pc >= c.chunk.code.len() || dest >= c.chunk.code.len() {
+        return;
+    }
     let offset = (dest as i32) - (pc as i32) - 1;
     let inst = c.chunk.code[pc];
     let opcode = Instruction::get_opcode(inst);

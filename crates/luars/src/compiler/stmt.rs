@@ -1,20 +1,20 @@
 // Statement compilation
 
 use super::assign::compile_assign_stat_new;
-use super::expr::{
-    compile_call_expr, compile_call_expr_with_returns_and_dest, compile_expr, compile_expr_to,
-    compile_var_expr, compile_expr_desc,
-};
+use super::exp2reg::{discharge_vars, exp_to_any_reg};
 use super::expdesc::{ExpDesc, ExpKind};
-use super::exp2reg::{exp_to_any_reg, discharge_vars};
+use super::expr::{
+    compile_call_expr, compile_call_expr_with_returns_and_dest, compile_expr, compile_expr_desc,
+    compile_expr_to, compile_var_expr,
+};
 use super::{Compiler, Local, helpers::*};
 use crate::compiler::compile_block;
-use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr_to};
+use crate::compiler::expr::compile_closure_expr_to;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::{
-    BinaryOperator, LuaAssignStat, LuaAstNode, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr,
-    LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat,
-    LuaLiteralToken, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
+    BinaryOperator, LuaAstNode, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr, LuaForRangeStat,
+    LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat, LuaLiteralToken, LuaLocalStat,
+    LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
 };
 
 /// Check if an expression is a vararg (...) literal
@@ -360,318 +360,6 @@ fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), Strin
     Ok(())
 }
 
-/// OLD assignment compilation (replaced by compile_assign_stat_new in assign.rs)
-#[allow(dead_code)]
-fn compile_assign_stat_OLD(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
-    use super::exp2reg::exp_to_next_reg;
-    use super::expr::{compile_expr_desc, compile_expr_to};
-    use emmylua_parser::LuaIndexKey;
-
-    // Get vars and expressions from children
-    let (vars, exprs) = stat.get_var_and_expr_list();
-
-    if vars.is_empty() {
-        return Ok(());
-    }
-
-    // OPTIMIZATION: For single local variable assignment, compile directly to target register
-    if vars.len() == 1 && exprs.len() == 1 {
-        if let LuaVarExpr::NameExpr(name_expr) = &vars[0] {
-            let name = name_expr.get_name_text().unwrap_or("".to_string());
-            if let Some(local) = resolve_local(c, &name) {
-                // Check if trying to assign to a const variable
-                if local.is_const {
-                    return Err(format!("attempt to assign to const variable '{}'", name));
-                }
-                // Local variable - compile expression directly to its register
-                let _result_reg = compile_expr_to(c, &exprs[0], Some(local.register))?;
-                return Ok(());
-            }
-
-            // Check if it's an upvalue assignment
-            if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
-                // Compile expression to a temporary register
-                let value_reg = compile_expr(c, &exprs[0])?;
-                // Emit SETUPVAL to copy value to upvalue
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0),
-                );
-                return Ok(());
-            }
-
-            // OPTIMIZATION: global = constant -> SETTABUP with k=1
-            // It's a global - add key to constants first (IMPORTANT: luac adds key before value!)
-            let lua_str = create_string_value(c, &name);
-            let key_idx = add_constant_dedup(c, lua_str);
-
-            // Then check if value is constant
-            if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
-                    emit(
-                        c,
-                        Instruction::create_abck(OpCode::SetTabUp, 0, key_idx, const_idx, true),
-                    );
-                    return Ok(());
-                }
-            }
-        }
-
-        // OPTIMIZATION: For table.field = constant, use SetField with RK
-        if let LuaVarExpr::IndexExpr(index_expr) = &vars[0] {
-            if let Some(LuaIndexKey::Name(name_token)) = index_expr.get_index_key() {
-                // Try to compile value as constant
-                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                    // Compile table expression
-                    let prefix_expr = index_expr
-                        .get_prefix_expr()
-                        .ok_or("Index expression missing table")?;
-                    let table_reg = compile_expr(c, &prefix_expr)?;
-
-                    // Get field name as constant
-                    let field_name = name_token.get_name_text().to_string();
-                    let lua_str = create_string_value(c, &field_name);
-                    let key_idx = add_constant_dedup(c, lua_str);
-
-                    // Emit SetField with k=1 (value is constant)
-                    if const_idx <= Instruction::MAX_C && key_idx <= Instruction::MAX_B {
-                        emit(
-                            c,
-                            Instruction::create_abck(
-                                OpCode::SetField,
-                                table_reg,
-                                key_idx,
-                                const_idx,
-                                true, // k=1: C is constant index
-                            ),
-                        );
-                        return Ok(());
-                    }
-                }
-            }
-
-            // OPTIMIZATION: For table[integer] = constant, use SETI with RK
-            if let Some(LuaIndexKey::Integer(number_token)) = index_expr.get_index_key() {
-                let int_value = number_token.get_int_value();
-                // SETI: B field is unsigned byte, range 0-255
-                if int_value >= 0 && int_value <= 255 {
-                    // Try to compile value as constant
-                    if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                        // Compile table expression
-                        let prefix_expr = index_expr
-                            .get_prefix_expr()
-                            .ok_or("Index expression missing table")?;
-                        let table_reg = compile_expr(c, &prefix_expr)?;
-
-                        // Emit SETI with k=1 (value is constant)
-                        if const_idx <= Instruction::MAX_C {
-                            let encoded_b = int_value as u32;
-                            emit(
-                                c,
-                                Instruction::create_abck(
-                                    OpCode::SetI,
-                                    table_reg,
-                                    encoded_b,
-                                    const_idx,
-                                    true, // k=1: C is constant index
-                                ),
-                            );
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            // OPTIMIZATION: For table[string_literal] = constant, use SETFIELD with RK
-            // This handles cases like: package.loaded["test"] = nil
-            if let Some(LuaIndexKey::String(str_token)) = index_expr.get_index_key() {
-                // Try to compile value as constant
-                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                    // Compile table expression
-                    let prefix_expr = index_expr
-                        .get_prefix_expr()
-                        .ok_or("Index expression missing table")?;
-                    let table_reg = compile_expr(c, &prefix_expr)?;
-
-                    // Get string literal as constant
-                    let lua_str = create_string_value(c, &str_token.get_value());
-                    let key_idx = add_constant_dedup(c, lua_str);
-
-                    // Emit SETFIELD with k=1 (value is constant)
-                    if const_idx <= Instruction::MAX_C && key_idx <= Instruction::MAX_B {
-                        emit(
-                            c,
-                            Instruction::create_abck(
-                                OpCode::SetField,
-                                table_reg,
-                                key_idx,
-                                const_idx,
-                                true, // k=1: C is constant index
-                            ),
-                        );
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    // Multi-assignment: use luac's reverse-order strategy
-    // Strategy:
-    // 1. Get target registers for all variables
-    // 2. Compile expressions to temps, but last value can go to its target directly
-    // 3. Emit moves in reverse order to avoid conflicts
-
-    let mut target_regs = Vec::new();
-
-    // Collect target registers for local variables and check const
-    let mut all_locals = true;
-    for var in vars.iter() {
-        if let LuaVarExpr::NameExpr(name_expr) = var {
-            let name = name_expr.get_name_text().unwrap_or("".to_string());
-            if let Some(local) = resolve_local(c, &name) {
-                // Check if trying to assign to a const variable
-                if local.is_const {
-                    return Err(format!("attempt to assign to const variable '{}'", name));
-                }
-                target_regs.push(Some(local.register));
-                continue;
-            }
-        }
-        target_regs.push(None);
-        all_locals = false;
-    }
-
-    // Compile expressions
-    let mut val_regs = Vec::new();
-
-    for (i, expr) in exprs.iter().enumerate() {
-        let is_last = i == exprs.len() - 1;
-
-        // If this is the last expression and it's a call, request multiple returns
-        if is_last && matches!(expr, LuaExpr::CallExpr(_)) {
-            let remaining_vars = vars.len().saturating_sub(val_regs.len());
-            if remaining_vars > 0 {
-                if let LuaExpr::CallExpr(call_expr) = expr {
-                    let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
-                    for j in 0..remaining_vars {
-                        val_regs.push(base_reg + j as u32);
-                    }
-                    break;
-                }
-            }
-        }
-
-        // NEW: Use ExpDesc system to compile expressions
-        // This is THE KEY FIX that eliminates extra register allocation!
-        let reg = if is_last && all_locals && val_regs.len() + 1 == vars.len() {
-            // Last value can go directly to its target
-            if let Some(target_reg) = target_regs[val_regs.len()] {
-                // CRITICAL: compile_expr_to may NOT honor dest if it's unsafe!
-                // Always use the returned register value
-                let result_reg = compile_expr_to(c, expr, Some(target_reg))?;
-                // If result ended up in different register, move it
-                if result_reg != target_reg {
-                    emit_move(c, target_reg, result_reg);
-                    target_reg
-                } else {
-                    result_reg
-                }
-            } else {
-                compile_expr(c, expr)?
-            }
-        } else {
-            // CRITICAL OPTIMIZATION: Use exp_to_next_reg instead of manual allocation!
-            // This ensures we allocate exactly one register per expression
-            let mut e = compile_expr_desc(c, expr)?;
-            exp_to_next_reg(c, &mut e);
-            e.get_register().ok_or("Expression has no register")?
-        };
-        val_regs.push(reg);
-    }
-
-    // Fill missing values with nil
-    if val_regs.len() < vars.len() {
-        let nil_count = vars.len() - val_regs.len();
-        let first_nil_reg = alloc_register(c);
-
-        // Allocate remaining registers
-        for _ in 1..nil_count {
-            alloc_register(c);
-        }
-
-        // Emit LOADNIL (batch)
-        if nil_count == 1 {
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, 0, 0),
-            );
-        } else {
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0),
-            );
-        }
-
-        for i in 0..nil_count {
-            val_regs.push(first_nil_reg + i as u32);
-        }
-    }
-
-    // Emit assignments in REVERSE order (luac optimization)
-    if all_locals && vars.len() > 1 {
-        // All local variables: use reverse-order moves
-        for i in (0..vars.len()).rev() {
-            if let Some(target_reg) = target_regs[i] {
-                if val_regs[i] != target_reg {
-                    emit_move(c, target_reg, val_regs[i]);
-                }
-            }
-        }
-    } else {
-        // Not all locals: compile normally with RK optimization for globals
-        for (i, var) in vars.iter().enumerate() {
-            // Special case: global variable assignment with constant value
-            if let LuaVarExpr::NameExpr(name_expr) = var {
-                let name = name_expr.get_name_text().unwrap_or("".to_string());
-
-                // Check if it's NOT a local (i.e., it's a global)
-                if resolve_local(c, &name).is_none()
-                    && resolve_upvalue_from_chain(c, &name).is_none()
-                {
-                    // It's a global - try to use RK optimization
-                    // Check if value_reg contains a recently loaded constant
-                    if i < exprs.len() {
-                        if let Some(const_idx) = try_expr_as_constant(c, &exprs[i]) {
-                            // Use SETTABUP with k=1 (both key and value are constants)
-                            let lua_str = create_string_value(c, &name);
-                            let key_idx = add_constant_dedup(c, lua_str);
-
-                            if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
-                                emit(
-                                    c,
-                                    Instruction::create_abck(
-                                        OpCode::SetTabUp,
-                                        0,
-                                        key_idx,
-                                        const_idx,
-                                        true,
-                                    ),
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-
-            compile_var_expr(c, var, val_regs[i])?;
-        }
-    }
-
-    Ok(())
-}
-
 /// Compile function call statement
 fn compile_call_stat(c: &mut Compiler, stat: &LuaCallExprStat) -> Result<(), String> {
     // Get call expression from children
@@ -694,16 +382,8 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     }
 
     // Check if last expression is varargs (...) or function call - these can return multiple values
-    let last_is_multret = if let Some(last_expr) = exprs.last() {
-        matches!(last_expr, LuaExpr::CallExpr(_)) || is_vararg_expr(last_expr)
-    } else {
-        false
-    };
-
     // 官方策略：先编译普通return，然后检测是否为tailcall并修改指令
     // (lparser.c L1824-1827: 检测VCALL && nret==1，修改CALL为TAILCALL)
-    
-    // Check if last expression is varargs (...) or function call - these can return multiple values
     let last_is_multret = if let Some(last_expr) = exprs.last() {
         matches!(last_expr, LuaExpr::CallExpr(_)) || is_vararg_expr(last_expr)
     } else {
@@ -769,25 +449,26 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 c,
                 Instruction::create_abck(OpCode::Return, first, 0, 0, true),
             );
-            
+
             // Tail call optimization (官方lparser.c L1824-1827)
             // If this is a single call expression return, convert CALL to TAILCALL
             if num_exprs == 1 && c.chunk.code.len() >= 2 {
                 let call_pc = c.chunk.code.len() - 2; // CALL is before RETURN
                 let call_inst_raw = c.chunk.code[call_pc];
                 let call_opcode = Instruction::get_opcode(call_inst_raw);
-                
+
                 if call_opcode == OpCode::Call {
                     let call_a = Instruction::get_a(call_inst_raw);
                     if call_a == first {
                         // Patch CALL to TAILCALL
                         let b = Instruction::get_b(call_inst_raw);
-                        c.chunk.code[call_pc] = Instruction::encode_abc(OpCode::TailCall, call_a, b, 0);
+                        c.chunk.code[call_pc] =
+                            Instruction::encode_abc(OpCode::TailCall, call_a, b, 0);
                         // RETURN already has B=0 (all out), which is correct for TAILCALL
                     }
                 }
             }
-            
+
             return Ok(());
         }
     }
@@ -800,11 +481,14 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
         // 单返回值优化：不传dest，让表达式使用原寄存器
         // 官方L1832: first = luaK_exp2anyreg(fs, &e);
         let actual_reg = compile_expr_to(c, &exprs[0], None)?;
-        
+
         // return single_value - use Return1 optimization
         // B = nret + 1 = 2, 使用actual_reg直接返回（无需MOVE）
-        emit(c, Instruction::encode_abc(OpCode::Return1, actual_reg, 2, 0));
-        
+        emit(
+            c,
+            Instruction::encode_abc(OpCode::Return1, actual_reg, 2, 0),
+        );
+
         // Tail call optimization for single return (官方lparser.c L1824-1827)
         // Check if the single expression is a CallExpr
         let is_single_call = matches!(&exprs[0], LuaExpr::CallExpr(_));
@@ -812,7 +496,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             let call_pc = c.chunk.code.len() - 2; // CALL is before RETURN1
             let call_inst_raw = c.chunk.code[call_pc];
             let call_opcode = Instruction::get_opcode(call_inst_raw);
-            
+
             if call_opcode == OpCode::Call {
                 // Verify that CALL's A register matches the return register
                 let call_a = Instruction::get_a(call_inst_raw);
@@ -820,10 +504,11 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                     // Patch CALL to TAILCALL
                     let b = Instruction::get_b(call_inst_raw);
                     c.chunk.code[call_pc] = Instruction::encode_abc(OpCode::TailCall, call_a, b, 0);
-                    
+
                     // Change RETURN1 to RETURN with B=0 (all out)
                     let return_pc = c.chunk.code.len() - 1;
-                    c.chunk.code[return_pc] = Instruction::create_abck(OpCode::Return, call_a, 0, 0, false);
+                    c.chunk.code[return_pc] =
+                        Instruction::create_abck(OpCode::Return, call_a, 0, 0, false);
                 }
             }
         }
@@ -866,13 +551,17 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 /// Aligned with official Lua's approach: TEST directly on the source register
 fn exp_to_condition(c: &mut Compiler, e: &mut ExpDesc) -> usize {
     discharge_vars(c, e);
-    
-    // Check if expression has inverted semantics (from NOT operator)
-    // If t and f were swapped by NOT, we need to invert the TEST condition
-    // Official Lua checks if (e->f != NO_JUMP) to determine inversion
-    let inverted = e.f != -1;
-    let test_c = if inverted { 1 } else { 0 };
-    
+
+    // Determine if TEST should be inverted
+    // e.f == -2: marker for inverted simple expression (from NOT)
+    // e.f == -1: normal expression (not inverted)
+    // e.f >= 0: has actual jump list (from AND/OR/NOT with jumps)
+    let test_c = if e.f == -2 || (e.f != -1 && e.f >= 0) {
+        1
+    } else {
+        0
+    };
+
     // Standard case: emit TEST instruction
     match e.kind {
         ExpKind::VNil | ExpKind::VFalse => {
@@ -967,16 +656,16 @@ fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
         } else {
             // Standard path: compile expression as ExpDesc for boolean optimization
             let mut cond_desc = compile_expr_desc(c, &cond)?;
-            
+
             // exp_to_condition will handle NOT optimization (swapped jump lists)
             let next_jump = exp_to_condition(c, &mut cond_desc);
-            
+
             if invert {
                 // Inverted mode (currently disabled)
                 // Would need different handling here
                 unreachable!("Inverted mode is currently disabled");
             }
-            
+
             next_jump
         };
 
@@ -1040,6 +729,9 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 
     // Begin scope for the loop body (to track locals for CLOSE)
     begin_scope(c);
+
+    // Enter block as loop (for goto/label handling)
+    enterblock(c, true);
 
     // Begin loop - record first_reg for break CLOSE
     begin_loop(c);
@@ -1131,6 +823,9 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
     // End loop (patches all break statements)
     end_loop(c);
 
+    // Leave block (for goto/label handling)
+    leaveblock(c);
+
     // End scope
     end_scope(c);
 
@@ -1140,6 +835,9 @@ fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), Strin
 /// Compile repeat-until loop
 fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), String> {
     // Structure: repeat <block> until <condition>
+
+    // Enter block as loop (for goto/label handling)
+    enterblock(c, true);
 
     // Begin loop
     begin_loop(c);
@@ -1175,6 +873,9 @@ fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), Str
 
     // End loop (patches all break statements)
     end_loop(c);
+
+    // Leave block (for goto/label handling)
+    leaveblock(c);
 
     Ok(())
 }
@@ -1228,6 +929,9 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
 
     // Begin new scope for loop body
     begin_scope(c);
+
+    // Enter block as loop (for goto/label handling)
+    enterblock(c, true);
 
     // Begin loop with var_reg as first register, so break can close it
     // Using var_reg instead of c.freereg because var_reg is the loop variable
@@ -1284,6 +988,10 @@ fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
     c.chunk.code[forprep_pc] = Instruction::encode_abx(OpCode::ForPrep, base_reg, prep_jump as u32);
 
     end_loop(c);
+
+    // Leave block (for goto/label handling)
+    leaveblock(c);
+
     end_scope(c);
 
     // Free the 4 loop control registers (base, limit, step, var)
@@ -1392,6 +1100,9 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
     // Begin scope for loop variables
     begin_scope(c);
 
+    // Enter block as loop (for goto/label handling)
+    enterblock(c, true);
+
     // Register the iterator's hidden variables as internal locals
     add_local(c, "(for state)".to_string(), base);
     add_local(c, "(for state)".to_string(), base + 1);
@@ -1460,6 +1171,10 @@ fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<()
         Instruction::encode_abx(OpCode::TForPrep, base, tforprep_jump as u32);
 
     end_loop(c);
+
+    // Leave block (for goto/label handling)
+    leaveblock(c);
+
     end_scope(c);
 
     // Free the loop control registers

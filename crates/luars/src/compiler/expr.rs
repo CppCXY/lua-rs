@@ -4,7 +4,7 @@ use super::Compiler;
 use super::exp2reg::*;
 use super::expdesc::*;
 use super::helpers::*;
-use crate::compiler::{compile_block, compile_statlist};
+use crate::compiler::compile_statlist;
 use crate::lua_value::UpvalueDesc;
 use crate::lua_value::{Chunk, LuaValue};
 use crate::lua_vm::{Instruction, OpCode};
@@ -15,8 +15,8 @@ use emmylua_parser::LuaParenExpr;
 use emmylua_parser::LuaTableExpr;
 use emmylua_parser::UnaryOperator;
 use emmylua_parser::{
-    BinaryOperator, LuaAstToken, LuaBinaryExpr, LuaCallExpr, LuaExpr, LuaLiteralExpr, LuaLiteralToken,
-    LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
+    BinaryOperator, LuaAstToken, LuaBinaryExpr, LuaCallExpr, LuaExpr, LuaLiteralExpr,
+    LuaLiteralToken, LuaNameExpr, LuaUnaryExpr, LuaVarExpr,
 };
 
 /// Core function: Compile expression and return ExpDesc
@@ -64,19 +64,19 @@ fn compile_literal_expr_desc(c: &mut Compiler, expr: &LuaLiteralExpr) -> Result<
         LuaLiteralToken::Number(num) => {
             // Get the raw text to handle hex numbers correctly
             let text = num.get_text();
-            
+
             // Check if this is a hex integer literal (0x... without decimal point or exponent)
             // emmylua_parser may incorrectly treat large hex numbers as floats
             let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
                 && !text.contains('.')
                 && !text.to_lowercase().contains('p');
-            
+
             // Check if text has decimal point or exponent (should be treated as float)
             // This handles cases like 1.0e19 or 9223372036854775808.0
             let text_lower = text.to_lowercase();
-            let has_decimal_or_exp = text.contains('.') || 
-                (!text_lower.starts_with("0x") && text_lower.contains('e'));
-            
+            let has_decimal_or_exp =
+                text.contains('.') || (!text_lower.starts_with("0x") && text_lower.contains('e'));
+
             // Treat as integer only if: no decimal/exponent OR is hex int
             if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
                 // Parse as integer - use our custom parser for hex numbers
@@ -171,7 +171,7 @@ fn compile_name_expr_desc(c: &mut Compiler, expr: &LuaNameExpr) -> Result<ExpDes
 /// This is the CRITICAL optimization - uses delayed code generation
 fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<ExpDesc, String> {
     use crate::compiler::binop_infix::{luak_infix, luak_posfix};
-    
+
     // Get operands and operator
     let (left, right) = expr
         .get_exprs()
@@ -186,19 +186,19 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
     // 2. Call luaK_infix(op, v) - prepares left operand for the operation
     // 3. Compile right operand
     // 4. Call luaK_posfix(op, v, v2) - completes the operation
-    
+
     // Step 1: Compile left operand
     let mut v = compile_expr_desc(c, &left)?;
-    
+
     // Step 2: Process left operand with infix
     luak_infix(c, op_kind, &mut v);
-    
+
     // Step 3: Compile right operand
     let mut v2 = compile_expr_desc(c, &right)?;
-    
+
     // Step 4: Complete operation with posfix
     luak_posfix(c, op_kind, &mut v, &mut v2, 0)?;
-    
+
     // Result is in v
     Ok(v)
 }
@@ -207,14 +207,16 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
 /// Aligned with luaK_prefix in lcode.c for boolean optimization
 fn compile_unary_expr_desc(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<ExpDesc, String> {
     use crate::compiler::expdesc::ExpKind;
-    
-    let op = expr.get_op_token().ok_or("Unary expression missing operator")?;
+
+    let op = expr
+        .get_op_token()
+        .ok_or("Unary expression missing operator")?;
     let op_kind = op.get_op();
     // Special handling for NOT operator - swap jump lists for boolean optimization
     if op_kind == UnaryOperator::OpNot {
         let operand = expr.get_expr().ok_or("Unary expression missing operand")?;
         let mut e = compile_expr_desc(c, &operand)?;
-        
+
         // Constant folding for NOT
         match e.kind {
             ExpKind::VNil | ExpKind::VFalse => {
@@ -233,13 +235,19 @@ fn compile_unary_expr_desc(c: &mut Compiler, expr: &LuaUnaryExpr) -> Result<ExpD
             }
             _ => {}
         }
-        
+
         // For other expressions: swap t and f jump lists
         // This is the KEY optimization: "not x" has opposite boolean behavior
-        std::mem::swap(&mut e.t, &mut e.f);
+        // Special case: if both are NO_JUMP (-1), set f to a marker value (-2)
+        // to indicate inversion without actual jump lists
+        if e.t == -1 && e.f == -1 {
+            e.f = -2; // Marker: inverted, but no jumps
+        } else {
+            std::mem::swap(&mut e.t, &mut e.f);
+        }
         return Ok(e);
     }
-    
+
     // For other unary operators, fall back to old implementation
     let reg = compile_unary_expr_to(c, expr, None)?;
     Ok(ExpDesc::new_nonreloc(reg))
@@ -260,14 +268,18 @@ fn compile_call_expr_desc(c: &mut Compiler, expr: &LuaCallExpr) -> Result<ExpDes
 /// Convert table+key to indexed ExpDesc (Aligned with luaK_indexed in lcode.c)
 /// This is THE KEY FUNCTION for converting table access to proper indexed form
 /// without generating GET instructions
-fn luak_indexed(c: &mut Compiler, table_desc: &mut ExpDesc, key_desc: &ExpDesc) -> Result<(), String> {
-    use super::expdesc::{ExpKind, IndexInfo};
+fn luak_indexed(
+    c: &mut Compiler,
+    table_desc: &mut ExpDesc,
+    key_desc: &ExpDesc,
+) -> Result<(), String> {
     use super::exp2reg::exp_to_any_reg;
-    
+    use super::expdesc::{ExpKind, IndexInfo};
+
     // CRITICAL: Do NOT discharge table here! Just validate it's in correct form.
     // The table should already be VLOCAL, VNONRELOC, or VUPVAL from name resolution.
     // We only convert other kinds to registers when absolutely necessary.
-    
+
     // Check key type and set appropriate indexed form
     match key_desc.kind {
         ExpKind::VK => {
@@ -276,22 +288,22 @@ fn luak_indexed(c: &mut Compiler, table_desc: &mut ExpDesc, key_desc: &ExpDesc) 
                 // Global variable: _ENV[key]
                 table_desc.kind = ExpKind::VIndexUp;
                 table_desc.ind = IndexInfo {
-                    t: table_desc.info,  // upvalue index
-                    idx: key_desc.info,  // constant index
+                    t: table_desc.info, // upvalue index
+                    idx: key_desc.info, // constant index
                 };
             } else if table_desc.kind == ExpKind::VLocal {
                 // Local table with string key: t.field
                 table_desc.kind = ExpKind::VIndexStr;
                 table_desc.ind = IndexInfo {
-                    t: table_desc.var.ridx,  // local variable register
-                    idx: key_desc.info,  // constant index
+                    t: table_desc.var.ridx, // local variable register
+                    idx: key_desc.info,     // constant index
                 };
             } else if table_desc.kind == ExpKind::VNonReloc {
                 // Table in register with string key
                 table_desc.kind = ExpKind::VIndexStr;
                 table_desc.ind = IndexInfo {
-                    t: table_desc.info,  // register
-                    idx: key_desc.info,  // constant index
+                    t: table_desc.info, // register
+                    idx: key_desc.info, // constant index
                 };
             } else {
                 // Need to discharge table to register first
@@ -352,31 +364,29 @@ fn luak_indexed(c: &mut Compiler, table_desc: &mut ExpDesc, key_desc: &ExpDesc) 
             };
         }
     }
-    
+
     Ok(())
 }
 
 /// NEW: Compile index expression (stub)
 fn compile_index_expr_desc(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<ExpDesc, String> {
     use super::exp2reg::exp_to_any_reg_up;
-    
+
     // Get table expression (prefix)
     let prefix_expr = expr
         .get_prefix_expr()
         .ok_or("Index expression missing prefix")?;
-    
+
     // Compile table to ExpDesc
     let mut table_desc = compile_expr_desc(c, &prefix_expr)?;
-    
+
     // CRITICAL: Call exp2anyregup BEFORE luaK_indexed (matches official fieldsel)
     // This ensures table is in a register or upvalue, and may generate GETTABUP
     exp_to_any_reg_up(c, &mut table_desc);
-    
+
     // Get index key
-    let index_key = expr
-        .get_index_key()
-        .ok_or("Index expression missing key")?;
-    
+    let index_key = expr.get_index_key().ok_or("Index expression missing key")?;
+
     // Compile key to ExpDesc
     let key_desc = match &index_key {
         LuaIndexKey::Expr(key_expr) => {
@@ -407,11 +417,11 @@ fn compile_index_expr_desc(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<ExpD
             ExpDesc::new_int(int_val)
         }
     };
-    
+
     // Call luaK_indexed to convert table+key to indexed ExpDesc
     // This is THE KEY FUNCTION for left-value compilation
     luak_indexed(c, &mut table_desc, &key_desc)?;
-    
+
     Ok(table_desc)
 }
 
@@ -467,19 +477,19 @@ fn compile_literal_expr(
         LuaLiteralToken::Number(num) => {
             // Get the raw text to handle hex numbers correctly
             let text = num.get_text();
-            
+
             // Check if this is a hex integer literal (0x... without decimal point or exponent)
             // emmylua_parser may incorrectly treat large hex numbers as floats
             let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
                 && !text.contains('.')
                 && !text.to_lowercase().contains('p');
-            
+
             // Check if text has decimal point or exponent (should be treated as float)
             // This handles cases like 1.0e19 or 9223372036854775808.0
             let text_lower = text.to_lowercase();
-            let has_decimal_or_exp = text.contains('.') || 
-                (!text_lower.starts_with("0x") && text_lower.contains('e'));
-            
+            let has_decimal_or_exp =
+                text.contains('.') || (!text_lower.starts_with("0x") && text_lower.contains('e'));
+
             // Lua 5.4 optimization: Try LoadI for integers, LoadF for simple floats
             // Treat as integer only if: parser says integer AND no decimal/exponent AND is hex int
             if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
@@ -571,17 +581,17 @@ fn try_eval_const_int(expr: &LuaExpr) -> Option<i64> {
         LuaExpr::LiteralExpr(lit) => {
             if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
                 let text = num.get_text();
-                
+
                 // Check if this is a hex integer
                 let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
                     && !text.contains('.')
                     && !text.to_lowercase().contains('p');
-                
+
                 // Check if has decimal or exponent
                 let text_lower = text.to_lowercase();
-                let has_decimal_or_exp = text.contains('.') || 
-                    (!text_lower.starts_with("0x") && text_lower.contains('e'));
-                
+                let has_decimal_or_exp = text.contains('.')
+                    || (!text_lower.starts_with("0x") && text_lower.contains('e'));
+
                 if (!num.is_float() && !has_decimal_or_exp) || is_hex_int {
                     match parse_lua_int(text) {
                         ParsedNumber::Int(int_val) => return Some(int_val),
@@ -646,20 +656,20 @@ fn compile_binary_expr_to(
     let (left, right) = expr.get_exprs().ok_or("error")?;
     let op = expr.get_op_token().ok_or("error")?;
     let op_kind = op.get_op();
-    
+
     if matches!(op_kind, BinaryOperator::OpConcat) && dest.is_some() {
         let d = dest.unwrap();
-        
+
         // Compile left operand and force it to dest
         let mut v = compile_expr_desc(c, &left)?;
         discharge_to_reg(c, &mut v, d);
         c.freereg = d + 1; // Ensure next allocation is d+1
-        
+
         // Compile right operand to d+1
         let mut v2 = compile_expr_desc(c, &right)?;
         discharge_to_reg(c, &mut v2, d + 1);
         c.freereg = d + 2;
-        
+
         // Check for CONCAT merge optimization
         if c.chunk.code.len() > 0 {
             let last_idx = c.chunk.code.len() - 1;
@@ -674,22 +684,22 @@ fn compile_binary_expr_to(
                 }
             }
         }
-        
+
         // Emit CONCAT
         emit(c, Instruction::encode_abc(OpCode::Concat, d, 2, 0));
         c.freereg = d + 1;
         return Ok(d);
     }
-    
+
     // Use new infix/posfix system for other operators
     let mut result_desc = compile_binary_expr_desc(c, expr)?;
-    
+
     // Discharge result to dest if specified
     if let Some(d) = dest {
         discharge_to_reg(c, &mut result_desc, d);
         return Ok(d);
     }
-    
+
     // Otherwise discharge to any register
     let reg = exp_to_any_reg(c, &mut result_desc);
     Ok(reg)
@@ -715,24 +725,24 @@ fn compile_unary_expr_to(
                 if op_kind == UnaryOperator::OpUnm {
                     // Negative number literal: emit LOADI/LOADK with negated value
                     let text = num_token.get_text();
-                    
+
                     // Check if this is a hex integer
                     let is_hex_int = (text.starts_with("0x") || text.starts_with("0X"))
                         && !text.contains('.')
                         && !text.to_lowercase().contains('p');
-                    
+
                     // Check if has decimal or exponent
                     let text_lower = text.to_lowercase();
-                    let has_decimal_or_exp = text.contains('.') || 
-                        (!text_lower.starts_with("0x") && text_lower.contains('e'));
-                    
+                    let has_decimal_or_exp = text.contains('.')
+                        || (!text_lower.starts_with("0x") && text_lower.contains('e'));
+
                     // Determine if should parse as integer
                     if (!num_token.is_float() && !has_decimal_or_exp) || is_hex_int {
                         match parse_lua_int(text) {
                             ParsedNumber::Int(int_val) => {
                                 // Successfully parsed as integer, negate it
                                 let neg_val = int_val.wrapping_neg();
-                                
+
                                 // Use LOADI for small integers
                                 if let Some(_) = emit_loadi(c, result_reg, neg_val) {
                                     return Ok(result_reg);
@@ -949,7 +959,7 @@ pub fn compile_call_expr_with_returns_and_dest(
         // OPTIMIZATION: If dest is specified and safe (>= nactvar), compile function directly to dest
         // This avoids unnecessary MOVE instructions
         let nactvar = c.nactvar as u32;
-        
+
         let func_reg = if let Some(d) = dest {
             // Check if we can safely use dest for function
             let args_start = d + 1;
@@ -982,7 +992,7 @@ pub fn compile_call_expr_with_returns_and_dest(
         } else {
             // No dest specified - use default behavior
             let temp_func_reg = compile_expr(c, &prefix_expr)?;
-            
+
             if num_returns > 0 {
                 // Expression context - need return values
                 // CRITICAL: Must preserve local variables!
@@ -1090,7 +1100,12 @@ pub fn compile_call_expr_with_returns_and_dest(
             if let LuaExpr::CallExpr(inner_call) = arg_expr {
                 // Use a simple approach: compile inner call to arg_dest with "all out" mode
                 // The recursive call will handle everything including method calls and nested calls
-                let call_result = compile_call_expr_with_returns_and_dest(c, inner_call, usize::MAX, Some(arg_dest))?;
+                let call_result = compile_call_expr_with_returns_and_dest(
+                    c,
+                    inner_call,
+                    usize::MAX,
+                    Some(arg_dest),
+                )?;
                 if call_result != arg_dest {
                     ensure_register(c, arg_dest);
                     emit_move(c, arg_dest, call_result);
@@ -1358,7 +1373,7 @@ fn compile_table_expr_to(
 ) -> Result<u32, String> {
     // Get all fields first to check if we need to use a temporary register
     let fields: Vec<_> = expr.get_fields().collect();
-    
+
     // CRITICAL FIX: When dest is a local variable register (< nactvar) and we have
     // non-empty table constructor, we must NOT use dest directly. This is because
     // table elements will be compiled into consecutive registers starting from reg+1,
@@ -1375,14 +1390,10 @@ fn compile_table_expr_to(
     } else {
         false
     };
-    
+
     // If we need to protect locals, ignore dest and allocate a fresh register
-    let effective_dest = if need_move_to_dest {
-        None
-    } else {
-        dest
-    };
-    
+    let effective_dest = if need_move_to_dest { None } else { dest };
+
     let reg = get_result_reg(c, effective_dest);
 
     // Fields already collected above
@@ -1451,7 +1462,7 @@ fn compile_table_expr_to(
     let mut array_idx = 0;
     let values_start = reg + 1;
     let mut has_vararg_at_end = false;
-    
+
     // CRITICAL: Pre-reserve registers for array elements BEFORE processing any fields.
     // This prevents hash field value expressions (like `select('#', ...)`) from
     // allocating temporary registers that conflict with array element positions.
@@ -1727,21 +1738,26 @@ fn compile_table_expr_to(
         while c.freereg <= target_reg {
             alloc_register(c);
         }
-        
+
         // Get the call expression and compile it
         if let Some(field) = fields.get(idx) {
             if let Some(value_expr) = field.get_value_expr() {
                 if let LuaExpr::CallExpr(call_expr) = value_expr {
                     // Compile the call with all return values (usize::MAX means all)
-                    compile_call_expr_with_returns_and_dest(c, &call_expr, usize::MAX, Some(target_reg))?;
+                    compile_call_expr_with_returns_and_dest(
+                        c,
+                        &call_expr,
+                        usize::MAX,
+                        Some(target_reg),
+                    )?;
                 }
             }
         }
-        
+
         // SetList with B=0 (all remaining values including call returns)
         let c_param = (array_idx as usize / 50) as u32;
         emit(c, Instruction::encode_abc(OpCode::SetList, reg, 0, c_param));
-        
+
         c.freereg = reg + 1;
         // Move result to original destination if needed
         if need_move_to_dest {
@@ -2037,7 +2053,7 @@ pub fn compile_closure_expr_to(
 
     // Add implicit return if needed (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
     let base_reg = freereg_before_leave;
-    
+
     if func_compiler.chunk.code.is_empty() {
         // Empty function - use Return0 with correct base
         let ret_instr = Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0);
@@ -2045,7 +2061,10 @@ pub fn compile_closure_expr_to(
     } else {
         let last_opcode = Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap());
         // Don't add return if last instruction is already a return
-        if !matches!(last_opcode, OpCode::Return | OpCode::Return0 | OpCode::Return1 | OpCode::TailCall) {
+        if !matches!(
+            last_opcode,
+            OpCode::Return | OpCode::Return0 | OpCode::Return1 | OpCode::TailCall
+        ) {
             // Add final return with correct base register (aligns with luaK_ret(fs, nvarstack, 0))
             // nret=0 means we use Return0 opcode
             let ret_instr = Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0);
@@ -2060,7 +2079,7 @@ pub fn compile_closure_expr_to(
         func_compiler.peak_freereg as usize,
         func_compiler.chunk.max_stack_size,
     );
-    
+
     // Finish function: convert RETURN0/RETURN1 and set k/C flags (对齐lcode.c的luaK_finish)
     finish_function(&mut func_compiler);
 
@@ -2074,7 +2093,7 @@ pub fn compile_closure_expr_to(
             index: uv.index,
         })
         .collect();
-    
+
     // Check if this function captures any local variables from parent
     // If so, mark parent's needclose (对齐lparser.c的markupval)
     let has_local_captures = upvalues.iter().any(|uv| uv.is_local);
