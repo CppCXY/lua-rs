@@ -5,7 +5,7 @@ use super::binop::{emit_arith_op, emit_bitwise_op, emit_cmp_op, emit_arith_imm, 
 use super::exp2reg::*;
 use super::expdesc::*;
 use super::helpers::*;
-use crate::compiler::compile_block;
+use crate::compiler::{compile_block, compile_statlist};
 use crate::lua_value::UpvalueDesc;
 use crate::lua_value::{Chunk, LuaValue};
 use crate::lua_vm::{Instruction, OpCode};
@@ -249,18 +249,23 @@ fn compile_binary_expr_desc(c: &mut Compiler, expr: &LuaBinaryExpr) -> Result<Ex
 
     match op_kind {
         BinaryOperator::OpConcat => {
-            // CONCAT A B: concatenate R[A] to R[A+B], result in R[A]
+            // CONCAT A B: R[A] := R[A] .. ... .. R[A+B-1]
+            // B is the number of values to concatenate
             if right_reg == left_reg + 1 {
+                // Operands are already in consecutive registers
                 result_reg = left_reg;
-                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, 1, 0));
+                let num_values = 2; // left and right
+                emit(c, Instruction::encode_abc(OpCode::Concat, result_reg, num_values, 0));
                 c.freereg = result_reg + 1;
             } else {
+                // Need to move operands to consecutive registers
                 let concat_base = c.freereg;
                 alloc_register(c);
                 alloc_register(c);
                 emit_move(c, concat_base, left_reg);
                 emit_move(c, concat_base + 1, right_reg);
-                emit(c, Instruction::encode_abc(OpCode::Concat, concat_base, 1, 0));
+                let num_values = 2;
+                emit(c, Instruction::encode_abc(OpCode::Concat, concat_base, num_values, 0));
                 result_reg = concat_base;
                 c.freereg = result_reg + 1;
             }
@@ -407,13 +412,19 @@ fn luak_indexed(c: &mut Compiler, table_desc: &mut ExpDesc, key_desc: &ExpDesc) 
 
 /// NEW: Compile index expression (stub)
 fn compile_index_expr_desc(c: &mut Compiler, expr: &LuaIndexExpr) -> Result<ExpDesc, String> {
+    use super::exp2reg::exp_to_any_reg_up;
+    
     // Get table expression (prefix)
     let prefix_expr = expr
         .get_prefix_expr()
         .ok_or("Index expression missing prefix")?;
     
-    // Compile table to ExpDesc (don't discharge yet)
+    // Compile table to ExpDesc
     let mut table_desc = compile_expr_desc(c, &prefix_expr)?;
+    
+    // CRITICAL: Call exp2anyregup BEFORE luaK_indexed (matches official fieldsel)
+    // This ensures table is in a register or upvalue, and may generate GETTABUP
+    exp_to_any_reg_up(c, &mut table_desc);
     
     // Get index key
     let index_key = expr
@@ -1079,7 +1090,7 @@ fn compile_binary_expr_to(
             if right_reg == left_reg + 1 {
                 // Perfect case: operands are consecutive
                 let concat_reg = left_reg;
-                emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
+                emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 2, 0));
                 if let Some(d) = dest {
                     if d != concat_reg {
                         emit_move(c, d, concat_reg);
@@ -1098,7 +1109,7 @@ fn compile_binary_expr_to(
 
                 emit_move(c, concat_reg, left_reg);
                 emit_move(c, concat_reg + 1, right_reg);
-                emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 1, 0));
+                emit(c, Instruction::encode_abc(OpCode::Concat, concat_reg, 2, 0));
 
                 // Reset freereg (concat consumes right operand)
                 c.freereg = concat_reg + 1;
@@ -2594,25 +2605,37 @@ pub fn compile_closure_expr_to(
         func_compiler.chunk.code.push(varargprep_instr);
     }
 
-    // Compile function body (skip if empty)
-    if has_body {
+    // Compile function body (对齐lparser.c的body)
+    // We need to manually call enterblock/leaveblock to capture freereg before leaveblock
+    // (official Lua calls luaK_ret BEFORE leaveblock in close_func)
+    // Note: luaY_nvarstack returns the register level (freereg), NOT nactvar itself
+    let freereg_before_leave = if has_body {
         let body = closure.get_block().unwrap();
-        compile_block(&mut func_compiler, &body)?;
-    }
+        // Manually do what compile_block does
+        enterblock(&mut func_compiler, false);
+        compile_statlist(&mut func_compiler, &body)?;
+        // Capture freereg BEFORE leaveblock (this is what luaY_nvarstack actually returns)
+        let saved_freereg = func_compiler.freereg;
+        leaveblock(&mut func_compiler);
+        saved_freereg
+    } else {
+        0
+    };
 
-    // Add implicit return if needed
-    // Lua 5.4 ALWAYS adds a final RETURN at the end of functions for safety
-    // This serves as a fallthrough in case execution reaches the end
+    // Add implicit return if needed (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
+    let base_reg = freereg_before_leave;
+    
     if func_compiler.chunk.code.is_empty() {
-        // Empty function - use Return0
-        let ret_instr = Instruction::encode_abc(OpCode::Return0, 0, 0, 0);
+        // Empty function - use Return0 with correct base
+        let ret_instr = Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0);
         func_compiler.chunk.code.push(ret_instr);
     } else {
         let last_opcode = Instruction::get_opcode(*func_compiler.chunk.code.last().unwrap());
         // Don't add return if last instruction is already a return
         if !matches!(last_opcode, OpCode::Return | OpCode::Return0 | OpCode::Return1 | OpCode::TailCall) {
-            // Always add final Return0 for fallthrough protection
-            let ret_instr = Instruction::encode_abc(OpCode::Return0, 0, 0, 0);
+            // Add final return with correct base register (aligns with luaK_ret(fs, nvarstack, 0))
+            // nret=0 means we use Return0 opcode
+            let ret_instr = Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0);
             func_compiler.chunk.code.push(ret_instr);
         }
     }

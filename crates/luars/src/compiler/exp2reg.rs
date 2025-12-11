@@ -246,6 +246,14 @@ impl ExpDesc {
     }
 }
 
+/// Ensure expression is in a register or upvalue (Aligned with luaK_exp2anyregup)
+/// If expression is not VUPVAL or has jumps, convert it to a register
+pub fn exp_to_any_reg_up(c: &mut Compiler, e: &mut ExpDesc) {
+    if e.kind != ExpKind::VUpval || e.has_jumps() {
+        exp_to_any_reg(c, e);
+    }
+}
+
 /// Store value from expression to a variable
 /// Lua equivalent: luaK_storevar
 #[allow(dead_code)]

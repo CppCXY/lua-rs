@@ -249,18 +249,29 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     c.chunk.is_vararg = true;
     emit(c, Instruction::encode_abc(OpCode::VarargPrep, 0, 0, 0));
 
-    if let Some(block) = chunk.get_block() {
-        compile_block(c, &block)?;
-    }
+    // Compile main body (对齐lparser.c的mainfunc: statlist + close_func)
+    // We manually do enterblock/statlist/leaveblock to capture freereg before leaveblock
+    // (official Lua calls luaK_ret BEFORE leaveblock in close_func)
+    // Note: luaY_nvarstack returns the register level (freereg), NOT nactvar itself
+    let freereg_before_leave = if let Some(block) = chunk.get_block() {
+        enterblock(c, false);
+        compile_statlist(c, &block)?;
+        // Capture freereg BEFORE leaveblock (this is what luaY_nvarstack actually returns)
+        let saved_freereg = c.freereg;
+        leaveblock(c);
+        saved_freereg
+    } else {
+        0
+    };
 
     // Check for unresolved gotos before finishing
     check_unresolved_gotos(c)?;
 
-    // Emit return at the end (k/C flags will be set by finish_function)
-    let freereg = c.freereg;
+    // Emit return at the end (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
+    // Use saved freereg value from before leaveblock
     emit(
         c,
-        Instruction::create_abck(OpCode::Return, freereg, 1, 0, false),
+        Instruction::create_abck(OpCode::Return, freereg_before_leave, 1, 0, false),
     );
     Ok(())
 }
@@ -275,7 +286,7 @@ fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
 }
 
 /// Compile a statement list (对齐lparser.c的statlist)
-fn compile_statlist(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+pub(crate) fn compile_statlist(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
     // statlist -> { stat [';'] }
     for stat in block.get_stats() {
         // Check for return statement - it must be last
