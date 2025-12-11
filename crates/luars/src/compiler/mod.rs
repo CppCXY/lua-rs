@@ -267,12 +267,27 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     // Check for unresolved gotos before finishing
     check_unresolved_gotos(c)?;
 
-    // Emit return at the end (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
-    // Use saved freereg value from before leaveblock
-    emit(
-        c,
-        Instruction::create_abck(OpCode::Return, freereg_before_leave, 1, 0, false),
-    );
+    // Emit implicit return at the end ONLY if last instruction is not already a return
+    // (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
+    // Official Lua always emits return, but if explicit return exists, it becomes dead code
+    // and gets optimized away later. We can just skip emitting if last is return.
+    let need_implicit_return = if c.chunk.code.len() > 0 {
+        let last_inst_raw = c.chunk.code[c.chunk.code.len() - 1];
+        let last_opcode = Instruction::get_opcode(last_inst_raw);
+        !matches!(
+            last_opcode,
+            OpCode::Return | OpCode::Return0 | OpCode::Return1 | OpCode::TailCall
+        )
+    } else {
+        true // Empty function needs return
+    };
+
+    if need_implicit_return {
+        emit(
+            c,
+            Instruction::create_abck(OpCode::Return, freereg_before_leave, 1, 0, false),
+        );
+    }
     Ok(())
 }
 

@@ -898,9 +898,10 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
     };
 
     // Compile expressions to consecutive registers for return
-    // Allocate new registers to avoid corrupting local variables
+    // 官方策略L1817: first = luaY_nvarstack(fs)
+    // 使用活跃变量的寄存器数作为起点，而非freereg
     let num_exprs = exprs.len();
-    let base_reg = c.freereg; // Start from the first free register
+    let first = nvarstack(c); // Official: use nvarstack as starting register
 
     // Handle last expression specially if it's varargs or call
     if last_is_multret && num_exprs > 0 {
@@ -908,7 +909,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
 
         // First, compile all expressions except the last directly to target registers
         for (i, expr) in exprs.iter().take(num_exprs - 1).enumerate() {
-            let target_reg = base_reg + i as u32;
+            let target_reg = first + i as u32;
 
             // Try to compile expression directly to target register
             let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
@@ -929,7 +930,7 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 Some(emmylua_parser::LuaLiteralToken::Dots(_))
             ) {
                 // Varargs: emit VARARG with B=0 (all out)
-                let last_target_reg = base_reg + (num_exprs - 1) as u32;
+                let last_target_reg = first + (num_exprs - 1) as u32;
                 emit(
                     c,
                     Instruction::encode_abc(OpCode::Vararg, last_target_reg, 0, 0),
@@ -937,13 +938,13 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
                 // Return with B=0 (all out)
                 emit(
                     c,
-                    Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true),
+                    Instruction::create_abck(OpCode::Return, first, 0, 0, true),
                 );
                 return Ok(());
             }
         } else if let LuaExpr::CallExpr(call_expr) = last_expr {
             // Call expression: compile with "all out" mode
-            let last_target_reg = base_reg + (num_exprs - 1) as u32;
+            let last_target_reg = first + (num_exprs - 1) as u32;
             compile_call_expr_with_returns_and_dest(
                 c,
                 call_expr,
@@ -953,45 +954,51 @@ fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), Str
             // Return with B=0 (all out)
             emit(
                 c,
-                Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true),
+                Instruction::create_abck(OpCode::Return, first, 0, 0, true),
             );
             return Ok(());
         }
     }
 
     // Normal return with fixed number of values
-    // Compile expressions directly to target registers when possible
-    for i in 0..num_exprs {
-        let target_reg = base_reg + i as u32;
-
-        // Try to compile expression directly to target register
-        // compile_expr_to will use get_result_reg which ensures max_stack_size is updated
-        let src_reg = compile_expr_to(c, &exprs[i], Some(target_reg))?;
-
-        // If expression couldn't be placed in target, emit a MOVE
-        if src_reg != target_reg {
-            emit_move(c, target_reg, src_reg);
-        }
-
-        // Update freereg to account for this register
-        if target_reg >= c.freereg {
-            c.freereg = target_reg + 1;
-        }
-    }
-
-    // Use optimized Return0/Return1 when possible
-    if num_exprs == 0 {
-        // No return values - use Return0
-        emit(c, Instruction::encode_abc(OpCode::Return0, base_reg, 0, 0));
-    } else if num_exprs == 1 {
+    // 官方策略：
+    // - 单返回值L1832: first = luaK_exp2anyreg (可复用原寄存器)
+    // - 多返回值L1834: luaK_exp2nextreg (必须连续)
+    if num_exprs == 1 {
+        // 单返回值优化：不传dest，让表达式使用原寄存器
+        // 官方L1832: first = luaK_exp2anyreg(fs, &e);
+        let actual_reg = compile_expr_to(c, &exprs[0], None)?;
+        
         // return single_value - use Return1 optimization
-        // B = nret + 1 = 2 (like official lcode.c luaK_ret)
-        emit(c, Instruction::encode_abc(OpCode::Return1, base_reg, 2, 0));
+        // B = nret + 1 = 2, 使用actual_reg直接返回（无需MOVE）
+        emit(c, Instruction::encode_abc(OpCode::Return1, actual_reg, 2, 0));
+    } else if num_exprs == 0 {
+        // No return values - use Return0
+        emit(c, Instruction::encode_abc(OpCode::Return0, first, 0, 0));
     } else {
-        // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1, k = 1
+        // 多返回值：必须编译到连续寄存器
+        // 官方L1834: luaK_exp2nextreg(fs, &e);
+        for i in 0..num_exprs {
+            let target_reg = first + i as u32;
+
+            // Try to compile expression directly to target register
+            let src_reg = compile_expr_to(c, &exprs[i], Some(target_reg))?;
+
+            // If expression couldn't be placed in target, emit a MOVE
+            if src_reg != target_reg {
+                emit_move(c, target_reg, src_reg);
+            }
+
+            // Update freereg to account for this register
+            if target_reg >= c.freereg {
+                c.freereg = target_reg + 1;
+            }
+        }
+
+        // Return instruction: OpCode::Return, A = first, B = num_values + 1, k = 1
         emit(
             c,
-            Instruction::create_abck(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0, true),
+            Instruction::create_abck(OpCode::Return, first, (num_exprs + 1) as u32, 0, true),
         );
     }
 

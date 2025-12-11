@@ -1811,20 +1811,28 @@ fn compile_index_expr_to(
         .ok_or("Index expression missing table")?;
 
     // Lua 5.4 optimization: For chained indexing like a.b.c, we want to reuse registers
-    // When dest is specified and prefix is not a local variable, compile prefix to dest
-    // This way: a.b.c with dest=R2 becomes:
-    //   GETFIELD R2 R(a) "b"   ; a.b -> R2
-    //   GETFIELD R2 R2 "c"     ; R2.c -> R2
+    // When dest is specified and prefix is NOT a local variable, compile prefix to dest
+    // This way: io.open with dest=R0 becomes:
+    //   GETTABUP R0 ... "io"    ; io -> R0
+    //   GETFIELD R0 R0 "open"   ; R0.open -> R0
+    // But for: local smt; smt.__band with dest=R4 should be:
+    //   GETFIELD R4 R(smt) "__band"  ; NOT MOVE R4 smt + GETFIELD R4 R4
     let nvarstack = nvarstack(c);
 
-    // Check if prefix is a simple name (local/upvalue) that we shouldn't overwrite
-    let prefix_is_var = matches!(&prefix_expr, LuaExpr::NameExpr(_));
+    // Check if prefix is a local variable (should not be moved to dest)
+    let prefix_is_local = if let LuaExpr::NameExpr(name_expr) = &prefix_expr {
+        let name = name_expr.get_name_text().unwrap_or("".to_string());
+        resolve_local(c, &name).is_some()
+    } else {
+        false
+    };
 
-    // Compile prefix with dest optimization for chained indexing
-    let table_reg = if dest.is_some() && !prefix_is_var {
-        // For chained indexing, compile intermediate result to dest
+    // Compile prefix with dest optimization (but not for locals)
+    let table_reg = if dest.is_some() && !prefix_is_local {
+        // Pass dest to prefix compilation for non-locals (globals/upvalues/expressions)
         compile_expr_to(c, &prefix_expr, dest)?
     } else {
+        // For locals or when no dest, compile normally
         compile_expr(c, &prefix_expr)?
     };
 
