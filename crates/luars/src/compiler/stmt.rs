@@ -9,6 +9,7 @@ pub(crate) fn statement(c: &mut Compiler, stmt: &LuaStat) -> Result<(), String> 
 
     match stmt {
         LuaStat::LocalStat(local) => compile_local_stat(c, local),
+        LuaStat::LocalFuncStat(local_func) => compile_local_func_stat(c, local_func),
         LuaStat::ReturnStat(ret) => compile_return_stat(c, ret),
         LuaStat::BreakStat(_) => compile_break_stat(c),
         LuaStat::IfStat(if_node) => compile_if_stat(c, if_node),
@@ -616,6 +617,54 @@ fn compile_do_stat(c: &mut Compiler, do_stat: &LuaDoStat) -> Result<(), String> 
 }
 
 /// Compile function statement (对齐funcstat)
+/// 编译 funcname 中的索引表达式（对齐 funcname 中的 fieldsel 调用链）
+/// 处理 t.a.b 这样的嵌套结构
+fn compile_func_name_index(c: &mut Compiler, index_expr: &LuaIndexExpr) -> Result<expdesc::ExpDesc, String> {
+    // 递归处理前缀
+    let mut v = expdesc::ExpDesc::new_void();
+    
+    if let Some(prefix) = index_expr.get_prefix_expr() {
+        match prefix {
+            LuaExpr::NameExpr(name_expr) => {
+                let name = name_expr.get_name_token()
+                    .ok_or("function name prefix missing token")?  
+                    .get_name_text()
+                    .to_string();
+                super::var::singlevar(c, &name, &mut v)?;
+            }
+            LuaExpr::IndexExpr(inner_index) => {
+                // 递归处理
+                v = compile_func_name_index(c, &inner_index)?;
+            }
+            _ => return Err("Invalid function name prefix".to_string()),
+        }
+    }
+    
+    // 获取当前字段
+    if let Some(index_token) = index_expr.get_index_token() {
+        if index_token.is_left_bracket() {
+            return Err("function name cannot use [] syntax".to_string());
+        }
+        
+        if let Some(key) = index_expr.get_index_key() {
+            let field_name = match key {
+                LuaIndexKey::Name(name_token) => {
+                    name_token.get_name_text().to_string()
+                }
+                _ => return Err("function name field must be a name".to_string()),
+            };
+            
+            // 创建字段访问（对齐 fieldsel）
+            let k_idx = super::helpers::string_k(c, field_name);
+            let mut k = expdesc::ExpDesc::new_k(k_idx);
+            super::exp2reg::exp2anyregup(c, &mut v);
+            super::exp2reg::indexed(c, &mut v, &mut k);
+        }
+    }
+    
+    Ok(v)
+}
+
 /// function funcname body
 fn compile_func_stat(c: &mut Compiler, func: &LuaFuncStat) -> Result<(), String> {
     // funcstat -> FUNCTION funcname body
@@ -625,7 +674,10 @@ fn compile_func_stat(c: &mut Compiler, func: &LuaFuncStat) -> Result<(), String>
         .ok_or("function statement missing name")?;
     
     // Parse function name into a variable descriptor
+    // ismethod 标记是否为方法定义（使用冒号）
     let mut v = expdesc::ExpDesc::new_void();
+    let mut ismethod = false;
+    
     match func_name {
         LuaVarExpr::NameExpr(name_expr) => {
             // Simple name: function foo() end
@@ -635,22 +687,106 @@ fn compile_func_stat(c: &mut Compiler, func: &LuaFuncStat) -> Result<(), String>
                 .to_string();
             super::var::singlevar(c, &name, &mut v)?;
         }
-        LuaVarExpr::IndexExpr(_index_expr) => {
+        LuaVarExpr::IndexExpr(index_expr) => {
             // Table field: function t.foo() end or function t:foo() end
-            // For now, treat as error - need proper implementation
-            // TODO: Handle method definitions and table field functions
-            return Err("Table field functions not yet implemented".to_string());
+            // 对齐 funcname: NAME {fieldsel} [':' NAME]
+            // funcname 只支持点号和最后的冒号，不支持 []
+            
+            // 检测最外层是否为冒号（对齐 funcname 中最后的 ':' 检测）
+            if let Some(index_token) = index_expr.get_index_token() {
+                if index_token.is_colon() {
+                    ismethod = true;
+                }
+            }
+            
+            // 获取前缀表达式（必须是一个名字或者另一个索引）
+            let prefix = index_expr.get_prefix_expr()
+                .ok_or("function name missing prefix")?;
+            
+            // 递归处理前缀（可能是 t 或者 t.a.b）
+            match prefix {
+                LuaExpr::NameExpr(name_expr) => {
+                    let name = name_expr.get_name_token()
+                        .ok_or("function name prefix missing token")?  
+                        .get_name_text()
+                        .to_string();
+                    super::var::singlevar(c, &name, &mut v)?;
+                }
+                LuaExpr::IndexExpr(inner_index) => {
+                    // 递归处理嵌套的索引（如 t.a.b）
+                    // 这里需要递归地构建索引链
+                    v = compile_func_name_index(c, &inner_index)?;
+                }
+                _ => return Err("Invalid function name prefix".to_string()),
+            }
+            
+            // 获取当前这一层的索引（字段名）
+            if let Some(index_token) = index_expr.get_index_token() {
+                if index_token.is_left_bracket() {
+                    return Err("function name cannot use [] syntax".to_string());
+                }
+                
+                // 点号或冒号后面必须跟一个名字
+                if let Some(key) = index_expr.get_index_key() {
+                    let field_name = match key {
+                        LuaIndexKey::Name(name_token) => {
+                            name_token.get_name_text().to_string()
+                        }
+                        _ => return Err("function name field must be a name".to_string()),
+                    };
+                    
+                    // 创建字段访问（对齐 fieldsel）
+                    let k_idx = super::helpers::string_k(c, field_name);
+                    let mut k = expdesc::ExpDesc::new_k(k_idx);
+                    super::exp2reg::exp2anyregup(c, &mut v);
+                    super::exp2reg::indexed(c, &mut v, &mut k);
+                }
+            }
         }
     }
     
     // Compile function body (closure expression)
+    // TODO: 需要将 ismethod 传递给 body 编译，使其在参数列表开始前添加 'self' 参数
+    // 参考 lparser.c 的 body 函数：if (ismethod) new_localvarliteral(ls, "self");
     let closure = func.get_closure()
         .ok_or("function statement missing body")?;
     let mut b = super::expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
     
+    // 暂时忽略 ismethod，等实现 closure 编译时再处理
+    let _ = ismethod;
+    
     // Store function in the variable
     // TODO: Check readonly variables
     super::exp2reg::store_var(c, &v, &mut b);
+    
+    Ok(())
+}
+
+/// Compile local function statement (对齐localfunc)
+/// local function name() body end
+fn compile_local_func_stat(c: &mut Compiler, local_func: &LuaLocalFuncStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    
+    // Get function name
+    let local_name = local_func.get_local_name()
+        .ok_or("local function missing name")?;
+    let name = local_name.get_name_token()
+        .ok_or("local function name missing token")?
+        .get_name_text()
+        .to_string();
+    
+    // Create local variable first (before compiling body)
+    new_localvar(c, name)?;
+    adjustlocalvars(c, 1);
+    
+    // Compile function body
+    let closure = local_func.get_closure()
+        .ok_or("local function missing body")?;
+    let mut b = super::expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
+    
+    // Store in the local variable (which is the last one created)
+    let reg = c.freereg - 1;
+    super::exp2reg::exp2reg(c, &mut b, reg);
     
     Ok(())
 }
