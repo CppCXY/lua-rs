@@ -127,48 +127,56 @@ pub fn luak_posfix(
 /// Create code for '(e1 .. e2)' - Lua equivalent: codeconcat (lcode.c L1686-1700)
 fn codeconcat(c: &mut Compiler, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), String> {
     // OFFICIAL LUA: lcode.c L1686-1700
-    // Check if e2's last instruction is a CONCAT (merge optimization)
-    if e2.kind == ExpKind::VReloc && c.chunk.code.len() > 0 {
-        let ie2_pc = e2.info as usize;
-        if ie2_pc < c.chunk.code.len() {
-            let ie2 = c.chunk.code[ie2_pc];
-            if Instruction::get_opcode(ie2) == OpCode::Concat {
-                let n = Instruction::get_b(ie2); // # of elements concatenated in e2
-                // Get e1's register: if VReloc use var.ridx, else use info
-                let e1_reg = if e1.kind == ExpKind::VReloc { e1.var.ridx } else { e1.info };
-                // Check if e1 ends just before e2's concatenation starts
-                let e2_start_reg = Instruction::get_a(ie2);
-                lua_assert(
-                    e1_reg == e2_start_reg - 1,
-                    "CONCAT merge: e1 must be just before e2",
-                );
-                let result_reg = e1_reg;
-                free_exp(c, e1);
-                // Merge: extend e2's CONCAT to include e1
-                c.chunk.code[ie2_pc] = Instruction::encode_abc(OpCode::Concat, result_reg, n + 1, 0);
-                // Result is still VReloc pointing to the merged instruction
-                e1.kind = ExpKind::VReloc;
-                e1.info = ie2_pc as u32;
-                e1.var.ridx = result_reg;
-                return Ok(());
-            }
+    // codeconcat merges consecutive CONCAT operations but does NOT change e1's type
+    // e1 stays VNONRELOC with info = result register
+    
+    // previousinstruction(fs) in Official Lua
+    if c.chunk.code.len() > 0 {
+        let ie2_pc = c.chunk.code.len() - 1;
+        let ie2 = c.chunk.code[ie2_pc];
+        
+        // Check if e2's last instruction is a CONCAT (merge optimization)
+        if Instruction::get_opcode(ie2) == OpCode::Concat {
+            let n = Instruction::get_b(ie2); // # of elements concatenated in e2
+            let e2_start_reg = Instruction::get_a(ie2);
+            
+            // Official Lua: lua_assert(e1->u.info + 1 == GETARG_A(*ie2));
+            // e1 must be in the register just before e2's CONCAT starts
+            lua_assert(
+                e1.kind == ExpKind::VNonReloc,
+                "codeconcat: e1 must be VNONRELOC",
+            );
+            lua_assert(
+                e1.info + 1 == e2_start_reg,
+                "codeconcat merge: e1 must be just before e2",
+            );
+            
+            free_exp(c, e2);
+            
+            // Merge: extend e2's CONCAT to include e1
+            // SETARG_A(*ie2, e1->u.info) - set start register to e1's register
+            // SETARG_B(*ie2, n + 1) - increment count
+            c.chunk.code[ie2_pc] = Instruction::encode_abc(OpCode::Concat, e1.info, n + 1, 0);
+            
+            // CRITICAL: Official Lua does NOT change e1's type!
+            // e1 stays VNONRELOC, result is in e1.info register
+            return Ok(());
         }
     }
 
     // e2 is not a concatenation - emit new CONCAT
-    // CRITICAL: Do NOT call exp_to_next_reg(e1) - e1 is already in the correct register!
     // Official Lua: luaK_codeABC(fs, OP_CONCAT, e1->u.info, 2, 0);
-    let a_value = e1.info;
-    let pc = c.chunk.code.len();
-    emit(c, Instruction::encode_abc(OpCode::Concat, a_value, 2, 0));
+    lua_assert(
+        e1.kind == ExpKind::VNonReloc,
+        "codeconcat: e1 must be VNONRELOC",
+    );
+    
+    emit(c, Instruction::encode_abc(OpCode::Concat, e1.info, 2, 0));
     free_exp(c, e2);
-    // CRITICAL: Result must be VReloc pointing to the CONCAT instruction
-    // This allows subsequent CONCAT operations to detect and merge
-    // Store register in var.ridx for merge comparison
-    // NOTE: Do NOT modify freereg here - Official Lua's codeconcat doesn't touch it
-    e1.kind = ExpKind::VReloc;
-    e1.info = pc as u32;      // Point to the CONCAT instruction
-    e1.var.ridx = a_value;    // Save register for merge check
+    
+    // CRITICAL: Official Lua does NOT change e1's type!
+    // e1 stays VNONRELOC, result is in e1.info register (same as CONCAT's A field)
+    // This allows subsequent CONCAT operations to merge correctly
     Ok(())
 }
 
