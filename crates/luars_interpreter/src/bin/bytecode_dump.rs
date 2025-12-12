@@ -314,7 +314,7 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
 
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
-        for (i, child) in chunk.child_protos.iter().enumerate() {
+        for (_i, child) in chunk.child_protos.iter().enumerate() {
             // TODO: get actual line numbers from child chunk
             dump_chunk(child, filename, 0, 0, false);
         }

@@ -98,7 +98,14 @@ pub(crate) fn adjustlocalvars(c: &mut Compiler, nvars: usize) {
 
 /// Mark that a variable will be used as an upvalue (对齐markupval)
 fn markupval(c: &mut Compiler, level: usize) {
-    // Find the block where this variable was defined
+    // Mark local variable as needing close (对齐luac markupval)
+    let mut scope = c.scope_chain.borrow_mut();
+    if level < scope.locals.len() {
+        scope.locals[level].needs_close = true;
+    }
+    drop(scope);
+    
+    // Find the block where this variable was defined and mark it
     let mut current = &mut c.block;
     
     loop {

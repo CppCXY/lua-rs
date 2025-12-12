@@ -111,14 +111,16 @@ pub(crate) struct Label {
     pub name: String,
     pub position: usize,    // Code position where label is defined
     pub scope_depth: usize, // Scope depth at label definition
+    pub nactvar: usize,     // Number of active variables at label (对齐luac Label.nactvar)
 }
 
 /// Pending goto statement
 pub(crate) struct GotoInfo {
     pub name: String,
     pub jump_position: usize, // Position of the jump instruction
-    #[allow(unused)]
     pub scope_depth: usize, // Scope depth at goto statement
+    pub nactvar: usize,     // Number of active variables at goto (对齐luac Labeldesc.nactvar)
+    pub close: bool,        // Whether need to close upvalues when jumping
 }
 
 impl<'a> Compiler<'a> {
@@ -324,6 +326,17 @@ fn enter_block(c: &mut Compiler, isloop: bool) -> Result<(), String> {
 fn leave_block(c: &mut Compiler) -> Result<(), String> {
     let bl = c.block.take().expect("No block to leave");
     
+    // Check for unresolved gotos (对齐luac leaveblock)
+    let first_goto = bl.first_goto;
+    if first_goto < c.gotos.len() {
+        // Find first unresolved goto that's still in scope
+        for i in first_goto..c.gotos.len() {
+            if c.gotos[i].scope_depth > bl.nactvar {
+                return Err(format!("no visible label '{}' for <goto>", c.gotos[i].name));
+            }
+        }
+    }
+    
     // Remove local variables
     let nvar = bl.nactvar;
     while c.nactvar > nvar {
@@ -351,8 +364,11 @@ fn leave_block(c: &mut Compiler) -> Result<(), String> {
     let stklevel = helpers::nvarstack(c);
     c.freereg = stklevel;
     
-    // Remove labels
+    // Remove labels from this block
     c.labels.truncate(bl.first_label);
+    
+    // Remove gotos from this block
+    c.gotos.truncate(first_goto);
     
     // Restore previous block
     c.block = bl.previous;

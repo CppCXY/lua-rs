@@ -276,17 +276,37 @@ fn compile_expr_stat(c: &mut Compiler, expr_stat: &LuaCallExprStat) -> Result<()
 
 /// Compile break statement (对齐breakstat)
 fn compile_break_stat(c: &mut Compiler) -> Result<(), String> {
-    // Break is semantically equivalent to "goto break"
-    // Create a jump instruction that will be patched later when we leave the loop
-    let pc = helpers::jump(c);
-    
-    // Find the innermost loop and add this break to its jump list
+    // Break is semantically equivalent to "goto break" (对齐luac breakstat)
     if c.loop_stack.is_empty() {
         return Err("break statement not inside a loop".to_string());
     }
     
-    // Add jump to the current loop's break list
+    // Get loop info to check if we need to close variables
     let loop_idx = c.loop_stack.len() - 1;
+    let first_local = c.loop_stack[loop_idx].first_local_register as usize;
+    
+    // Emit CLOSE for variables that need closing when exiting loop (对齐luac)
+    if c.nactvar > first_local {
+        // Check if any variables need closing
+        let scope = c.scope_chain.borrow();
+        let mut needs_close = false;
+        for i in first_local..c.nactvar {
+            if i < scope.locals.len() && scope.locals[i].is_to_be_closed {
+                needs_close = true;
+                break;
+            }
+        }
+        drop(scope);
+        
+        if needs_close {
+            helpers::code_abc(c, crate::lua_vm::OpCode::Close, first_local as u32, 0, 0);
+        }
+    }
+    
+    // Create a jump instruction that will be patched later when we leave the loop
+    let pc = helpers::jump(c);
+    
+    // Add jump to the current loop's break list
     c.loop_stack[loop_idx].break_jumps.push(pc);
     
     Ok(())
@@ -802,7 +822,7 @@ fn compile_local_func_stat(c: &mut Compiler, local_func: &LuaLocalFuncStat) -> R
     // Compile function body (this will reserve a register for the closure)
     let closure = local_func.get_closure()
         .ok_or("local function missing body")?;
-    let mut b = expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
+    let b = expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
     
     // Now activate the local variable (对齐luac: adjustlocalvars after body compilation)
     // This makes the variable point to the register where the closure was placed
@@ -915,33 +935,55 @@ fn compile_label_stat(c: &mut Compiler, label_stat: &LuaLabelStat) -> Result<(),
         .get_name_text()
         .to_string();
     
-    // Check for duplicate labels in current function
-    for existing in &c.labels {
-        if existing.name == name && existing.scope_depth == c.scope_depth {
-            return Err(format!("Label '{}' already defined", name));
+    // Check for duplicate labels in current block (对齐luac checkrepeated)
+    if let Some(block) = &c.block {
+        let first_label = block.first_label;
+        for i in first_label..c.labels.len() {
+            if c.labels[i].name == name {
+                return Err(format!("label '{}' already defined", name));
+            }
         }
     }
     
     // Create label at current position
     let pc = helpers::get_label(c);
+    let nactvar = c.nactvar;
     c.labels.push(Label {
         name: name.clone(),
         position: pc,
         scope_depth: c.scope_depth,
+        nactvar,
     });
     
-    // Resolve any pending gotos to this label
-    let mut i = 0;
-    while i < c.gotos.len() {
-        if c.gotos[i].name == name {
-            let goto_info = c.gotos.remove(i);
-            // Patch the goto jump to this label
-            helpers::patch_list(c, goto_info.jump_position as i32, pc);
-            
-            // Check for variable scope issues
-            // TODO: Track nactvar in GotoInfo if needed for scope checking
-        } else {
-            i += 1;
+    // Resolve pending gotos to this label (对齐luac findgotos)
+    if let Some(block) = &c.block {
+        let first_goto = block.first_goto;
+        let mut i = first_goto;
+        while i < c.gotos.len() {
+            if c.gotos[i].name == name {
+                let goto_nactvar = c.gotos[i].nactvar;
+                
+                // Check if goto jumps into scope of any variable (对齐luac)
+                if goto_nactvar < nactvar {
+                    // Get variable name that would be jumped into
+                    let scope = c.scope_chain.borrow();
+                    let var_name = if goto_nactvar < scope.locals.len() {
+                        scope.locals[goto_nactvar].name.clone()
+                    } else {
+                        "?".to_string()
+                    };
+                    drop(scope);
+                    
+                    return Err(format!("<goto {}> at line ? jumps into the scope of local '{}'", 
+                                     name, var_name));
+                }
+                
+                let goto_info = c.gotos.remove(i);
+                // Patch the goto jump to this label
+                helpers::patch_list(c, goto_info.jump_position as i32, pc);
+            } else {
+                i += 1;
+            }
         }
     }
     
@@ -957,30 +999,51 @@ fn compile_goto_stat(c: &mut Compiler, goto_stat: &LuaGotoStat) -> Result<(), St
         .get_name_text()
         .to_string();
     
-    // Generate jump instruction
-    let jump_pc = helpers::jump(c);
+    let nactvar = c.nactvar;
+    let close = c.needclose;
     
-    // Try to find the label (for backward jumps)
-    let mut found = false;
-    for label in &c.labels {
+    // Try to find the label (for backward jumps) (对齐luac findlabel)
+    let mut found_label = None;
+    for (idx, label) in c.labels.iter().enumerate() {
         if label.name == name {
-            // Backward jump - resolve immediately
-            helpers::patch_list(c, jump_pc as i32, label.position);
-            
-            // Check if we need to close upvalues
-            // TODO: Track variable count for proper scope checking
-            
-            found = true;
+            found_label = Some(idx);
             break;
         }
     }
     
-    if !found {
-        // Forward jump - add to pending gotos
+    if let Some(label_idx) = found_label {
+        // Extract label info before borrowing c mutably
+        let label_nactvar = c.labels[label_idx].nactvar;
+        let label_position = c.labels[label_idx].position;
+        
+        // Backward jump - check scope (对齐luac)
+        if nactvar > label_nactvar {
+            // Check for to-be-closed variables
+            let scope = c.scope_chain.borrow();
+            for i in label_nactvar..nactvar {
+                if i < scope.locals.len() && scope.locals[i].is_to_be_closed {
+                    return Err(format!("<goto {}> jumps into scope of to-be-closed variable", name));
+                }
+            }
+        }
+        
+        // Emit CLOSE if needed (对齐luac)
+        if nactvar > label_nactvar {
+            helpers::code_abc(c, crate::lua_vm::OpCode::Close, label_nactvar as u32, 0, 0);
+        }
+        
+        // Generate jump instruction
+        let jump_pc = helpers::jump(c);
+        helpers::patch_list(c, jump_pc as i32, label_position);
+    } else {
+        // Forward jump - add to pending gotos (对齐luac newgotoentry)
+        let jump_pc = helpers::jump(c);
         c.gotos.push(GotoInfo {
             name,
             jump_position: jump_pc,
             scope_depth: c.scope_depth,
+            nactvar,
+            close,
         });
     }
     
