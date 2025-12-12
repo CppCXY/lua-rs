@@ -1,6 +1,6 @@
 // Statement compilation (对齐lparser.c的statement parsing)
-use super::*;
 use super::helpers;
+use super::*;
 use emmylua_parser::*;
 
 /// Compile a single statement (对齐statement)
@@ -14,7 +14,8 @@ pub(crate) fn statement(c: &mut Compiler, stmt: &LuaStat) -> Result<(), String> 
         LuaStat::IfStat(if_node) => compile_if_stat(c, if_node),
         LuaStat::WhileStat(while_node) => compile_while_stat(c, while_node),
         LuaStat::RepeatStat(repeat_node) => compile_repeat_stat(c, repeat_node),
-        LuaStat::ForStat(for_node) => compile_for_stat(c, for_node),
+        LuaStat::ForStat(for_node) => compile_generic_for_stat(c, for_node),
+        LuaStat::ForRangeStat(for_range_node) => compile_numeric_for_stat(c, for_range_node),
         LuaStat::DoStat(do_node) => compile_do_stat(c, do_node),
         LuaStat::FuncStat(func_node) => compile_func_stat(c, func_node),
         LuaStat::AssignStat(assign_node) => compile_assign_stat(c, assign_node),
@@ -30,9 +31,174 @@ pub(crate) fn statement(c: &mut Compiler, stmt: &LuaStat) -> Result<(), String> 
     }
 }
 
+/// Adjust assignment - align nvars variables to nexps expressions (对齐adjust_assign)
+/// This handles the case where the number of variables doesn't match the number of expressions
+pub(crate) fn adjust_assign(
+    c: &mut Compiler,
+    nvars: i32,
+    nexps: i32,
+    e: &mut super::expdesc::ExpDesc,
+) {
+    use super::expdesc::ExpKind;
+    use exp2reg;
+
+    let needed = nvars - nexps; // extra values needed
+
+    // Check if last expression has multiple returns (call or vararg)
+    if matches!(e.kind, ExpKind::VCall | ExpKind::VVararg) {
+        let mut extra = needed + 1; // discount last expression itself
+        if extra < 0 {
+            extra = 0;
+        }
+        exp2reg::set_returns(c, e, extra); // last exp. provides the difference
+    } else {
+        if e.kind != ExpKind::VVoid {
+            // at least one expression?
+            exp2reg::exp2nextreg(c, e); // close last expression
+        }
+        if needed > 0 {
+            // missing values?
+            helpers::nil(c, c.freereg, needed as u32); // complete with nils
+        }
+    }
+
+    if needed > 0 {
+        helpers::reserve_regs(c, needed as u32); // registers for extra values
+    } else {
+        // adding 'needed' is actually a subtraction
+        c.freereg = (c.freereg as i32 + needed) as u32; // remove extra values
+    }
+}
+
 /// Compile local variable declaration (对齐localstat)
-fn compile_local_stat(_c: &mut Compiler, _local: &LuaLocalStat) -> Result<(), String> {
-    // TODO: Implement local variable declaration
+fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    use super::{exp2reg, expr};
+
+    let mut nvars: i32 = 0;
+    let mut toclose: i32 = -1; // index of to-be-closed variable (if any)
+    let local_defs = local_stat.get_local_name_list();
+    // Parse variable names and attributes
+    // local name1 [<attr>], name2 [<attr>], ... [= explist]
+    // TODO: emmylua_parser API needs investigation
+    // Temporarily stub this out until we know the correct API
+
+    for name_def in local_defs {
+        let name = name_def
+            .get_name_token()
+            .unwrap()
+            .get_name_text()
+            .to_string();
+
+        if name.is_empty() {
+            return Err("expected variable name".to_string());
+        }
+
+        // Create local variable
+        let vidx = new_localvar(c, name)?;
+
+        // Check for attribute (<const> or <close>)
+        let (is_const, is_to_be_closed) = {
+            let attrib = name_def.get_attrib();
+            let mut is_const = false;
+            let mut is_to_be_closed = false;
+            if let Some(attr) = attrib {
+                if attr.is_const() {
+                    is_const = true;
+                }
+                if attr.is_close() {
+                    is_to_be_closed = true;
+                }
+            }
+            (is_const, is_to_be_closed)
+        };
+
+        // Set attributes in the local variable
+        {
+            let mut scope = c.scope_chain.borrow_mut();
+            if let Some(local) = scope.locals.get_mut(vidx) {
+                local.is_const = is_const;
+                local.is_to_be_closed = is_to_be_closed;
+            }
+        }
+
+        // Check for to-be-closed
+        if is_to_be_closed {
+            if toclose != -1 {
+                return Err("multiple to-be-closed variables in local list".to_string());
+            }
+            // Calculate current nactvar equivalent (number of active locals)
+            let scope = c.scope_chain.borrow();
+            let nactvar = scope.locals.iter().filter(|l| !l.is_const).count();
+            toclose = nactvar as i32 + nvars;
+        }
+
+        nvars += 1;
+    }
+
+    // Parse initialization expressions if present
+    let exprs: Vec<_> = local_stat.get_value_exprs().collect();
+    let nexps = exprs.len() as i32;
+
+    if nexps == 0 {
+        // No initialization - all variables get nil
+        // Special case: const without initializer is compile-time constant nil
+        adjustlocalvars(c, nvars as usize);
+    } else if nvars == nexps {
+        // Equal number of variables and expressions
+        // Check if last variable is const and can be compile-time constant
+        let scope = c.scope_chain.borrow();
+        let vidx = scope.locals.len() - 1;
+        let is_last_const = scope.locals.get(vidx).map(|l| l.is_const).unwrap_or(false);
+        drop(scope);
+
+        if is_last_const && nexps > 0 {
+            // Try to evaluate as compile-time constant
+            let mut e = expr::expr(c, &exprs[(nexps - 1) as usize])?;
+
+            // For now, only simple constants can be compile-time (TODO: add luaK_exp2const)
+            // Activate all variables
+            adjustlocalvars(c, nvars as usize);
+
+            // TODO: Implement compile-time constant optimization
+            // This requires luaK_exp2const equivalent
+            adjust_assign(c, nvars, nexps, &mut e);
+        } else {
+            // Compile all expressions
+            let mut last_e = super::expdesc::ExpDesc::new_void();
+            for (i, ex) in exprs.iter().enumerate() {
+                last_e = expr::expr(c, ex)?;
+                if i < (nexps - 1) as usize {
+                    exp2reg::exp2nextreg(c, &mut last_e);
+                }
+            }
+            adjust_assign(c, nvars, nexps, &mut last_e);
+            adjustlocalvars(c, nvars as usize);
+        }
+    } else {
+        // Different number of variables and expressions - use adjust_assign
+        let mut last_e = super::expdesc::ExpDesc::new_void();
+
+        if nexps > 0 {
+            for (i, ex) in exprs.iter().enumerate() {
+                last_e = expr::expr(c, ex)?;
+                if i < (nexps - 1) as usize {
+                    exp2reg::exp2nextreg(c, &mut last_e);
+                }
+            }
+        }
+
+        adjust_assign(c, nvars, nexps, &mut last_e);
+        adjustlocalvars(c, nvars as usize);
+    }
+
+    // Handle to-be-closed variable
+    if toclose != -1 {
+        // Mark the variable as to-be-closed (OP_TBC)
+        let level = super::var::reglevel(c, toclose as usize);
+        helpers::code_abc(c, crate::lua_vm::OpCode::Tbc, level, 0, 0);
+    }
+
     Ok(())
 }
 
@@ -40,23 +206,26 @@ fn compile_local_stat(_c: &mut Compiler, _local: &LuaLocalStat) -> Result<(), St
 fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), String> {
     let first = helpers::nvarstack(c);
     let mut nret: i32 = 0;
-    
+
     // Get return expressions and collect them
     let exprs: Vec<_> = ret.get_expr_list().collect();
-    
+
     if exprs.is_empty() {
         // No return values
         nret = 0;
     } else if exprs.len() == 1 {
         // Single return value
         let mut e = super::expr::expr(c, &exprs[0])?;
-        
+
         // Check if it's a multi-return expression (call or vararg)
-        if matches!(e.kind, super::expdesc::ExpKind::VCall | super::expdesc::ExpKind::VVararg) {
-            super::exp2reg::set_returns(c, &mut e, -1); // Return all values
+        if matches!(
+            e.kind,
+            super::expdesc::ExpKind::VCall | super::expdesc::ExpKind::VVararg
+        ) {
+            exp2reg::set_returns(c, &mut e, -1); // Return all values
             nret = -1; // LUA_MULTRET
         } else {
-            super::exp2reg::exp2anyreg(c, &mut e);
+            exp2reg::exp2anyreg(c, &mut e);
             nret = 1;
         }
     } else {
@@ -65,53 +234,358 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
             let mut e = super::expr::expr(c, expr)?;
             if i == exprs.len() - 1 {
                 // Last expression might return multiple values
-                if matches!(e.kind, super::expdesc::ExpKind::VCall | super::expdesc::ExpKind::VVararg) {
-                    super::exp2reg::set_returns(c, &mut e, -1);
+                if matches!(
+                    e.kind,
+                    super::expdesc::ExpKind::VCall | super::expdesc::ExpKind::VVararg
+                ) {
+                    exp2reg::set_returns(c, &mut e, -1);
                     nret = -1; // LUA_MULTRET
                 } else {
-                    super::exp2reg::exp2nextreg(c, &mut e);
+                    exp2reg::exp2nextreg(c, &mut e);
                     nret = exprs.len() as i32;
                 }
             } else {
-                super::exp2reg::exp2nextreg(c, &mut e);
+                exp2reg::exp2nextreg(c, &mut e);
             }
         }
         if nret != -1 {
             nret = exprs.len() as i32;
         }
     }
-    
+
     helpers::ret(c, first, nret);
     Ok(())
 }
 
 /// Compile break statement (对齐breakstat)
-fn compile_break_stat(_c: &mut Compiler) -> Result<(), String> {
-    // TODO: Implement break
+fn compile_break_stat(c: &mut Compiler) -> Result<(), String> {
+    // Break is semantically equivalent to "goto break"
+    // Create a jump instruction that will be patched later when we leave the loop
+    let pc = helpers::jump(c);
+    
+    // Find the innermost loop and add this break to its jump list
+    if c.loop_stack.is_empty() {
+        return Err("break statement not inside a loop".to_string());
+    }
+    
+    // Add jump to the current loop's break list
+    let loop_idx = c.loop_stack.len() - 1;
+    c.loop_stack[loop_idx].break_jumps.push(pc);
+    
     Ok(())
 }
 
 /// Compile if statement (对齐ifstat)
-fn compile_if_stat(_c: &mut Compiler, _if_stat: &LuaIfStat) -> Result<(), String> {
-    // TODO: Implement if
+fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> {
+    // ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END
+    let mut escapelist = helpers::NO_JUMP;
+    
+    // Compile main if condition and block
+    if let Some(ref cond) = if_stat.get_condition_expr() {
+        let mut v = super::expr::expr(c, cond)?;
+        let jf = super::exp2reg::goiffalse(c, &mut v);
+        
+        super::enter_block(c, false)?;
+        if let Some(ref block) = if_stat.get_block() {
+            super::compile_statlist(c, block)?;
+        }
+        super::leave_block(c)?;
+        
+        // If there are else/elseif clauses, jump over them
+        if if_stat.get_else_clause().is_some() || if_stat.get_else_if_clause_list().next().is_some() {
+            let jmp = helpers::jump(c) as i32;
+            helpers::concat(c, &mut escapelist, jmp);
+        }
+        
+        helpers::patch_to_here(c, jf);
+    }
+    
+    // Compile elseif clauses
+    for elseif in if_stat.get_else_if_clause_list() {
+        if let Some(ref cond) = elseif.get_condition_expr() {
+            let mut v = super::expr::expr(c, cond)?;
+            let jf = super::exp2reg::goiffalse(c, &mut v);
+            
+            super::enter_block(c, false)?;
+            if let Some(ref block) = elseif.get_block() {
+                super::compile_statlist(c, block)?;
+            }
+            super::leave_block(c)?;
+            
+            // Jump over remaining elseif/else
+            if if_stat.get_else_clause().is_some() {
+                let jmp = helpers::jump(c) as i32;
+                helpers::concat(c, &mut escapelist, jmp);
+            }
+            
+            helpers::patch_to_here(c, jf);
+        }
+    }
+    
+    // Compile else clause
+    if let Some(ref else_clause) = if_stat.get_else_clause() {
+        super::enter_block(c, false)?;
+        if let Some(ref block) = else_clause.get_block() {
+            super::compile_statlist(c, block)?;
+        }
+        super::leave_block(c)?;
+    }
+    
+    // Patch all escape jumps to here (end of if statement)
+    helpers::patch_to_here(c, escapelist);
+    
     Ok(())
 }
 
 /// Compile while statement (对齐whilestat)
-fn compile_while_stat(_c: &mut Compiler, _while_stat: &LuaWhileStat) -> Result<(), String> {
-    // TODO: Implement while
+fn compile_while_stat(c: &mut Compiler, while_stat: &LuaWhileStat) -> Result<(), String> {
+    // whilestat -> WHILE cond DO block END
+    let whileinit = helpers::get_label(c);
+    
+    // Compile condition
+    let cond_expr = while_stat.get_condition_expr()
+        .ok_or("while statement missing condition")?;
+    let mut v = super::expr::expr(c, &cond_expr)?;
+    
+    // Generate conditional jump (jump if false)
+    let condexit = super::exp2reg::goiffalse(c, &mut v);
+    
+    // Enter loop block
+    super::enter_block(c, true)?;
+    
+    // Setup loop info for break statements
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
+    
+    // Compile loop body
+    if let Some(ref block) = while_stat.get_block() {
+        super::compile_statlist(c, block)?;
+    }
+    
+    // Jump back to condition
+    helpers::jump_to(c, whileinit);
+    
+    // Leave block and patch breaks
+    super::leave_block(c)?;
+    
+    // Patch all break statements to jump here
+    if let Some(loop_info) = c.loop_stack.pop() {
+        let here = helpers::get_label(c);
+        for break_pc in loop_info.break_jumps {
+            helpers::fix_jump(c, break_pc, here);
+        }
+    }
+    
+    // Patch condition exit to jump here (after loop)
+    helpers::patch_to_here(c, condexit);
+    
     Ok(())
 }
 
 /// Compile repeat statement (对齐repeatstat)
-fn compile_repeat_stat(_c: &mut Compiler, _repeat: &LuaRepeatStat) -> Result<(), String> {
-    // TODO: Implement repeat
+fn compile_repeat_stat(c: &mut Compiler, repeat_stat: &LuaRepeatStat) -> Result<(), String> {
+    // repeatstat -> REPEAT block UNTIL cond
+    let repeat_init = helpers::get_label(c);
+    
+    // Enter loop block
+    super::enter_block(c, true)?;
+    
+    // Setup loop info for break statements  
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
+    
+    // Enter inner scope block (for condition variables)
+    super::enter_block(c, false)?;
+    
+    // Compile loop body
+    if let Some(ref block) = repeat_stat.get_block() {
+        super::compile_statlist(c, block)?;
+    }
+    
+    // Compile condition (can see variables declared in loop body)
+    let cond_expr = repeat_stat.get_condition_expr()
+        .ok_or("repeat statement missing condition")?;
+    let mut v = super::expr::expr(c, &cond_expr)?;
+    let condexit = super::exp2reg::goiftrue(c, &mut v);
+    
+    // Leave inner scope
+    super::leave_block(c)?;
+    
+    // Check if we need to close upvalues
+    // TODO: Handle upvalue closing properly when block.upval is true
+    
+    // Jump back to start if condition is false
+    helpers::patch_list(c, condexit, repeat_init);
+    
+    // Leave loop block
+    super::leave_block(c)?;
+    
+    // Patch all break statements
+    if let Some(loop_info) = c.loop_stack.pop() {
+        let here = helpers::get_label(c);
+        for break_pc in loop_info.break_jumps {
+            helpers::fix_jump(c, break_pc, here);
+        }
+    }
+    
     Ok(())
 }
 
-/// Compile for statement (对齐forstat)
-fn compile_for_stat(_c: &mut Compiler, _for_stat: &LuaForStat) -> Result<(), String> {
-    // TODO: Implement for
+/// Compile generic for statement (对齐forlist)
+/// for var1, var2, ... in exp1, exp2, exp3 do block end
+fn compile_generic_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    
+    // forlist -> NAME {,NAME} IN explist DO block
+    let _base = c.freereg;
+    let nvars = 3; // (iter, state, control) - internal control variables
+    
+    // Create internal control variables
+    new_localvar(c, "(for iterator)".to_string())?;
+    new_localvar(c, "(for state)".to_string())?;
+    new_localvar(c, "(for control)".to_string())?;
+    
+    // Parse user variables
+    let var_name = for_stat.get_var_name()
+        .ok_or("generic for missing variable name")?;
+    new_localvar(c, var_name.get_name_text().to_string())?;
+    let nvars = nvars + 1;
+    
+    // TODO: Parse additional variables from iterator if multiple vars
+    // let mut nvars = nvars + 1;
+    // for name in ... { new_localvar(c, name)?; nvars += 1; }
+    
+    // Compile iterator expressions
+    let iter_exprs: Vec<_> = for_stat.get_iter_expr().collect();
+    let nexps = iter_exprs.len() as i32;
+    
+    // Evaluate iterator expressions
+    if nexps == 0 {
+        return Err("generic for missing iterator expression".to_string());
+    }
+    
+    for (i, iter_expr) in iter_exprs.iter().enumerate() {
+        let mut v = super::expr::expr(c, iter_expr)?;
+        if i == nexps as usize - 1 {
+            // Last expression can return multiple values
+            exp2reg::set_returns(c, &mut v, -1); // LUA_MULTRET
+        } else {
+            exp2reg::exp2nextreg(c, &mut v);
+        }
+    }
+    
+    // Adjust to exactly 3 values (iterator, state, control)
+    let mut e = super::expdesc::ExpDesc::new_void();
+    adjust_assign(c, 3, nexps, &mut e);
+    
+    // Activate loop variables
+    adjustlocalvars(c, 3);
+    helpers::reserve_regs(c, 3);
+    
+    // Setup loop
+    super::enter_block(c, false)?;
+    adjustlocalvars(c, nvars - 3);
+    helpers::reserve_regs(c, nvars as u32 - 3);
+    
+    // TODO: Implement forbody - the loop body compilation
+    // This requires TFORPREP, TFORLOOP instructions
+    // Placeholder for now
+    if let Some(ref block) = for_stat.get_block() {
+        super::compile_statlist(c, block)?;
+    }
+    
+    super::leave_block(c)?;
+    
+    Ok(())
+}
+
+/// Compile numeric for statement (对齐fornum)
+/// for v = e1, e2 [, e3] do block end
+fn compile_numeric_for_stat(c: &mut Compiler, for_range_stat: &LuaForRangeStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    
+    // fornum -> NAME = exp1,exp1[,exp1] DO block
+    let _base = c.freereg;
+    
+    // Create internal control variables: (index), (limit), (step)
+    new_localvar(c, "(for index)".to_string())?;
+    new_localvar(c, "(for limit)".to_string())?;
+    new_localvar(c, "(for step)".to_string())?;
+    
+    // Get loop variable name
+    let var_names: Vec<_> = for_range_stat.get_var_name_list().collect();
+    if var_names.is_empty() {
+        return Err("numeric for missing variable name".to_string());
+    }
+    let varname = var_names[0].get_name_text().to_string();
+    new_localvar(c, varname)?;
+    
+    // Compile initial value, limit, step
+    let exprs: Vec<_> = for_range_stat.get_expr_list().collect();
+    if exprs.len() < 2 {
+        return Err("numeric for requires at least start and end values".to_string());
+    }
+    
+    // Compile start expression
+    let mut v = super::expr::expr(c, &exprs[0])?;
+    exp2reg::exp2nextreg(c, &mut v);
+    
+    // Compile limit expression
+    let mut v = super::expr::expr(c, &exprs[1])?;
+    exp2reg::exp2nextreg(c, &mut v);
+    
+    // Compile step expression (default 1)
+    if exprs.len() >= 3 {
+        let mut v = super::expr::expr(c, &exprs[2])?;
+        exp2reg::exp2nextreg(c, &mut v);
+    } else {
+        exp2reg::code_int(c, c.freereg, 1);
+        helpers::reserve_regs(c, 1);
+    }
+    
+    // Activate control variables
+    adjustlocalvars(c, 3);
+    
+    // TODO: Generate FORPREP instruction
+    // let prep_jump = helpers::code_asbc(c, OpCode::Forprep, base, 0);
+    
+    // Enter loop block
+    super::enter_block(c, true)?;
+    adjustlocalvars(c, 1); // activate loop variable
+    helpers::reserve_regs(c, 1);
+    
+    // Setup loop info for break statements
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
+    
+    // Compile loop body
+    if let Some(ref block) = for_range_stat.get_block() {
+        super::compile_statlist(c, block)?;
+    }
+    
+    // Leave block
+    super::leave_block(c)?;
+    
+    // TODO: Generate FORLOOP instruction
+    // helpers::patch_list(c, helpers::code_asbc(c, OpCode::Forloop, base, prep_jump + 1), prep_pc);
+    
+    // Patch break statements
+    if let Some(loop_info) = c.loop_stack.pop() {
+        let here = helpers::get_label(c);
+        for break_pc in loop_info.break_jumps {
+            helpers::fix_jump(c, break_pc, here);
+        }
+    }
+    
     Ok(())
 }
 

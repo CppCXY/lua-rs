@@ -7,6 +7,7 @@ mod helpers;
 mod stmt;
 mod tagmethod;
 mod parse_lua_number;
+mod var;
 
 use rowan::TextRange;
 
@@ -92,7 +93,7 @@ pub(crate) struct Upvalue {
 pub(crate) struct Local {
     pub name: String,
     pub depth: usize,
-    pub register: u32,
+    pub reg: u32,              // Register index (对齐ridx)
     pub is_const: bool,        // <const> attribute
     pub is_to_be_closed: bool, // <close> attribute
     pub needs_close: bool,     // True if captured by a closure (needs CLOSE on scope exit)

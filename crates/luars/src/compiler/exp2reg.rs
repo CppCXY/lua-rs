@@ -171,6 +171,72 @@ fn has_jumps(e: &ExpDesc) -> bool {
     e.t != NO_JUMP || e.f != NO_JUMP
 }
 
+/// Generate jump if expression is false (对齐luaK_goiffalse)
+pub(crate) fn goiffalse(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
+    discharge_vars(c, e);
+    match e.kind {
+        ExpKind::VJmp => {
+            // Already a jump - negate condition
+            negate_condition(c, e);
+            e.f
+        }
+        ExpKind::VNil | ExpKind::VFalse => {
+            // Always false - no jump needed
+            NO_JUMP
+        }
+        _ => {
+            // Generate test and jump
+            discharge2anyreg(c, e);
+            free_exp(c, e);
+            let jmp = jump_on_cond(c, e.info, false);
+            jmp as i32
+        }
+    }
+}
+
+/// Generate jump if expression is true (对齐luaK_goiftrue)
+pub(crate) fn goiftrue(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
+    discharge_vars(c, e);
+    match e.kind {
+        ExpKind::VJmp => {
+            // Already a jump - keep condition
+            e.t
+        }
+        ExpKind::VNil | ExpKind::VFalse => {
+            // Always false - jump unconditionally
+            jump(c) as i32
+        }
+        ExpKind::VTrue | ExpKind::VK | ExpKind::VKFlt | ExpKind::VKInt | ExpKind::VKStr => {
+            // Always true - no jump
+            NO_JUMP
+        }
+        _ => {
+            // Generate test and jump
+            discharge2anyreg(c, e);
+            free_exp(c, e);
+            let jmp = jump_on_cond(c, e.info, true);
+            jmp as i32
+        }
+    }
+}
+
+/// Negate condition of jump (对齐negatecondition)
+fn negate_condition(_c: &mut Compiler, e: &mut ExpDesc) {
+    // Swap true and false jump lists
+    let temp = e.t;
+    e.t = e.f;
+    e.f = temp;
+}
+
+/// Generate conditional jump (对齐jumponcond)
+fn jump_on_cond(c: &mut Compiler, reg: u32, cond: bool) -> usize {
+    if cond {
+        code_abc(c, OpCode::Test, reg, 0, 1)
+    } else {
+        code_abc(c, OpCode::Test, reg, 0, 0)
+    }
+}
+
 /// Free register used by expression (对齐freeexp)
 fn free_exp(c: &mut Compiler, e: &ExpDesc) {
     if e.kind == ExpKind::VNonReloc {
@@ -195,7 +261,7 @@ fn code_extra_arg(c: &mut Compiler, a: u32) {
 }
 
 /// Load integer into register (对齐luaK_int)
-fn code_int(c: &mut Compiler, reg: u32, i: i64) {
+pub(crate) fn code_int(c: &mut Compiler, reg: u32, i: i64) {
     if i >= -0x1FFFF && i <= 0x1FFFF {
         code_asbx(c, OpCode::LoadI, reg, i as i32);
     } else {

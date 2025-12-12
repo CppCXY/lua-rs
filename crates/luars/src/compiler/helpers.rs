@@ -205,7 +205,7 @@ pub(crate) fn nvarstack(c: &Compiler) -> u32 {
     let mut count = 0;
     for local in c.scope_chain.borrow().locals.iter() {
         if !local.is_const {
-            count = count.max(local.register + 1);
+            count = count.max(local.reg + 1);
         }
     }
     count
@@ -217,4 +217,11 @@ pub(crate) fn free_reg(c: &mut Compiler, reg: u32) {
         c.freereg -= 1;
         debug_assert!(reg == c.freereg);
     }
+}
+
+/// Jump to specific label (对齐luaK_jumpto)
+pub(crate) fn jump_to(c: &mut Compiler, target: usize) {
+    let here = get_label(c);
+    let offset = (target as i32) - (here as i32) - 1;
+    code_sj(c, crate::lua_vm::OpCode::Jmp, offset);
 }
