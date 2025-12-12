@@ -1,375 +1,216 @@
-use super::Compiler;
-/// Expression to register conversion functions
-/// Mirrors Lua's code generation strategy with expdesc
+// Expression discharge and register allocation (对齐lcode.c的discharge系列函数)
 use super::expdesc::*;
 use super::helpers::*;
-use crate::lua_value::LuaValue;
+use super::*;
 use crate::lua_vm::{Instruction, OpCode};
 
-/// Discharge expression variables (convert to concrete value)
-/// Lua equivalent: luaK_dischargevars
-pub fn discharge_vars(c: &mut Compiler, e: &mut ExpDesc) {
+/// Discharge variables to their values (对齐luaK_dischargevars)
+pub(crate) fn discharge_vars(c: &mut Compiler, e: &mut ExpDesc) {
     match e.kind {
         ExpKind::VLocal => {
-            // Local variable: convert to VNONRELOC with its register
-            e.kind = ExpKind::VNonReloc;
             e.info = e.var.ridx;
+            e.kind = ExpKind::VNonReloc;
         }
         ExpKind::VUpval => {
-            // Upvalue: generate GETUPVAL instruction
-            let reg = alloc_register(c);
-            emit(c, Instruction::encode_abc(OpCode::GetUpval, reg, e.info, 0));
-            e.kind = ExpKind::VNonReloc;
-            e.info = reg;
+            e.info = code_abc(c, OpCode::GetUpval, 0, e.info, 0) as u32;
+            e.kind = ExpKind::VReloc;
         }
         ExpKind::VIndexUp => {
-            // Indexed upvalue: generate GETTABUP instruction
-            let reg = alloc_register(c);
-            emit(
-                c,
-                Instruction::create_abck(OpCode::GetTabUp, reg, e.ind.t, e.ind.idx, true),
-            );
-            e.kind = ExpKind::VNonReloc;
-            e.info = reg;
+            e.info = code_abc(c, OpCode::GetTabUp, 0, e.ind.t, e.ind.idx) as u32;
+            e.kind = ExpKind::VReloc;
         }
         ExpKind::VIndexI => {
-            // Integer indexed: generate GETI instruction
-            free_register(c, e.ind.t);
-            let reg = alloc_register(c);
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::GetI, reg, e.ind.t, e.ind.idx),
-            );
-            e.kind = ExpKind::VNonReloc;
-            e.info = reg;
+            free_reg(c, e.ind.t);
+            e.info = code_abc(c, OpCode::GetI, 0, e.ind.t, e.ind.idx) as u32;
+            e.kind = ExpKind::VReloc;
         }
         ExpKind::VIndexStr => {
-            // String indexed: generate GETFIELD instruction
-            free_register(c, e.ind.t);
-            let reg = alloc_register(c);
-            emit(
-                c,
-                Instruction::create_abck(OpCode::GetField, reg, e.ind.t, e.ind.idx, true),
-            );
-            e.kind = ExpKind::VNonReloc;
-            e.info = reg;
+            free_reg(c, e.ind.t);
+            e.info = code_abc(c, OpCode::GetField, 0, e.ind.t, e.ind.idx) as u32;
+            e.kind = ExpKind::VReloc;
         }
         ExpKind::VIndexed => {
-            // General indexed: generate GETTABLE instruction
-            free_registers(c, e.ind.t, e.ind.idx);
-            let reg = alloc_register(c);
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::GetTable, reg, e.ind.t, e.ind.idx),
-            );
-            e.kind = ExpKind::VNonReloc;
-            e.info = reg;
+            free_reg(c, e.ind.t);
+            free_reg(c, e.ind.idx);
+            e.info = code_abc(c, OpCode::GetTable, 0, e.ind.t, e.ind.idx) as u32;
+            e.kind = ExpKind::VReloc;
         }
         ExpKind::VCall | ExpKind::VVararg => {
-            // These are already discharged by their generation
-            // Just set to VNONRELOC pointing to freereg-1
-            if c.freereg > 0 {
-                e.kind = ExpKind::VNonReloc;
-                e.info = c.freereg - 1;
-            }
+            set_one_ret(c, e);
         }
-        _ => {
-            // Other kinds don't need discharging
-        }
+        _ => {}
     }
 }
 
-/// Ensure expression is in any register
-/// Lua equivalent: discharge2anyreg
-#[allow(dead_code)]
-fn discharge_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) {
-    if e.kind != ExpKind::VNonReloc {
-        reserve_registers(c, 1);
-        discharge_to_reg(c, e, c.freereg - 1);
-    }
-}
-
-/// Discharge expression to a specific register
-/// Lua equivalent: discharge2reg
-pub fn discharge_to_reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
+/// Discharge expression to a specific register (对齐discharge2reg)
+fn discharge2reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
     discharge_vars(c, e);
-
     match e.kind {
-        ExpKind::VNil => {
-            emit(c, Instruction::encode_abc(OpCode::LoadNil, reg, 0, 0));
-        }
-        ExpKind::VFalse => {
-            emit(c, Instruction::encode_abc(OpCode::LoadFalse, reg, 0, 0));
-        }
-        ExpKind::VTrue => {
-            emit(c, Instruction::encode_abc(OpCode::LoadTrue, reg, 0, 0));
-        }
-        ExpKind::VK => {
-            // Load constant from constant table
-            emit_loadk(c, reg, e.info);
-        }
-        ExpKind::VKInt => {
-            // Load integer immediate if in range, otherwise use constant table
-            if e.ival >= -(1 << 23) && e.ival < (1 << 23) {
-                emit(
-                    c,
-                    Instruction::encode_asbx(OpCode::LoadI, reg, e.ival as i32),
-                );
-            } else {
-                let const_idx = add_constant_dedup(c, LuaValue::integer(e.ival));
-                emit_loadk(c, reg, const_idx);
-            }
-        }
-        ExpKind::VKFlt => {
-            // Load float from constant table
-            let const_idx = add_constant_dedup(c, LuaValue::number(e.nval));
-            emit_loadk(c, reg, const_idx);
-        }
-        ExpKind::VKStr => {
-            // Load string from constant table
-            emit_loadk(c, reg, e.info);
+        ExpKind::VNil => nil(c, reg, 1),
+        ExpKind::VFalse => { code_abc(c, OpCode::LoadFalse, reg, 0, 0); }
+        ExpKind::VTrue => { code_abc(c, OpCode::LoadTrue, reg, 0, 0); }
+        ExpKind::VK => code_loadk(c, reg, e.info),
+        ExpKind::VKInt => code_int(c, reg, e.ival),
+        ExpKind::VKFlt => code_float(c, reg, e.nval),
+        ExpKind::VReloc => {
+            let pc = e.info as usize;
+            let mut instr = c.chunk.code[pc];
+            Instruction::set_a(&mut instr, reg);
+            c.chunk.code[pc] = instr;
         }
         ExpKind::VNonReloc => {
-            if e.info != reg {
-                emit_move(c, reg, e.info);
+            if reg != e.info {
+                code_abc(c, OpCode::Move, reg, e.info, 0);
             }
         }
-        ExpKind::VReloc => {
-            // Relocatable expression: patch instruction to use target register
-            let pc = e.info as usize;
-            if pc < c.chunk.code.len() {
-                // Patch the A field of the instruction
-                let mut instr = c.chunk.code[pc];
-                Instruction::set_a(&mut instr, reg);
-                c.chunk.code[pc] = instr;
-            }
-        }
-        _ => {
-            // Should not happen if discharge_vars was called
-        }
+        ExpKind::VJmp => return,
+        _ => {}
     }
-
-    e.kind = ExpKind::VNonReloc;
     e.info = reg;
+    e.kind = ExpKind::VNonReloc;
 }
 
-/// Compile expression to any available register
-/// Lua equivalent: luaK_exp2anyreg
-pub fn exp_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) -> u32 {
+/// Discharge to any register (对齐discharge2anyreg)
+fn discharge2anyreg(c: &mut Compiler, e: &mut ExpDesc) {
+    if e.kind != ExpKind::VNonReloc {
+        reserve_regs(c, 1);
+        discharge2reg(c, e, c.freereg - 1);
+    }
+}
+
+/// Ensure expression is in next available register (对齐luaK_exp2nextreg)
+pub(crate) fn exp2nextreg(c: &mut Compiler, e: &mut ExpDesc) {
     discharge_vars(c, e);
+    free_exp(c, e);
+    reserve_regs(c, 1);
+    exp2reg(c, e, c.freereg - 1);
+}
 
+/// Ensure expression is in some register (对齐luaK_exp2anyreg)
+pub(crate) fn exp2anyreg(c: &mut Compiler, e: &mut ExpDesc) -> u32 {
+    discharge_vars(c, e);
     if e.kind == ExpKind::VNonReloc {
-        // Already in a register
-        // Official Lua: if no jumps, return register directly (even for locals!)
-        // Locals can be used directly as operands in binary operations
-        if !e.has_jumps() {
+        if !has_jumps(e) {
             return e.info;
         }
-        // If has jumps and is NOT a local, can put final result in same register
-        let nactvar = nvarstack(c);
-        if e.info >= nactvar {
-            exp_to_reg(c, e, e.info);
+        if e.info >= nvarstack(c) {
+            exp2reg(c, e, e.info);
             return e.info;
         }
-        // Fall through: has jumps AND is local - need new register
     }
-
-    if e.kind == ExpKind::VReloc {
-        // CRITICAL: VReloc means result is already in a register (saved in var.ridx)
-        // The instruction at e.info can be patched if needed, but the value is live
-        // DO NOT allocate a new register - just return the existing one
-        // This is essential for CONCAT and other operations that return VReloc
-        // Convert to VNonReloc to avoid confusion
-        let reg = e.var.ridx;
-        e.kind = ExpKind::VNonReloc;
-        e.info = reg;
-        return reg;
-    }
-
-    // Need to allocate a new register
-    reserve_registers(c, 1);
-    discharge_to_reg(c, e, c.freereg - 1);
+    exp2nextreg(c, e);
     e.info
 }
 
-/// Compile expression to next available register
-/// Lua equivalent: luaK_exp2nextreg
-pub fn exp_to_next_reg(c: &mut Compiler, e: &mut ExpDesc) {
-    discharge_vars(c, e);
-    free_exp(c, e);
-    reserve_registers(c, 1);
-    exp_to_reg(c, e, c.freereg - 1);
+/// Ensure expression value is in register or upvalue (对齐luaK_exp2anyregup)
+pub(crate) fn exp2anyregup(c: &mut Compiler, e: &mut ExpDesc) {
+    if e.kind != ExpKind::VUpval || has_jumps(e) {
+        exp2anyreg(c, e);
+    }
 }
 
-/// Compile expression to a specific register
-/// Lua equivalent: exp2reg
-pub fn exp_to_reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
-    discharge_to_reg(c, e, reg);
+/// Ensure expression is discharged (对齐luaK_exp2val)
+pub(crate) fn exp2val(c: &mut Compiler, e: &mut ExpDesc) {
+    if has_jumps(e) {
+        exp2anyreg(c, e);
+    } else {
+        discharge_vars(c, e);
+    }
+}
 
+/// Full exp2reg with jump handling (对齐exp2reg)
+pub(crate) fn exp2reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
+    discharge2reg(c, e, reg);
     if e.kind == ExpKind::VJmp {
-        // TODO: Handle jump expressions (for boolean operators)
-        // concat_jump_lists(c, &mut e.t, e.info);
+        concat(c, &mut e.t, e.info as i32);
     }
-
-    if e.has_jumps() {
-        // TODO: Patch jump lists
-        // patch_list_to_here(c, e.f);
-        // patch_list_to_here(c, e.t);
+    if has_jumps(e) {
+        // TODO: Handle jump lists for boolean expressions
     }
-
-    e.f = -1;
-    e.t = -1;
-    e.kind = ExpKind::VNonReloc;
+    e.f = NO_JUMP;
+    e.t = NO_JUMP;
     e.info = reg;
+    e.kind = ExpKind::VNonReloc;
 }
 
-/// Free expression if it's in a temporary register
-/// Lua equivalent: freeexp
-pub fn free_exp(c: &mut Compiler, e: &ExpDesc) {
+/// Set expression to return one result (对齐luaK_setoneret)
+pub(crate) fn set_one_ret(c: &mut Compiler, e: &mut ExpDesc) {
+    if e.kind == ExpKind::VCall {
+        let pc = e.info as usize;
+        let instr = c.chunk.code[pc];
+        e.kind = ExpKind::VNonReloc;
+        e.info = Instruction::get_a(instr);
+    } else if e.kind == ExpKind::VVararg {
+        let pc = e.info as usize;
+        let mut instr = c.chunk.code[pc];
+        Instruction::set_c(&mut instr, 2);
+        c.chunk.code[pc] = instr;
+        e.kind = ExpKind::VReloc;
+    }
+}
+
+/// Set expression to return multiple results (对齐luaK_setreturns)
+pub(crate) fn set_returns(c: &mut Compiler, e: &mut ExpDesc, nresults: i32) {
+    if e.kind == ExpKind::VCall {
+        let pc = e.info as usize;
+        let mut instr = c.chunk.code[pc];
+        Instruction::set_c(&mut instr, (nresults + 1) as u32);
+        c.chunk.code[pc] = instr;
+    } else if e.kind == ExpKind::VVararg {
+        let pc = e.info as usize;
+        let mut instr = c.chunk.code[pc];
+        Instruction::set_c(&mut instr, (nresults + 1) as u32);
+        Instruction::set_a(&mut instr, c.freereg);
+        c.chunk.code[pc] = instr;
+        reserve_regs(c, 1);
+    }
+}
+
+/// Check if expression has jumps
+fn has_jumps(e: &ExpDesc) -> bool {
+    e.t != NO_JUMP || e.f != NO_JUMP
+}
+
+/// Free register used by expression (对齐freeexp)
+fn free_exp(c: &mut Compiler, e: &ExpDesc) {
     if e.kind == ExpKind::VNonReloc {
-        free_register(c, e.info);
+        free_reg(c, e.info);
     }
 }
 
-/// Free two expressions
-/// Lua equivalent: freeexps
-#[allow(dead_code)]
-pub fn free_exps(c: &mut Compiler, e1: &ExpDesc, e2: &ExpDesc) {
-    let r1 = if e1.kind == ExpKind::VNonReloc {
-        e1.info as i32
+/// Load constant into register (对齐luaK_codek)
+fn code_loadk(c: &mut Compiler, reg: u32, k: u32) {
+    if k <= 0x3FFFF {
+        code_abx(c, OpCode::LoadK, reg, k);
     } else {
-        -1
-    };
-    let r2 = if e2.kind == ExpKind::VNonReloc {
-        e2.info as i32
+        code_abx(c, OpCode::LoadKX, reg, 0);
+        code_extra_arg(c, k);
+    }
+}
+
+/// Emit EXTRAARG instruction
+fn code_extra_arg(c: &mut Compiler, a: u32) {
+    let instr = Instruction::create_ax(OpCode::ExtraArg, a);
+    code(c, instr);
+}
+
+/// Load integer into register (对齐luaK_int)
+fn code_int(c: &mut Compiler, reg: u32, i: i64) {
+    if i >= -0x1FFFF && i <= 0x1FFFF {
+        code_asbx(c, OpCode::LoadI, reg, i as i32);
     } else {
-        -1
-    };
-
-    if r1 >= 0 && r2 >= 0 {
-        free_registers(c, r1 as u32, r2 as u32);
-    } else if r1 >= 0 {
-        free_register(c, r1 as u32);
-    } else if r2 >= 0 {
-        free_register(c, r2 as u32);
+        let k = int_k(c, i);
+        code_loadk(c, reg, k);
     }
 }
 
-/// Check if expression has jump lists
-impl ExpDesc {
-    pub fn has_jumps(&self) -> bool {
-        self.t != -1 || self.f != -1
-    }
-}
-
-/// Ensure expression is in a register or upvalue (Aligned with luaK_exp2anyregup)
-/// If expression is not VUPVAL or has jumps, convert it to a register
-pub fn exp_to_any_reg_up(c: &mut Compiler, e: &mut ExpDesc) {
-    if e.kind != ExpKind::VUpval || e.has_jumps() {
-        exp_to_any_reg(c, e);
-    }
-}
-
-/// Store value from expression to a variable
-/// Lua equivalent: luaK_storevar
-#[allow(dead_code)]
-pub fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
-    match var.kind {
-        ExpKind::VLocal => {
-            free_exp(c, ex);
-            exp_to_reg(c, ex, var.var.ridx);
-        }
-        ExpKind::VUpval => {
-            let e = exp_to_any_reg(c, ex);
-            emit(c, Instruction::encode_abc(OpCode::SetUpval, e, var.info, 0));
-            free_exp(c, ex);
-        }
-        ExpKind::VIndexUp => {
-            code_abrk(c, OpCode::SetTabUp, var.ind.t, var.ind.idx, ex);
-            free_exp(c, ex);
-        }
-        ExpKind::VIndexI => {
-            code_abrk(c, OpCode::SetI, var.ind.t, var.ind.idx, ex);
-            free_exp(c, ex);
-        }
-        ExpKind::VIndexStr => {
-            code_abrk(c, OpCode::SetField, var.ind.t, var.ind.idx, ex);
-            free_exp(c, ex);
-        }
-        ExpKind::VIndexed => {
-            code_abrk(c, OpCode::SetTable, var.ind.t, var.ind.idx, ex);
-            free_exp(c, ex);
-        }
-        _ => {
-            // Should not happen
-        }
-    }
-}
-
-/// Code ABRxK instruction (with RK operand)
-/// Lua equivalent: codeABRK
-#[allow(dead_code)]
-fn code_abrk(c: &mut Compiler, op: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
-    let k = exp_to_rk(c, ec);
-    emit(c, Instruction::create_abck(op, a, b, ec.info, k));
-}
-
-/// Convert expression to RK operand (register or constant)
-/// Lua equivalent: exp2RK
-pub fn exp_to_rk(c: &mut Compiler, e: &mut ExpDesc) -> bool {
-    match e.kind {
-        ExpKind::VTrue | ExpKind::VFalse | ExpKind::VNil => {
-            // OFFICIAL LUA: These constants must be added to constant table for RK encoding
-            // lcode.c exp2RK always calls boolF/boolT/nilK which add to constant table
-            let value = if e.kind == ExpKind::VTrue {
-                LuaValue::boolean(true)
-            } else if e.kind == ExpKind::VFalse {
-                LuaValue::boolean(false)
-            } else {
-                LuaValue::nil()
-            };
-            let const_idx = add_constant_dedup(c, value);
-            if const_idx <= Instruction::MAX_C {
-                e.info = const_idx;
-                e.kind = ExpKind::VK;
-                return true;
-            }
-            // If constant table is full, discharge to register
-            exp_to_any_reg(c, e);
-            false
-        }
-        ExpKind::VKInt => {
-            // Try to fit integer in constant table
-            let const_idx = add_constant_dedup(c, LuaValue::integer(e.ival));
-            if const_idx <= Instruction::MAX_C {
-                e.info = const_idx;
-                e.kind = ExpKind::VK;
-                return true;
-            }
-            // Fall through to allocate register
-            exp_to_any_reg(c, e);
-            false
-        }
-        ExpKind::VKFlt => {
-            let const_idx = add_constant_dedup(c, LuaValue::number(e.nval));
-            if const_idx <= Instruction::MAX_C {
-                e.info = const_idx;
-                e.kind = ExpKind::VK;
-                return true;
-            }
-            exp_to_any_reg(c, e);
-            false
-        }
-        ExpKind::VK => {
-            if e.info <= Instruction::MAX_C {
-                return true;
-            }
-            exp_to_any_reg(c, e);
-            false
-        }
-        _ => {
-            exp_to_any_reg(c, e);
-            false
-        }
+/// Load float into register (对齐luaK_float)
+fn code_float(c: &mut Compiler, reg: u32, f: f64) {
+    let fi = f as i64;
+    if (fi as f64) == f && fi >= -0x1FFFF && fi <= 0x1FFFF {
+        code_asbx(c, OpCode::LoadF, reg, fi as i32);
+    } else {
+        let k = number_k(c, f);
+        code_loadk(c, reg, k);
     }
 }

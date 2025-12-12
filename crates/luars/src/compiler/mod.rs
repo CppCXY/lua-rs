@@ -1,7 +1,5 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
-mod assign;
-mod binop_infix;
 mod exp2reg;
 mod expdesc;
 mod expr;
@@ -12,12 +10,10 @@ mod tagmethod;
 use rowan::TextRange;
 
 use crate::lua_value::Chunk;
-use crate::lua_value::UpvalueDesc;
 use crate::lua_vm::LuaVM;
-use crate::lua_vm::{Instruction, OpCode};
+use crate::lua_vm::OpCode;
 // use crate::optimizer::optimize_constants;  // Disabled for now
 use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
-use helpers::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use stmt::*;
@@ -65,7 +61,7 @@ pub struct Compiler<'a> {
     pub(crate) vm_ptr: *mut LuaVM,       // VM pointer for string pool access
     pub(crate) last_line: u32,           // Last line number for line_info (not used currently)
     pub(crate) line_index: &'a LineIndex, // Line index for error reporting
-    pub(crate) needclose: bool,          // Function needs to close upvalues when returning (对齐lparser.h FuncState.needclose)
+    pub(crate) needclose: bool, // Function needs to close upvalues when returning (对齐lparser.h FuncState.needclose)
     pub(crate) block: Option<Box<BlockCnt>>, // Current block (对齐FuncState.bl)
     pub(crate) prev: Option<*mut Compiler<'a>>, // Enclosing function (对齐lparser.h FuncState.prev)
     pub(crate) _phantom: std::marker::PhantomData<&'a mut LuaVM>,
@@ -204,9 +200,6 @@ impl<'a> Compiler<'a> {
 
         let chunk_node = tree.get_chunk_node();
         compile_chunk(&mut compiler, &chunk_node)?;
-        
-        // Finish function: convert RETURN0/RETURN1 and set k/C flags (对齐lcode.c的luaK_finish)
-        finish_function(&mut compiler);
 
         // Optimize child chunks first
         let optimized_children: Vec<std::rc::Rc<Chunk>> = compiler
@@ -231,75 +224,40 @@ impl<'a> Compiler<'a> {
     }
 }
 
-/// Compile a chunk (root node)
+/// Compile a chunk (root node) - 对齐mainfunc
 fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
-    // Lua 5.4: Every chunk has _ENV as upvalue[0] for accessing globals
-    // Add _ENV upvalue descriptor to the chunk and scope chain
-    c.chunk.upvalue_descs.push(UpvalueDesc {
-        is_local: true, // Main chunk's _ENV is provided by VM
-        index: 0,
-    });
-    c.chunk.upvalue_count = 1;
-
-    // Add _ENV to scope chain so child functions can resolve it
-    c.scope_chain.borrow_mut().upvalues.push(Upvalue {
-        name: "_ENV".to_string(),
-        is_local: true,
-        index: 0,
-    });
-
-    // Emit VARARGPREP at the beginning
+    // Enter main block
+    enter_block(c, false)?;
+    
+    // Main function is vararg
     c.chunk.is_vararg = true;
-    emit(c, Instruction::encode_abc(OpCode::VarargPrep, 0, 0, 0));
-
-    // Compile main body (对齐lparser.c的mainfunc: statlist + close_func)
-    // We manually do enterblock/statlist/leaveblock to capture freereg before leaveblock
-    // (official Lua calls luaK_ret BEFORE leaveblock in close_func)
-    // Note: luaY_nvarstack returns the register level (freereg), NOT nactvar itself
-    let freereg_before_leave = if let Some(block) = chunk.get_block() {
-        enterblock(c, false);
-        compile_statlist(c, &block)?;
-        // Capture freereg BEFORE leaveblock (this is what luaY_nvarstack actually returns)
-        let saved_freereg = c.freereg;
-        leaveblock(c);
-        saved_freereg
-    } else {
-        0
-    };
-
-    // Check for unresolved gotos before finishing
-    check_unresolved_gotos(c)?;
-
-    // Emit implicit return at the end ONLY if last instruction is not already a return
-    // (对齐lparser.c的close_func: luaK_ret(fs, luaY_nvarstack(fs), 0))
-    // Official Lua always emits return, but if explicit return exists, it becomes dead code
-    // and gets optimized away later. We can just skip emitting if last is return.
-    let need_implicit_return = if c.chunk.code.len() > 0 {
-        let last_inst_raw = c.chunk.code[c.chunk.code.len() - 1];
-        let last_opcode = Instruction::get_opcode(last_inst_raw);
-        !matches!(
-            last_opcode,
-            OpCode::Return | OpCode::Return0 | OpCode::Return1 | OpCode::TailCall
-        )
-    } else {
-        true // Empty function needs return
-    };
-
-    if need_implicit_return {
-        emit(
-            c,
-            Instruction::create_abck(OpCode::Return, freereg_before_leave, 1, 0, false),
-        );
+    helpers::code_abc(c, OpCode::VarargPrep, 0, 0, 0);
+    
+    // Compile the body
+    if let Some(ref block) = chunk.get_block() {
+        compile_statlist(c, block)?;
     }
+    
+    // Final return
+    let first = helpers::nvarstack(c);
+    helpers::ret(c, first, 0);
+    
+    // Leave main block
+    leave_block(c)?;
+    
+    // Set max stack size
+    if c.peak_freereg > c.chunk.max_stack_size as u32 {
+        c.chunk.max_stack_size = c.peak_freereg as usize;
+    }
+    
     Ok(())
 }
 
 /// Compile a block of statements (对齐lparser.c的block)
-fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
-    // block -> statlist
-    enterblock(c, false);
+pub(crate) fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+    enter_block(c, false)?;
     compile_statlist(c, block)?;
-    leaveblock(c);
+    leave_block(c)?;
     Ok(())
 }
 
@@ -307,13 +265,70 @@ fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
 pub(crate) fn compile_statlist(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
     // statlist -> { stat [';'] }
     for stat in block.get_stats() {
-        // Check for return statement - it must be last
-        if let emmylua_parser::LuaStat::ReturnStat(_) = stat {
-            compile_stat(c, &stat)?;
-            return Ok(()); // 'return' must be last statement
-        }
-        compile_stat(c, &stat)?;
+        statement(c, &stat)?;
+        
+        // Free registers after each statement
+        let nvar = helpers::nvarstack(c);
+        c.freereg = nvar;
     }
+    Ok(())
+}
+
+/// Enter a new block (对齐enterblock)
+fn enter_block(c: &mut Compiler, isloop: bool) -> Result<(), String> {
+    let bl = BlockCnt {
+        previous: c.block.take(),
+        first_label: c.labels.len(),
+        first_goto: c.gotos.len(),
+        nactvar: c.nactvar,
+        upval: false,
+        isloop,
+        insidetbc: c.block.as_ref().map_or(false, |b| b.insidetbc),
+    };
+    c.block = Some(Box::new(bl));
+    
+    // freereg should equal nvarstack
+    debug_assert!(c.freereg == helpers::nvarstack(c));
+    Ok(())
+}
+
+/// Leave current block (对齐leaveblock)
+fn leave_block(c: &mut Compiler) -> Result<(), String> {
+    let bl = c.block.take().expect("No block to leave");
+    
+    // Remove local variables
+    let nvar = bl.nactvar;
+    while c.nactvar > nvar {
+        c.nactvar -= 1;
+        let mut scope = c.scope_chain.borrow_mut();
+        if !scope.locals.is_empty() {
+            scope.locals.pop();
+        }
+    }
+    
+    // Handle break statements if this is a loop
+    if bl.isloop {
+        // Create break label
+        let _label_pos = helpers::get_label(c);
+        // TODO: Patch break jumps
+    }
+    
+    // Emit CLOSE if needed
+    if bl.upval {
+        let stklevel = helpers::nvarstack(c);
+        helpers::code_abc(c, OpCode::Close, stklevel, 0, 0);
+    }
+    
+    // Free registers
+    let stklevel = helpers::nvarstack(c);
+    c.freereg = stklevel;
+    
+    // Remove labels
+    c.labels.truncate(bl.first_label);
+    
+    // Restore previous block
+    c.block = bl.previous;
+    
     Ok(())
 }
 
