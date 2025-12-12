@@ -23,7 +23,7 @@ fn main() {
     let mut vm = LuaVM::new();
     match vm.compile(&source) {
         Ok(chunk) => {
-            dump_chunk(&chunk, &filename, 0, 0, true);
+            dump_chunk(&chunk, &filename, 0, 0, true, &vm);
         }
         Err(e) => {
             eprintln!("Compilation error: {}", e);
@@ -33,7 +33,46 @@ fn main() {
     }
 }
 
-fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined: usize, is_main: bool) {
+/// 格式化常量值为luac格式的字符串（对齐luac的PrintConstant）
+fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
+    if let Some(val) = chunk.constants.get(idx as usize) {
+        // 根据值类型格式化
+        if val.is_nil() {
+            "nil".to_string()
+        } else if val.is_boolean() {
+            if let Some(b) = val.as_boolean() {
+                if b { "true" } else { "false" }.to_string()
+            } else {
+                "?bool".to_string()
+            }
+        } else if val.is_integer() {
+            if let Some(i) = val.as_integer() {
+                i.to_string()
+            } else {
+                "?int".to_string()
+            }
+        } else if val.is_float() {
+            if let Some(f) = val.as_float() {
+                f.to_string()
+            } else {
+                "?float".to_string()
+            }
+        } else if val.is_string() {
+            // 获取实际字符串内容（对齐luac）
+            if let Some(s) = vm.get_string(val) {
+                format!("\"{}\"", s.as_str())
+            } else {
+                format!("string({})", idx)
+            }
+        } else {
+            format!("{:?}", val)
+        }
+    } else {
+        format!("?({})", idx)
+    }
+}
+
+fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined: usize, is_main: bool, vm: &LuaVM) {
     // Format: main <file:line,line> or function <file:line,line>
     let func_name = if is_main {
         format!("main <{}:0,0>", filename)
@@ -265,13 +304,9 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
         // Add comment for some instructions (like luac)
         let comment = match opcode {
             OpCode::GetTabUp | OpCode::SetTabUp => {
-                // Show upvalue name and constant name
+                // Show upvalue name and constant name（对齐luac）
                 if b < chunk.upvalue_count as u32 && c < chunk.constants.len() as u32 {
-                    if let Some(const_val) = chunk.constants.get(c as usize) {
-                        format!(" ; _ENV {:?}", const_val)
-                    } else {
-                        String::new()
-                    }
+                    format!(" ; _ENV {}", format_constant(chunk, c, vm))
                 } else {
                     String::new()
                 }
@@ -289,13 +324,9 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
                 format!(" ; function_{}", bx)
             }
             OpCode::LoadK => {
-                // Show constant value
+                // Show constant value（对齐luac）
                 if bx < chunk.constants.len() as u32 {
-                    if let Some(val) = chunk.constants.get(bx as usize) {
-                        format!(" ; {:?}", val)
-                    } else {
-                        String::new()
-                    }
+                    format!(" ; {}", format_constant(chunk, bx, vm))
                 } else {
                     String::new()
                 }
@@ -320,7 +351,7 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
     if !chunk.child_protos.is_empty() {
         for (_i, child) in chunk.child_protos.iter().enumerate() {
             // TODO: get actual line numbers from child chunk
-            dump_chunk(child, filename, 0, 0, false);
+            dump_chunk(child, filename, 0, 0, false, vm);
         }
     }
 }
