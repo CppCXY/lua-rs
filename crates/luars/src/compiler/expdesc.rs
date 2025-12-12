@@ -98,6 +98,7 @@ impl ExpDesc {
     }
 
     /// Create expression in a specific register
+    #[allow(dead_code)]
     pub fn new_nonreloc(reg: u32) -> Self {
         ExpDesc {
             kind: ExpKind::VNonReloc,
@@ -159,6 +160,20 @@ impl ExpDesc {
         ExpDesc {
             kind: ExpKind::VK,
             info: const_idx,
+            ival: 0,
+            nval: 0.0,
+            ind: IndexInfo { t: 0, idx: 0 },
+            var: VarInfo { ridx: 0, vidx: 0 },
+            t: -1,
+            f: -1,
+        }
+    }
+
+    /// Create string constant expression (对齐luac VKStr)
+    pub fn new_kstr(str_idx: u32) -> Self {
+        ExpDesc {
+            kind: ExpKind::VKStr,
+            info: str_idx,
             ival: 0,
             nval: 0.0,
             ind: IndexInfo { t: 0, idx: 0 },
@@ -231,6 +246,7 @@ impl ExpDesc {
     }
 
     /// Get the register number if expression is in a register
+    #[allow(dead_code)]
     pub fn get_register(&self) -> Option<u32> {
         match self.kind {
             ExpKind::VNonReloc => Some(self.info),

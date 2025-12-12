@@ -2179,17 +2179,27 @@ impl LuaVM {
             }
         }
 
-        // 5. All registers beyond the frames (temporary values)
+        // 5. All registers beyond the last frame's top (temporary values)
+        // NOTE: Only scan up to a reasonable limit to avoid scanning stale registers
         if self.frame_count > 0 {
             let last_frame = &self.frames[self.frame_count - 1];
             let last_frame_end = last_frame.base_ptr as usize + last_frame.top as usize;
-            for i in last_frame_end..self.register_stack.len() {
-                self.gc_roots_buffer.push(self.register_stack[i]);
+            // Limit scan to avoid excessive GC work on large register stacks
+            let scan_limit = (last_frame_end + 128).min(self.register_stack.len());
+            for i in last_frame_end..scan_limit {
+                let value = self.register_stack[i];
+                if !value.is_nil() {
+                    self.gc_roots_buffer.push(value);
+                }
             }
         } else {
-            // No frames? Collect all registers
-            for reg in &self.register_stack {
-                self.gc_roots_buffer.push(*reg);
+            // No frames? Scan limited portion
+            let scan_limit = 256.min(self.register_stack.len());
+            for i in 0..scan_limit {
+                let value = self.register_stack[i];
+                if !value.is_nil() {
+                    self.gc_roots_buffer.push(value);
+                }
             }
         }
 

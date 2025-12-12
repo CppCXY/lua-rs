@@ -1,1589 +1,1054 @@
-// Statement compilation
+// Statement compilation (对齐lparser.c的statement parsing)
+use super::helpers;
+use super::*;
+use emmylua_parser::*;
 
-use super::expr::{
-    compile_call_expr, compile_call_expr_with_returns_and_dest, compile_expr, compile_expr_to,
-    compile_var_expr,
-};
-use super::{Compiler, Local, helpers::*};
-use crate::compiler::compile_block;
-use crate::compiler::expr::{compile_call_expr_with_returns, compile_closure_expr_to};
-use crate::lua_vm::{Instruction, OpCode};
-use emmylua_parser::{
-    BinaryOperator, LuaAssignStat, LuaAstNode, LuaBlock, LuaCallExprStat, LuaDoStat, LuaExpr,
-    LuaForRangeStat, LuaForStat, LuaFuncStat, LuaGotoStat, LuaIfStat, LuaLabelStat,
-    LuaLiteralToken, LuaLocalStat, LuaRepeatStat, LuaReturnStat, LuaStat, LuaVarExpr, LuaWhileStat,
-};
+/// Compile a single statement (对齐statement)
+pub(crate) fn statement(c: &mut Compiler, stmt: &LuaStat) -> Result<(), String> {
+    c.save_line_info(stmt.get_range());
 
-/// Check if an expression is a vararg (...) literal
-fn is_vararg_expr(expr: &LuaExpr) -> bool {
-    if let LuaExpr::LiteralExpr(lit) = expr {
-        matches!(lit.get_literal(), Some(LuaLiteralToken::Dots(_)))
-    } else {
-        false
-    }
-}
-
-/// Check if a block contains only a single unconditional jump statement (break/return only)
-/// Note: goto is NOT optimized by luac, so we don't include it here
-#[allow(dead_code)]
-fn is_single_jump_block(block: &LuaBlock) -> bool {
-    let stats: Vec<_> = block.get_stats().collect();
-    if stats.len() != 1 {
-        return false;
-    }
-    matches!(stats[0], LuaStat::BreakStat(_) | LuaStat::ReturnStat(_))
-}
-
-/// Try to compile binary expression as immediate comparison for control flow
-/// Returns Some(register) if successful (comparison instruction emitted)
-/// The emitted instruction skips next instruction if comparison result matches `invert`
-/// invert=false: skip if FALSE (normal if-then), invert=true: skip if TRUE (optimized break/goto/return)
-fn try_compile_immediate_comparison(
-    c: &mut Compiler,
-    expr: &LuaExpr,
-    invert: bool,
-) -> Result<Option<u32>, String> {
-    // Only handle binary comparison expressions
-    if let LuaExpr::BinaryExpr(bin_expr) = expr {
-        let (left, right) = bin_expr.get_exprs().ok_or("error")?;
-        let op = bin_expr.get_op_token().ok_or("error")?;
-        let op_kind = op.get_op();
-
-        // Check if right operand is small integer constant
-        if let LuaExpr::LiteralExpr(lit) = &right {
-            if let Some(LuaLiteralToken::Number(num)) = lit.get_literal() {
-                if !num.is_float() {
-                    let int_val = num.get_int_value();
-                    // Lua 5.4 immediate comparisons use signed sB field (8 bits): range [-128, 127]
-                    // But encoded as unsigned in instruction, so range is [0, 255] with wraparound
-                    if int_val >= -128 && int_val <= 127 {
-                        // Compile left operand
-                        let left_reg = compile_expr(c, &left)?;
-
-                        // Encode immediate value with OFFSET_SB = 128 for signed B field
-                        let imm = ((int_val + 128) & 0xFF) as u32;
-
-                        // Emit immediate comparison
-                        // C parameter controls skip behavior:
-                        //   C=0: skip next if FALSE (normal if-then: true executes then-block)
-                        //   C=1: skip next if TRUE (inverted: true skips the jump, false executes jump)
-                        let c_param = if invert { 1 } else { 0 };
-
-                        match op_kind {
-                            BinaryOperator::OpLt => {
-                                emit(
-                                    c,
-                                    Instruction::encode_abc(OpCode::LtI, left_reg, imm, c_param),
-                                );
-                                return Ok(Some(left_reg));
-                            }
-                            BinaryOperator::OpLe => {
-                                emit(
-                                    c,
-                                    Instruction::encode_abc(OpCode::LeI, left_reg, imm, c_param),
-                                );
-                                return Ok(Some(left_reg));
-                            }
-                            BinaryOperator::OpGt => {
-                                emit(
-                                    c,
-                                    Instruction::encode_abc(OpCode::GtI, left_reg, imm, c_param),
-                                );
-                                return Ok(Some(left_reg));
-                            }
-                            BinaryOperator::OpGe => {
-                                emit(
-                                    c,
-                                    Instruction::encode_abc(OpCode::GeI, left_reg, imm, c_param),
-                                );
-                                return Ok(Some(left_reg));
-                            }
-                            BinaryOperator::OpEq => {
-                                emit(
-                                    c,
-                                    Instruction::encode_abc(OpCode::EqI, left_reg, imm, c_param),
-                                );
-                                return Ok(Some(left_reg));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-/// Try to compile binary expression as register comparison for control flow
-/// This handles comparisons between two registers (e.g., i < n where n is a variable)
-/// Returns true if successful (comparison + JMP emitted)
-/// The emitted instructions skip the JMP if condition is TRUE (continue loop)
-fn try_compile_register_comparison(
-    c: &mut Compiler,
-    expr: &LuaExpr,
-    invert: bool,
-) -> Result<bool, String> {
-    // Only handle binary comparison expressions
-    if let LuaExpr::BinaryExpr(bin_expr) = expr {
-        let (left, right) = bin_expr.get_exprs().ok_or("error")?;
-        let op = bin_expr.get_op_token().ok_or("error")?;
-        let op_kind = op.get_op();
-
-        // Check if this is a comparison operator
-        let (opcode, swap) = match op_kind {
-            BinaryOperator::OpLt => (OpCode::Lt, false),
-            BinaryOperator::OpLe => (OpCode::Le, false),
-            BinaryOperator::OpGt => (OpCode::Lt, true), // a > b == b < a
-            BinaryOperator::OpGe => (OpCode::Le, true), // a >= b == b <= a
-            _ => return Ok(false),
-        };
-
-        // Compile both operands
-        let left_reg = compile_expr(c, &left)?;
-        let right_reg = compile_expr(c, &right)?;
-
-        // Emit comparison instruction
-        // k=0: skip next if FALSE (we want to continue if TRUE, so FALSE means exit)
-        // For while: if (i < n) is TRUE, continue loop (skip JMP), else execute JMP to exit
-        let k = if invert { 1 } else { 0 };
-        let (a, b) = if swap {
-            (right_reg, left_reg)
-        } else {
-            (left_reg, right_reg)
-        };
-        emit(c, Instruction::encode_abc(opcode, a, b, k));
-
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-/// Compile any statement
-pub fn compile_stat(c: &mut Compiler, stat: &LuaStat) -> Result<(), String> {
-    c.save_line_info(stat.get_range());
-
-    let result = match stat {
-        LuaStat::LocalStat(s) => compile_local_stat(c, s),
-        LuaStat::AssignStat(s) => compile_assign_stat(c, s),
-        LuaStat::CallExprStat(s) => compile_call_stat(c, s),
-        LuaStat::ReturnStat(s) => compile_return_stat(c, s),
-        LuaStat::IfStat(s) => compile_if_stat(c, s),
-        LuaStat::WhileStat(s) => compile_while_stat(c, s),
-        LuaStat::RepeatStat(s) => compile_repeat_stat(c, s),
-        LuaStat::ForStat(s) => compile_for_stat(c, s),
-        LuaStat::ForRangeStat(s) => compile_for_range_stat(c, s),
-        LuaStat::DoStat(s) => compile_do_stat(c, s),
+    match stmt {
+        LuaStat::LocalStat(local) => compile_local_stat(c, local),
+        LuaStat::LocalFuncStat(local_func) => compile_local_func_stat(c, local_func),
+        LuaStat::ReturnStat(ret) => compile_return_stat(c, ret),
         LuaStat::BreakStat(_) => compile_break_stat(c),
-        LuaStat::EmptyStat(_) => Ok(()),
-        LuaStat::GotoStat(s) => compile_goto_stat(c, s),
-        LuaStat::LabelStat(s) => compile_label_stat(c, s),
-        LuaStat::FuncStat(s) => compile_function_stat(c, s),
-        LuaStat::LocalFuncStat(s) => compile_local_function_stat(c, s),
-        _ => Ok(()), // Other statements not yet implemented
-    };
-
-    // After each statement, reset freereg to active local variables
-    // This matches Lua's: fs->freereg = luaY_nvarstack(fs);
-    if result.is_ok() {
-        reset_freereg(c);
+        LuaStat::IfStat(if_node) => compile_if_stat(c, if_node),
+        LuaStat::WhileStat(while_node) => compile_while_stat(c, while_node),
+        LuaStat::RepeatStat(repeat_node) => compile_repeat_stat(c, repeat_node),
+        LuaStat::ForStat(for_node) => compile_generic_for_stat(c, for_node),
+        LuaStat::ForRangeStat(for_range_node) => compile_numeric_for_stat(c, for_range_node),
+        LuaStat::DoStat(do_node) => compile_do_stat(c, do_node),
+        LuaStat::FuncStat(func_node) => compile_func_stat(c, func_node),
+        LuaStat::AssignStat(assign_node) => compile_assign_stat(c, assign_node),
+        LuaStat::LabelStat(label_node) => compile_label_stat(c, label_node),
+        LuaStat::GotoStat(goto_node) => compile_goto_stat(c, goto_node),
+        LuaStat::CallExprStat(expr_stat) => compile_expr_stat(c, expr_stat),
+        LuaStat::EmptyStat(_) => Ok(()), // Empty statement is explicitly handled
+        _ => Err(format!("Unimplemented statement type: {:?}", stmt)),
     }
-
-    result
 }
 
-/// Compile local variable declaration
-fn compile_local_stat(c: &mut Compiler, stat: &LuaLocalStat) -> Result<(), String> {
-    use super::expr::{compile_call_expr_with_returns_and_dest, compile_expr_to};
-    use emmylua_parser::LuaExpr;
+/// Adjust assignment - align nvars variables to nexps expressions (对齐adjust_assign)
+/// This handles the case where the number of variables doesn't match the number of expressions
+pub(crate) fn adjust_assign(
+    c: &mut Compiler,
+    nvars: i32,
+    nexps: i32,
+    e: &mut expdesc::ExpDesc,
+) {
+    use expdesc::ExpKind;
+    use exp2reg;
 
-    let names: Vec<_> = stat.get_local_name_list().collect();
-    let exprs: Vec<_> = stat.get_value_exprs().collect();
+    let needed = nvars - nexps; // extra values needed
 
-    // CRITICAL FIX: Pre-allocate registers for local variables
-    // This ensures expressions compile into the correct target registers
-    // Example: `local a = f()` should place f's result directly into a's register
-    let base_reg = c.freereg;
-    let num_vars = names.len();
-
-    // Pre-allocate registers for all local variables
-    for _ in 0..num_vars {
-        alloc_register(c);
-    }
-
-    // Now compile init expressions into the pre-allocated registers
-    let mut regs = Vec::new();
-
-    if !exprs.is_empty() {
-        // Compile all expressions except the last one
-        for (i, expr) in exprs.iter().take(exprs.len().saturating_sub(1)).enumerate() {
-            let target_reg = base_reg + i as u32;
-            // Compile expression with target register specified
-            let result_reg = compile_expr_to(c, expr, Some(target_reg))?;
-            regs.push(result_reg);
+    // Check if last expression has multiple returns (call or vararg)
+    if matches!(e.kind, ExpKind::VCall | ExpKind::VVararg) {
+        let mut extra = needed + 1; // discount last expression itself
+        if extra < 0 {
+            extra = 0;
         }
-
-        // Handle the last expression specially if we need more values
-        if let Some(last_expr) = exprs.last() {
-            let remaining_vars = num_vars.saturating_sub(regs.len());
-            let target_base = base_reg + regs.len() as u32;
-
-            // Check if last expression is ... (varargs) which should expand
-            let is_dots = if let LuaExpr::LiteralExpr(lit_expr) = last_expr {
-                matches!(
-                    lit_expr.get_literal(),
-                    Some(emmylua_parser::LuaLiteralToken::Dots(_))
-                )
-            } else {
-                false
-            };
-
-            if is_dots && remaining_vars > 0 {
-                // Varargs expansion: generate VarArg instruction into pre-allocated registers
-                // VARARG A C: R(A), ..., R(A+C-2) = vararg
-                // C = remaining_vars + 1 (or 0 for all)
-                let c_value = if remaining_vars == 1 {
-                    2
-                } else {
-                    (remaining_vars + 1) as u32
-                };
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Vararg, target_base, 0, c_value),
-                );
-
-                // Add all registers
-                for i in 0..remaining_vars {
-                    regs.push(target_base + i as u32);
-                }
-            }
-            // Check if last expression is a function call (which might return multiple values)
-            else if let LuaExpr::CallExpr(call_expr) = last_expr {
-                if remaining_vars > 1 {
-                    // Multi-return call: DON'T pass dest to avoid overwriting pre-allocated registers
-                    // Let the call compile into safe temporary position, results will be in target_base
-                    // because we've pre-allocated the registers
-                    // 
-                    // CRITICAL: We need to compile without dest, then the results will naturally
-                    // end up in sequential registers starting from wherever the function was placed.
-                    // Since we pre-allocated target_base..target_base+remaining_vars, freereg points
-                    // past them, so the call will compile into fresh registers.
-                    let result_base = compile_call_expr_with_returns_and_dest(
-                        c,
-                        call_expr,
-                        remaining_vars,
-                        None, // Don't specify dest - let call choose safe location
-                    )?;
-
-                    // Move results to target registers if needed
-                    for i in 0..remaining_vars {
-                        let src = result_base + i as u32;
-                        let dst = target_base + i as u32;
-                        if src != dst {
-                            emit_move(c, dst, src);
-                        }
-                        regs.push(dst);
-                    }
-
-                    // Define locals and return
-                    for (i, name) in names.iter().enumerate() {
-                        if let Some(name_token) = name.get_name_token() {
-                            let name_text = name_token.get_name_text().to_string();
-                            let mut is_const = false;
-                            let mut is_to_be_closed = false;
-                            if let Some(attr_token) = name.get_attrib() {
-                                is_const = attr_token.is_const();
-                                is_to_be_closed = attr_token.is_close();
-                            }
-                            add_local_with_attrs(c, name_text, regs[i], is_const, is_to_be_closed);
-                        }
-                    }
-                    return Ok(());
-                } else {
-                    // Single value: compile with dest = target_base
-                    let result_reg = compile_expr_to(c, last_expr, Some(target_base))?;
-                    regs.push(result_reg);
-                }
-            } else {
-                // Non-call expression: compile with dest = target_base
-                let result_reg = compile_expr_to(c, last_expr, Some(target_base))?;
-                regs.push(result_reg);
-            }
+        exp2reg::set_returns(c, e, extra); // last exp. provides the difference
+    } else {
+        if e.kind != ExpKind::VVoid {
+            // at least one expression?
+            exp2reg::exp2nextreg(c, e); // close last expression
+        }
+        if needed > 0 {
+            // missing values?
+            helpers::nil(c, c.freereg, needed as u32); // complete with nils
         }
     }
 
-    // Fill missing values with nil (batch optimization)
-    if regs.len() < names.len() {
-        // Use pre-allocated registers instead of allocating new ones
-        let first_nil_reg = base_reg + regs.len() as u32;
-        let nil_count = names.len() - regs.len();
-
-        // Emit single LOADNIL instruction for all nil values
-        // Format: LOADNIL A B - loads nil into R(A)..R(A+B)
-        emit(
-            c,
-            Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0),
-        );
-
-        // Add all nil registers to regs
-        for i in 0..nil_count {
-            regs.push(first_nil_reg + i as u32);
-        }
+    if needed > 0 {
+        helpers::reserve_regs(c, needed as u32); // registers for extra values
+    } else {
+        // adding 'needed' is actually a subtraction
+        c.freereg = (c.freereg as i32 + needed) as u32; // remove extra values
     }
+}
 
-    // Define locals with attributes
-    for (i, name) in names.iter().enumerate() {
-        // Get name text from LocalName node
-        if let Some(name_token) = name.get_name_token() {
-            let name_text = name_token.get_name_text().to_string();
+/// Compile local variable declaration (对齐localstat)
+fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    use super::{exp2reg, expr};
 
-            // Parse attributes: <const> or <close>
+    let mut nvars: i32 = 0;
+    let mut toclose: i32 = -1; // index of to-be-closed variable (if any)
+    let local_defs = local_stat.get_local_name_list();
+    // Parse variable names and attributes
+    // local name1 [<attr>], name2 [<attr>], ... [= explist]
+    // TODO: emmylua_parser API needs investigation
+    // Temporarily stub this out until we know the correct API
+
+    for name_def in local_defs {
+        let name = name_def
+            .get_name_token()
+            .unwrap()
+            .get_name_text()
+            .to_string();
+
+        if name.is_empty() {
+            return Err("expected variable name".to_string());
+        }
+
+        // Create local variable
+        let vidx = new_localvar(c, name)?;
+
+        // Check for attribute (<const> or <close>)
+        let (is_const, is_to_be_closed) = {
+            let attrib = name_def.get_attrib();
             let mut is_const = false;
             let mut is_to_be_closed = false;
-
-            // Check if LocalName has an attribute
-            if let Some(attr_token) = name.get_attrib() {
-                is_const = attr_token.is_const();
-                is_to_be_closed = attr_token.is_close();
-            }
-
-            add_local_with_attrs(c, name_text, regs[i], is_const, is_to_be_closed);
-        }
-    }
-
-    Ok(())
-}
-
-/// Compile assignment statement
-fn compile_assign_stat(c: &mut Compiler, stat: &LuaAssignStat) -> Result<(), String> {
-    use super::exp2reg::exp_to_next_reg;
-    use super::expr::{compile_expr_desc, compile_expr_to};
-    use emmylua_parser::LuaIndexKey;
-
-    // Get vars and expressions from children
-    let (vars, exprs) = stat.get_var_and_expr_list();
-
-    if vars.is_empty() {
-        return Ok(());
-    }
-
-    // OPTIMIZATION: For single local variable assignment, compile directly to target register
-    if vars.len() == 1 && exprs.len() == 1 {
-        if let LuaVarExpr::NameExpr(name_expr) = &vars[0] {
-            let name = name_expr.get_name_text().unwrap_or("".to_string());
-            if let Some(local) = resolve_local(c, &name) {
-                // Check if trying to assign to a const variable
-                if local.is_const {
-                    return Err(format!("attempt to assign to const variable '{}'", name));
+            if let Some(attr) = attrib {
+                if attr.is_const() {
+                    is_const = true;
                 }
-                // Local variable - compile expression directly to its register
-                let _result_reg = compile_expr_to(c, &exprs[0], Some(local.register))?;
-                return Ok(());
-            }
-
-            // Check if it's an upvalue assignment
-            if let Some(upvalue_index) = resolve_upvalue_from_chain(c, &name) {
-                // Compile expression to a temporary register
-                let value_reg = compile_expr(c, &exprs[0])?;
-                // Emit SETUPVAL to copy value to upvalue
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::SetUpval, value_reg, upvalue_index as u32, 0),
-                );
-                // Note: We don't free the register here to maintain compatibility
-                // Standard Lua may reuse it, but we need more careful analysis
-                return Ok(());
-            }
-
-            // OPTIMIZATION: global = constant -> SETTABUP with k=1
-            if resolve_upvalue_from_chain(c, &name).is_none() {
-                // It's a global - add key to constants first (IMPORTANT: luac adds key before value!)
-                let lua_str = create_string_value(c, &name);
-                let key_idx = add_constant_dedup(c, lua_str);
-
-                // Then check if value is constant
-                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                    if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
-                        emit(
-                            c,
-                            Instruction::create_abck(OpCode::SetTabUp, 0, key_idx, const_idx, true),
-                        );
-                        return Ok(());
-                    }
+                if attr.is_close() {
+                    is_to_be_closed = true;
                 }
             }
-        }
-
-        // OPTIMIZATION: For table.field = constant, use SetField with RK
-        if let LuaVarExpr::IndexExpr(index_expr) = &vars[0] {
-            if let Some(LuaIndexKey::Name(name_token)) = index_expr.get_index_key() {
-                // Try to compile value as constant
-                if let Some(const_idx) = try_expr_as_constant(c, &exprs[0]) {
-                    // Compile table expression
-                    let prefix_expr = index_expr
-                        .get_prefix_expr()
-                        .ok_or("Index expression missing table")?;
-                    let table_reg = compile_expr(c, &prefix_expr)?;
-
-                    // Get field name as constant
-                    let field_name = name_token.get_name_text().to_string();
-                    let lua_str = create_string_value(c, &field_name);
-                    let key_idx = add_constant_dedup(c, lua_str);
-
-                    // Emit SetField with k=1 (value is constant)
-                    if const_idx <= Instruction::MAX_C && key_idx <= Instruction::MAX_B {
-                        emit(
-                            c,
-                            Instruction::create_abck(
-                                OpCode::SetField,
-                                table_reg,
-                                key_idx,
-                                const_idx,
-                                true, // k=1: C is constant index
-                            ),
-                        );
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    // Multi-assignment: use luac's reverse-order strategy
-    // Strategy:
-    // 1. Get target registers for all variables
-    // 2. Compile expressions to temps, but last value can go to its target directly
-    // 3. Emit moves in reverse order to avoid conflicts
-
-    let mut target_regs = Vec::new();
-
-    // Collect target registers for local variables and check const
-    let mut all_locals = true;
-    for var in vars.iter() {
-        if let LuaVarExpr::NameExpr(name_expr) = var {
-            let name = name_expr.get_name_text().unwrap_or("".to_string());
-            if let Some(local) = resolve_local(c, &name) {
-                // Check if trying to assign to a const variable
-                if local.is_const {
-                    return Err(format!("attempt to assign to const variable '{}'", name));
-                }
-                target_regs.push(Some(local.register));
-                continue;
-            }
-        }
-        target_regs.push(None);
-        all_locals = false;
-    }
-
-    // Compile expressions
-    let mut val_regs = Vec::new();
-
-    for (i, expr) in exprs.iter().enumerate() {
-        let is_last = i == exprs.len() - 1;
-
-        // If this is the last expression and it's a call, request multiple returns
-        if is_last && matches!(expr, LuaExpr::CallExpr(_)) {
-            let remaining_vars = vars.len().saturating_sub(val_regs.len());
-            if remaining_vars > 0 {
-                if let LuaExpr::CallExpr(call_expr) = expr {
-                    let base_reg = compile_call_expr_with_returns(c, call_expr, remaining_vars)?;
-                    for j in 0..remaining_vars {
-                        val_regs.push(base_reg + j as u32);
-                    }
-                    break;
-                }
-            }
-        }
-
-        // NEW: Use ExpDesc system to compile expressions
-        // This is THE KEY FIX that eliminates extra register allocation!
-        let reg = if is_last && all_locals && val_regs.len() + 1 == vars.len() {
-            // Last value can go directly to its target
-            if let Some(target_reg) = target_regs[val_regs.len()] {
-                // CRITICAL: compile_expr_to may NOT honor dest if it's unsafe!
-                // Always use the returned register value
-                let result_reg = compile_expr_to(c, expr, Some(target_reg))?;
-                // If result ended up in different register, move it
-                if result_reg != target_reg {
-                    emit_move(c, target_reg, result_reg);
-                    target_reg
-                } else {
-                    result_reg
-                }
-            } else {
-                compile_expr(c, expr)?
-            }
-        } else {
-            // CRITICAL OPTIMIZATION: Use exp_to_next_reg instead of manual allocation!
-            // This ensures we allocate exactly one register per expression
-            let mut e = compile_expr_desc(c, expr)?;
-            exp_to_next_reg(c, &mut e);
-            e.get_register().ok_or("Expression has no register")?
+            (is_const, is_to_be_closed)
         };
-        val_regs.push(reg);
-    }
 
-    // Fill missing values with nil
-    if val_regs.len() < vars.len() {
-        let nil_count = vars.len() - val_regs.len();
-        let first_nil_reg = alloc_register(c);
-
-        // Allocate remaining registers
-        for _ in 1..nil_count {
-            alloc_register(c);
-        }
-
-        // Emit LOADNIL (batch)
-        if nil_count == 1 {
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, 0, 0),
-            );
-        } else {
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::LoadNil, first_nil_reg, (nil_count - 1) as u32, 0),
-            );
-        }
-
-        for i in 0..nil_count {
-            val_regs.push(first_nil_reg + i as u32);
-        }
-    }
-
-    // Emit assignments in REVERSE order (luac optimization)
-    if all_locals && vars.len() > 1 {
-        // All local variables: use reverse-order moves
-        for i in (0..vars.len()).rev() {
-            if let Some(target_reg) = target_regs[i] {
-                if val_regs[i] != target_reg {
-                    emit_move(c, target_reg, val_regs[i]);
-                }
+        // Set attributes in the local variable
+        {
+            let mut scope = c.scope_chain.borrow_mut();
+            if let Some(local) = scope.locals.get_mut(vidx) {
+                local.is_const = is_const;
+                local.is_to_be_closed = is_to_be_closed;
             }
+        }
+
+        // Check for to-be-closed
+        if is_to_be_closed {
+            if toclose != -1 {
+                return Err("multiple to-be-closed variables in local list".to_string());
+            }
+            // Calculate current nactvar equivalent (number of active locals)
+            let scope = c.scope_chain.borrow();
+            let nactvar = scope.locals.iter().filter(|l| !l.is_const).count();
+            toclose = nactvar as i32 + nvars;
+        }
+
+        nvars += 1;
+    }
+
+    // Parse initialization expressions if present
+    let exprs: Vec<_> = local_stat.get_value_exprs().collect();
+    let nexps = exprs.len() as i32;
+
+    if nexps == 0 {
+        // No initialization - all variables get nil
+        // Special case: const without initializer is compile-time constant nil
+        adjustlocalvars(c, nvars as usize);
+    } else if nvars == nexps {
+        // Equal number of variables and expressions
+        // Check if last variable is const and can be compile-time constant
+        let scope = c.scope_chain.borrow();
+        let vidx = scope.locals.len() - 1;
+        let is_last_const = scope.locals.get(vidx).map(|l| l.is_const).unwrap_or(false);
+        drop(scope);
+
+        if is_last_const && nexps > 0 {
+            // Try to evaluate as compile-time constant
+            let mut e = expr::expr(c, &exprs[(nexps - 1) as usize])?;
+
+            // For now, only simple constants can be compile-time (TODO: add luaK_exp2const)
+            // Activate all variables
+            adjustlocalvars(c, nvars as usize);
+
+            // TODO: Implement compile-time constant optimization
+            // This requires luaK_exp2const equivalent
+            adjust_assign(c, nvars, nexps, &mut e);
+        } else {
+            // Compile all expressions
+            // 参考lparser.c:1011 (explist function)
+            let mut last_e = expdesc::ExpDesc::new_void();
+            // 编译第一个表达式
+            last_e = expr::expr(c, &exprs[0])?;
+            // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
+            for ex in exprs.iter().skip(1) {
+                exp2reg::exp2nextreg(c, &mut last_e);
+                last_e = expr::expr(c, ex)?;
+            }
+            adjust_assign(c, nvars, nexps, &mut last_e);
+            adjustlocalvars(c, nvars as usize);
         }
     } else {
-        // Not all locals: compile normally with RK optimization for globals
-        for (i, var) in vars.iter().enumerate() {
-            // Special case: global variable assignment with constant value
-            if let LuaVarExpr::NameExpr(name_expr) = var {
-                let name = name_expr.get_name_text().unwrap_or("".to_string());
+        // Different number of variables and expressions - use adjust_assign
+        // 参考lparser.c:1011 (explist function)
+        let mut last_e = expdesc::ExpDesc::new_void();
 
-                // Check if it's NOT a local (i.e., it's a global)
-                if resolve_local(c, &name).is_none()
-                    && resolve_upvalue_from_chain(c, &name).is_none()
-                {
-                    // It's a global - try to use RK optimization
-                    // Check if value_reg contains a recently loaded constant
-                    if i < exprs.len() {
-                        if let Some(const_idx) = try_expr_as_constant(c, &exprs[i]) {
-                            // Use SETTABUP with k=1 (both key and value are constants)
-                            let lua_str = create_string_value(c, &name);
-                            let key_idx = add_constant_dedup(c, lua_str);
-
-                            if key_idx <= Instruction::MAX_B && const_idx <= Instruction::MAX_C {
-                                emit(
-                                    c,
-                                    Instruction::create_abck(
-                                        OpCode::SetTabUp,
-                                        0,
-                                        key_idx,
-                                        const_idx,
-                                        true,
-                                    ),
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                }
+        if nexps > 0 {
+            // 编译第一个表达式
+            last_e = expr::expr(c, &exprs[0])?;
+            // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
+            for ex in exprs.iter().skip(1) {
+                exp2reg::exp2nextreg(c, &mut last_e);
+                last_e = expr::expr(c, ex)?;
             }
-
-            compile_var_expr(c, var, val_regs[i])?;
         }
+
+        adjust_assign(c, nvars, nexps, &mut last_e);
+        adjustlocalvars(c, nvars as usize);
+    }
+
+    // Handle to-be-closed variable
+    if toclose != -1 {
+        // Mark the variable as to-be-closed (OP_TBC)
+        let level = super::var::reglevel(c, toclose as usize);
+        helpers::code_abc(c, crate::lua_vm::OpCode::Tbc, level, 0, 0);
     }
 
     Ok(())
 }
 
-/// Compile function call statement
-fn compile_call_stat(c: &mut Compiler, stat: &LuaCallExprStat) -> Result<(), String> {
-    // Get call expression from children
-    let call_expr = stat
-        .get_call_expr()
-        .ok_or("Missing call expression in call statement")?;
-    compile_call_expr(c, &call_expr)?;
-    Ok(())
-}
+/// Compile return statement (对齐retstat)
+fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), String> {
+    let first = helpers::nvarstack(c);
+    let mut nret: i32 = 0;
 
-/// Compile return statement
-fn compile_return_stat(c: &mut Compiler, stat: &LuaReturnStat) -> Result<(), String> {
-    // Get expressions from children
-    let exprs = stat.get_expr_list().collect::<Vec<_>>();
+    // Get return expressions and collect them
+    let exprs: Vec<_> = ret.get_expr_list().collect();
 
     if exprs.is_empty() {
-        // return (no values) - use Return0 optimization
-        emit(c, Instruction::encode_abc(OpCode::Return0, 0, 0, 0));
-        return Ok(());
-    }
+        // No return values
+        nret = 0;
+    } else if exprs.len() == 1 {
+        // Single return value
+        let mut e = expr::expr(c, &exprs[0])?;
 
-    // Tail call optimization: if return has a single call expression, use TailCall
-    if exprs.len() == 1 {
-        if let LuaExpr::CallExpr(call_expr) = &exprs[0] {
-            // This is a tail call: return func(...)
-            // Get function being called
-            let func_expr = if let Some(prefix) = call_expr.get_prefix_expr() {
-                prefix
-            } else {
-                return Err("Tail call missing function expression".to_string());
-            };
-
-            // Check if this is a method call (obj:method syntax)
-            let is_method = if let LuaExpr::IndexExpr(index_expr) = &func_expr {
-                index_expr
-                    .get_index_token()
-                    .map(|t| t.is_colon())
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-
-            // Get arguments first to know how many we have
-            let args = if let Some(args_list) = call_expr.get_args_list() {
-                args_list.get_args().collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-
-            // For method calls, we need an extra slot for self
-            let num_args = args.len();
-            let num_total = if is_method {
-                2 + num_args // func + self + explicit args
-            } else {
-                1 + num_args // func + args
-            };
-
-            // Reserve all registers we'll need
-            let mut reserved_regs = Vec::new();
-            for _ in 0..num_total {
-                reserved_regs.push(alloc_register(c));
-            }
-            let base_reg = reserved_regs[0];
-
-            // Handle method call with SELF instruction
-            if is_method {
-                if let LuaExpr::IndexExpr(index_expr) = &func_expr {
-                    // Method call: obj:method(args) → SELF instruction
-                    // SELF A B C: R(A+1) = R(B); R(A) = R(B)[C]
-
-                    // Compile object (table)
-                    let obj_expr = index_expr
-                        .get_prefix_expr()
-                        .ok_or("Method call missing object")?;
-                    let obj_reg = compile_expr(c, &obj_expr)?;
-
-                    // Get method name
-                    let method_name = if let Some(emmylua_parser::LuaIndexKey::Name(name_token)) =
-                        index_expr.get_index_key()
-                    {
-                        name_token.get_name_text().to_string()
-                    } else {
-                        return Err("Method call requires name index".to_string());
-                    };
-
-                    // Add method name to constants
-                    let lua_str = create_string_value(c, &method_name);
-                    let key_idx = add_constant_dedup(c, lua_str);
-
-                    // Emit SELF instruction: R(base_reg+1) = R(obj_reg); R(base_reg) = R(obj_reg)[key]
-                    emit(
-                        c,
-                        Instruction::create_abck(
-                            OpCode::Self_,
-                            base_reg,
-                            obj_reg,
-                            key_idx,
-                            true, // k=1: C is constant index
-                        ),
-                    );
-
-                    // Compile explicit arguments to consecutive registers after self (base_reg+2, ...)
-                    let mut last_is_vararg_all_out = false;
-                    for (i, arg) in args.iter().enumerate() {
-                        let target_reg = base_reg + 2 + i as u32; // +2 for func and self
-                        let is_last_arg = i == num_args - 1;
-
-                        // Check if last argument is ... (vararg)
-                        if is_last_arg {
-                            if let LuaExpr::LiteralExpr(lit) = arg {
-                                if matches!(
-                                    lit.get_literal(),
-                                    Some(emmylua_parser::LuaLiteralToken::Dots(_))
-                                ) {
-                                    emit(
-                                        c,
-                                        Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0),
-                                    );
-                                    last_is_vararg_all_out = true;
-                                    continue;
-                                }
-                            }
-                        }
-
-                        let arg_reg = compile_expr(c, &arg)?;
-                        if arg_reg != target_reg {
-                            emit_move(c, target_reg, arg_reg);
-                        }
-                    }
-
-                    // Emit TailCall instruction
-                    // For method call, B includes implicit self parameter
-                    let b_param = if last_is_vararg_all_out {
-                        0
-                    } else {
-                        (num_args + 2) as u32 // +1 for self, +1 for Lua convention
-                    };
-                    emit(
-                        c,
-                        Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
-                    );
-
-                    // After TAILCALL, emit RETURN
-                    emit(
-                        c,
-                        Instruction::create_abck(OpCode::Return, base_reg, 0, 0, false),
-                    );
-
-                    return Ok(());
-                }
-            }
-
-            // Regular function call (not method)
-            // Compile function to the first reserved register
-            let func_reg = compile_expr(c, &func_expr)?;
-            if func_reg != base_reg {
-                emit_move(c, base_reg, func_reg);
-            }
-
-            // Compile arguments to consecutive registers after function
-            let mut last_is_vararg_or_call_all_out = false;
-            for (i, arg) in args.iter().enumerate() {
-                let target_reg = reserved_regs[i + 1];
-                let is_last_arg = i == args.len() - 1;
-
-                // Check if last argument is ... (vararg)
-                if is_last_arg {
-                    if let LuaExpr::LiteralExpr(lit) = arg {
-                        if matches!(
-                            lit.get_literal(),
-                            Some(emmylua_parser::LuaLiteralToken::Dots(_))
-                        ) {
-                            // Vararg as last argument: use "all out" mode
-                            emit(c, Instruction::encode_abc(OpCode::Vararg, target_reg, 0, 0));
-                            last_is_vararg_or_call_all_out = true;
-                            continue;
-                        }
-                    }
-                    // Check if last argument is a function call
-                    if let LuaExpr::CallExpr(inner_call) = arg {
-                        // Compile the inner call with "all out" mode (num_returns = usize::MAX)
-                        compile_call_expr_with_returns_and_dest(c, inner_call, usize::MAX, Some(target_reg))?;
-                        last_is_vararg_or_call_all_out = true;
-                        continue;
-                    }
-                }
-
-                let arg_reg = compile_expr(c, &arg)?;
-                if arg_reg != target_reg {
-                    emit_move(c, target_reg, arg_reg);
-                }
-            }
-
-            // Emit TailCall instruction
-            // A = function register, B = num_args + 1 (or 0 if last arg is vararg/call "all out")
-            let b_param = if last_is_vararg_or_call_all_out {
-                0 // B=0: all in (variable number of args from vararg)
-            } else {
-                (num_args + 1) as u32
-            };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::TailCall, base_reg, b_param, 0),
-            );
-
-            // After TAILCALL, emit RETURN 0 0 0 (all out) like Lua 5.4
-            // This handles the return value from the tail-called function
-            emit(
-                c,
-                Instruction::create_abck(OpCode::Return, base_reg, 0, 0, false),
-            );
-
-            return Ok(());
+        // Check if it's a multi-return expression (call or vararg)
+        if matches!(
+            e.kind,
+            expdesc::ExpKind::VCall | expdesc::ExpKind::VVararg
+        ) {
+            exp2reg::set_returns(c, &mut e, -1); // Return all values
+            nret = -1; // LUA_MULTRET
+        } else {
+            exp2reg::exp2anyreg(c, &mut e);
+            nret = 1;
         }
-    }
-
-    // Check if last expression is varargs (...) or function call - these can return multiple values
-    let last_is_multret = if let Some(last_expr) = exprs.last() {
-        matches!(last_expr, LuaExpr::CallExpr(_)) || is_vararg_expr(last_expr)
     } else {
-        false
-    };
-
-    // Compile expressions to consecutive registers for return
-    // Allocate new registers to avoid corrupting local variables
-    let num_exprs = exprs.len();
-    let base_reg = c.freereg; // Start from the first free register
-
-    // Handle last expression specially if it's varargs or call
-    if last_is_multret && num_exprs > 0 {
-        let last_expr = exprs.last().unwrap();
-
-        // First, compile all expressions except the last directly to target registers
-        for (i, expr) in exprs.iter().take(num_exprs - 1).enumerate() {
-            let target_reg = base_reg + i as u32;
-
-            // Try to compile expression directly to target register
-            let src_reg = compile_expr_to(c, expr, Some(target_reg))?;
-
-            // If expression couldn't be placed in target, emit a MOVE
-            if src_reg != target_reg {
-                emit_move(c, target_reg, src_reg);
-            }
-
-            if target_reg >= c.freereg {
-                c.freereg = target_reg + 1;
+        // Multiple return values
+        for (i, expr) in exprs.iter().enumerate() {
+            let mut e = expr::expr(c, expr)?;
+            if i == exprs.len() - 1 {
+                // Last expression might return multiple values
+                if matches!(
+                    e.kind,
+                    expdesc::ExpKind::VCall | expdesc::ExpKind::VVararg
+                ) {
+                    exp2reg::set_returns(c, &mut e, -1);
+                    nret = -1; // LUA_MULTRET
+                } else {
+                    exp2reg::exp2nextreg(c, &mut e);
+                    nret = exprs.len() as i32;
+                }
+            } else {
+                exp2reg::exp2nextreg(c, &mut e);
             }
         }
-
-        if let LuaExpr::LiteralExpr(lit) = last_expr {
-            if matches!(
-                lit.get_literal(),
-                Some(emmylua_parser::LuaLiteralToken::Dots(_))
-            ) {
-                // Varargs: emit VARARG with B=0 (all out)
-                let last_target_reg = base_reg + (num_exprs - 1) as u32;
-                emit(
-                    c,
-                    Instruction::encode_abc(OpCode::Vararg, last_target_reg, 0, 0),
-                );
-                // Return with B=0 (all out)
-                emit(
-                    c,
-                    Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true),
-                );
-                return Ok(());
-            }
-        } else if let LuaExpr::CallExpr(call_expr) = last_expr {
-            // Call expression: compile with "all out" mode
-            let last_target_reg = base_reg + (num_exprs - 1) as u32;
-            compile_call_expr_with_returns_and_dest(c, call_expr, usize::MAX, Some(last_target_reg))?;
-            // Return with B=0 (all out)
-            emit(
-                c,
-                Instruction::create_abck(OpCode::Return, base_reg, 0, 0, true),
-            );
-            return Ok(());
+        if nret != -1 {
+            nret = exprs.len() as i32;
         }
     }
 
-    // Normal return with fixed number of values
-    // Compile expressions directly to target registers when possible
-    for i in 0..num_exprs {
-        let target_reg = base_reg + i as u32;
-
-        // Try to compile expression directly to target register
-        // compile_expr_to will use get_result_reg which ensures max_stack_size is updated
-        let src_reg = compile_expr_to(c, &exprs[i], Some(target_reg))?;
-
-        // If expression couldn't be placed in target, emit a MOVE
-        if src_reg != target_reg {
-            emit_move(c, target_reg, src_reg);
-        }
-
-        // Update freereg to account for this register
-        if target_reg >= c.freereg {
-            c.freereg = target_reg + 1;
-        }
-    }
-
-    // Use optimized Return0/Return1 when possible
-    if num_exprs == 1 {
-        // return single_value - use Return1 optimization
-        emit(c, Instruction::encode_abc(OpCode::Return1, base_reg, 0, 0));
-    } else {
-        // Return instruction: OpCode::Return, A = base_reg, B = num_values + 1, k = 1
-        emit(
-            c,
-            Instruction::create_abck(OpCode::Return, base_reg, (num_exprs + 1) as u32, 0, true),
-        );
-    }
-
+    helpers::ret(c, first, nret);
     Ok(())
 }
 
-/// Compile if statement
-fn compile_if_stat(c: &mut Compiler, stat: &LuaIfStat) -> Result<(), String> {
-    // Structure: if <condition> then <block> [elseif <condition> then <block>]* [else <block>] end
-    let mut end_jumps = Vec::new();
-
-    // Check if there are elseif or else clauses
-    let elseif_clauses = stat.get_else_if_clause_list().collect::<Vec<_>>();
-    let has_else = stat.get_else_clause().is_some();
-    let has_branches = !elseif_clauses.is_empty() || has_else;
-
-    // Main if clause
-    if let Some(cond) = stat.get_condition_expr() {
-        // Check if then-block contains only a single jump (break/goto/return)
-        // If so, invert comparison to optimize away the jump instruction
-        // BUT: Only if there are no else/elseif clauses (otherwise we need to compile them)
-        // NOTE: For break statements, we DON'T invert because the JMP IS the break itself
-        let then_body = stat.get_block();
-        #[allow(unused_variables)]
-        let is_single_break = then_body.as_ref().map_or(false, |b| {
-            let stats: Vec<_> = b.get_stats().collect();
-            stats.len() == 1 && matches!(stats[0], LuaStat::BreakStat(_))
-        });
-
-        // Only invert for return statements, not for break
-        // DISABLED: This optimization assumes the if statement is at the end of the block
-        // But in cases like "if cond then return end; <more code>", we need normal mode
-        // TODO: Re-enable this optimization only when if statement is the last statement in the block
-        let invert = false;
-        /*
-        let invert = !has_branches
-            && !is_single_break
-            && then_body
-                .as_ref()
-                .map_or(false, |b| is_single_jump_block(b));
-        */
-
-        // Try immediate comparison optimization (like GTI, LEI, etc.)
-        let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, invert)? {
-            // Immediate comparison emitted
-            if invert {
-                // Inverted mode: comparison skips then-block if condition is TRUE
-                // When condition is FALSE, execute then-block directly (no JMP needed)
-                // This optimization is only used when then-block is a single jump (return/break)
-                // and there are no elseif/else branches
-
-                // Compile then block directly
-                if let Some(body) = then_body {
-                    compile_block(c, &body)?;
-                }
-
-                // No elseif/else for inverted single-jump blocks
-                return Ok(());
-            } else {
-                // Normal mode: comparison skips next instruction if FALSE
-                // So we emit a JMP to skip the then-block when condition is false
-                emit_jump(c, OpCode::Jmp)
-            }
-        } else {
-            // Standard path: compile expression + Test
-            let cond_reg = compile_expr(c, &cond)?;
-            let test_c = if invert { 1 } else { 0 };
-            emit(
-                c,
-                Instruction::encode_abc(OpCode::Test, cond_reg, 0, test_c),
-            );
-            // Reset freereg after condition - temp registers are no longer needed
-            reset_freereg(c);
-
-            if invert {
-                // Same inverted optimization logic for Test instruction
-                let jump_pos = emit_jump(c, OpCode::Jmp);
-                if let Some(body) = then_body {
-                    let stats: Vec<_> = body.get_stats().collect();
-                    if stats.len() == 1 {
-                        match &stats[0] {
-                            LuaStat::BreakStat(_) => {
-                                c.loop_stack.last_mut().unwrap().break_jumps.push(jump_pos);
-                            }
-                            LuaStat::ReturnStat(ret_stat) => {
-                                compile_return_stat(c, ret_stat)?;
-                            }
-                            _ => unreachable!(
-                                "is_single_jump_block should only return true for break/return"
-                            ),
-                        }
-                    }
-                }
-                return Ok(());
-            }
-
-            emit_jump(c, OpCode::Jmp)
-        };
-
-        // Compile then block (only in normal mode, already handled in inverted mode)
-        if let Some(body) = then_body {
-            compile_block(c, &body)?;
-        }
-
-        // Only add jump to end if there are other branches
-        if has_branches {
-            end_jumps.push(emit_jump(c, OpCode::Jmp));
-        }
-
-        // Patch jump to next clause (elseif or else)
-        patch_jump(c, next_jump);
-    }
-
-    // Handle elseif clauses
-    for elseif_clause in elseif_clauses {
-        if let Some(cond) = elseif_clause.get_condition_expr() {
-            // Try immediate comparison optimization (elseif always uses normal mode)
-            let next_jump = if let Some(_) = try_compile_immediate_comparison(c, &cond, false)? {
-                emit_jump(c, OpCode::Jmp)
-            } else {
-                let cond_reg = compile_expr(c, &cond)?;
-                emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-                emit_jump(c, OpCode::Jmp)
-            };
-
-            // Compile elseif block
-            if let Some(body) = elseif_clause.get_block() {
-                compile_block(c, &body)?;
-            }
-
-            // After executing elseif block, jump to end
-            end_jumps.push(emit_jump(c, OpCode::Jmp));
-
-            // Patch jump to next clause
-            patch_jump(c, next_jump);
-        }
-    }
-
-    // Handle else clause
-    if let Some(else_clause) = stat.get_else_clause() {
-        if let Some(body) = else_clause.get_block() {
-            compile_block(c, &body)?;
-        }
-    }
-
-    // Patch all jumps to end
-    for jump_pos in end_jumps {
-        patch_jump(c, jump_pos);
-    }
-
-    Ok(())
-}
-
-/// Compile while loop
-fn compile_while_stat(c: &mut Compiler, stat: &LuaWhileStat) -> Result<(), String> {
-    // Structure: while <condition> do <block> end
-
-    // Begin scope for the loop body (to track locals for CLOSE)
-    begin_scope(c);
-    
-    // Begin loop - record first_reg for break CLOSE
-    begin_loop(c);
-
-    // Mark loop start
-    let loop_start = c.chunk.code.len();
-
-    let cond = stat
-        .get_condition_expr()
-        .ok_or("while statement missing condition")?;
-
-    // OPTIMIZATION: while true -> infinite loop (no condition check)
-    let is_infinite_loop = if let LuaExpr::LiteralExpr(lit) = &cond {
-        if let Some(LuaLiteralToken::Bool(b)) = lit.get_literal() {
-            b.is_true()
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    let end_jump = if is_infinite_loop {
-        // Infinite loop: no condition check, no exit jump
-        // Just compile body and jump back
-        None
-    } else if let Some(_imm_reg) = try_compile_immediate_comparison(c, &cond, false)? {
-        // OPTIMIZATION: immediate comparison with constant (e.g., i < 10)
-        Some(emit_jump(c, OpCode::Jmp))
-    } else if try_compile_register_comparison(c, &cond, false)? {
-        // OPTIMIZATION: register comparison (e.g., i < n)
-        Some(emit_jump(c, OpCode::Jmp))
-    } else {
-        // Standard path: compile expression + Test
-        let cond_reg = compile_expr(c, &cond)?;
-        emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-        Some(emit_jump(c, OpCode::Jmp))
-    };
-
-    // Compile body
-    if let Some(body) = stat.get_block() {
-        compile_block(c, &body)?;
-    }
-
-    // Before jumping back, emit CLOSE if any local in the loop body was captured
-    {
-        let loop_info = c.loop_stack.last().unwrap();
-        let loop_scope_depth = loop_info.scope_depth;
-        let first_reg = loop_info.first_local_register;
+/// Compile expression statement (对齐exprstat)
+/// This handles function calls and other expressions used as statements
+fn compile_expr_stat(c: &mut Compiler, expr_stat: &LuaCallExprStat) -> Result<(), String> {
+    // Get the expression
+    if let Some(expr) = expr_stat.get_call_expr() {
+        let mut v = expr::expr(c, &LuaExpr::CallExpr(expr))?;
         
+        // Expression statements must be function calls or assignments
+        // For calls, we need to set the result count to 0 (discard results)
+        if matches!(v.kind, expdesc::ExpKind::VCall) {
+            exp2reg::set_returns(c, &mut v, 0); // Discard all return values
+        } else {
+            // Other expressions as statements are generally no-ops
+            // but we still discharge them in case they have side effects
+            exp2reg::discharge_vars(c, &mut v);
+        }
+    }
+    Ok(())
+}
+
+/// Compile break statement (对齐breakstat)
+fn compile_break_stat(c: &mut Compiler) -> Result<(), String> {
+    // Break is semantically equivalent to "goto break" (对齐luac breakstat)
+    if c.loop_stack.is_empty() {
+        return Err("break statement not inside a loop".to_string());
+    }
+    
+    // Get loop info to check if we need to close variables
+    let loop_idx = c.loop_stack.len() - 1;
+    let first_local = c.loop_stack[loop_idx].first_local_register as usize;
+    
+    // Emit CLOSE for variables that need closing when exiting loop (对齐luac)
+    if c.nactvar > first_local {
+        // Check if any variables need closing
         let scope = c.scope_chain.borrow();
-        let mut min_close_reg: Option<u32> = None;
-        for local in scope.locals.iter().rev() {
-            if local.depth < loop_scope_depth {
+        let mut needs_close = false;
+        for i in first_local..c.nactvar {
+            if i < scope.locals.len() && scope.locals[i].is_to_be_closed {
+                needs_close = true;
                 break;
             }
-            if local.needs_close && local.register >= first_reg {
-                min_close_reg = Some(match min_close_reg {
-                    None => local.register,
-                    Some(min_reg) => min_reg.min(local.register),
-                });
-            }
         }
         drop(scope);
-        if let Some(reg) = min_close_reg {
-            emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
+        
+        if needs_close {
+            helpers::code_abc(c, crate::lua_vm::OpCode::Close, first_local as u32, 0, 0);
         }
     }
-
-    // Jump back to loop start
-    let jump_offset = (c.chunk.code.len() - loop_start) as i32 + 1;
-    emit(c, Instruction::create_sj(OpCode::Jmp, -jump_offset));
-
-    // Patch end jump (if exists)
-    if let Some(jump_pos) = end_jump {
-        patch_jump(c, jump_pos);
-    }
-
-    // End loop (patches all break statements)
-    end_loop(c);
     
-    // End scope
-    end_scope(c);
-
+    // Create a jump instruction that will be patched later when we leave the loop
+    let pc = helpers::jump(c);
+    
+    // Add jump to the current loop's break list
+    c.loop_stack[loop_idx].break_jumps.push(pc);
+    
     Ok(())
 }
 
-/// Compile repeat-until loop
-fn compile_repeat_stat(c: &mut Compiler, stat: &LuaRepeatStat) -> Result<(), String> {
-    // Structure: repeat <block> until <condition>
-
-    // Begin loop
-    begin_loop(c);
-
-    // Mark loop start
-    let loop_start = c.chunk.code.len();
-
-    // Compile body block
-    if let Some(body) = stat.get_block() {
-        compile_block(c, &body)?;
+/// Compile if statement (对齐ifstat)
+fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> {
+    // ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END
+    let mut escapelist = helpers::NO_JUMP;
+    
+    // Compile main if condition and block
+    if let Some(ref cond) = if_stat.get_condition_expr() {
+        let mut v = expr::expr(c, cond)?;
+        let jf = super::exp2reg::goiffalse(c, &mut v);
+        
+        super::enter_block(c, false)?;
+        if let Some(ref block) = if_stat.get_block() {
+            super::compile_statlist(c, block)?;
+        }
+        super::leave_block(c)?;
+        
+        // If there are else/elseif clauses, jump over them
+        if if_stat.get_else_clause().is_some() || if_stat.get_else_if_clause_list().next().is_some() {
+            let jmp = helpers::jump(c) as i32;
+            helpers::concat(c, &mut escapelist, jmp);
+        }
+        
+        helpers::patch_to_here(c, jf);
     }
-
-    // Compile condition expression
-    if let Some(cond_expr) = stat.get_condition_expr() {
-        // OPTIMIZATION: Try immediate comparison (skip Test)
-        if let Some(_) = try_compile_immediate_comparison(c, &cond_expr, false)? {
-            // Immediate comparison skips if FALSE, so Jmp executes when condition is FALSE
-            // This is correct for repeat-until (continue when false)
-            let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
-            emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
-        } else if try_compile_register_comparison(c, &cond_expr, false)? {
-            // OPTIMIZATION: register comparison (e.g., i >= n)
-            let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
-            emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
-        } else {
-            // Standard path
-            let cond_reg = compile_expr(c, &cond_expr)?;
-            emit(c, Instruction::encode_abc(OpCode::Test, cond_reg, 0, 0));
-            let jump_offset = loop_start as i32 - (c.chunk.code.len() as i32 + 1);
-            emit(c, Instruction::create_sj(OpCode::Jmp, jump_offset));
+    
+    // Compile elseif clauses
+    for elseif in if_stat.get_else_if_clause_list() {
+        if let Some(ref cond) = elseif.get_condition_expr() {
+            let mut v = expr::expr(c, cond)?;
+            let jf = super::exp2reg::goiffalse(c, &mut v);
+            
+            super::enter_block(c, false)?;
+            if let Some(ref block) = elseif.get_block() {
+                super::compile_statlist(c, block)?;
+            }
+            super::leave_block(c)?;
+            
+            // Jump over remaining elseif/else
+            if if_stat.get_else_clause().is_some() {
+                let jmp = helpers::jump(c) as i32;
+                helpers::concat(c, &mut escapelist, jmp);
+            }
+            
+            helpers::patch_to_here(c, jf);
         }
     }
-
-    // End loop (patches all break statements)
-    end_loop(c);
-
+    
+    // Compile else clause
+    if let Some(ref else_clause) = if_stat.get_else_clause() {
+        super::enter_block(c, false)?;
+        if let Some(ref block) = else_clause.get_block() {
+            super::compile_statlist(c, block)?;
+        }
+        super::leave_block(c)?;
+    }
+    
+    // Patch all escape jumps to here (end of if statement)
+    helpers::patch_to_here(c, escapelist);
+    
     Ok(())
 }
 
-/// Compile numeric for loop
-fn compile_for_stat(c: &mut Compiler, stat: &LuaForStat) -> Result<(), String> {
-    // Structure: for <var> = <start>, <end> [, <step>] do <block> end
-    // Use efficient FORPREP/FORLOOP instructions like Lua
-
-    // Get loop variable name
-    let var_name = stat
-        .get_var_name()
-        .ok_or("for loop missing variable name")?
-        .get_name_text()
-        .to_string();
-
-    // Get start, end, step expressions
-    let exprs = stat.get_iter_expr().collect::<Vec<_>>();
-    if exprs.len() < 2 {
-        return Err("for loop requires at least start and end expressions".to_string());
+/// Compile while statement (对齐whilestat)
+fn compile_while_stat(c: &mut Compiler, while_stat: &LuaWhileStat) -> Result<(), String> {
+    // whilestat -> WHILE cond DO block END
+    let whileinit = helpers::get_label(c);
+    
+    // Compile condition
+    let cond_expr = while_stat.get_condition_expr()
+        .ok_or("while statement missing condition")?;
+    let mut v = expr::expr(c, &cond_expr)?;
+    
+    // Generate conditional jump (jump if false)
+    let condexit = super::exp2reg::goiffalse(c, &mut v);
+    
+    // Enter loop block
+    super::enter_block(c, true)?;
+    
+    // Setup loop info for break statements
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
+    
+    // Compile loop body
+    if let Some(ref block) = while_stat.get_block() {
+        super::compile_statlist(c, block)?;
     }
+    
+    // Jump back to condition
+    helpers::jump_to(c, whileinit);
+    
+    // Leave block and patch breaks
+    super::leave_block(c)?;
+    
+    // Patch all break statements to jump here
+    if let Some(loop_info) = c.loop_stack.pop() {
+        let here = helpers::get_label(c);
+        for break_pc in loop_info.break_jumps {
+            helpers::fix_jump(c, break_pc, here);
+        }
+    }
+    
+    // Patch condition exit to jump here (after loop)
+    helpers::patch_to_here(c, condexit);
+    
+    Ok(())
+}
 
-    // Allocate registers for loop control variables in sequence
-    // R(base) = index, R(base+1) = limit, R(base+2) = step, R(base+3) = loop var
-    let base_reg = alloc_register(c);
-    let limit_reg = alloc_register(c);
-    let step_reg = alloc_register(c);
-    let var_reg = alloc_register(c);
+/// Compile repeat statement (对齐repeatstat)
+fn compile_repeat_stat(c: &mut Compiler, repeat_stat: &LuaRepeatStat) -> Result<(), String> {
+    // repeatstat -> REPEAT block UNTIL cond
+    let repeat_init = helpers::get_label(c);
+    
+    // Enter loop block
+    super::enter_block(c, true)?;
+    
+    // Setup loop info for break statements  
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
+    
+    // Enter inner scope block (for condition variables)
+    super::enter_block(c, false)?;
+    
+    // Compile loop body
+    if let Some(ref block) = repeat_stat.get_block() {
+        super::compile_statlist(c, block)?;
+    }
+    
+    // Compile condition (can see variables declared in loop body)
+    let cond_expr = repeat_stat.get_condition_expr()
+        .ok_or("repeat statement missing condition")?;
+    let mut v = expr::expr(c, &cond_expr)?;
+    let condexit = super::exp2reg::goiftrue(c, &mut v);
+    
+    // Leave inner scope
+    super::leave_block(c)?;
+    
+    // Check if we need to close upvalues
+    // TODO: Handle upvalue closing properly when block.upval is true
+    
+    // Jump back to start if condition is false
+    helpers::patch_list(c, condexit, repeat_init);
+    
+    // Leave loop block
+    super::leave_block(c)?;
+    
+    // Patch all break statements
+    if let Some(loop_info) = c.loop_stack.pop() {
+        let here = helpers::get_label(c);
+        for break_pc in loop_info.break_jumps {
+            helpers::fix_jump(c, break_pc, here);
+        }
+    }
+    
+    Ok(())
+}
 
-    // Compile expressions DIRECTLY to target registers - avoid intermediate registers
-    let _ = compile_expr_to(c, &exprs[0], Some(base_reg))?;
-    let _ = compile_expr_to(c, &exprs[1], Some(limit_reg))?;
+/// Compile generic for statement (对齐forlist)
+/// for var1, var2, ... in exp1, exp2, exp3 do block end
+fn compile_generic_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    
+    // forlist -> NAME {,NAME} IN explist DO block
+    let _base = c.freereg;
+    let nvars = 3; // (iter, state, control) - internal control variables
+    
+    // Create internal control variables
+    new_localvar(c, "(for iterator)".to_string())?;
+    new_localvar(c, "(for state)".to_string())?;
+    new_localvar(c, "(for control)".to_string())?;
+    
+    // Parse user variables
+    let var_name = for_stat.get_var_name()
+        .ok_or("generic for missing variable name")?;
+    new_localvar(c, var_name.get_name_text().to_string())?;
+    let nvars = nvars + 1;
+    
+    // TODO: Parse additional variables from iterator if multiple vars
+    // let mut nvars = nvars + 1;
+    // for name in ... { new_localvar(c, name)?; nvars += 1; }
+    
+    // Compile iterator expressions
+    let iter_exprs: Vec<_> = for_stat.get_iter_expr().collect();
+    let nexps = iter_exprs.len() as i32;
+    
+    // Evaluate iterator expressions
+    if nexps == 0 {
+        return Err("generic for missing iterator expression".to_string());
+    }
+    
+    for (i, iter_expr) in iter_exprs.iter().enumerate() {
+        let mut v = expr::expr(c, iter_expr)?;
+        if i == nexps as usize - 1 {
+            // Last expression can return multiple values
+            exp2reg::set_returns(c, &mut v, -1); // LUA_MULTRET
+        } else {
+            exp2reg::exp2nextreg(c, &mut v);
+        }
+    }
+    
+    // Adjust to exactly 3 values (iterator, state, control)
+    let mut e = expdesc::ExpDesc::new_void();
+    adjust_assign(c, 3, nexps, &mut e);
+    
+    // Activate loop control variables (iterator, state, control)
+    adjustlocalvars(c, 3);
+    helpers::reserve_regs(c, 3);
+    let base = (_base) as u32;
+    
+    // Generate TFORPREP instruction - prepare for generic for
+    let prep = helpers::code_abx(c, crate::lua_vm::OpCode::TForPrep, base, 0);
+    
+    // Setup loop block
+    super::enter_block(c, false)?;
+    adjustlocalvars(c, nvars - 3); // Activate user variables
+    helpers::reserve_regs(c, nvars as u32 - 3);
+    
+    // Compile loop body
+    if let Some(ref block) = for_stat.get_block() {
+        super::compile_statlist(c, block)?;
+    }
+    
+    // Leave block
+    super::leave_block(c)?;
+    
+    // Fix TFORPREP to jump to after TFORLOOP
+    helpers::fix_for_jump(c, prep, helpers::get_label(c), false);
+    
+    // Generate TFORCALL instruction - call iterator
+    helpers::code_abc(c, crate::lua_vm::OpCode::TForCall, base, 0, (nvars - 3) as u32);
+    
+    // Generate TFORLOOP instruction - check result and loop back
+    let endfor = helpers::code_abx(c, crate::lua_vm::OpCode::TForLoop, base, 0);
+    
+    // Fix TFORLOOP to jump back to right after TFORPREP
+    helpers::fix_for_jump(c, endfor, prep + 1, true);
+    
+    Ok(())
+}
 
+/// Compile numeric for statement (对齐fornum)
+/// for v = e1, e2 [, e3] do block end
+fn compile_numeric_for_stat(c: &mut Compiler, for_range_stat: &LuaForRangeStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    
+    // fornum -> NAME = exp1,exp1[,exp1] DO block
+    let _base = c.freereg;
+    
+    // Create internal control variables: (index), (limit), (step)
+    new_localvar(c, "(for index)".to_string())?;
+    new_localvar(c, "(for limit)".to_string())?;
+    new_localvar(c, "(for step)".to_string())?;
+    
+    // Get loop variable name
+    let var_names: Vec<_> = for_range_stat.get_var_name_list().collect();
+    if var_names.is_empty() {
+        return Err("numeric for missing variable name".to_string());
+    }
+    let varname = var_names[0].get_name_text().to_string();
+    new_localvar(c, varname)?;
+    
+    // Compile initial value, limit, step
+    let exprs: Vec<_> = for_range_stat.get_expr_list().collect();
+    if exprs.len() < 2 {
+        return Err("numeric for requires at least start and end values".to_string());
+    }
+    
+    // Compile start expression
+    let mut v = expr::expr(c, &exprs[0])?;
+    exp2reg::exp2nextreg(c, &mut v);
+    
+    // Compile limit expression
+    let mut v = expr::expr(c, &exprs[1])?;
+    exp2reg::exp2nextreg(c, &mut v);
+    
     // Compile step expression (default 1)
     if exprs.len() >= 3 {
-        let _ = compile_expr_to(c, &exprs[2], Some(step_reg))?;
+        let mut v = expr::expr(c, &exprs[2])?;
+        exp2reg::exp2nextreg(c, &mut v);
     } else {
-        // Use LOADI for immediate integer 1
-        emit(c, Instruction::encode_asbx(OpCode::LoadI, step_reg, 1));
+        exp2reg::code_int(c, c.freereg, 1);
+        helpers::reserve_regs(c, 1);
     }
-
-    // Create hidden local variables for the internal control state
-    // These prevent the registers from being reused by function calls
-    add_local(c, "(for state)".to_string(), base_reg);
-    add_local(c, "(for state)".to_string(), limit_reg);
-    add_local(c, "(for state)".to_string(), step_reg);
-
-    // Emit FORPREP: R(base) -= R(step); jump to FORLOOP (not loop body)
-    let forprep_pc = c.chunk.code.len();
-    emit(c, Instruction::encode_asbx(OpCode::ForPrep, base_reg, 0)); // Will patch later
-
-    // Begin new scope for loop body
-    begin_scope(c);
-
-    // Begin loop with var_reg as first register, so break can close it
-    // Using var_reg instead of c.freereg because var_reg is the loop variable
-    begin_loop_with_register(c, var_reg);
-
-    // The loop variable is at R(base+3)
-    add_local(c, var_name, var_reg);
-
-    // Loop body starts here
-    let loop_body_start = c.chunk.code.len();
-
+    
+    // Activate control variables
+    adjustlocalvars(c, 3);
+    let base = (_base) as u32; // Store base for FORPREP/FORLOOP
+    
+    // Generate FORPREP instruction - initialize loop and skip if empty
+    let prep = helpers::code_abx(c, crate::lua_vm::OpCode::ForPrep, base, 0);
+    
+    // Enter loop block
+    super::enter_block(c, false)?; // Not a loop block for enterblock (variables already created)
+    adjustlocalvars(c, 1); // activate loop variable
+    helpers::reserve_regs(c, 1);
+    
+    // Setup loop info for break statements
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
+    
     // Compile loop body
-    if let Some(body) = stat.get_block() {
-        compile_block(c, &body)?;
+    if let Some(ref block) = for_range_stat.get_block() {
+        super::compile_statlist(c, block)?;
     }
-
-    // Before FORLOOP, emit CLOSE if any local in the loop body was captured
-    // Find the minimum register of captured locals in the current scope (loop body)
-    {
-        let scope = c.scope_chain.borrow();
-        let mut min_close_reg: Option<u32> = None;
-        for local in scope.locals.iter().rev() {
-            if local.depth < c.scope_depth {
-                break; // Only check current scope (loop body)
-            }
-            if local.depth == c.scope_depth && local.needs_close {
-                min_close_reg = Some(match min_close_reg {
-                    None => local.register,
-                    Some(min_reg) => min_reg.min(local.register),
-                });
-            }
-        }
-        drop(scope);
-        if let Some(reg) = min_close_reg {
-            emit(c, Instruction::encode_abc(OpCode::Close, reg, 0, 0));
+    
+    // Leave block
+    super::leave_block(c)?;
+    
+    // Fix FORPREP to jump to after FORLOOP if loop is empty
+    helpers::fix_for_jump(c, prep, helpers::get_label(c), false);
+    
+    // Generate FORLOOP instruction - increment and jump back if not done
+    let endfor = helpers::code_abx(c, crate::lua_vm::OpCode::ForLoop, base, 0);
+    
+    // Fix FORLOOP to jump back to right after FORPREP
+    helpers::fix_for_jump(c, endfor, prep + 1, true);
+    
+    // Patch break statements
+    if let Some(loop_info) = c.loop_stack.pop() {
+        let here = helpers::get_label(c);
+        for break_pc in loop_info.break_jumps {
+            helpers::fix_jump(c, break_pc, here);
         }
     }
-
-    // FORLOOP comes AFTER the body (and CLOSE if needed)
-    let forloop_pc = c.chunk.code.len();
-    // Emit FORLOOP: increments index, checks condition, copies to var, jumps back to body
-    // Bx is the backward jump distance. Since PC is incremented before dispatch,
-    // when FORLOOP executes, PC is already forloop_pc+1. To jump back to loop_body_start:
-    // (forloop_pc + 1) - Bx = loop_body_start => Bx = forloop_pc + 1 - loop_body_start
-    let forloop_offset = forloop_pc + 1 - loop_body_start;
-    emit(
-        c,
-        Instruction::encode_abx(OpCode::ForLoop, base_reg, forloop_offset as u32),
-    );
-
-    // Patch FORPREP to jump to FORLOOP (not body)
-    // Use unsigned Bx for forward jump distance
-    let prep_jump = (forloop_pc as i32) - (forprep_pc as i32) - 1;
-    c.chunk.code[forprep_pc] = Instruction::encode_abx(OpCode::ForPrep, base_reg, prep_jump as u32);
-
-    end_loop(c);
-    end_scope(c);
-
-    // Free the 4 loop control registers (base, limit, step, var)
-    c.freereg = base_reg;
-
+    
     Ok(())
 }
 
-/// Compile generic for loop using TFORPREP/TFORCALL/TFORLOOP instructions
-///
-/// Lua 5.4 for-in register layout:
-/// R[A]   = iter_func (f)
-/// R[A+1] = state (s)
-/// R[A+2] = control variable (var, updated by TFORLOOP)
-/// R[A+3] = to-be-closed variable (copy of state, for cleanup)
-/// R[A+4] = first loop variable (var1)
-/// R[A+5] = second loop variable (var2)
-/// ...
-///
-/// Instruction sequence:
-/// TFORPREP A Bx   -> sets up R[A+3] = R[A+1], jumps forward to TFORCALL
-/// (loop body)
-/// TFORCALL A C    -> R[A+4], ..., R[A+3+C] := R[A](R[A+1], R[A+2])
-/// TFORLOOP A Bx   -> if R[A+4] ~= nil then { R[A+2]=R[A+4]; pc -= Bx }
-fn compile_for_range_stat(c: &mut Compiler, stat: &LuaForRangeStat) -> Result<(), String> {
-    use super::expr::compile_call_expr_with_returns;
-    use emmylua_parser::LuaExpr;
-
-    // Get loop variable names
-    let var_names = stat
-        .get_var_name_list()
-        .map(|name| name.get_name_text().to_string())
-        .collect::<Vec<_>>();
-
-    if var_names.is_empty() {
-        return Err("for-in loop requires at least one variable".to_string());
+/// Compile do statement (对齐block in DO statement)
+fn compile_do_stat(c: &mut Compiler, do_stat: &LuaDoStat) -> Result<(), String> {
+    if let Some(ref block) = do_stat.get_block() {
+        super::enter_block(c, false)?;
+        super::compile_block(c, block)?;
+        super::leave_block(c)?;
     }
+    Ok(())
+}
 
-    // Get iterator expressions
-    let iter_exprs = stat.get_expr_list().collect::<Vec<_>>();
-    if iter_exprs.is_empty() {
-        return Err("for-in loop requires iterator expression".to_string());
-    }
-
-    // FIRST: Compile iterator expressions BEFORE allocating the for-in block
-    // This prevents the call results from overlapping with loop variables
-    let base = c.freereg;
-
-    // Compile iterator expressions to get (iter_func, state, control_var, to-be-closed) at base
-    // Lua 5.4 for-in needs 4 control slots: iterator, state, control, closing value
-    if iter_exprs.len() == 1 {
-        if let LuaExpr::CallExpr(call_expr) = &iter_exprs[0] {
-            // Single call expression - returns (iter_func, state, control_var, closing)
-            // Compile directly to base register, expecting 4 return values
-            let result_reg = compile_call_expr_with_returns(c, call_expr, 4)?;
-            // Move results to base if not already there
-            if result_reg != base {
-                emit_move(c, base, result_reg);
-                emit_move(c, base + 1, result_reg + 1);
-                emit_move(c, base + 2, result_reg + 2);
-                emit_move(c, base + 3, result_reg + 3);
+/// Compile function statement (对齐funcstat)
+/// 编译 funcname 中的索引表达式（对齐 funcname 中的 fieldsel 调用链）
+/// 处理 t.a.b 这样的嵌套结构
+fn compile_func_name_index(c: &mut Compiler, index_expr: &LuaIndexExpr) -> Result<expdesc::ExpDesc, String> {
+    // 递归处理前缀
+    let mut v = expdesc::ExpDesc::new_void();
+    
+    if let Some(prefix) = index_expr.get_prefix_expr() {
+        match prefix {
+            LuaExpr::NameExpr(name_expr) => {
+                let name = name_expr.get_name_token()
+                    .ok_or("function name prefix missing token")?  
+                    .get_name_text()
+                    .to_string();
+                super::var::singlevar(c, &name, &mut v)?;
             }
+            LuaExpr::IndexExpr(inner_index) => {
+                // 递归处理
+                v = compile_func_name_index(c, &inner_index)?;
+            }
+            _ => return Err("Invalid function name prefix".to_string()),
+        }
+    }
+    
+    // 获取当前字段
+    if let Some(index_token) = index_expr.get_index_token() {
+        if index_token.is_left_bracket() {
+            return Err("function name cannot use [] syntax".to_string());
+        }
+        
+        if let Some(key) = index_expr.get_index_key() {
+            let field_name = match key {
+                LuaIndexKey::Name(name_token) => {
+                    name_token.get_name_text().to_string()
+                }
+                _ => return Err("function name field must be a name".to_string()),
+            };
+            
+            // 创建字段访问（对齐 fieldsel）
+            let k_idx = super::helpers::string_k(c, field_name);
+            let mut k = expdesc::ExpDesc::new_k(k_idx);
+            super::exp2reg::exp2anyregup(c, &mut v);
+            super::exp2reg::indexed(c, &mut v, &mut k);
+        }
+    }
+    
+    Ok(v)
+}
+
+/// function funcname body
+fn compile_func_stat(c: &mut Compiler, func: &LuaFuncStat) -> Result<(), String> {
+    // funcstat -> FUNCTION funcname body
+    
+    // Get function name (this is a variable expression)
+    let func_name = func.get_func_name()
+        .ok_or("function statement missing name")?;
+    
+    // Parse function name into a variable descriptor
+    // ismethod 标记是否为方法定义（使用冒号）
+    let mut v = expdesc::ExpDesc::new_void();
+    let mut ismethod = false;
+    
+    match func_name {
+        LuaVarExpr::NameExpr(name_expr) => {
+            // Simple name: function foo() end
+            let name = name_expr.get_name_token()
+                .ok_or("function name missing token")?
+                .get_name_text()
+                .to_string();
+            super::var::singlevar(c, &name, &mut v)?;
+        }
+        LuaVarExpr::IndexExpr(index_expr) => {
+            // Table field: function t.foo() end or function t:foo() end
+            // 对齐 funcname: NAME {fieldsel} [':' NAME]
+            // funcname 只支持点号和最后的冒号，不支持 []
+            
+            // 检测最外层是否为冒号（对齐 funcname 中最后的 ':' 检测）
+            if let Some(index_token) = index_expr.get_index_token() {
+                if index_token.is_colon() {
+                    ismethod = true;
+                }
+            }
+            
+            // 获取前缀表达式（必须是一个名字或者另一个索引）
+            let prefix = index_expr.get_prefix_expr()
+                .ok_or("function name missing prefix")?;
+            
+            // 递归处理前缀（可能是 t 或者 t.a.b）
+            match prefix {
+                LuaExpr::NameExpr(name_expr) => {
+                    let name = name_expr.get_name_token()
+                        .ok_or("function name prefix missing token")?  
+                        .get_name_text()
+                        .to_string();
+                    super::var::singlevar(c, &name, &mut v)?;
+                }
+                LuaExpr::IndexExpr(inner_index) => {
+                    // 递归处理嵌套的索引（如 t.a.b）
+                    // 这里需要递归地构建索引链
+                    v = compile_func_name_index(c, &inner_index)?;
+                }
+                _ => return Err("Invalid function name prefix".to_string()),
+            }
+            
+            // 获取当前这一层的索引（字段名）
+            if let Some(index_token) = index_expr.get_index_token() {
+                if index_token.is_left_bracket() {
+                    return Err("function name cannot use [] syntax".to_string());
+                }
+                
+                // 点号或冒号后面必须跟一个名字
+                if let Some(key) = index_expr.get_index_key() {
+                    let field_name = match key {
+                        LuaIndexKey::Name(name_token) => {
+                            name_token.get_name_text().to_string()
+                        }
+                        _ => return Err("function name field must be a name".to_string()),
+                    };
+                    
+                    // 创建字段访问（对齐 fieldsel）
+                    let k_idx = super::helpers::string_k(c, field_name);
+                    let mut k = expdesc::ExpDesc::new_k(k_idx);
+                    super::exp2reg::exp2anyregup(c, &mut v);
+                    super::exp2reg::indexed(c, &mut v, &mut k);
+                }
+            }
+        }
+    }
+    
+    // Compile function body with ismethod flag
+    // 参考 lparser.c 的 body 函数：if (ismethod) new_localvarliteral(ls, "self");
+    let closure = func.get_closure()
+        .ok_or("function statement missing body")?;
+    
+    // 调用compile_closure_expr传递ismethod参数（对齐lparser.c的body调用）
+    let mut b = expr::compile_closure_expr(c, &closure, ismethod)?;
+    
+    // Store function in the variable
+    // TODO: Check readonly variables
+    super::exp2reg::store_var(c, &v, &mut b);
+    
+    Ok(())
+}
+
+/// Compile local function statement (对齐localfunc)
+/// local function name() body end
+fn compile_local_func_stat(c: &mut Compiler, local_func: &LuaLocalFuncStat) -> Result<(), String> {
+    use super::var::{adjustlocalvars, new_localvar};
+    
+    // Get function name
+    let local_name = local_func.get_local_name()
+        .ok_or("local function missing name")?;
+    let name = local_name.get_name_token()
+        .ok_or("local function name missing token")?
+        .get_name_text()
+        .to_string();
+    
+    // Create local variable but don't activate yet (对齐luac localfunc)
+    // The variable will be activated after the function is compiled
+    new_localvar(c, name)?;
+    
+    // Compile function body (this will reserve a register for the closure)
+    let closure = local_func.get_closure()
+        .ok_or("local function missing body")?;
+    let b = expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
+    
+    // Now activate the local variable (对齐luac: adjustlocalvars after body compilation)
+    // This makes the variable point to the register where the closure was placed
+    adjustlocalvars(c, 1);
+    
+    // The function is already in the correct register (from CLOSURE instruction)
+    // No need to move it - just ensure freereg is correct
+    debug_assert!(matches!(b.kind, expdesc::ExpKind::VNonReloc));
+    
+    Ok(())
+}
+
+/// Compile assignment statement (对齐assignment/restassign)
+/// var1, var2, ... = exp1, exp2, ...
+fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), String> {
+    // assignment -> var {, var} = explist
+    
+    // Get variables and expressions
+    let (vars, exprs) = assign.get_var_and_expr_list();
+    
+    if vars.is_empty() {
+        return Err("assignment statement missing variables".to_string());
+    }
+    
+    let nvars = vars.len() as i32;
+    let nexps = exprs.len() as i32;
+    
+    // Parse all left-hand side variables
+    let mut var_descs: Vec<expdesc::ExpDesc> = Vec::new();
+    for var_expr in &vars {
+        let mut v = expdesc::ExpDesc::new_void();
+        match var_expr {
+            LuaVarExpr::NameExpr(name_expr) => {
+                let name = name_expr.get_name_token()
+                    .ok_or("variable name missing token")?
+                    .get_name_text()
+                    .to_string();
+                super::var::singlevar(c, &name, &mut v)?;
+            }
+            LuaVarExpr::IndexExpr(index_expr) => {
+                // Table indexing: t[k] or t.k (对齐luac suffixedexp)
+                v = expr::compile_index_expr(c, index_expr)?;
+            }
+        }
+        var_descs.push(v.clone());
+    }
+    
+    // Evaluate right-hand side expressions
+    let mut expr_descs: Vec<expdesc::ExpDesc> = Vec::new();
+    if nexps > 0 {
+        for (i, expr) in exprs.iter().enumerate() {
+            let mut e = expr::expr(c, expr)?;
+            
+            if i < nexps as usize - 1 {
+                // Not the last expression - discharge to next register
+                exp2reg::exp2nextreg(c, &mut e);
+            }
+            // Last expression handled below
+            
+            expr_descs.push(e);
+        }
+    }
+    
+    // Get the last expression (or create void if no expressions)
+    let mut last_expr = if nexps > 0 {
+        expr_descs.pop().unwrap()
+    } else {
+        expdesc::ExpDesc::new_void()
+    };
+    
+    // Adjust last expression to provide the right number of values
+    adjust_assign(c, nvars, nexps, &mut last_expr);
+    
+    // Now perform the assignments in reverse order
+    // This is important for cases like: a, b = b, a
+    
+    // First, store all values in temporary registers if needed
+    // For simplicity, we'll assign from left to right
+    // The first nvars-1 variables get values from expr_descs
+    // The last variable gets the adjusted last_expr
+    
+    let mut expr_idx = 0;
+    for (i, var_desc) in var_descs.iter().enumerate() {
+        if i < nexps as usize - 1 {
+            // Use evaluated expression
+            let mut e = expr_descs[expr_idx].clone();
+            super::exp2reg::store_var(c, var_desc, &mut e);
+            expr_idx += 1;
+        } else if i == nexps as usize - 1 {
+            // Use the last (possibly adjusted) expression
+            super::exp2reg::store_var(c, var_desc, &mut last_expr);
         } else {
-            // Single non-call expression - use as iterator function, state and control are nil
-            let func_reg = compile_expr(c, &iter_exprs[0])?;
-            emit_move(c, base, func_reg);
-            emit_load_nil(c, base + 1);
-            emit_load_nil(c, base + 2);
-            emit_load_nil(c, base + 3);
+            // No more expressions - assign nil
+            let mut nil_expr = expdesc::ExpDesc::new_void();
+            nil_expr.kind = expdesc::ExpKind::VNil;
+            super::exp2reg::store_var(c, var_desc, &mut nil_expr);
         }
-    } else {
-        // Multiple expressions: iter_func, state, control_var, closing_value
-        for (i, expr) in iter_exprs.iter().enumerate().take(4) {
-            let reg = compile_expr(c, expr)?;
-            if reg != base + i as u32 {
-                emit_move(c, base + i as u32, reg);
+    }
+    
+    Ok(())
+}
+
+/// Compile label statement (对齐labelstat)
+/// ::label::
+fn compile_label_stat(c: &mut Compiler, label_stat: &LuaLabelStat) -> Result<(), String> {
+    // Get label name
+    let name = label_stat.get_label_name_token()
+        .ok_or("label statement missing name")?
+        .get_name_text()
+        .to_string();
+    
+    // Check for duplicate labels in current block (对齐luac checkrepeated)
+    if let Some(block) = &c.block {
+        let first_label = block.first_label;
+        for i in first_label..c.labels.len() {
+            if c.labels[i].name == name {
+                return Err(format!("label '{}' already defined", name));
             }
         }
-        // Fill missing with nil (up to 4 control slots)
-        for i in iter_exprs.len()..4 {
-            emit_load_nil(c, base + i as u32);
+    }
+    
+    // Create label at current position
+    let pc = helpers::get_label(c);
+    let nactvar = c.nactvar;
+    c.labels.push(Label {
+        name: name.clone(),
+        position: pc,
+        scope_depth: c.scope_depth,
+        nactvar,
+    });
+    
+    // Resolve pending gotos to this label (对齐luac findgotos)
+    if let Some(block) = &c.block {
+        let first_goto = block.first_goto;
+        let mut i = first_goto;
+        while i < c.gotos.len() {
+            if c.gotos[i].name == name {
+                let goto_nactvar = c.gotos[i].nactvar;
+                
+                // Check if goto jumps into scope of any variable (对齐luac)
+                if goto_nactvar < nactvar {
+                    // Get variable name that would be jumped into
+                    let scope = c.scope_chain.borrow();
+                    let var_name = if goto_nactvar < scope.locals.len() {
+                        scope.locals[goto_nactvar].name.clone()
+                    } else {
+                        "?".to_string()
+                    };
+                    drop(scope);
+                    
+                    return Err(format!("<goto {}> at line ? jumps into the scope of local '{}'", 
+                                     name, var_name));
+                }
+                
+                let goto_info = c.gotos.remove(i);
+                // Patch the goto jump to this label
+                helpers::patch_list(c, goto_info.jump_position as i32, pc);
+            } else {
+                i += 1;
+            }
         }
     }
-
-    // NOW set freereg to allocate the control block properly
-    // The first 3 registers (iter_func, state, control) are already at base
-    // We need to mark them as used and allocate the to-be-closed slot
-    c.freereg = base + 4; // base + 3 slots already used + 1 for to-be-closed
-
-    // Begin scope for loop variables
-    begin_scope(c);
-
-    // Register the iterator's hidden variables as internal locals
-    add_local(c, "(for state)".to_string(), base);
-    add_local(c, "(for state)".to_string(), base + 1);
-    add_local(c, "(for state)".to_string(), base + 2);
-    add_local(c, "(for state)".to_string(), base + 3);
-
-    // Allocate registers for loop variables (starting at base+4)
-    for var_name in &var_names {
-        let reg = alloc_register(c);
-        add_local(c, var_name.clone(), reg);
-    }
-
-    // Number of loop variables (C parameter for TFORCALL)
-    let num_vars = var_names.len();
-
-    // Emit TFORPREP: creates to-be-closed and jumps forward to TFORCALL
-    let tforprep_pc = c.chunk.code.len();
-    emit(c, Instruction::encode_abx(OpCode::TForPrep, base, 0)); // Will patch later
-
-    begin_loop(c);
-
-    // Loop body starts here
-    let loop_body_start = c.chunk.code.len();
-
-    // Compile loop body
-    if let Some(body) = stat.get_block() {
-        compile_block(c, &body)?;
-    }
-
-    // Ensure max_stack_size is large enough to protect vararg area
-    // When a function call happens inside the loop, the called function may use
-    // registers beyond max_stack_size. If vararg is stored at max_stack_size,
-    // it can be overwritten. Add extra space to prevent this.
-    // This is a workaround - the proper fix would be in VARARGPREP to use
-    // a larger offset or track the maximum call depth.
-    let safe_stack_size = c.freereg as usize + 4; // Add 4 extra slots for safety
-    if safe_stack_size > c.chunk.max_stack_size {
-        c.chunk.max_stack_size = safe_stack_size;
-    }
-
-    // TFORCALL comes after the loop body
-    let tforcall_pc = c.chunk.code.len();
-    // TFORCALL A C: R[A+4], ..., R[A+3+C] := R[A](R[A+1], R[A+2])
-    emit(
-        c,
-        Instruction::encode_abc(OpCode::TForCall, base, 0, num_vars as u32),
-    );
-
-    // TFORLOOP: if R[A+4] ~= nil then { R[A+2]=R[A+4]; pc -= Bx }
-    let tforloop_pc = c.chunk.code.len();
-    // Jump back to loop body start
-    // When TFORLOOP executes, PC is at tforloop_pc. After execution, PC increments.
-    // If continuing: PC = PC - Bx (before increment), then PC++.
-    // So we need: (tforloop_pc - Bx + 1) = loop_body_start
-    // Bx = tforloop_pc + 1 - loop_body_start
-    let tforloop_jump = tforloop_pc + 1 - loop_body_start;
-    emit(
-        c,
-        Instruction::encode_abx(OpCode::TForLoop, base, tforloop_jump as u32),
-    );
-
-    // Patch TFORPREP to jump to TFORCALL
-    // TFORPREP jumps forward by Bx
-    let tforprep_jump = tforcall_pc - tforprep_pc - 1;
-    c.chunk.code[tforprep_pc] =
-        Instruction::encode_abx(OpCode::TForPrep, base, tforprep_jump as u32);
-
-    end_loop(c);
-    end_scope(c);
-
-    // Free the loop control registers
-    c.freereg = base;
-
+    
     Ok(())
 }
 
-/// Compile do-end block
-fn compile_do_stat(c: &mut Compiler, stat: &LuaDoStat) -> Result<(), String> {
-    begin_scope(c);
-
-    if let Some(block) = stat.get_block() {
-        compile_block(c, &block)?;
-    }
-
-    end_scope(c);
-
-    Ok(())
-}
-
-/// Compile break statement
-fn compile_break_stat(c: &mut Compiler) -> Result<(), String> {
-    emit_break(c)
-}
-
-fn compile_goto_stat(c: &mut Compiler, stat: &LuaGotoStat) -> Result<(), String> {
-    let label_name = stat
-        .get_label_name_token()
+/// Compile goto statement (对齐gotostat)
+/// goto label
+fn compile_goto_stat(c: &mut Compiler, goto_stat: &LuaGotoStat) -> Result<(), String> {
+    // Get target label name
+    let name = goto_stat.get_label_name_token()
         .ok_or("goto statement missing label name")?
         .get_name_text()
         .to_string();
-
-    emit_goto(c, label_name)?;
-    Ok(())
-}
-
-fn compile_label_stat(c: &mut Compiler, stat: &LuaLabelStat) -> Result<(), String> {
-    let label_name = stat
-        .get_label_name_token()
-        .ok_or("label statement missing label name")?
-        .get_name_text()
-        .to_string();
-
-    define_label(c, label_name)?;
-    Ok(())
-}
-
-fn compile_function_stat(c: &mut Compiler, stat: &LuaFuncStat) -> Result<(), String> {
-    let func_name_var_expr = stat
-        .get_func_name()
-        .ok_or("function statement missing function name")?;
-
-    let closure = stat
-        .get_closure()
-        .ok_or("function statement missing function body")?;
-
-    let is_colon = if let LuaVarExpr::IndexExpr(index_expr) = &func_name_var_expr {
-        index_expr
-            .get_index_token()
-            .ok_or("Missing index token")?
-            .is_colon()
+    
+    let nactvar = c.nactvar;
+    let close = c.needclose;
+    
+    // Try to find the label (for backward jumps) (对齐luac findlabel)
+    let mut found_label = None;
+    for (idx, label) in c.labels.iter().enumerate() {
+        if label.name == name {
+            found_label = Some(idx);
+            break;
+        }
+    }
+    
+    if let Some(label_idx) = found_label {
+        // Extract label info before borrowing c mutably
+        let label_nactvar = c.labels[label_idx].nactvar;
+        let label_position = c.labels[label_idx].position;
+        
+        // Backward jump - check scope (对齐luac)
+        if nactvar > label_nactvar {
+            // Check for to-be-closed variables
+            let scope = c.scope_chain.borrow();
+            for i in label_nactvar..nactvar {
+                if i < scope.locals.len() && scope.locals[i].is_to_be_closed {
+                    return Err(format!("<goto {}> jumps into scope of to-be-closed variable", name));
+                }
+            }
+        }
+        
+        // Emit CLOSE if needed (对齐luac)
+        if nactvar > label_nactvar {
+            helpers::code_abc(c, crate::lua_vm::OpCode::Close, label_nactvar as u32, 0, 0);
+        }
+        
+        // Generate jump instruction
+        let jump_pc = helpers::jump(c);
+        helpers::patch_list(c, jump_pc as i32, label_position);
     } else {
-        false
-    };
-
-    let func_name = func_name_var_expr.get_text();
-    // Compile the closure to get function value
-    let func_reg = compile_closure_expr_to(c, &closure, None, is_colon, Some(func_name.clone()))?;
-
-    compile_var_expr(c, &func_name_var_expr, func_reg)?;
-
-    Ok(())
-}
-
-fn compile_local_function_stat(
-    c: &mut Compiler,
-    stat: &emmylua_parser::LuaLocalFuncStat,
-) -> Result<(), String> {
-    let local_name = stat
-        .get_local_name()
-        .ok_or("local function statement missing function name")?;
-    let func_name = local_name
-        .get_name_token()
-        .ok_or("local function statement missing function name token")?
-        .get_name_text()
-        .to_string();
-
-    let closure = stat
-        .get_closure()
-        .ok_or("local function statement missing function body")?;
-
-    // Declare the local variable first (for recursion support)
-    let func_reg = c.freereg;
-    c.freereg += 1;
-    c.nactvar += 1; // Increment active variable count
-
-    c.scope_chain.borrow_mut().locals.push(Local {
-        name: func_name.clone(),
-        depth: c.scope_depth,
-        register: func_reg,
-        is_const: false,
-        is_to_be_closed: false,
-        needs_close: false,
-    });
-    c.chunk.locals.push(func_name.clone());
-
-    // Compile the closure - use dest=Some(func_reg) to ensure it goes to the correct register
-    let closure_reg = compile_closure_expr_to(c, &closure, Some(func_reg), false, Some(func_name))?;
-
-    // Sanity check: closure should be compiled to func_reg
-    debug_assert_eq!(
-        closure_reg, func_reg,
-        "Closure should be compiled to func_reg"
-    );
-
+        // Forward jump - add to pending gotos (对齐luac newgotoentry)
+        let jump_pc = helpers::jump(c);
+        c.gotos.push(GotoInfo {
+            name,
+            jump_position: jump_pc,
+            scope_depth: c.scope_depth,
+            nactvar,
+            close,
+        });
+    }
+    
     Ok(())
 }

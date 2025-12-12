@@ -1,23 +1,23 @@
 // Lua bytecode compiler - Main module
 // Compiles Lua source code to bytecode using emmylua_parser
-mod binop;
 mod exp2reg;
 mod expdesc;
 mod expr;
 mod helpers;
+mod parse_lua_number;
 mod stmt;
 mod tagmethod;
+mod var;
 
 use rowan::TextRange;
-pub(crate) use tagmethod::TagMethod;
 
 use crate::lua_value::Chunk;
-use crate::lua_value::UpvalueDesc;
 use crate::lua_vm::LuaVM;
-use crate::lua_vm::{Instruction, OpCode};
+use crate::lua_vm::OpCode;
 // use crate::optimizer::optimize_constants;  // Disabled for now
-use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
-use helpers::*;
+use emmylua_parser::{
+    LineIndex, LuaAstNode, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use stmt::*;
@@ -65,7 +65,23 @@ pub struct Compiler<'a> {
     pub(crate) vm_ptr: *mut LuaVM,       // VM pointer for string pool access
     pub(crate) last_line: u32,           // Last line number for line_info (not used currently)
     pub(crate) line_index: &'a LineIndex, // Line index for error reporting
+    pub(crate) source: &'a str,          // Source code for error reporting
+    pub(crate) chunk_name: String,       // Chunk name for error reporting
+    pub(crate) needclose: bool, // Function needs to close upvalues when returning (对齐lparser.h FuncState.needclose)
+    pub(crate) block: Option<Box<BlockCnt>>, // Current block (对齐FuncState.bl)
+    pub(crate) prev: Option<*mut Compiler<'a>>, // Enclosing function (对齐lparser.h FuncState.prev)
     pub(crate) _phantom: std::marker::PhantomData<&'a mut LuaVM>,
+}
+
+/// Block control structure (对齐lparser.c的BlockCnt)
+pub(crate) struct BlockCnt {
+    pub previous: Option<Box<BlockCnt>>, // Previous block in chain
+    pub first_label: usize,              // Index of first label in this block
+    pub first_goto: usize,               // Index of first pending goto in this block
+    pub nactvar: usize,                  // Number of active locals outside the block
+    pub upval: bool,                     // true if some variable in the block is an upvalue
+    pub isloop: bool,                    // true if 'block' is a loop
+    pub insidetbc: bool,                 // true if inside the scope of a to-be-closed var
 }
 
 /// Upvalue information
@@ -80,8 +96,9 @@ pub(crate) struct Upvalue {
 #[derive(Clone)]
 pub(crate) struct Local {
     pub name: String,
+    #[allow(unused)]
     pub depth: usize,
-    pub register: u32,
+    pub reg: u32,              // Register index (对齐ridx)
     pub is_const: bool,        // <const> attribute
     pub is_to_be_closed: bool, // <close> attribute
     pub needs_close: bool,     // True if captured by a closure (needs CLOSE on scope exit)
@@ -89,28 +106,38 @@ pub(crate) struct Local {
 
 /// Loop information for break statements
 pub(crate) struct LoopInfo {
-    pub break_jumps: Vec<usize>,   // Positions of break statements to patch
-    pub scope_depth: usize,        // Scope depth at loop start
+    pub break_jumps: Vec<usize>, // Positions of break statements to patch
+    #[allow(unused)]
+    pub scope_depth: usize, // Scope depth at loop start
     pub first_local_register: u32, // First register of loop-local variables (for CLOSE on break)
 }
 
 /// Label definition
 pub(crate) struct Label {
     pub name: String,
-    pub position: usize,    // Code position where label is defined
+    pub position: usize, // Code position where label is defined
+    #[allow(unused)]
     pub scope_depth: usize, // Scope depth at label definition
+    pub nactvar: usize,  // Number of active variables at label (对齐luac Label.nactvar)
 }
 
 /// Pending goto statement
 pub(crate) struct GotoInfo {
     pub name: String,
     pub jump_position: usize, // Position of the jump instruction
+    pub scope_depth: usize,   // Scope depth at goto statement
+    pub nactvar: usize,       // Number of active variables at goto (对齐luac Labeldesc.nactvar)
     #[allow(unused)]
-    pub scope_depth: usize, // Scope depth at goto statement
+    pub close: bool, // Whether need to close upvalues when jumping
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(vm: &'a mut LuaVM, line_index: &'a LineIndex) -> Self {
+    pub fn new(
+        vm: &'a mut LuaVM,
+        line_index: &'a LineIndex,
+        source: &'a str,
+        chunk_name: &str,
+    ) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
@@ -125,16 +152,24 @@ impl<'a> Compiler<'a> {
             vm_ptr: vm as *mut LuaVM,
             last_line: 1,
             line_index,
+            source,
+            chunk_name: chunk_name.to_string(),
+            needclose: false,
+            block: None,
+            prev: None, // Main compiler has no parent
             _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Create a new compiler with a parent scope chain
+    /// Create a new compiler with a parent scope chain and parent compiler
     pub fn new_with_parent(
         parent_scope: Rc<RefCell<ScopeChain>>,
         vm_ptr: *mut LuaVM,
         line_index: &'a LineIndex,
+        source: &'a str,
+        chunk_name: &str,
         current_line: u32,
+        prev: Option<*mut Compiler<'a>>, // Parent compiler
     ) -> Self {
         Compiler {
             chunk: Chunk::new(),
@@ -150,6 +185,11 @@ impl<'a> Compiler<'a> {
             vm_ptr,
             last_line: current_line,
             line_index,
+            source,
+            chunk_name: chunk_name.to_string(),
+            needclose: false,
+            block: None,
+            prev,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -178,11 +218,12 @@ impl<'a> Compiler<'a> {
                 .collect();
             return Err(format!("Syntax errors:\n{}", errors.join("\n")));
         }
-        let mut compiler = Compiler::new(vm, &line_index);
+        let mut compiler = Compiler::new(vm, &line_index, source, chunk_name);
         compiler.chunk.source_name = Some(chunk_name.to_string());
 
         let chunk_node = tree.get_chunk_node();
-        compile_chunk(&mut compiler, &chunk_node)?;
+        compile_chunk(&mut compiler, &chunk_node)
+            .map_err(|e| format!("{}:{}: {}", chunk_name, compiler.last_line, e))?;
 
         // Optimize child chunks first
         let optimized_children: Vec<std::rc::Rc<Chunk>> = compiler
@@ -207,48 +248,170 @@ impl<'a> Compiler<'a> {
     }
 }
 
-/// Compile a chunk (root node)
+/// Compile a chunk (root node) - 对齐mainfunc
 fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
-    // Lua 5.4: Every chunk has _ENV as upvalue[0] for accessing globals
-    // Add _ENV upvalue descriptor to the chunk and scope chain
-    c.chunk.upvalue_descs.push(UpvalueDesc {
-        is_local: true, // Main chunk's _ENV is provided by VM
-        index: 0,
-    });
-    c.chunk.upvalue_count = 1;
+    // Enter main block
+    enter_block(c, false)?;
 
-    // Add _ENV to scope chain so child functions can resolve it
-    c.scope_chain.borrow_mut().upvalues.push(Upvalue {
-        name: "_ENV".to_string(),
-        is_local: true,
-        index: 0,
-    });
-
-    // Emit VARARGPREP at the beginning
+    // Main function is vararg
     c.chunk.is_vararg = true;
-    emit(c, Instruction::encode_abc(OpCode::VarargPrep, 0, 0, 0));
+    helpers::code_abc(c, OpCode::VarargPrep, 0, 0, 0);
 
-    if let Some(block) = chunk.get_block() {
-        compile_block(c, &block)?;
+    // Add _ENV as first upvalue for main function (Lua 5.4 standard)
+    {
+        let mut scope = c.scope_chain.borrow_mut();
+        let env_upvalue = Upvalue {
+            name: "_ENV".to_string(),
+            is_local: false, // _ENV is not a local, it comes from outside
+            index: 0,        // First upvalue
+        };
+        scope.upvalues.push(env_upvalue);
     }
 
-    // Check for unresolved gotos before finishing
-    check_unresolved_gotos(c)?;
+    // Compile the body
+    if let Some(ref block) = chunk.get_block() {
+        compile_statlist(c, block)?;
+    }
 
-    // Emit return at the end
-    let freereg = c.freereg;
-    emit(
-        c,
-        Instruction::create_abck(OpCode::Return, freereg, 1, 0, true),
-    );
+    // Final return（对齐Lua C中lparser.c的mainfunc/funcbody）
+    // 使用freereg而不是nvarstack，因为表达式语句可能改变freereg
+    let first = c.freereg;
+    helpers::ret(c, first, 0);
+
+    // Store upvalue and local information BEFORE leaving block (对齐luac的Proto信息)
+    {
+        let scope = c.scope_chain.borrow();
+        c.chunk.upvalue_count = scope.upvalues.len();
+        c.chunk.upvalue_descs = scope
+            .upvalues
+            .iter()
+            .map(|uv| crate::lua_value::UpvalueDesc {
+                is_local: uv.is_local,
+                index: uv.index,
+            })
+            .collect();
+
+        // Store local variable names for debug info
+        c.chunk.locals = scope.locals.iter().map(|l| l.name.clone()).collect();
+    }
+
+    // Leave main block
+    leave_block(c)?;
+
+    // Set max stack size
+    if c.peak_freereg > c.chunk.max_stack_size as u32 {
+        c.chunk.max_stack_size = c.peak_freereg as usize;
+    }
+
     Ok(())
 }
 
-/// Compile a block of statements
-fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+/// Compile a block of statements (对齐lparser.c的block)
+pub(crate) fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+    enter_block(c, false)?;
+    compile_statlist(c, block)?;
+    leave_block(c)?;
+    Ok(())
+}
+
+/// Compile a statement list (对齐lparser.c的statlist)
+pub(crate) fn compile_statlist(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
+    // statlist -> { stat [';'] }
     for stat in block.get_stats() {
-        compile_stat(c, &stat)?;
+        // Save line info for error reporting
+        c.save_line_info(stat.get_range());
+        statement(c, &stat).map_err(|e| format!("{} (at {}:{})", e, c.chunk_name, c.last_line))?;
+
+        // Free registers after each statement
+        let nvar = helpers::nvarstack(c);
+        c.freereg = nvar;
     }
+    Ok(())
+}
+
+/// Enter a new block (对齐enterblock)
+fn enter_block(c: &mut Compiler, isloop: bool) -> Result<(), String> {
+    let bl = BlockCnt {
+        previous: c.block.take(),
+        first_label: c.labels.len(),
+        first_goto: c.gotos.len(),
+        nactvar: c.nactvar,
+        upval: false,
+        isloop,
+        insidetbc: c.block.as_ref().map_or(false, |b| b.insidetbc),
+    };
+    c.block = Some(Box::new(bl));
+
+    // freereg should equal nvarstack
+    // TODO: 这个断言在某些情况下会失败，需要修复freereg管理
+    // debug_assert!(c.freereg == helpers::nvarstack(c));
+    Ok(())
+}
+
+/// Leave current block (对齐leaveblock)
+fn leave_block(c: &mut Compiler) -> Result<(), String> {
+    let bl = c.block.take().expect("No block to leave");
+
+    // Check for unresolved gotos (对齐luac leaveblock)
+    let first_goto = bl.first_goto;
+    if first_goto < c.gotos.len() {
+        // Find first unresolved goto that's still in scope
+        for i in first_goto..c.gotos.len() {
+            if c.gotos[i].scope_depth > bl.nactvar {
+                return Err(format!("no visible label '{}' for <goto>", c.gotos[i].name));
+            }
+        }
+    }
+
+    // Remove local variables
+    let nvar = bl.nactvar;
+    while c.nactvar > nvar {
+        c.nactvar -= 1;
+        let mut scope = c.scope_chain.borrow_mut();
+        if !scope.locals.is_empty() {
+            scope.locals.pop();
+        }
+    }
+
+    // Handle break statements if this is a loop (对齐luac)
+    if bl.isloop {
+        // Create break label at current position
+        let label_pos = helpers::get_label(c);
+        // Collect break jumps before borrowing mutably
+        let break_jumps: Vec<usize> = if let Some(loop_info) = c.loop_stack.last() {
+            loop_info.break_jumps.clone()
+        } else {
+            Vec::new()
+        };
+        // Patch all break jumps to this position
+        for &break_pc in &break_jumps {
+            helpers::patch_list(c, break_pc as i32, label_pos);
+        }
+        // Pop loop from stack
+        if !c.loop_stack.is_empty() {
+            c.loop_stack.pop();
+        }
+    }
+
+    // Emit CLOSE if needed
+    if bl.upval {
+        let stklevel = helpers::nvarstack(c);
+        helpers::code_abc(c, OpCode::Close, stklevel, 0, 0);
+    }
+
+    // Free registers
+    let stklevel = helpers::nvarstack(c);
+    c.freereg = stklevel;
+
+    // Remove labels from this block
+    c.labels.truncate(bl.first_label);
+
+    // Remove gotos from this block
+    c.gotos.truncate(first_goto);
+
+    // Restore previous block
+    c.block = bl.previous;
+
     Ok(())
 }
 

@@ -6,13 +6,10 @@ use std::fs;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let source = if args.len() > 1 {
-        let filename = &args[1];
-        match fs::read_to_string(filename) {
-            Ok(content) => {
-                println!("=== File: {} ===\n", filename);
-                content
-            }
+    let (source, filename) = if args.len() > 1 {
+        let filename = args[1].clone();
+        match fs::read_to_string(&filename) {
+            Ok(content) => (content, filename),
             Err(e) => {
                 eprintln!("Error reading file '{}': {}", filename, e);
                 std::process::exit(1);
@@ -24,26 +21,92 @@ fn main() {
     };
 
     let mut vm = LuaVM::new();
-    match vm.compile(&source) {
+    match vm.compile_with_name(&source, &filename) {
         Ok(chunk) => {
-            dump_chunk(&chunk, "main", 0);
+            dump_chunk(&chunk, &filename, 0, 0, true, &vm);
         }
         Err(e) => {
             eprintln!("Compilation error: {}", e);
+            eprintln!("Details: {}", vm.get_error_message());
             std::process::exit(1);
         }
     }
 }
 
-fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
-    let indent = "  ".repeat(depth);
+/// 格式化常量值为luac格式的字符串（对齐luac的PrintConstant）
+fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
+    if let Some(val) = chunk.constants.get(idx as usize) {
+        // 根据值类型格式化
+        if val.is_nil() {
+            "nil".to_string()
+        } else if val.is_boolean() {
+            if let Some(b) = val.as_boolean() {
+                if b { "true" } else { "false" }.to_string()
+            } else {
+                "?bool".to_string()
+            }
+        } else if val.is_integer() {
+            if let Some(i) = val.as_integer() {
+                i.to_string()
+            } else {
+                "?int".to_string()
+            }
+        } else if val.is_float() {
+            if let Some(f) = val.as_float() {
+                f.to_string()
+            } else {
+                "?float".to_string()
+            }
+        } else if val.is_string() {
+            // 获取实际字符串内容（对齐luac）
+            if let Some(s) = vm.get_string(val) {
+                format!("\"{}\"", s.as_str())
+            } else {
+                format!("string({})", idx)
+            }
+        } else {
+            format!("{:?}", val)
+        }
+    } else {
+        format!("?({})", idx)
+    }
+}
 
-    println!("{}=== {} ===", indent, name);
+fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined: usize, is_main: bool, vm: &LuaVM) {
+    // Format: main <file:line,line> or function <file:line,line>
+    let func_name = if is_main {
+        format!("main <{}:0,0>", filename)
+    } else {
+        format!("function <{}:{},{}>", filename, linedefined, lastlinedefined)
+    };
+    
+    // Calculate instruction count
+    let ninstr = chunk.code.len();
+    
+    // Format param info (0+ for vararg, or just number)
+    let param_str = if chunk.is_vararg {
+        format!("{}+", chunk.param_count)
+    } else {
+        format!("{}", chunk.param_count)
+    };
+    
+    // Print header like luac: name (ninstr instructions)
+    println!("\n{} ({} instructions)", func_name, ninstr);
+    
+    // Print meta info
     println!(
-        "{}params: {}, vararg: {}, max_stack: {}",
-        indent, chunk.param_count, chunk.is_vararg, chunk.max_stack_size
+        "{} params, {} slots, {} upvalue{}, {} local{}, {} constant{}, {} function{}",
+        param_str,
+        chunk.max_stack_size,
+        chunk.upvalue_count,
+        if chunk.upvalue_count != 1 { "s" } else { "" },
+        chunk.locals.len(),
+        if chunk.locals.len() != 1 { "s" } else { "" },
+        chunk.constants.len(),
+        if chunk.constants.len() != 1 { "s" } else { "" },
+        chunk.child_protos.len(),
+        if chunk.child_protos.len() != 1 { "s" } else { "" }
     );
-    println!();
 
     for (pc, &instr) in chunk.code.iter().enumerate() {
         let opcode = Instruction::get_opcode(instr);
@@ -53,6 +116,13 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
         let bx = Instruction::get_bx(instr);
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
+        
+        // Get line number for this instruction (luac format)
+        let line = if pc < chunk.line_info.len() {
+            chunk.line_info[pc]
+        } else {
+            0
+        };
 
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
@@ -101,19 +171,20 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Concat => format!("CONCAT {} {}", a, b),
             OpCode::Call => format!("CALL {} {} {}", a, b, c),
             OpCode::TailCall => {
-                let k_str = if k { " 1" } else { " 0" };
-                format!("TAILCALL {} {}{}", a, b, k_str)
+                // TAILCALL A B C: function at A, B args, C=0 (always 0 for tailcall)
+                format!("TAILCALL {} {} {}", a, b, c)
             }
             OpCode::Return => {
-                // k=0: show "0k", k=1: show "1" (no k suffix)
-                if k {
-                    format!("RETURN {} {} 1", a, b)
-                } else {
-                    format!("RETURN {} {} 0k", a, b)
-                }
+                // k=1: show "1k", k=0: show "1" (no k suffix)
+                let k_suffix = if k { "k" } else { "" };
+                format!("RETURN {} {} {}{}", a, b, c, k_suffix)
             }
-            OpCode::Return0 => format!("RETURN0"),
-            OpCode::Return1 => format!("RETURN1 {}", a),
+            // Return0 is encoded as RETURN A 1 1 in luac's listing format
+            // A字段指示起始寄存器，1表示0个返回值（B=nret+1），1表示final return
+            OpCode::Return0 => format!("RETURN {} 1 1\t; 0 out", a),
+            // Return1 is encoded as RETURN A 2 1 in luac's listing format  
+            // A字段指示返回值寄存器，2表示1个返回值（B=nret+1），1表示final return
+            OpCode::Return1 => format!("RETURN {} 2 1\t; 1 out", a),
             OpCode::Closure => format!("CLOSURE {} {}", a, bx),
             OpCode::Jmp => format!("JMP {}", Instruction::get_sj(instr)),
             OpCode::Eq => format!("EQ {} {} {}", a, b, k as u32),
@@ -171,62 +242,116 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             OpCode::Len => format!("LEN {} {}", a, b),
             OpCode::GetI => {
                 // GETI A B C: R[A] := R[B][C] - C is unsigned integer index
-                format!("GetI {} {} {}", a, b, c)
+                format!("GETI {} {} {}", a, b, c)
             }
             OpCode::SetI => {
                 // SETI A B C/k: R[A][B] := RK(C) - B is unsigned integer index
                 let k_str = if k { "k" } else { "" };
-                format!("SetI {} {} {}{}", a, b, c, k_str)
+                format!("SETI {} {} {}{}", a, b, c, k_str)
             }
             OpCode::EqK => {
                 // EQK A B k: if ((R[A] == K[B]) ~= k) then pc++
                 let k_str = if k { "k" } else { "" };
-                format!("EqK {} {} {}{}", a, b, k as u32, k_str)
+                format!("EQK {} {} {}{}", a, b, k as u32, k_str)
             }
             OpCode::SetList => {
                 // SETLIST A B C k: for i = 1, B do R[A][C+i] := R[A+i] end
                 let k_str = if k { "k" } else { "" };
-                format!("SetList {} {} {}{}", a, b, c, k_str)
+                format!("SETLIST {} {} {}{}", a, b, c, k_str)
             }
             OpCode::ExtraArg => format!("EXTRAARG {}", bx),
             OpCode::Tbc => format!("TBC {}", a),
             OpCode::Close => format!("CLOSE {}", a),
+            
+            // Bitwise operations
+            OpCode::BAnd => format!("BAND {} {} {}", a, b, c),
+            OpCode::BOr => format!("BOR {} {} {}", a, b, c),
+            OpCode::BXor => format!("BXOR {} {} {}", a, b, c),
+            OpCode::Shl => format!("SHL {} {} {}", a, b, c),
+            OpCode::Shr => format!("SHR {} {} {}", a, b, c),
+            OpCode::BNot => format!("BNOT {} {}", a, b),
+            
+            // Bitwise with constant
+            OpCode::BAndK => format!("BANDK {} {} {}", a, b, c),
+            OpCode::BOrK => format!("BORK {} {} {}", a, b, c),
+            OpCode::BXorK => format!("BXORK {} {} {}", a, b, c),
+            OpCode::ShrI => {
+                let sc = Instruction::get_sc(instr);
+                format!("SHRI {} {} {}", a, b, sc)
+            }
+            OpCode::ShlI => {
+                let sc = Instruction::get_sc(instr);
+                format!("SHLI {} {} {}", a, b, sc)
+            }
+            
+            // Load float/boolean
+            OpCode::LoadF => {
+                // LOADF loads a float from sBx field
+                // The sBx field encodes a float value
+                format!("LOADF {} {}", a, sbx)
+            }
+            OpCode::LoadFalse => format!("LOADFALSE {}", a),
+            OpCode::LoadTrue => format!("LOADTRUE {}", a),
+            OpCode::LFalseSkip => format!("LFALSESKIP {}", a),
+            
+            // Test instructions (iAk format)
+            OpCode::Test => format!("TEST {} {}", a, k as u32),
+            OpCode::TestSet => format!("TESTSET {} {} {}", a, b, k as u32),
+            
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
+        
+        // Add comment for some instructions (like luac)
+        let comment = match opcode {
+            OpCode::GetTabUp | OpCode::SetTabUp => {
+                // Show upvalue name and constant name（对齐luac）
+                if b < chunk.upvalue_count as u32 && c < chunk.constants.len() as u32 {
+                    format!(" ; _ENV {}", format_constant(chunk, c, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::GetUpval => {
+                // Show upvalue name
+                if b < chunk.upvalue_descs.len() as u32 {
+                    String::new() // TODO: add upvalue name when available
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::Closure => {
+                // Show child function address (just use index)
+                format!(" ; function_{}", bx)
+            }
+            OpCode::LoadK => {
+                // Show constant value（对齐luac）
+                if bx < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, bx, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::Return => {
+                // Show return count
+                let nret = if c == 0 {
+                    "0 out"
+                } else {
+                    &format!("{} out", c - 1)
+                };
+                format!(" ; {}", nret)
+            }
+            _ => String::new()
+        };
 
-        println!("{}{:4} {}", indent, pc + 1, detail);
-    }
-
-    // Show constants if any
-    if !chunk.constants.is_empty() {
-        println!("\n{}constants:", indent);
-        for (i, val) in chunk.constants.iter().enumerate() {
-            println!("{}  {} = {:?}", indent, i, val);
-        }
-    }
-
-    // Show locals if any
-    if !chunk.locals.is_empty() {
-        println!("\n{}locals:", indent);
-        for (i, name) in chunk.locals.iter().enumerate() {
-            println!("{}  {} = {} (register {})", indent, i, name, i);
-        }
-    }
-
-    // Show upvalues if any
-    if chunk.upvalue_count > 0 {
-        println!("\n{}upvalues ({}):", indent, chunk.upvalue_count);
-        for (i, uv) in chunk.upvalue_descs.iter().enumerate() {
-            let uv_type = if uv.is_local { "local" } else { "upvalue" };
-            println!("{}  {} = {} index={}", indent, i, uv_type, uv.index);
-        }
+        // Print instruction in luac format: [line] OPCODE args ; comment
+        println!("\t{}\t[{}]\t{}{}", pc + 1, line, detail, comment);
     }
 
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
-        println!();
-        for (i, child) in chunk.child_protos.iter().enumerate() {
-            dump_chunk(child, &format!("function <PROTO[{}]>", i), depth + 1);
+        for (_i, child) in chunk.child_protos.iter().enumerate() {
+            // TODO: get actual line numbers from child chunk
+            dump_chunk(child, filename, 0, 0, false, vm);
         }
     }
 }
