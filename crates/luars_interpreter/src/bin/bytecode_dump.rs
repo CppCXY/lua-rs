@@ -21,7 +21,7 @@ fn main() {
     };
 
     let mut vm = LuaVM::new();
-    match vm.compile(&source) {
+    match vm.compile_with_name(&source, &filename) {
         Ok(chunk) => {
             dump_chunk(&chunk, &filename, 0, 0, true, &vm);
         }

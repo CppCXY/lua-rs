@@ -109,6 +109,51 @@ pub(crate) fn exp2anyregup(c: &mut Compiler, e: &mut ExpDesc) {
     }
 }
 
+/// Try to convert expression to K (constant in table) (对齐luaK_exp2K)
+/// Returns true if successfully converted to K, false otherwise
+pub(crate) fn exp2k(c: &mut Compiler, e: &mut ExpDesc) -> bool {
+    if !has_jumps(e) {
+        match e.kind {
+            ExpKind::VNil => {
+                e.info = super::helpers::nil_k(c);
+                e.kind = ExpKind::VK;
+                return true;
+            }
+            ExpKind::VTrue => {
+                e.info = super::helpers::bool_k(c, true);
+                e.kind = ExpKind::VK;
+                return true;
+            }
+            ExpKind::VFalse => {
+                e.info = super::helpers::bool_k(c, false);
+                e.kind = ExpKind::VK;
+                return true;
+            }
+            ExpKind::VKInt => {
+                e.info = super::helpers::int_k(c, e.ival);
+                e.kind = ExpKind::VK;
+                return true;
+            }
+            ExpKind::VKFlt => {
+                e.info = super::helpers::number_k(c, e.nval);
+                e.kind = ExpKind::VK;
+                return true;
+            }
+            ExpKind::VKStr => {
+                // Already a string constant, just ensure it's in K form
+                e.kind = ExpKind::VK;
+                return true;
+            }
+            ExpKind::VK => {
+                // Already a K expression
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Ensure expression is discharged (对齐luaK_exp2val)
 pub(crate) fn exp2val(c: &mut Compiler, e: &mut ExpDesc) {
     if has_jumps(e) {
@@ -192,10 +237,13 @@ pub(crate) fn goiffalse(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
             NO_JUMP
         }
         _ => {
-            // Generate test and jump
+            // Generate test and jump（对齐Lua C中的luaK_goiffalse）
             discharge2anyreg(c, e);
             free_exp(c, e);
-            let jmp = jump_on_cond(c, e.info, false);
+            // TEST指令：if not R then skip next
+            jump_on_cond(c, e.info, false);
+            // JMP指令：跳转到目标位置（稍后patch）
+            let jmp = jump(c);
             jmp as i32
         }
     }
@@ -218,10 +266,13 @@ pub(crate) fn goiftrue(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
             NO_JUMP
         }
         _ => {
-            // Generate test and jump
+            // Generate test and jump（对齐Lua C中的luaK_goiftrue）
             discharge2anyreg(c, e);
             free_exp(c, e);
-            let jmp = jump_on_cond(c, e.info, true);
+            // TEST指令：if R then skip next
+            jump_on_cond(c, e.info, true);
+            // JMP指令：跳转到目标位置（稍后patch）
+            let jmp = jump(c);
             jmp as i32
         }
     }

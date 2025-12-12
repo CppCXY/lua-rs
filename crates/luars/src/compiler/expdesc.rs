@@ -98,6 +98,7 @@ impl ExpDesc {
     }
 
     /// Create expression in a specific register
+    #[allow(dead_code)]
     pub fn new_nonreloc(reg: u32) -> Self {
         ExpDesc {
             kind: ExpKind::VNonReloc,
@@ -245,6 +246,7 @@ impl ExpDesc {
     }
 
     /// Get the register number if expression is in a register
+    #[allow(dead_code)]
     pub fn get_register(&self) -> Option<u32> {
         match self.kind {
             ExpKind::VNonReloc => Some(self.info),

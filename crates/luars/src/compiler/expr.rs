@@ -185,21 +185,16 @@ pub(crate) fn compile_index_expr(
 
     // Get the index/key
     if let Some(index_token) = index_expr.get_index_token() {
-        // 冒号语法不应该出现在普通索引表达式中
-        // 冒号只在函数调用（t:method()）和函数定义（function t:method()）中有意义
-        if index_token.is_colon() {
-            return Err(
-                "colon syntax ':' is only valid in function calls or definitions".to_string(),
-            );
-        }
-
-        if index_token.is_dot() {
-            // Dot notation: t.field
-            // Get the field name as a string constant
+        // 注意：冒号语法在这里不报错，因为可能是在函数调用context中
+        // 会在compile_function_call中特殊处理
+        
+        if index_token.is_dot() || index_token.is_colon() {
+            // Dot/Colon notation: t.field 或 t:method
+            // 注意：冒号在这里和点号处理相同，实际的SELF指令会在函数调用时生成
             if let Some(key) = index_expr.get_index_key() {
                 let key_name = match key {
                     LuaIndexKey::Name(name_token) => name_token.get_name_text().to_string(),
-                    _ => return Err("Dot notation requires name key".to_string()),
+                    _ => return Err("Dot/Colon notation requires name key".to_string()),
                 };
 
                 // Create string constant for field name (对齐luac，使用VKStr)
@@ -725,6 +720,53 @@ fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr, ismetho
     Ok(())
 }
 
+/// Convert expression to RK operand (对齐exp2RK)
+/// Returns true if expression is K (constant), false if in register
+fn exp2rk(c: &mut Compiler, e: &mut ExpDesc) -> bool {
+    // Try to make it a constant
+    if super::exp2reg::exp2k(c, e) {
+        true
+    } else {
+        // Put in register
+        super::exp2reg::exp2anyreg(c, e);
+        false
+    }
+}
+
+/// Code ABRK instruction format (对齐codeABRK)
+fn code_abrk(c: &mut Compiler, op: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
+    let k = exp2rk(c, ec);
+    let c_val = ec.info;
+    helpers::code_abck(c, op, a, b, c_val, k);
+}
+
+/// Emit SELF instruction (对齐luaK_self)
+/// Converts expression 'e' into 'e:key(e,'
+/// SELF A B C: R(A+1) := R(B); R(A) := R(B)[RK(C)]
+fn code_self(c: &mut Compiler, e: &mut ExpDesc, key: &mut ExpDesc) -> u32 {
+    // Ensure object is in a register
+    super::exp2reg::exp2anyreg(c, e);
+    let ereg = e.info; // register where object was placed
+    
+    // Free the object register since SELF will use new registers
+    helpers::freeexp(c, e);
+    
+    // Allocate base register for SELF
+    e.info = c.freereg;
+    e.kind = expdesc::ExpKind::VNonReloc;
+    
+    // Reserve 2 registers: one for method, one for self parameter
+    helpers::reserve_regs(c, 2);
+    
+    // Generate SELF instruction
+    code_abrk(c, OpCode::Self_, e.info, ereg, key);
+    
+    // Free key expression
+    helpers::freeexp(c, key);
+    
+    e.info
+}
+
 /// Compile function call expression - 对齐funcargs
 fn compile_function_call(c: &mut Compiler, call_expr: &LuaCallExpr) -> Result<ExpDesc, String> {
     use super::exp2reg;
@@ -734,17 +776,57 @@ fn compile_function_call(c: &mut Compiler, call_expr: &LuaCallExpr) -> Result<Ex
         .get_prefix_expr()
         .ok_or("call expression missing prefix")?;
 
-    // Compile the function expression
-    let mut func = expr(c, &prefix)?;
-
-    // Process the function to ensure it's in a register
-    exp2reg::discharge_vars(c, &mut func);
-
-    let base = if matches!(func.kind, expdesc::ExpKind::VNonReloc) {
-        func.info as u32
+    // 检查是否是冒号方法调用 (obj:method())
+    // 如果prefix是IndexExpr且使用冒号，需要生成SELF指令
+    let is_method_call = if let LuaExpr::IndexExpr(index_expr) = &prefix {
+        if let Some(index_token) = index_expr.get_index_token() {
+            index_token.is_colon()
+        } else {
+            false
+        }
     } else {
-        exp2reg::exp2nextreg(c, &mut func);
-        func.info as u32
+        false
+    };
+
+    let base = if is_method_call {
+        // 方法调用：obj:method(args) 转换为 obj.method(obj, args)
+        // 使用SELF指令：SELF A B C  =>  R(A+1):=R(B); R(A):=R(B)[RK(C)]
+        if let LuaExpr::IndexExpr(index_expr) = &prefix {
+            // 编译对象表达式
+            let obj_prefix = index_expr.get_prefix_expr()
+                .ok_or("method call missing object")?;
+            let mut obj = expr(c, &obj_prefix)?;
+            
+            // 获取方法名
+            let method_name = if let Some(key) = index_expr.get_index_key() {
+                match key {
+                    LuaIndexKey::Name(name_token) => name_token.get_name_text().to_string(),
+                    _ => return Err("Method call requires name key".to_string()),
+                }
+            } else {
+                return Err("Method call missing method name".to_string());
+            };
+            
+            // 创建方法名的字符串常量
+            let k_idx = super::helpers::string_k(c, method_name);
+            let mut key = ExpDesc::new_kstr(k_idx);
+            
+            // 生成SELF指令 (对齐luaK_self)
+            code_self(c, &mut obj, &mut key)
+        } else {
+            unreachable!("Checked is_method_call but not IndexExpr");
+        }
+    } else {
+        // 普通函数调用
+        let mut func = expr(c, &prefix)?;
+        exp2reg::discharge_vars(c, &mut func);
+
+        if matches!(func.kind, expdesc::ExpKind::VNonReloc) {
+            func.info as u32
+        } else {
+            exp2reg::exp2nextreg(c, &mut func);
+            func.info as u32
+        }
     };
 
     // Get argument list
@@ -753,7 +835,8 @@ fn compile_function_call(c: &mut Compiler, call_expr: &LuaCallExpr) -> Result<Ex
         .ok_or("call expression missing arguments")?
         .get_args()
         .collect::<Vec<_>>();
-    let mut nargs = 0i32;
+    // 方法调用时，self参数已经由SELF指令放入R(A+1)，所以参数从1开始
+    let mut nargs = if is_method_call { 1i32 } else { 0i32 };
 
     // Compile each argument
     for (i, arg) in args.iter().enumerate() {
