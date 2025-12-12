@@ -162,26 +162,30 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
             adjust_assign(c, nvars, nexps, &mut e);
         } else {
             // Compile all expressions
+            // 参考lparser.c:1011 (explist function)
             let mut last_e = expdesc::ExpDesc::new_void();
-            for (i, ex) in exprs.iter().enumerate() {
+            // 编译第一个表达式
+            last_e = expr::expr(c, &exprs[0])?;
+            // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
+            for ex in exprs.iter().skip(1) {
+                exp2reg::exp2nextreg(c, &mut last_e);
                 last_e = expr::expr(c, ex)?;
-                if i < (nexps - 1) as usize {
-                    exp2reg::exp2nextreg(c, &mut last_e);
-                }
             }
             adjust_assign(c, nvars, nexps, &mut last_e);
             adjustlocalvars(c, nvars as usize);
         }
     } else {
         // Different number of variables and expressions - use adjust_assign
+        // 参考lparser.c:1011 (explist function)
         let mut last_e = expdesc::ExpDesc::new_void();
 
         if nexps > 0 {
-            for (i, ex) in exprs.iter().enumerate() {
+            // 编译第一个表达式
+            last_e = expr::expr(c, &exprs[0])?;
+            // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
+            for ex in exprs.iter().skip(1) {
+                exp2reg::exp2nextreg(c, &mut last_e);
                 last_e = expr::expr(c, ex)?;
-                if i < (nexps - 1) as usize {
-                    exp2reg::exp2nextreg(c, &mut last_e);
-                }
             }
         }
 
