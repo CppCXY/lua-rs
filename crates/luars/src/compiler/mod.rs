@@ -255,6 +255,21 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     let first = helpers::nvarstack(c);
     helpers::ret(c, first, 0);
     
+    // Store upvalue and local information BEFORE leaving block (对齐luac的Proto信息)
+    {
+        let scope = c.scope_chain.borrow();
+        c.chunk.upvalue_count = scope.upvalues.len();
+        c.chunk.upvalue_descs = scope.upvalues.iter().map(|uv| {
+            crate::lua_value::UpvalueDesc {
+                is_local: uv.is_local,
+                index: uv.index,
+            }
+        }).collect();
+        
+        // Store local variable names for debug info
+        c.chunk.locals = scope.locals.iter().map(|l| l.name.clone()).collect();
+    }
+    
     // Leave main block
     leave_block(c)?;
     

@@ -674,6 +674,12 @@ fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr, ismetho
     let first = helpers::nvarstack(child);
     helpers::ret(child, first, 0);
 
+    // Store local variable names for debug info BEFORE leaving block
+    {
+        let scope = child.scope_chain.borrow();
+        child.chunk.locals = scope.locals.iter().map(|l| l.name.clone()).collect();
+    }
+
     // Leave function block
     leave_block(child)?;
 

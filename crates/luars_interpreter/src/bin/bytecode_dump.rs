@@ -6,13 +6,10 @@ use std::fs;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let source = if args.len() > 1 {
-        let filename = &args[1];
-        match fs::read_to_string(filename) {
-            Ok(content) => {
-                println!("=== File: {} ===\n", filename);
-                content
-            }
+    let (source, filename) = if args.len() > 1 {
+        let filename = args[1].clone();
+        match fs::read_to_string(&filename) {
+            Ok(content) => (content, filename),
             Err(e) => {
                 eprintln!("Error reading file '{}': {}", filename, e);
                 std::process::exit(1);
@@ -26,26 +23,51 @@ fn main() {
     let mut vm = LuaVM::new();
     match vm.compile(&source) {
         Ok(chunk) => {
-            dump_chunk(&chunk, "main", 0);
+            dump_chunk(&chunk, &filename, 0, 0, true);
         }
         Err(e) => {
             eprintln!("Compilation error: {}", e);
-            // Also print the detailed error message from VM
             eprintln!("Details: {}", vm.get_error_message());
             std::process::exit(1);
         }
     }
 }
 
-fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
-    let indent = "  ".repeat(depth);
-
-    println!("{}=== {} ===", indent, name);
+fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined: usize, is_main: bool) {
+    // Format: main <file:line,line> or function <file:line,line>
+    let func_name = if is_main {
+        format!("main <{}:0,0>", filename)
+    } else {
+        format!("function <{}:{},{}>", filename, linedefined, lastlinedefined)
+    };
+    
+    // Calculate instruction count
+    let ninstr = chunk.code.len();
+    
+    // Format param info (0+ for vararg, or just number)
+    let param_str = if chunk.is_vararg {
+        format!("{}+", chunk.param_count)
+    } else {
+        format!("{}", chunk.param_count)
+    };
+    
+    // Print header like luac: name (ninstr instructions)
+    println!("\n{} ({} instructions)", func_name, ninstr);
+    
+    // Print meta info
     println!(
-        "{}params: {}, vararg: {}, max_stack: {}",
-        indent, chunk.param_count, chunk.is_vararg, chunk.max_stack_size
+        "{} params, {} slots, {} upvalue{}, {} local{}, {} constant{}, {} function{}",
+        param_str,
+        chunk.max_stack_size,
+        chunk.upvalue_count,
+        if chunk.upvalue_count != 1 { "s" } else { "" },
+        chunk.locals.len(),
+        if chunk.locals.len() != 1 { "s" } else { "" },
+        chunk.constants.len(),
+        if chunk.constants.len() != 1 { "s" } else { "" },
+        chunk.child_protos.len(),
+        if chunk.child_protos.len() != 1 { "s" } else { "" }
     );
-    println!();
 
     for (pc, &instr) in chunk.code.iter().enumerate() {
         let opcode = Instruction::get_opcode(instr);
@@ -55,6 +77,13 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
         let bx = Instruction::get_bx(instr);
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
+        
+        // Get line number for this instruction (luac format)
+        let line = if pc < chunk.line_info.len() {
+            chunk.line_info[pc]
+        } else {
+            0
+        };
 
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
@@ -228,40 +257,66 @@ fn dump_chunk(chunk: &Chunk, name: &str, depth: usize) {
             
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
+        
+        // Add comment for some instructions (like luac)
+        let comment = match opcode {
+            OpCode::GetTabUp | OpCode::SetTabUp => {
+                // Show upvalue name and constant name
+                if b < chunk.upvalue_count as u32 && c < chunk.constants.len() as u32 {
+                    if let Some(const_val) = chunk.constants.get(c as usize) {
+                        format!(" ; _ENV {:?}", const_val)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::GetUpval => {
+                // Show upvalue name
+                if b < chunk.upvalue_descs.len() as u32 {
+                    String::new() // TODO: add upvalue name when available
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::Closure => {
+                // Show child function address (just use index)
+                format!(" ; function_{}", bx)
+            }
+            OpCode::LoadK => {
+                // Show constant value
+                if bx < chunk.constants.len() as u32 {
+                    if let Some(val) = chunk.constants.get(bx as usize) {
+                        format!(" ; {:?}", val)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::Return => {
+                // Show return count
+                let nret = if c == 0 {
+                    "0 out"
+                } else {
+                    &format!("{} out", c - 1)
+                };
+                format!(" ; {}", nret)
+            }
+            _ => String::new()
+        };
 
-        println!("{}{:4} {}", indent, pc + 1, detail);
-    }
-
-    // Show constants if any
-    if !chunk.constants.is_empty() {
-        println!("\n{}constants:", indent);
-        for (i, val) in chunk.constants.iter().enumerate() {
-            println!("{}  {} = {:?}", indent, i, val);
-        }
-    }
-
-    // Show locals if any
-    if !chunk.locals.is_empty() {
-        println!("\n{}locals:", indent);
-        for (i, name) in chunk.locals.iter().enumerate() {
-            println!("{}  {} = {} (register {})", indent, i, name, i);
-        }
-    }
-
-    // Show upvalues if any
-    if chunk.upvalue_count > 0 {
-        println!("\n{}upvalues ({}):", indent, chunk.upvalue_count);
-        for (i, uv) in chunk.upvalue_descs.iter().enumerate() {
-            let uv_type = if uv.is_local { "local" } else { "upvalue" };
-            println!("{}  {} = {} index={}", indent, i, uv_type, uv.index);
-        }
+        // Print instruction in luac format: [line] OPCODE args ; comment
+        println!("\t{}\t[{}]\t{}{}", pc + 1, line, detail, comment);
     }
 
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
-        println!();
         for (i, child) in chunk.child_protos.iter().enumerate() {
-            dump_chunk(child, &format!("function <PROTO[{}]>", i), depth + 1);
+            // TODO: get actual line numbers from child chunk
+            dump_chunk(child, filename, 0, 0, false);
         }
     }
 }
