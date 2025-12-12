@@ -154,8 +154,15 @@ pub(crate) fn set_returns(c: &mut Compiler, e: &mut ExpDesc, nresults: i32) {
     if e.kind == ExpKind::VCall {
         let pc = e.info as usize;
         let mut instr = c.chunk.code[pc];
+        let base_reg = Instruction::get_a(instr);
         Instruction::set_c(&mut instr, (nresults + 1) as u32);
         c.chunk.code[pc] = instr;
+        
+        // 当丢弃返回值时(nresults==0)，将freereg重置为call的基寄存器（对齐Lua C）
+        // 参考lcode.c中luaK_setreturns: if (nresults == 0) fs->freereg = base(e);
+        if nresults == 0 {
+            c.freereg = base_reg;
+        }
     } else if e.kind == ExpKind::VVararg {
         let pc = e.info as usize;
         let mut instr = c.chunk.code[pc];
@@ -304,12 +311,27 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
             free_exp(c, ex);
         }
         ExpKind::VIndexed => {
-            // Store to table: t[k] = v
-            // TODO: Implement proper indexed store with SETTABLE, SETI, SETFIELD variants
-            // For now, use generic SETTABLE
+            // Store to table: t[k] = v (对齐luac SETTABLE)
             let val = exp2anyreg(c, ex);
             code_abc(c, OpCode::SetTable, var.ind.t, var.ind.idx, val);
             free_exp(c, ex);
+        }
+        ExpKind::VIndexStr => {
+            // Store to table with string key: t.field = v (对齐luac SETFIELD)
+            let val = exp2anyreg(c, ex);
+            code_abc(c, OpCode::SetField, var.ind.t, var.ind.idx, val);
+            free_exp(c, ex);
+        }
+        ExpKind::VIndexI => {
+            // Store to table with integer key: t[i] = v (对齐luac SETI)
+            let val = exp2anyreg(c, ex);
+            code_abc(c, OpCode::SetI, var.ind.t, var.ind.idx, val);
+            free_exp(c, ex);
+        }
+        ExpKind::VNonReloc | ExpKind::VReloc => {
+            // If variable was discharged to a register, this is an error
+            // This should not happen - indexed expressions should not be discharged before store
+            panic!("Cannot store to discharged indexed variable: {:?}", var.kind);
         }
         _ => {
             // Invalid variable kind for store
@@ -335,10 +357,11 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
             ExpKind::VIndexed // t[k]
         };
         
-        // CRITICAL: 先设置ind字段，再调用exp2anyreg
+        // CRITICAL: 先exp2anyreg获取t的寄存器，再设置kind
+        let t_reg = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
         t.kind = op;
         t.ind.idx = idx;
-        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
+        t.ind.t = t_reg;
     } else if k.kind == ExpKind::VKStr {
         // 字符串常量索引
         let op = if t.kind == ExpKind::VUpval {
@@ -347,11 +370,12 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
             ExpKind::VIndexStr
         };
         
-        // CRITICAL: 先保存k.info，再调用exp2anyreg（它会触发discharge_vars读取ind）
+        // CRITICAL: 先exp2anyreg获取t的寄存器，再设置kind
+        let t_reg = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
         let key_idx = k.info;
         t.kind = op;
-        t.ind.idx = key_idx; // 必须在exp2anyreg之前设置！
-        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
+        t.ind.idx = key_idx;
+        t.ind.t = t_reg;
     } else if k.kind == ExpKind::VKInt && fits_as_offset(k.ival) {
         // 整数索引（在范围内）
         let op = if t.kind == ExpKind::VUpval {
@@ -360,15 +384,19 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
             ExpKind::VIndexI
         };
         
-        // CRITICAL: 先设置ind字段，再调用exp2anyreg
+        // CRITICAL: 先exp2anyreg获取t的寄存器，再设置kind
+        let t_reg = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
         t.kind = op;
         t.ind.idx = k.ival as u32;
-        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
+        t.ind.t = t_reg;
     } else {
-        // 通用索引：需要把 key 放到寄存器
+        // 通用索引：需要把 key 放到寄存器（对齐 Lua C 实现）
+        // CRITICAL: 必须先 exp2anyreg 获取寄存器，再设置 kind
+        let t_reg = exp2anyreg(c, t);
+        let k_reg = exp2anyreg(c, k);
         t.kind = ExpKind::VIndexed;
-        t.ind.t = exp2anyreg(c, t);
-        t.ind.idx = exp2anyreg(c, k);
+        t.ind.t = t_reg;
+        t.ind.idx = k_reg;
     }
 }
 
@@ -380,7 +408,9 @@ fn fits_as_offset(n: i64) -> bool {
 /// Check if expression is valid as RK operand and return its index
 fn valid_op(e: &ExpDesc) -> Option<u32> {
     match e.kind {
-        ExpKind::VK | ExpKind::VKInt | ExpKind::VKFlt => Some(e.info),
+        ExpKind::VK => Some(e.info), // 常量池索引
+        // VKInt 和 VKFlt 不应该走这个路径，它们需要特殊处理
+        // 因为整数和浮点数存储在 ival/nval，不是 info
         _ => None,
     }
 }

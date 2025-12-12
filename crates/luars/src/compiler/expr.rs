@@ -464,6 +464,36 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
 
     e1.info = helpers::code_abc(c, op, 0, o1, o2) as u32;
     e1.kind = ExpKind::VReloc;
+    
+    // 生成元方法标记指令（对齐 Lua 5.4 codeMMBin）
+    // MMBIN 用于标记可能触发元方法的二元操作
+    code_mmbin(c, op, o1, o2);
+}
+
+/// 生成元方法二元操作标记（对齐 luaK_codeMMBin in lcode.c）
+fn code_mmbin(c: &mut Compiler, op: OpCode, o1: u32, o2: u32) {
+    // 将OpCode映射到元方法ID（参考Lua 5.4 ltm.h中的TM enum）
+    // ltm.h定义：TM_INDEX(0), TM_NEWINDEX(1), TM_GC(2), TM_MODE(3), TM_LEN(4), TM_EQ(5),
+    // TM_ADD(6), TM_SUB(7), TM_MUL(8), TM_MOD(9), TM_POW(10), TM_DIV(11), TM_IDIV(12),
+    // TM_BAND(13), TM_BOR(14), TM_BXOR(15), TM_SHL(16), TM_SHR(17), ...
+    let mm = match op {
+        OpCode::Add => 6,      // TM_ADD
+        OpCode::Sub => 7,      // TM_SUB
+        OpCode::Mul => 8,      // TM_MUL
+        OpCode::Mod => 9,      // TM_MOD
+        OpCode::Pow => 10,     // TM_POW
+        OpCode::Div => 11,     // TM_DIV
+        OpCode::IDiv => 12,    // TM_IDIV
+        OpCode::BAnd => 13,    // TM_BAND
+        OpCode::BOr => 14,     // TM_BOR
+        OpCode::BXor => 15,    // TM_BXOR
+        OpCode::Shl => 16,     // TM_SHL
+        OpCode::Shr => 17,     // TM_SHR
+        _ => return,           // 其他操作不需要MMBIN
+    };
+    
+    use super::helpers::code_abc;
+    code_abc(c, OpCode::MmBin, o1, o2, mm);
 }
 
 /// 生成比较指令（对齐 codecomp）
@@ -570,12 +600,16 @@ pub(crate) fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, i
     let parent_scope = c.scope_chain.clone();
     let vm_ptr = c.vm_ptr;
     let line_index = c.line_index;
+    let source = c.source;
+    let chunk_name = c.chunk_name.clone();
     let current_line = c.last_line;
 
     let mut child_compiler = Compiler::new_with_parent(
         parent_scope,
         vm_ptr,
         line_index,
+        source,
+        &chunk_name,
         current_line,
         Some(c as *mut Compiler),
     );

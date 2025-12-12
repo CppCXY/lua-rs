@@ -15,7 +15,7 @@ use crate::lua_value::Chunk;
 use crate::lua_vm::LuaVM;
 use crate::lua_vm::OpCode;
 // use crate::optimizer::optimize_constants;  // Disabled for now
-use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig};
+use emmylua_parser::{LineIndex, LuaBlock, LuaChunk, LuaLanguageLevel, LuaParser, ParserConfig, LuaAstNode};
 use std::cell::RefCell;
 use std::rc::Rc;
 use stmt::*;
@@ -63,6 +63,8 @@ pub struct Compiler<'a> {
     pub(crate) vm_ptr: *mut LuaVM,       // VM pointer for string pool access
     pub(crate) last_line: u32,           // Last line number for line_info (not used currently)
     pub(crate) line_index: &'a LineIndex, // Line index for error reporting
+    pub(crate) source: &'a str,          // Source code for error reporting
+    pub(crate) chunk_name: String,       // Chunk name for error reporting
     pub(crate) needclose: bool, // Function needs to close upvalues when returning (对齐lparser.h FuncState.needclose)
     pub(crate) block: Option<Box<BlockCnt>>, // Current block (对齐FuncState.bl)
     pub(crate) prev: Option<*mut Compiler<'a>>, // Enclosing function (对齐lparser.h FuncState.prev)
@@ -124,7 +126,7 @@ pub(crate) struct GotoInfo {
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(vm: &'a mut LuaVM, line_index: &'a LineIndex) -> Self {
+    pub fn new(vm: &'a mut LuaVM, line_index: &'a LineIndex, source: &'a str, chunk_name: &str) -> Self {
         Compiler {
             chunk: Chunk::new(),
             scope_depth: 0,
@@ -139,6 +141,8 @@ impl<'a> Compiler<'a> {
             vm_ptr: vm as *mut LuaVM,
             last_line: 1,
             line_index,
+            source,
+            chunk_name: chunk_name.to_string(),
             needclose: false,
             block: None,
             prev: None, // Main compiler has no parent
@@ -151,6 +155,8 @@ impl<'a> Compiler<'a> {
         parent_scope: Rc<RefCell<ScopeChain>>,
         vm_ptr: *mut LuaVM,
         line_index: &'a LineIndex,
+        source: &'a str,
+        chunk_name: &str,
         current_line: u32,
         prev: Option<*mut Compiler<'a>>, // Parent compiler
     ) -> Self {
@@ -168,6 +174,8 @@ impl<'a> Compiler<'a> {
             vm_ptr,
             last_line: current_line,
             line_index,
+            source,
+            chunk_name: chunk_name.to_string(),
             needclose: false,
             block: None,
             prev,
@@ -199,11 +207,13 @@ impl<'a> Compiler<'a> {
                 .collect();
             return Err(format!("Syntax errors:\n{}", errors.join("\n")));
         }
-        let mut compiler = Compiler::new(vm, &line_index);
+        let mut compiler = Compiler::new(vm, &line_index, source, chunk_name);
         compiler.chunk.source_name = Some(chunk_name.to_string());
 
         let chunk_node = tree.get_chunk_node();
-        compile_chunk(&mut compiler, &chunk_node)?;
+        compile_chunk(&mut compiler, &chunk_node).map_err(|e| {
+            format!("{}:{}: {}", chunk_name, compiler.last_line, e)
+        })?;
 
         // Optimize child chunks first
         let optimized_children: Vec<std::rc::Rc<Chunk>> = compiler
@@ -253,8 +263,9 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
         compile_statlist(c, block)?;
     }
     
-    // Final return
-    let first = helpers::nvarstack(c);
+    // Final return（对齐Lua C中lparser.c的mainfunc/funcbody）
+    // 使用freereg而不是nvarstack，因为表达式语句可能改变freereg
+    let first = c.freereg;
     helpers::ret(c, first, 0);
     
     // Store upvalue and local information BEFORE leaving block (对齐luac的Proto信息)
@@ -295,7 +306,11 @@ pub(crate) fn compile_block(c: &mut Compiler, block: &LuaBlock) -> Result<(), St
 pub(crate) fn compile_statlist(c: &mut Compiler, block: &LuaBlock) -> Result<(), String> {
     // statlist -> { stat [';'] }
     for stat in block.get_stats() {
-        statement(c, &stat)?;
+        // Save line info for error reporting
+        c.save_line_info(stat.get_range());
+        statement(c, &stat).map_err(|e| {
+            format!("{} (at {}:{})", e, c.chunk_name, c.last_line)
+        })?;
         
         // Free registers after each statement
         let nvar = helpers::nvarstack(c);
@@ -347,11 +362,24 @@ fn leave_block(c: &mut Compiler) -> Result<(), String> {
         }
     }
     
-    // Handle break statements if this is a loop
+    // Handle break statements if this is a loop (对齐luac)
     if bl.isloop {
-        // Create break label
-        let _label_pos = helpers::get_label(c);
-        // TODO: Patch break jumps
+        // Create break label at current position
+        let label_pos = helpers::get_label(c);
+        // Collect break jumps before borrowing mutably
+        let break_jumps: Vec<usize> = if let Some(loop_info) = c.loop_stack.last() {
+            loop_info.break_jumps.clone()
+        } else {
+            Vec::new()
+        };
+        // Patch all break jumps to this position
+        for &break_pc in &break_jumps {
+            helpers::patch_list(c, break_pc as i32, label_pos);
+        }
+        // Pop loop from stack
+        if !c.loop_stack.is_empty() {
+            c.loop_stack.pop();
+        }
     }
     
     // Emit CLOSE if needed

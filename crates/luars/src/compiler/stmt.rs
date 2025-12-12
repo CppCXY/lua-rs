@@ -862,13 +862,12 @@ fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), S
                     .to_string();
                 super::var::singlevar(c, &name, &mut v)?;
             }
-            LuaVarExpr::IndexExpr(_index_expr) => {
-                // Table indexing: t[k] or t.k
-                // TODO: Implement proper indexed expression parsing
-                return Err("Table indexing in assignment not yet implemented".to_string());
+            LuaVarExpr::IndexExpr(index_expr) => {
+                // Table indexing: t[k] or t.k (对齐luac suffixedexp)
+                v = expr::compile_index_expr(c, index_expr)?;
             }
         }
-        var_descs.push(v);
+        var_descs.push(v.clone());
     }
     
     // Evaluate right-hand side expressions

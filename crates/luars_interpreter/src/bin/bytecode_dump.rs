@@ -140,8 +140,12 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
                 let k_suffix = if k { "k" } else { "" };
                 format!("RETURN {} {} {}{}", a, b, c, k_suffix)
             }
-            OpCode::Return0 => format!("RETURN0"),
-            OpCode::Return1 => format!("RETURN1 {}", a),
+            // Return0 is encoded as RETURN A 1 1 in luac's listing format
+            // A字段指示起始寄存器，1表示0个返回值（B=nret+1），1表示final return
+            OpCode::Return0 => format!("RETURN {} 1 1\t; 0 out", a),
+            // Return1 is encoded as RETURN A 2 1 in luac's listing format  
+            // A字段指示返回值寄存器，2表示1个返回值（B=nret+1），1表示final return
+            OpCode::Return1 => format!("RETURN {} 2 1\t; 1 out", a),
             OpCode::Closure => format!("CLOSURE {} {}", a, bx),
             OpCode::Jmp => format!("JMP {}", Instruction::get_sj(instr)),
             OpCode::Eq => format!("EQ {} {} {}", a, b, k as u32),
