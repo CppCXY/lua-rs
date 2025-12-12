@@ -772,119 +772,14 @@ fn compile_func_stat(c: &mut Compiler, func: &LuaFuncStat) -> Result<(), String>
     let closure = func.get_closure()
         .ok_or("function statement missing body")?;
     
-    // 需要直接编译函数体而不是通过expr::expr，因为需要传递ismethod
-    let mut b = compile_func_body_with_method(c, &closure, ismethod)?;
+    // 调用compile_closure_expr传递ismethod参数（对齐lparser.c的body调用）
+    let mut b = expr::compile_closure_expr(c, &closure, ismethod)?;
     
     // Store function in the variable
     // TODO: Check readonly variables
     super::exp2reg::store_var(c, &v, &mut b);
     
     Ok(())
-}
-
-/// Compile function body with ismethod flag (for func_stat)
-/// This is similar to compile_closure_expr but passes ismethod to compile_function_body
-fn compile_func_body_with_method(
-    c: &mut Compiler,
-    closure: &LuaClosureExpr,
-    ismethod: bool,
-) -> Result<expdesc::ExpDesc, String> {
-    use super::var::{new_localvar, adjustlocalvars};
-    use super::{enter_block, leave_block};
-    use super::helpers;
-    use crate::lua_vm::OpCode;
-    
-    // Create a child compiler for the nested function
-    let parent_scope = c.scope_chain.clone();
-    let vm_ptr = c.vm_ptr;
-    let line_index = c.line_index;
-    let current_line = c.last_line;
-
-    let mut child_compiler = Compiler::new_with_parent(
-        parent_scope,
-        vm_ptr,
-        line_index,
-        current_line,
-        Some(c as *mut Compiler),
-    );
-
-    // Enter function block
-    enter_block(&mut child_compiler, false)?;
-
-    // If method, create 'self' parameter first (对齐 lparser.c body函数)
-    if ismethod {
-        new_localvar(&mut child_compiler, "self".to_string())?;
-        adjustlocalvars(&mut child_compiler, 1);
-    }
-
-    // Parse parameters
-    if let Some(param_list) = closure.get_params_list() {
-        let params = param_list.get_params();
-        let mut param_count = 0;
-        let mut has_vararg = false;
-
-        for param in params {
-            if param.is_dots() {
-                has_vararg = true;
-                break;
-            } else if let Some(name_token) = param.get_name_token() {
-                let name = name_token.get_name_text().to_string();
-                new_localvar(&mut child_compiler, name)?;
-                param_count += 1;
-            }
-        }
-
-        // 如果是方法，param_count需要加1（包含self）
-        if ismethod {
-            param_count += 1;
-        }
-
-        child_compiler.chunk.param_count = param_count;
-        child_compiler.chunk.is_vararg = has_vararg;
-
-        // Activate parameter variables (不包括已经activate的self)
-        adjustlocalvars(&mut child_compiler, param_count - if ismethod { 1 } else { 0 });
-
-        // Generate VARARGPREP if function is vararg
-        if has_vararg {
-            helpers::code_abc(&mut child_compiler, OpCode::VarargPrep, param_count as u32, 0, 0);
-        }
-    } else if ismethod {
-        // 只有self参数，没有其他参数
-        child_compiler.chunk.param_count = 1;
-    }
-
-    // Compile function body
-    if let Some(block) = closure.get_block() {
-        compile_statlist(&mut child_compiler, &block)?;
-    }
-
-    // Final return
-    let first = helpers::nvarstack(&mut child_compiler);
-    helpers::ret(&mut child_compiler, first, 0);
-
-    // Leave function block
-    leave_block(&mut child_compiler)?;
-
-    // Set max stack size
-    if child_compiler.peak_freereg > child_compiler.chunk.max_stack_size as u32 {
-        child_compiler.chunk.max_stack_size = child_compiler.peak_freereg as usize;
-    }
-
-    // Store the child chunk
-    c.child_chunks.push(child_compiler.chunk);
-    let proto_idx = c.child_chunks.len() - 1;
-
-    // Generate CLOSURE instruction (对齐 luaK_codeclosure)
-    super::helpers::reserve_regs(c, 1);
-    let reg = c.freereg - 1;
-    let pc = super::helpers::code_abx(c, OpCode::Closure, reg, proto_idx as u32);
-
-    // Return expression descriptor (already in register after reserve_regs)
-    let mut v = expdesc::ExpDesc::new_void();
-    v.kind = expdesc::ExpKind::VNonReloc;
-    v.info = reg;
-    Ok(v)
 }
 
 /// Compile local function statement (对齐localfunc)

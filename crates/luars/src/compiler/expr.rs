@@ -150,7 +150,8 @@ pub(crate) fn simple_exp(c: &mut Compiler, node: &LuaExpr) -> Result<ExpDesc, St
         }
         LuaExpr::ClosureExpr(closure_expr) => {
             // Anonymous function / closure (对齐body)
-            compile_closure_expr(c, closure_expr)
+            // 匿名函数不是方法
+            compile_closure_expr(c, closure_expr, false)
         }
         LuaExpr::CallExpr(call_expr) => {
             // Function call expression (对齐funcargs)
@@ -564,7 +565,7 @@ fn postfix_op(
 }
 
 /// Compile closure expression (anonymous function) - 对齐body
-fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<ExpDesc, String> {
+pub(crate) fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, ismethod: bool) -> Result<ExpDesc, String> {
     // Create a child compiler for the nested function
     let parent_scope = c.scope_chain.clone();
     let vm_ptr = c.vm_ptr;
@@ -579,8 +580,8 @@ fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<Ex
         Some(c as *mut Compiler),
     );
 
-    // Compile function body (closure expressions are never methods)
-    compile_function_body(&mut child_compiler, closure, false)?;
+    // Compile function body with ismethod flag
+    compile_function_body(&mut child_compiler, closure, ismethod)?;
 
     // Store the child chunk
     c.child_chunks.push(child_compiler.chunk);
@@ -590,7 +591,7 @@ fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<Ex
     // 注意：luac的codeclosure会先生成CLOSURE指令，然后调用exp2nextreg来fix到寄存器
     super::helpers::reserve_regs(c, 1);
     let reg = c.freereg - 1;
-    let pc = super::helpers::code_abx(c, crate::lua_vm::OpCode::Closure, reg, proto_idx as u32);
+    super::helpers::code_abx(c, crate::lua_vm::OpCode::Closure, reg, proto_idx as u32);
 
     // Return expression descriptor (already in register after reserve_regs)
     let mut v = ExpDesc::new_void();
