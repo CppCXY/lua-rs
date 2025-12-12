@@ -294,20 +294,213 @@ fn apply_unary_op(c: &mut Compiler, op_token: &LuaUnaryOpToken, v: &mut ExpDesc)
 
 /// 中缀处理 (对齐 luaK_infix)
 fn infix_op(c: &mut Compiler, op_token: &LuaBinaryOpToken, v: &mut ExpDesc) -> Result<(), String> {
+    use emmylua_parser::BinaryOperator;
+    
     let op = op_token.get_op();
     
-    // TODO: 实现中缀运算符处理
-    // 参考 lcode.c 的 luaK_infix 函数
-    let _ = (c, op, v);
+    match op {
+        BinaryOperator::OpAnd => {
+            // and: 短路求值，左操作数为 false 时跳过右操作数
+            super::exp2reg::goiftrue(c, v);
+        }
+        BinaryOperator::OpOr => {
+            // or: 短路求值，左操作数为 true 时跳过右操作数
+            super::exp2reg::goiffalse(c, v);
+        }
+        BinaryOperator::OpConcat => {
+            // 字符串连接：需要把左操作数放到寄存器
+            super::exp2reg::exp2nextreg(c, v);
+        }
+        BinaryOperator::OpAdd | BinaryOperator::OpSub | BinaryOperator::OpMul 
+        | BinaryOperator::OpDiv | BinaryOperator::OpIDiv | BinaryOperator::OpMod 
+        | BinaryOperator::OpPow | BinaryOperator::OpBAnd | BinaryOperator::OpBOr 
+        | BinaryOperator::OpBXor | BinaryOperator::OpShl | BinaryOperator::OpShr => {
+            // 算术和按位运算：常量折叠在 postfix 中处理
+            // 如果左操作数不是数值常量，则放到寄存器
+            if !expdesc::is_numeral(v) {
+                super::exp2reg::exp2anyreg(c, v);
+            }
+        }
+        BinaryOperator::OpEq | BinaryOperator::OpNe | BinaryOperator::OpLt 
+        | BinaryOperator::OpLe | BinaryOperator::OpGt | BinaryOperator::OpGe => {
+            // 比较运算：不需要在 infix 阶段做特殊处理
+        }
+        BinaryOperator::OpNop => {}
+    }
+    
     Ok(())
+}
+
+/// 生成算术运算指令（对齐 luaK_codearith）
+fn code_arith(c: &mut Compiler, op: crate::lua_vm::OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) -> Result<(), String> {
+    // 尝试常量折叠
+    if try_const_folding(op, e1, e2) {
+        return Ok(());
+    }
+    // 生成运算指令
+    code_bin_arith(c, op, e1, e2);
+    Ok(())
+}
+
+/// 常量折叠（对齐 constfolding）
+fn try_const_folding(op: crate::lua_vm::OpCode, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
+    use crate::lua_vm::OpCode;
+    
+    // 只对数值常量进行折叠
+    if !expdesc::is_numeral(e1) || !expdesc::is_numeral(e2) {
+        return false;
+    }
+    
+    // 获取操作数值
+    let v1 = if e1.kind == ExpKind::VKInt { e1.ival as f64 } else { e1.nval };
+    let v2 = if e2.kind == ExpKind::VKInt { e2.ival as f64 } else { e2.nval };
+    
+    // 执行运算
+    let result = match op {
+        OpCode::Add => v1 + v2,
+        OpCode::Sub => v1 - v2,
+        OpCode::Mul => v1 * v2,
+        OpCode::Div => v1 / v2,
+        OpCode::IDiv => (v1 / v2).floor(),
+        OpCode::Mod => v1 % v2,
+        OpCode::Pow => v1.powf(v2),
+        OpCode::BAnd if e1.kind == ExpKind::VKInt && e2.kind == ExpKind::VKInt => {
+            e1.ival &= e2.ival;
+            return true;
+        }
+        OpCode::BOr if e1.kind == ExpKind::VKInt && e2.kind == ExpKind::VKInt => {
+            e1.ival |= e2.ival;
+            return true;
+        }
+        OpCode::BXor if e1.kind == ExpKind::VKInt && e2.kind == ExpKind::VKInt => {
+            e1.ival ^= e2.ival;
+            return true;
+        }
+        OpCode::Shl if e1.kind == ExpKind::VKInt && e2.kind == ExpKind::VKInt => {
+            e1.ival = e1.ival.wrapping_shl(e2.ival as u32);
+            return true;
+        }
+        OpCode::Shr if e1.kind == ExpKind::VKInt && e2.kind == ExpKind::VKInt => {
+            e1.ival = e1.ival.wrapping_shr(e2.ival as u32);
+            return true;
+        }
+        _ => return false,
+    };
+    
+    // 保存结果
+    e1.nval = result;
+    e1.kind = ExpKind::VKFlt;
+    true
+}
+
+/// 生成二元算术指令（对齐 codebinarith）
+fn code_bin_arith(c: &mut Compiler, op: crate::lua_vm::OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    use super::helpers;
+    
+    let o2 = super::exp2reg::exp2anyreg(c, e2);
+    let o1 = super::exp2reg::exp2anyreg(c, e1);
+    
+    if o1 > o2 {
+        super::exp2reg::free_exp(c, e1);
+        super::exp2reg::free_exp(c, e2);
+    } else {
+        super::exp2reg::free_exp(c, e2);
+        super::exp2reg::free_exp(c, e1);
+    }
+    
+    e1.info = helpers::code_abc(c, op, 0, o1, o2) as u32;
+    e1.kind = ExpKind::VReloc;
+}
+
+/// 生成比较指令（对齐 codecomp）
+fn code_comp(c: &mut Compiler, op: crate::lua_vm::OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    use super::helpers;
+    
+    let o1 = super::exp2reg::exp2anyreg(c, e1);
+    let o2 = super::exp2reg::exp2anyreg(c, e2);
+    
+    super::exp2reg::free_exp(c, e2);
+    super::exp2reg::free_exp(c, e1);
+    
+    // 生成比较指令（结果是跳转）
+    e1.info = helpers::cond_jump(c, op, o1, o2) as u32;
+    e1.kind = ExpKind::VJmp;
 }
 
 /// 后缀处理 (对齐 luaK_posfix)
 fn postfix_op(c: &mut Compiler, op_token: &LuaBinaryOpToken, v1: &mut ExpDesc, v2: &mut ExpDesc) -> Result<(), String> {
+    use crate::lua_vm::OpCode;
+    use emmylua_parser::BinaryOperator;
+    use super::helpers;
+    
     let op = op_token.get_op();
     
-    // TODO: 实现后缀运算符处理
-    // 参考 lcode.c 的 luaK_posfix 函数
-    let _ = (c, op, v1, v2);
+    match op {
+        BinaryOperator::OpAnd => {
+            // and: v1 and v2
+            debug_assert!(v1.t == helpers::NO_JUMP); // 左操作数为 true 时继续
+            super::exp2reg::discharge_2any_reg(c, v2);
+            helpers::concat(c, &mut v2.f, v1.f);
+            *v1 = v2.clone();
+        }
+        BinaryOperator::OpOr => {
+            // or: v1 or v2
+            debug_assert!(v1.f == helpers::NO_JUMP); // 左操作数为 false 时继续
+            super::exp2reg::discharge_2any_reg(c, v2);
+            helpers::concat(c, &mut v2.t, v1.t);
+            *v1 = v2.clone();
+        }
+        BinaryOperator::OpConcat => {
+            // 字符串连接: v1 .. v2
+            super::exp2reg::exp2val(c, v2);
+            if v2.kind == ExpKind::VReloc && helpers::get_op(c, v2.info) == OpCode::Concat {
+                // 连接链：v1 .. v2 .. v3 => CONCAT A B C
+                debug_assert!(v1.info == helpers::getarg_b(c, v2.info) as u32 - 1);
+                super::exp2reg::free_exp(c, v1);
+                helpers::setarg_b(c, v2.info, v1.info);
+                v1.kind = ExpKind::VReloc;
+                v1.info = v2.info;
+            } else {
+                // 简单连接
+                super::exp2reg::exp2nextreg(c, v2);
+                code_bin_arith(c, OpCode::Concat, v1, v2);
+            }
+        }
+        // 算术运算
+        BinaryOperator::OpAdd => code_arith(c, OpCode::Add, v1, v2)?,
+        BinaryOperator::OpSub => code_arith(c, OpCode::Sub, v1, v2)?,
+        BinaryOperator::OpMul => code_arith(c, OpCode::Mul, v1, v2)?,
+        BinaryOperator::OpDiv => code_arith(c, OpCode::Div, v1, v2)?,
+        BinaryOperator::OpIDiv => code_arith(c, OpCode::IDiv, v1, v2)?,
+        BinaryOperator::OpMod => code_arith(c, OpCode::Mod, v1, v2)?,
+        BinaryOperator::OpPow => code_arith(c, OpCode::Pow, v1, v2)?,
+        // 按位运算
+        BinaryOperator::OpBAnd => code_arith(c, OpCode::BAnd, v1, v2)?,
+        BinaryOperator::OpBOr => code_arith(c, OpCode::BOr, v1, v2)?,
+        BinaryOperator::OpBXor => code_arith(c, OpCode::BXor, v1, v2)?,
+        BinaryOperator::OpShl => code_arith(c, OpCode::Shl, v1, v2)?,
+        BinaryOperator::OpShr => code_arith(c, OpCode::Shr, v1, v2)?,
+        // 比较运算
+        BinaryOperator::OpEq => code_comp(c, OpCode::Eq, v1, v2),
+        BinaryOperator::OpNe => {
+            code_comp(c, OpCode::Eq, v1, v2);
+            // ~= 是 == 的否定，交换 true/false 跳转链
+            std::mem::swap(&mut v1.t, &mut v1.f);
+        }
+        BinaryOperator::OpLt => code_comp(c, OpCode::Lt, v1, v2),
+        BinaryOperator::OpLe => code_comp(c, OpCode::Le, v1, v2),
+        BinaryOperator::OpGt => {
+            // > 转换为 <
+            code_comp(c, OpCode::Lt, v2, v1);
+            *v1 = v2.clone();
+        }
+        BinaryOperator::OpGe => {
+            // >= 转换为 <=
+            code_comp(c, OpCode::Le, v2, v1);
+            *v1 = v2.clone();
+        }
+        BinaryOperator::OpNop => {}
+    }
+    
     Ok(())
 }

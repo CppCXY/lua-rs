@@ -246,3 +246,26 @@ pub(crate) fn fix_for_jump(c: &mut Compiler, pc: usize, dest: usize, back: bool)
     Instruction::set_bx(&mut instr, offset as u32);
     c.chunk.code[pc] = instr;
 }
+
+/// Generate conditional jump (对齐 condjump)
+pub(crate) fn cond_jump(c: &mut Compiler, op: OpCode, a: u32, b: u32) -> usize {
+    code_abc(c, op, a, b, 0)
+}
+
+/// Get instruction at position
+pub(crate) fn get_op(c: &Compiler, pc: u32) -> OpCode {
+    use crate::lua_vm::Instruction;
+    Instruction::get_opcode(c.chunk.code[pc as usize])
+}
+
+/// Get argument B from instruction
+pub(crate) fn getarg_b(c: &Compiler, pc: u32) -> u32 {
+    use crate::lua_vm::Instruction;
+    Instruction::get_b(c.chunk.code[pc as usize])
+}
+
+/// Set argument B in instruction
+pub(crate) fn setarg_b(c: &mut Compiler, pc: u32, b: u32) {
+    use crate::lua_vm::Instruction;
+    Instruction::set_b(&mut c.chunk.code[pc as usize], b);
+}
