@@ -147,7 +147,7 @@ fn newupvalue(c: &mut Compiler, name: String, var: &ExpDesc) -> Result<u32, Stri
 
 /// Find variable recursively through scopes (对齐singlevaraux)
 fn singlevaraux(c: &mut Compiler, name: &str, var: &mut ExpDesc, base: bool) -> Result<(), String> {
-    // Try to find as local variable
+    // Try to find as local variable in current scope
     let v = searchvar(c, name, var);
     
     if v >= 0 {
@@ -159,20 +159,50 @@ fn singlevaraux(c: &mut Compiler, name: &str, var: &mut ExpDesc, base: bool) -> 
         return Ok(());
     }
     
-    // Not found as local, try upvalues
+    // Not found locally, check if we have a parent compiler
+    if let Some(parent_ptr) = c.prev {
+        // Try to find in parent scope (对齐luac: recursively search in parent)
+        unsafe {
+            let parent = &mut *parent_ptr;
+            
+            // Recursively search in parent (not base level anymore)
+            singlevaraux(parent, name, var, false)?;
+            
+            // Check what we found in parent
+            match var.kind {
+                ExpKind::VLocal | ExpKind::VUpval => {
+                    // Found in parent - create upvalue in current function
+                    // 对齐luac的newupvalue调用
+                    let idx = newupvalue(c, name.to_string(), var)?;
+                    var.kind = ExpKind::VUpval;
+                    var.info = idx;
+                    return Ok(());
+                }
+                ExpKind::VVoid => {
+                    // Not found in parent either - will be treated as global
+                    return Ok(());
+                }
+                _ => {
+                    // Other kinds (constants etc) - return as is
+                    return Ok(());
+                }
+            }
+        }
+    }
+    
+    // No parent compiler - check existing upvalues (for _ENV in main chunk)
     let idx = searchupvalue(c, name);
     
-    if idx < 0 {
-        // Not found in upvalues - this is a global variable access
-        // Mark as VVoid to indicate global access needed
-        var.kind = ExpKind::VVoid;
-        var.info = 0;
+    if idx >= 0 {
+        // Found as existing upvalue
+        var.kind = ExpKind::VUpval;
+        var.info = idx as u32;
         return Ok(());
     }
     
-    // Found as upvalue
-    var.kind = ExpKind::VUpval;
-    var.info = idx as u32;
+    // Not found anywhere - this is a global variable access
+    var.kind = ExpKind::VVoid;
+    var.info = 0;
     Ok(())
 }
 

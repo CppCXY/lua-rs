@@ -583,16 +583,36 @@ pub(crate) fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, i
     // Compile function body with ismethod flag
     compile_function_body(&mut child_compiler, closure, ismethod)?;
 
+    // Get upvalue information from child before moving chunk
+    let upvalue_descs = {
+        let scope = child_compiler.scope_chain.borrow();
+        scope.upvalues.clone()
+    };
+    let num_upvalues = upvalue_descs.len();
+    
+    // Store upvalue descriptors in child chunk (对齐luac的Proto.upvalues)
+    child_compiler.chunk.upvalue_count = num_upvalues;
+    child_compiler.chunk.upvalue_descs = upvalue_descs.iter().map(|uv| {
+        crate::lua_value::UpvalueDesc {
+            is_local: uv.is_local,
+            index: uv.index,
+        }
+    }).collect();
+    
     // Store the child chunk
     c.child_chunks.push(child_compiler.chunk);
     let proto_idx = c.child_chunks.len() - 1;
 
     // Generate CLOSURE instruction (对齐 luaK_codeclosure)
-    // 注意：luac的codeclosure会先生成CLOSURE指令，然后调用exp2nextreg来fix到寄存器
     super::helpers::reserve_regs(c, 1);
     let reg = c.freereg - 1;
     super::helpers::code_abx(c, crate::lua_vm::OpCode::Closure, reg, proto_idx as u32);
 
+    // Generate upvalue initialization instructions (对齐luac的codeclosure)
+    // After CLOSURE, we need to emit instructions to describe how to capture each upvalue
+    // 在luac 5.4中，这些信息已经在upvalue_descs中，VM会根据它来捕获upvalues
+    // 但我们仍然需要确保upvalue_descs已正确设置
+    
     // Return expression descriptor (already in register after reserve_regs)
     let mut v = ExpDesc::new_void();
     v.kind = expdesc::ExpKind::VNonReloc;
