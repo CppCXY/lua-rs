@@ -136,11 +136,26 @@ pub(crate) fn add_constant(c: &mut Compiler, value: LuaValue) -> u32 {
 }
 
 /// Add string constant (对齐stringK)
-pub(crate) fn string_k(_c: &mut Compiler, _s: String) -> u32 {
-    // TODO: Need to implement string interning through VM
-    // For now, return placeholder constant index
-    // This needs to be fixed when we implement proper constant handling
-    0
+pub(crate) fn string_k(c: &mut Compiler, s: String) -> u32 {
+    // Intern the string through VM's object pool and get StringId
+    // SAFETY: vm_ptr is valid during compilation
+    let vm = unsafe { &mut *c.vm_ptr };
+    
+    // Create string in VM's object pool (automatically tracked by GC)
+    let value = vm.create_string_owned(s);
+    
+    // Search for existing constant with same value
+    for (i, existing) in c.chunk.constants.iter().enumerate() {
+        if existing.raw_equal(&value) {
+            return i as u32;
+        }
+    }
+    
+    // Add new constant
+    // The string will be kept alive by being referenced in the constants table
+    let idx = c.chunk.constants.len();
+    c.chunk.constants.push(value);
+    idx as u32
 }
 
 /// Add integer constant (对齐luaK_intK)

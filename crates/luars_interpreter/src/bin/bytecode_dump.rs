@@ -30,6 +30,8 @@ fn main() {
         }
         Err(e) => {
             eprintln!("Compilation error: {}", e);
+            // Also print the detailed error message from VM
+            eprintln!("Details: {}", vm.get_error_message());
             std::process::exit(1);
         }
     }

@@ -163,9 +163,8 @@ fn singlevaraux(c: &mut Compiler, name: &str, var: &mut ExpDesc, base: bool) -> 
     let idx = searchupvalue(c, name);
     
     if idx < 0 {
-        // Not found in upvalues, check if we have a parent scope
-        // TODO: Implement parent scope lookup
-        // For now, treat as global variable
+        // Not found in upvalues - this is a global variable access
+        // Mark as VVoid to indicate global access needed
         var.kind = ExpKind::VVoid;
         var.info = 0;
         return Ok(());
@@ -183,9 +182,24 @@ pub(crate) fn singlevar(c: &mut Compiler, name: &str, var: &mut ExpDesc) -> Resu
     singlevaraux(c, name, var, true)?;
     
     if matches!(var.kind, ExpKind::VVoid) {
-        // Global variable: treat as _ENV[name]
-        // TODO: Implement global variable access through _ENV
-        // For now, just mark it as void
+        // Not found as local or upvalue - treat as global variable
+        // Global variable access: _ENV[name]
+        // First, get _ENV upvalue
+        let mut env_var = ExpDesc::new_void();
+        singlevaraux(c, "_ENV", &mut env_var, true)?;
+        
+        if !matches!(env_var.kind, ExpKind::VUpval) {
+            return Err(format!("Cannot access global variable '{}': _ENV not available", name));
+        }
+        
+        // Now create an indexed expression: _ENV[name]
+        // Add the variable name as a constant
+        let name_idx = super::helpers::string_k(c, name.to_string());
+        
+        // Create VIndexUp expression
+        var.kind = ExpKind::VIndexUp;
+        var.ind.t = env_var.info; // _ENV upvalue index
+        var.ind.idx = name_idx;    // name constant index
     }
     
     Ok(())

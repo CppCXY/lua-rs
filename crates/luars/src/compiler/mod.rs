@@ -235,6 +235,17 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
     c.chunk.is_vararg = true;
     helpers::code_abc(c, OpCode::VarargPrep, 0, 0, 0);
     
+    // Add _ENV as first upvalue for main function (Lua 5.4 standard)
+    {
+        let mut scope = c.scope_chain.borrow_mut();
+        let env_upvalue = Upvalue {
+            name: "_ENV".to_string(),
+            is_local: false,  // _ENV is not a local, it comes from outside
+            index: 0,          // First upvalue
+        };
+        scope.upvalues.push(env_upvalue);
+    }
+    
     // Compile the body
     if let Some(ref block) = chunk.get_block() {
         compile_statlist(c, block)?;

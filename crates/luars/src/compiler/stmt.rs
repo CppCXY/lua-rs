@@ -22,7 +22,9 @@ pub(crate) fn statement(c: &mut Compiler, stmt: &LuaStat) -> Result<(), String> 
         LuaStat::AssignStat(assign_node) => compile_assign_stat(c, assign_node),
         LuaStat::LabelStat(label_node) => compile_label_stat(c, label_node),
         LuaStat::GotoStat(goto_node) => compile_goto_stat(c, goto_node),
-        _ => Ok(()), // Empty statement
+        LuaStat::CallExprStat(expr_stat) => compile_expr_stat(c, expr_stat),
+        LuaStat::EmptyStat(_) => Ok(()), // Empty statement is explicitly handled
+        _ => Err(format!("Unimplemented statement type: {:?}", stmt)),
     }
 }
 
@@ -210,7 +212,7 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
         nret = 0;
     } else if exprs.len() == 1 {
         // Single return value
-        let mut e = super::expr::expr(c, &exprs[0])?;
+        let mut e = expr::expr(c, &exprs[0])?;
 
         // Check if it's a multi-return expression (call or vararg)
         if matches!(
@@ -226,7 +228,7 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
     } else {
         // Multiple return values
         for (i, expr) in exprs.iter().enumerate() {
-            let mut e = super::expr::expr(c, expr)?;
+            let mut e = expr::expr(c, expr)?;
             if i == exprs.len() - 1 {
                 // Last expression might return multiple values
                 if matches!(
@@ -249,6 +251,26 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
     }
 
     helpers::ret(c, first, nret);
+    Ok(())
+}
+
+/// Compile expression statement (对齐exprstat)
+/// This handles function calls and other expressions used as statements
+fn compile_expr_stat(c: &mut Compiler, expr_stat: &LuaCallExprStat) -> Result<(), String> {
+    // Get the expression
+    if let Some(expr) = expr_stat.get_call_expr() {
+        let mut v = expr::expr(c, &LuaExpr::CallExpr(expr))?;
+        
+        // Expression statements must be function calls or assignments
+        // For calls, we need to set the result count to 0 (discard results)
+        if matches!(v.kind, expdesc::ExpKind::VCall) {
+            exp2reg::set_returns(c, &mut v, 0); // Discard all return values
+        } else {
+            // Other expressions as statements are generally no-ops
+            // but we still discharge them in case they have side effects
+            exp2reg::discharge_vars(c, &mut v);
+        }
+    }
     Ok(())
 }
 
@@ -277,7 +299,7 @@ fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> 
     
     // Compile main if condition and block
     if let Some(ref cond) = if_stat.get_condition_expr() {
-        let mut v = super::expr::expr(c, cond)?;
+        let mut v = expr::expr(c, cond)?;
         let jf = super::exp2reg::goiffalse(c, &mut v);
         
         super::enter_block(c, false)?;
@@ -298,7 +320,7 @@ fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> 
     // Compile elseif clauses
     for elseif in if_stat.get_else_if_clause_list() {
         if let Some(ref cond) = elseif.get_condition_expr() {
-            let mut v = super::expr::expr(c, cond)?;
+            let mut v = expr::expr(c, cond)?;
             let jf = super::exp2reg::goiffalse(c, &mut v);
             
             super::enter_block(c, false)?;
@@ -340,7 +362,7 @@ fn compile_while_stat(c: &mut Compiler, while_stat: &LuaWhileStat) -> Result<(),
     // Compile condition
     let cond_expr = while_stat.get_condition_expr()
         .ok_or("while statement missing condition")?;
-    let mut v = super::expr::expr(c, &cond_expr)?;
+    let mut v = expr::expr(c, &cond_expr)?;
     
     // Generate conditional jump (jump if false)
     let condexit = super::exp2reg::goiffalse(c, &mut v);
@@ -406,7 +428,7 @@ fn compile_repeat_stat(c: &mut Compiler, repeat_stat: &LuaRepeatStat) -> Result<
     // Compile condition (can see variables declared in loop body)
     let cond_expr = repeat_stat.get_condition_expr()
         .ok_or("repeat statement missing condition")?;
-    let mut v = super::expr::expr(c, &cond_expr)?;
+    let mut v = expr::expr(c, &cond_expr)?;
     let condexit = super::exp2reg::goiftrue(c, &mut v);
     
     // Leave inner scope
@@ -466,7 +488,7 @@ fn compile_generic_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(
     }
     
     for (i, iter_expr) in iter_exprs.iter().enumerate() {
-        let mut v = super::expr::expr(c, iter_expr)?;
+        let mut v = expr::expr(c, iter_expr)?;
         if i == nexps as usize - 1 {
             // Last expression can return multiple values
             exp2reg::set_returns(c, &mut v, -1); // LUA_MULTRET
@@ -543,16 +565,16 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_range_stat: &LuaForRangeStat) 
     }
     
     // Compile start expression
-    let mut v = super::expr::expr(c, &exprs[0])?;
+    let mut v = expr::expr(c, &exprs[0])?;
     exp2reg::exp2nextreg(c, &mut v);
     
     // Compile limit expression
-    let mut v = super::expr::expr(c, &exprs[1])?;
+    let mut v = expr::expr(c, &exprs[1])?;
     exp2reg::exp2nextreg(c, &mut v);
     
     // Compile step expression (default 1)
     if exprs.len() >= 3 {
-        let mut v = super::expr::expr(c, &exprs[2])?;
+        let mut v = expr::expr(c, &exprs[2])?;
         exp2reg::exp2nextreg(c, &mut v);
     } else {
         exp2reg::code_int(c, c.freereg, 1);
@@ -750,7 +772,7 @@ fn compile_func_stat(c: &mut Compiler, func: &LuaFuncStat) -> Result<(), String>
     // 参考 lparser.c 的 body 函数：if (ismethod) new_localvarliteral(ls, "self");
     let closure = func.get_closure()
         .ok_or("function statement missing body")?;
-    let mut b = super::expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
+    let mut b = expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
     
     // 暂时忽略 ismethod，等实现 closure 编译时再处理
     let _ = ismethod;
@@ -782,7 +804,7 @@ fn compile_local_func_stat(c: &mut Compiler, local_func: &LuaLocalFuncStat) -> R
     // Compile function body
     let closure = local_func.get_closure()
         .ok_or("local function missing body")?;
-    let mut b = super::expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
+    let mut b = expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
     
     // Store in the local variable (which is the last one created)
     let reg = c.freereg - 1;
@@ -831,7 +853,7 @@ fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), S
     let mut expr_descs: Vec<expdesc::ExpDesc> = Vec::new();
     if nexps > 0 {
         for (i, expr) in exprs.iter().enumerate() {
-            let mut e = super::expr::expr(c, expr)?;
+            let mut e = expr::expr(c, expr)?;
             
             if i < nexps as usize - 1 {
                 // Not the last expression - discharge to next register

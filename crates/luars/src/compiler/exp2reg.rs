@@ -296,6 +296,13 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
             let e = exp2anyreg(c, ex);
             code_abc(c, OpCode::SetUpval, e, var.info, 0);
         }
+        ExpKind::VIndexUp => {
+            // Store to indexed upvalue: upval[k] = v
+            // Used for global variable assignment like _ENV[x] = v
+            let e = exp2anyreg(c, ex);
+            code_abck(c, OpCode::SetTabUp, var.ind.t, e, var.ind.idx, true);
+            free_exp(c, ex);
+        }
         ExpKind::VIndexed => {
             // Store to table: t[k] = v
             // TODO: Implement proper indexed store with SETTABLE, SETI, SETFIELD variants
