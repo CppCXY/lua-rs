@@ -202,9 +202,9 @@ pub(crate) fn compile_index_expr(
                     _ => return Err("Dot notation requires name key".to_string()),
                 };
 
-                // Create string constant for field name
+                // Create string constant for field name (对齐luac，使用VKStr)
                 let k_idx = helpers::string_k(c, key_name);
-                let mut k = ExpDesc::new_k(k_idx);
+                let mut k = ExpDesc::new_kstr(k_idx);
 
                 // Create indexed expression
                 super::exp2reg::indexed(c, &mut t, &mut k);

@@ -335,9 +335,10 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
             ExpKind::VIndexed // t[k]
         };
         
+        // CRITICAL: 先设置ind字段，再调用exp2anyreg
         t.kind = op;
-        t.ind.t = if t.kind == ExpKind::VUpval { t.info } else { exp2anyreg(c, t) };
         t.ind.idx = idx;
+        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
     } else if k.kind == ExpKind::VKStr {
         // 字符串常量索引
         let op = if t.kind == ExpKind::VUpval {
@@ -346,9 +347,11 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
             ExpKind::VIndexStr
         };
         
+        // CRITICAL: 先保存k.info，再调用exp2anyreg（它会触发discharge_vars读取ind）
+        let key_idx = k.info;
         t.kind = op;
+        t.ind.idx = key_idx; // 必须在exp2anyreg之前设置！
         t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
-        t.ind.idx = k.info; // 字符串常量索引
     } else if k.kind == ExpKind::VKInt && fits_as_offset(k.ival) {
         // 整数索引（在范围内）
         let op = if t.kind == ExpKind::VUpval {
@@ -357,9 +360,10 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
             ExpKind::VIndexI
         };
         
+        // CRITICAL: 先设置ind字段，再调用exp2anyreg
         t.kind = op;
-        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
         t.ind.idx = k.ival as u32;
+        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
     } else {
         // 通用索引：需要把 key 放到寄存器
         t.kind = ExpKind::VIndexed;

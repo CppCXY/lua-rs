@@ -168,6 +168,20 @@ impl ExpDesc {
         }
     }
 
+    /// Create string constant expression (对齐luac VKStr)
+    pub fn new_kstr(str_idx: u32) -> Self {
+        ExpDesc {
+            kind: ExpKind::VKStr,
+            info: str_idx,
+            ival: 0,
+            nval: 0.0,
+            ind: IndexInfo { t: 0, idx: 0 },
+            var: VarInfo { ridx: 0, vidx: 0 },
+            t: -1,
+            f: -1,
+        }
+    }
+
     /// Create nil expression
     pub fn new_nil() -> Self {
         ExpDesc {
