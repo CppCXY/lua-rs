@@ -19,14 +19,8 @@ pub(crate) fn statement(c: &mut Compiler, stmt: &LuaStat) -> Result<(), String> 
         LuaStat::DoStat(do_node) => compile_do_stat(c, do_node),
         LuaStat::FuncStat(func_node) => compile_func_stat(c, func_node),
         LuaStat::AssignStat(assign_node) => compile_assign_stat(c, assign_node),
-        LuaStat::LabelStat(_) => {
-            // TODO: Implement label
-            Ok(())
-        }
-        LuaStat::GotoStat(_) => {
-            // TODO: Implement goto
-            Ok(())
-        }
+        LuaStat::LabelStat(label_node) => compile_label_stat(c, label_node),
+        LuaStat::GotoStat(goto_node) => compile_goto_stat(c, goto_node),
         _ => Ok(()), // Empty statement
     }
 }
@@ -37,9 +31,9 @@ pub(crate) fn adjust_assign(
     c: &mut Compiler,
     nvars: i32,
     nexps: i32,
-    e: &mut super::expdesc::ExpDesc,
+    e: &mut expdesc::ExpDesc,
 ) {
-    use super::expdesc::ExpKind;
+    use expdesc::ExpKind;
     use exp2reg;
 
     let needed = nvars - nexps; // extra values needed
@@ -165,7 +159,7 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
             adjust_assign(c, nvars, nexps, &mut e);
         } else {
             // Compile all expressions
-            let mut last_e = super::expdesc::ExpDesc::new_void();
+            let mut last_e = expdesc::ExpDesc::new_void();
             for (i, ex) in exprs.iter().enumerate() {
                 last_e = expr::expr(c, ex)?;
                 if i < (nexps - 1) as usize {
@@ -177,7 +171,7 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
         }
     } else {
         // Different number of variables and expressions - use adjust_assign
-        let mut last_e = super::expdesc::ExpDesc::new_void();
+        let mut last_e = expdesc::ExpDesc::new_void();
 
         if nexps > 0 {
             for (i, ex) in exprs.iter().enumerate() {
@@ -220,7 +214,7 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
         // Check if it's a multi-return expression (call or vararg)
         if matches!(
             e.kind,
-            super::expdesc::ExpKind::VCall | super::expdesc::ExpKind::VVararg
+            expdesc::ExpKind::VCall | expdesc::ExpKind::VVararg
         ) {
             exp2reg::set_returns(c, &mut e, -1); // Return all values
             nret = -1; // LUA_MULTRET
@@ -236,7 +230,7 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
                 // Last expression might return multiple values
                 if matches!(
                     e.kind,
-                    super::expdesc::ExpKind::VCall | super::expdesc::ExpKind::VVararg
+                    expdesc::ExpKind::VCall | expdesc::ExpKind::VVararg
                 ) {
                     exp2reg::set_returns(c, &mut e, -1);
                     nret = -1; // LUA_MULTRET
@@ -481,26 +475,41 @@ fn compile_generic_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(
     }
     
     // Adjust to exactly 3 values (iterator, state, control)
-    let mut e = super::expdesc::ExpDesc::new_void();
+    let mut e = expdesc::ExpDesc::new_void();
     adjust_assign(c, 3, nexps, &mut e);
     
-    // Activate loop variables
+    // Activate loop control variables (iterator, state, control)
     adjustlocalvars(c, 3);
     helpers::reserve_regs(c, 3);
+    let base = (_base) as u32;
     
-    // Setup loop
+    // Generate TFORPREP instruction - prepare for generic for
+    let prep = helpers::code_abx(c, crate::lua_vm::OpCode::TForPrep, base, 0);
+    
+    // Setup loop block
     super::enter_block(c, false)?;
-    adjustlocalvars(c, nvars - 3);
+    adjustlocalvars(c, nvars - 3); // Activate user variables
     helpers::reserve_regs(c, nvars as u32 - 3);
     
-    // TODO: Implement forbody - the loop body compilation
-    // This requires TFORPREP, TFORLOOP instructions
-    // Placeholder for now
+    // Compile loop body
     if let Some(ref block) = for_stat.get_block() {
         super::compile_statlist(c, block)?;
     }
     
+    // Leave block
     super::leave_block(c)?;
+    
+    // Fix TFORPREP to jump to after TFORLOOP
+    helpers::fix_for_jump(c, prep, helpers::get_label(c), false);
+    
+    // Generate TFORCALL instruction - call iterator
+    helpers::code_abc(c, crate::lua_vm::OpCode::TForCall, base, 0, (nvars - 3) as u32);
+    
+    // Generate TFORLOOP instruction - check result and loop back
+    let endfor = helpers::code_abx(c, crate::lua_vm::OpCode::TForLoop, base, 0);
+    
+    // Fix TFORLOOP to jump back to right after TFORPREP
+    helpers::fix_for_jump(c, endfor, prep + 1, true);
     
     Ok(())
 }
@@ -551,12 +560,13 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_range_stat: &LuaForRangeStat) 
     
     // Activate control variables
     adjustlocalvars(c, 3);
+    let base = (_base) as u32; // Store base for FORPREP/FORLOOP
     
-    // TODO: Generate FORPREP instruction
-    // let prep_jump = helpers::code_asbc(c, OpCode::Forprep, base, 0);
+    // Generate FORPREP instruction - initialize loop and skip if empty
+    let prep = helpers::code_abx(c, crate::lua_vm::OpCode::ForPrep, base, 0);
     
     // Enter loop block
-    super::enter_block(c, true)?;
+    super::enter_block(c, false)?; // Not a loop block for enterblock (variables already created)
     adjustlocalvars(c, 1); // activate loop variable
     helpers::reserve_regs(c, 1);
     
@@ -575,8 +585,14 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_range_stat: &LuaForRangeStat) 
     // Leave block
     super::leave_block(c)?;
     
-    // TODO: Generate FORLOOP instruction
-    // helpers::patch_list(c, helpers::code_asbc(c, OpCode::Forloop, base, prep_jump + 1), prep_pc);
+    // Fix FORPREP to jump to after FORLOOP if loop is empty
+    helpers::fix_for_jump(c, prep, helpers::get_label(c), false);
+    
+    // Generate FORLOOP instruction - increment and jump back if not done
+    let endfor = helpers::code_abx(c, crate::lua_vm::OpCode::ForLoop, base, 0);
+    
+    // Fix FORLOOP to jump back to right after FORPREP
+    helpers::fix_for_jump(c, endfor, prep + 1, true);
     
     // Patch break statements
     if let Some(loop_info) = c.loop_stack.pop() {
@@ -600,13 +616,213 @@ fn compile_do_stat(c: &mut Compiler, do_stat: &LuaDoStat) -> Result<(), String> 
 }
 
 /// Compile function statement (对齐funcstat)
-fn compile_func_stat(_c: &mut Compiler, _func: &LuaFuncStat) -> Result<(), String> {
-    // TODO: Implement function
+/// function funcname body
+fn compile_func_stat(c: &mut Compiler, func: &LuaFuncStat) -> Result<(), String> {
+    // funcstat -> FUNCTION funcname body
+    
+    // Get function name (this is a variable expression)
+    let func_name = func.get_func_name()
+        .ok_or("function statement missing name")?;
+    
+    // Parse function name into a variable descriptor
+    let mut v = expdesc::ExpDesc::new_void();
+    match func_name {
+        LuaVarExpr::NameExpr(name_expr) => {
+            // Simple name: function foo() end
+            let name = name_expr.get_name_token()
+                .ok_or("function name missing token")?
+                .get_name_text()
+                .to_string();
+            super::var::singlevar(c, &name, &mut v)?;
+        }
+        LuaVarExpr::IndexExpr(_index_expr) => {
+            // Table field: function t.foo() end or function t:foo() end
+            // For now, treat as error - need proper implementation
+            // TODO: Handle method definitions and table field functions
+            return Err("Table field functions not yet implemented".to_string());
+        }
+    }
+    
+    // Compile function body (closure expression)
+    let closure = func.get_closure()
+        .ok_or("function statement missing body")?;
+    let mut b = super::expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
+    
+    // Store function in the variable
+    // TODO: Check readonly variables
+    super::exp2reg::store_var(c, &v, &mut b);
+    
     Ok(())
 }
 
 /// Compile assignment statement (对齐assignment/restassign)
-fn compile_assign_stat(_c: &mut Compiler, _assign: &LuaAssignStat) -> Result<(), String> {
-    // TODO: Implement assignment
+/// var1, var2, ... = exp1, exp2, ...
+fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), String> {
+    // assignment -> var {, var} = explist
+    
+    // Get variables and expressions
+    let (vars, exprs) = assign.get_var_and_expr_list();
+    
+    if vars.is_empty() {
+        return Err("assignment statement missing variables".to_string());
+    }
+    
+    let nvars = vars.len() as i32;
+    let nexps = exprs.len() as i32;
+    
+    // Parse all left-hand side variables
+    let mut var_descs: Vec<expdesc::ExpDesc> = Vec::new();
+    for var_expr in &vars {
+        let mut v = expdesc::ExpDesc::new_void();
+        match var_expr {
+            LuaVarExpr::NameExpr(name_expr) => {
+                let name = name_expr.get_name_token()
+                    .ok_or("variable name missing token")?
+                    .get_name_text()
+                    .to_string();
+                super::var::singlevar(c, &name, &mut v)?;
+            }
+            LuaVarExpr::IndexExpr(_index_expr) => {
+                // Table indexing: t[k] or t.k
+                // TODO: Implement proper indexed expression parsing
+                return Err("Table indexing in assignment not yet implemented".to_string());
+            }
+        }
+        var_descs.push(v);
+    }
+    
+    // Evaluate right-hand side expressions
+    let mut expr_descs: Vec<expdesc::ExpDesc> = Vec::new();
+    if nexps > 0 {
+        for (i, expr) in exprs.iter().enumerate() {
+            let mut e = super::expr::expr(c, expr)?;
+            
+            if i < nexps as usize - 1 {
+                // Not the last expression - discharge to next register
+                exp2reg::exp2nextreg(c, &mut e);
+            }
+            // Last expression handled below
+            
+            expr_descs.push(e);
+        }
+    }
+    
+    // Get the last expression (or create void if no expressions)
+    let mut last_expr = if nexps > 0 {
+        expr_descs.pop().unwrap()
+    } else {
+        expdesc::ExpDesc::new_void()
+    };
+    
+    // Adjust last expression to provide the right number of values
+    adjust_assign(c, nvars, nexps, &mut last_expr);
+    
+    // Now perform the assignments in reverse order
+    // This is important for cases like: a, b = b, a
+    
+    // First, store all values in temporary registers if needed
+    // For simplicity, we'll assign from left to right
+    // The first nvars-1 variables get values from expr_descs
+    // The last variable gets the adjusted last_expr
+    
+    let mut expr_idx = 0;
+    for (i, var_desc) in var_descs.iter().enumerate() {
+        if i < nexps as usize - 1 {
+            // Use evaluated expression
+            let mut e = expr_descs[expr_idx].clone();
+            super::exp2reg::store_var(c, var_desc, &mut e);
+            expr_idx += 1;
+        } else if i == nexps as usize - 1 {
+            // Use the last (possibly adjusted) expression
+            super::exp2reg::store_var(c, var_desc, &mut last_expr);
+        } else {
+            // No more expressions - assign nil
+            let mut nil_expr = expdesc::ExpDesc::new_void();
+            nil_expr.kind = expdesc::ExpKind::VNil;
+            super::exp2reg::store_var(c, var_desc, &mut nil_expr);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Compile label statement (对齐labelstat)
+/// ::label::
+fn compile_label_stat(c: &mut Compiler, label_stat: &LuaLabelStat) -> Result<(), String> {
+    // Get label name
+    let name = label_stat.get_label_name_token()
+        .ok_or("label statement missing name")?
+        .get_name_text()
+        .to_string();
+    
+    // Check for duplicate labels in current function
+    for existing in &c.labels {
+        if existing.name == name && existing.scope_depth == c.scope_depth {
+            return Err(format!("Label '{}' already defined", name));
+        }
+    }
+    
+    // Create label at current position
+    let pc = helpers::get_label(c);
+    c.labels.push(Label {
+        name: name.clone(),
+        position: pc,
+        scope_depth: c.scope_depth,
+    });
+    
+    // Resolve any pending gotos to this label
+    let mut i = 0;
+    while i < c.gotos.len() {
+        if c.gotos[i].name == name {
+            let goto_info = c.gotos.remove(i);
+            // Patch the goto jump to this label
+            helpers::patch_list(c, goto_info.jump_position as i32, pc);
+            
+            // Check for variable scope issues
+            // TODO: Track nactvar in GotoInfo if needed for scope checking
+        } else {
+            i += 1;
+        }
+    }
+    
+    Ok(())
+}
+
+/// Compile goto statement (对齐gotostat)
+/// goto label
+fn compile_goto_stat(c: &mut Compiler, goto_stat: &LuaGotoStat) -> Result<(), String> {
+    // Get target label name
+    let name = goto_stat.get_label_name_token()
+        .ok_or("goto statement missing label name")?
+        .get_name_text()
+        .to_string();
+    
+    // Generate jump instruction
+    let jump_pc = helpers::jump(c);
+    
+    // Try to find the label (for backward jumps)
+    let mut found = false;
+    for label in &c.labels {
+        if label.name == name {
+            // Backward jump - resolve immediately
+            helpers::patch_list(c, jump_pc as i32, label.position);
+            
+            // Check if we need to close upvalues
+            // TODO: Track variable count for proper scope checking
+            
+            found = true;
+            break;
+        }
+    }
+    
+    if !found {
+        // Forward jump - add to pending gotos
+        c.gotos.push(GotoInfo {
+            name,
+            jump_position: jump_pc,
+            scope_depth: c.scope_depth,
+        });
+    }
+    
     Ok(())
 }

@@ -280,3 +280,33 @@ fn code_float(c: &mut Compiler, reg: u32, f: f64) {
         code_loadk(c, reg, k);
     }
 }
+
+/// Store expression value into variable (对齐luaK_storevar)
+pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
+    use super::expdesc::ExpKind;
+    
+    match var.kind {
+        ExpKind::VLocal => {
+            // Store to local variable
+            free_exp(c, ex);
+            exp2reg(c, ex, var.info as u32);
+        }
+        ExpKind::VUpval => {
+            // Store to upvalue
+            let e = exp2anyreg(c, ex);
+            code_abc(c, OpCode::SetUpval, e, var.info, 0);
+        }
+        ExpKind::VIndexed => {
+            // Store to table: t[k] = v
+            // TODO: Implement proper indexed store with SETTABLE, SETI, SETFIELD variants
+            // For now, use generic SETTABLE
+            let val = exp2anyreg(c, ex);
+            code_abc(c, OpCode::SetTable, var.ind.t, var.ind.idx, val);
+            free_exp(c, ex);
+        }
+        _ => {
+            // Invalid variable kind for store
+            panic!("Invalid variable kind for store: {:?}", var.kind);
+        }
+    }
+}

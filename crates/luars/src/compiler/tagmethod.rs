@@ -36,12 +36,6 @@ pub enum TagMethod {
 }
 
 impl TagMethod {
-    /// Convert TagMethod to u32 for instruction encoding
-    #[inline]
-    pub const fn as_u32(self) -> u32 {
-        self as u32
-    }
-
     /// Get the metamethod name
     #[allow(dead_code)]
     pub const fn name(self) -> &'static str {

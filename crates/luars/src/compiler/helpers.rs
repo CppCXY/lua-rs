@@ -225,3 +225,24 @@ pub(crate) fn jump_to(c: &mut Compiler, target: usize) {
     let offset = (target as i32) - (here as i32) - 1;
     code_sj(c, crate::lua_vm::OpCode::Jmp, offset);
 }
+
+/// Fix for loop jump instruction (对齐fixforjump)
+/// Used to patch FORPREP and FORLOOP instructions with correct jump offsets
+pub(crate) fn fix_for_jump(c: &mut Compiler, pc: usize, dest: usize, back: bool) {
+    use crate::lua_vm::Instruction;
+    
+    let mut offset = (dest as i32) - (pc as i32) - 1;
+    if back {
+        offset = -offset;
+    }
+    
+    // Check if offset fits in Bx field (18 bits unsigned)
+    if offset < 0 || offset > 0x3FFFF {
+        panic!("Control structure too long");
+    }
+    
+    // Get the instruction and modify its Bx field
+    let mut instr = c.chunk.code[pc];
+    Instruction::set_bx(&mut instr, offset as u32);
+    c.chunk.code[pc] = instr;
+}
