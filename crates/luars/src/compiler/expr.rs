@@ -232,11 +232,63 @@ pub(crate) fn compile_index_expr(c: &mut Compiler, index_expr: &LuaIndexExpr) ->
 
 /// 应用一元运算符 (对齐 luaK_prefix)
 fn apply_unary_op(c: &mut Compiler, op_token: &LuaUnaryOpToken, v: &mut ExpDesc) -> Result<(), String> {
+    use crate::lua_vm::OpCode;
+    use super::helpers;
+    use emmylua_parser::UnaryOperator;
+    
     let op = op_token.get_op();
     
-    // TODO: 实现一元运算符的代码生成
-    // 参考 lcode.c 的 luaK_prefix 函数
-    let _ = (c, op, v);
+    match op {
+        UnaryOperator::OpUnm => {
+            // 负号：尝试常量折叠
+            if v.kind == ExpKind::VKInt {
+                v.ival = v.ival.wrapping_neg();
+            } else if v.kind == ExpKind::VKFlt {
+                v.nval = -v.nval;
+            } else {
+                // 生成 UNM 指令
+                super::exp2reg::discharge_2any_reg(c, v);
+                super::exp2reg::free_exp(c, v);
+                v.info = helpers::code_abc(c, OpCode::Unm, 0, v.info, 0) as u32;
+                v.kind = ExpKind::VReloc;
+            }
+        }
+        UnaryOperator::OpNot => {
+            // 逻辑非：常量折叠或生成 NOT 指令
+            if expdesc::is_const(v) {
+                // 常量折叠
+                let val = matches!(v.kind, ExpKind::VNil | ExpKind::VFalse);
+                *v = if val { ExpDesc::new_true() } else { ExpDesc::new_false() };
+            } else {
+                super::exp2reg::discharge_2any_reg(c, v);
+                super::exp2reg::free_exp(c, v);
+                v.info = helpers::code_abc(c, OpCode::Not, 0, v.info, 0) as u32;
+                v.kind = ExpKind::VReloc;
+            }
+        }
+        UnaryOperator::OpLen => {
+            // 长度运算符
+            super::exp2reg::discharge_2any_reg(c, v);
+            super::exp2reg::free_exp(c, v);
+            v.info = helpers::code_abc(c, OpCode::Len, 0, v.info, 0) as u32;
+            v.kind = ExpKind::VReloc;
+        }
+        UnaryOperator::OpBNot => {
+            // 按位取反
+            if v.kind == ExpKind::VKInt {
+                v.ival = !v.ival;
+            } else {
+                super::exp2reg::discharge_2any_reg(c, v);
+                super::exp2reg::free_exp(c, v);
+                v.info = helpers::code_abc(c, OpCode::BNot, 0, v.info, 0) as u32;
+                v.kind = ExpKind::VReloc;
+            }
+        }
+        UnaryOperator::OpNop => {
+            // 空操作，不应该出现
+        }
+    }
+    
     Ok(())
 }
 

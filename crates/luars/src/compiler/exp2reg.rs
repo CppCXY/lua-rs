@@ -238,7 +238,7 @@ fn jump_on_cond(c: &mut Compiler, reg: u32, cond: bool) -> usize {
 }
 
 /// Free register used by expression (对齐freeexp)
-fn free_exp(c: &mut Compiler, e: &ExpDesc) {
+pub(crate) fn free_exp(c: &mut Compiler, e: &ExpDesc) {
     if e.kind == ExpKind::VNonReloc {
         free_reg(c, e.info);
     }
@@ -308,5 +308,77 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
             // Invalid variable kind for store
             panic!("Invalid variable kind for store: {:?}", var.kind);
         }
+    }
+}
+
+/// Create indexed expression from table and key (对齐 luaK_indexed)
+/// 根据 key 的类型选择合适的索引方式
+pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
+    // t 必须已经是寄存器或 upvalue
+    debug_assert!(
+        matches!(t.kind, ExpKind::VNonReloc | ExpKind::VLocal | ExpKind::VUpval | ExpKind::VIndexUp)
+    );
+    
+    // 根据 key 的类型选择索引方式
+    if let Some(idx) = valid_op(k) {
+        // Key 可以作为 RK 操作数（寄存器或常量）
+        let op = if t.kind == ExpKind::VUpval {
+            ExpKind::VIndexUp // upvalue[k]
+        } else {
+            ExpKind::VIndexed // t[k]
+        };
+        
+        t.kind = op;
+        t.ind.t = if t.kind == ExpKind::VUpval { t.info } else { exp2anyreg(c, t) };
+        t.ind.idx = idx;
+    } else if k.kind == ExpKind::VKStr {
+        // 字符串常量索引
+        let op = if t.kind == ExpKind::VUpval {
+            ExpKind::VIndexUp
+        } else {
+            ExpKind::VIndexStr
+        };
+        
+        t.kind = op;
+        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
+        t.ind.idx = k.info; // 字符串常量索引
+    } else if k.kind == ExpKind::VKInt && fits_as_offset(k.ival) {
+        // 整数索引（在范围内）
+        let op = if t.kind == ExpKind::VUpval {
+            ExpKind::VIndexUp
+        } else {
+            ExpKind::VIndexI
+        };
+        
+        t.kind = op;
+        t.ind.t = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
+        t.ind.idx = k.ival as u32;
+    } else {
+        // 通用索引：需要把 key 放到寄存器
+        t.kind = ExpKind::VIndexed;
+        t.ind.t = exp2anyreg(c, t);
+        t.ind.idx = exp2anyreg(c, k);
+    }
+}
+
+/// Check if integer fits as an offset (Lua 使用 8 位或更多位)
+fn fits_as_offset(n: i64) -> bool {
+    n >= 0 && n < 256
+}
+
+/// Check if expression is valid as RK operand and return its index
+fn valid_op(e: &ExpDesc) -> Option<u32> {
+    match e.kind {
+        ExpKind::VK | ExpKind::VKInt | ExpKind::VKFlt => Some(e.info),
+        _ => None,
+    }
+}
+
+/// Discharge expression to any register (对齐 luaK_exp2anyreg)
+pub(crate) fn discharge_2any_reg(c: &mut Compiler, e: &mut ExpDesc) {
+    discharge_vars(c, e);
+    if e.kind != ExpKind::VNonReloc {
+        reserve_regs(c, 1);
+        discharge2reg(c, e, c.freereg - 1);
     }
 }
