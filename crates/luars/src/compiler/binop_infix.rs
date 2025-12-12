@@ -261,11 +261,20 @@ fn codearith(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDes
 fn codebitwise(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> Result<(), String> {
     use crate::compiler::tagmethod::TagMethod;
     
-    // Ensure e1 is in a register (Official Lua's luaK_exp2anyreg)
-    let v1 = exp_to_any_reg(c, e1);
+    // Get register for e1 (Official Lua's finishbinexpval pattern)
+    let left_reg = match e1.kind {
+        ExpKind::VLocal => e1.var.ridx,
+        ExpKind::VNonReloc => e1.info,
+        _ => exp_to_any_reg(c, e1),
+    };
     
-    // Ensure e2 is in a register
-    let v2 = exp_to_any_reg(c, &mut e2.clone());
+    // Get register for e2 (avoid unnecessary cloning)
+    let mut e2_clone = e2.clone();
+    let right_reg = match e2_clone.kind {
+        ExpKind::VLocal => e2_clone.var.ridx,
+        ExpKind::VNonReloc => e2_clone.info,
+        _ => exp_to_any_reg(c, &mut e2_clone),
+    };
     
     let (opcode, tm) = match op {
         BinaryOperator::OpBAnd => (OpCode::BAnd, TagMethod::BAnd),
@@ -276,16 +285,16 @@ fn codebitwise(c: &mut Compiler, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
         _ => unreachable!(),
     };
     
-    // Free expression registers (Official Lua's freeexps)
+    // Free expression registers (Official Lua's freeexps pattern)
     free_exp(c, e1);
-    free_exp(c, &mut e2.clone());
+    free_exp(c, &mut e2_clone);
     
     // Emit instruction with A=0 (result goes to freereg, Official Lua pattern)
     let pc = c.chunk.code.len();
-    emit(c, Instruction::encode_abc(opcode, 0, v1, v2));
+    emit(c, Instruction::encode_abc(opcode, 0, left_reg, right_reg));
     
     // Emit MMBIN for metamethod binding (Lua 5.4 optimization)
-    emit(c, Instruction::encode_abc(OpCode::MmBin, v1, v2, tm as u32));
+    emit(c, Instruction::encode_abc(OpCode::MmBin, left_reg, right_reg, tm as u32));
     
     // Set e1 to VReloc pointing to the instruction (Official Lua pattern)
     e1.kind = ExpKind::VReloc;

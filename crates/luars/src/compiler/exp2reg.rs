@@ -160,14 +160,18 @@ pub fn exp_to_any_reg(c: &mut Compiler, e: &mut ExpDesc) -> u32 {
 
     if e.kind == ExpKind::VNonReloc {
         // Already in a register
-        // Check if the register is NOT a local variable (i.e., it's a temp register)
-        // If it's a local (info < nactvar), we MUST NOT reuse it - allocate a new register
-        let nactvar = nvarstack(c);
-        if e.info >= nactvar {
-            // It's a temp register, can return directly
+        // Official Lua: if no jumps, return register directly (even for locals!)
+        // Locals can be used directly as operands in binary operations
+        if !e.has_jumps() {
             return e.info;
         }
-        // Fall through: it's a local variable, need to copy to new register
+        // If has jumps and is NOT a local, can put final result in same register
+        let nactvar = nvarstack(c);
+        if e.info >= nactvar {
+            exp_to_reg(c, e, e.info);
+            return e.info;
+        }
+        // Fall through: has jumps AND is local - need new register
     }
 
     if e.kind == ExpKind::VReloc {
