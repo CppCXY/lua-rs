@@ -1,3 +1,4 @@
+use crate::Instruction;
 use crate::compiler::parse_lua_number::NumberResult;
 
 // Expression compilation (对齐lparser.c的expression parsing)
@@ -154,6 +155,10 @@ pub(crate) fn simple_exp(c: &mut Compiler, node: &LuaExpr) -> Result<ExpDesc, St
         LuaExpr::CallExpr(call_expr) => {
             // Function call expression (对齐funcargs)
             compile_function_call(c, call_expr)
+        }
+        LuaExpr::TableExpr(table_expr) => {
+            // Table constructor expression (对齐constructor)
+            compile_table_constructor(c, table_expr)
         }
         _ => {
             // TODO: Handle other expression types (calls, tables, binary ops, etc.)
@@ -574,29 +579,36 @@ fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr) -> Result<Ex
         Some(c as *mut Compiler),
     );
 
-    // Compile function body
-    compile_function_body(&mut child_compiler, closure)?;
+    // Compile function body (closure expressions are never methods)
+    compile_function_body(&mut child_compiler, closure, false)?;
 
     // Store the child chunk
     c.child_chunks.push(child_compiler.chunk);
     let proto_idx = c.child_chunks.len() - 1;
 
-    // Generate CLOSURE instruction
+    // Generate CLOSURE instruction (对齐 luaK_codeclosure)
+    // 注意：luac的codeclosure会先生成CLOSURE指令，然后调用exp2nextreg来fix到寄存器
     super::helpers::reserve_regs(c, 1);
     let reg = c.freereg - 1;
     let pc = super::helpers::code_abx(c, crate::lua_vm::OpCode::Closure, reg, proto_idx as u32);
 
-    // Return expression descriptor for the closure
+    // Return expression descriptor (already in register after reserve_regs)
     let mut v = ExpDesc::new_void();
-    v.kind = expdesc::ExpKind::VReloc;
-    v.info = pc as u32;
+    v.kind = expdesc::ExpKind::VNonReloc;
+    v.info = reg;
     Ok(v)
 }
 
 /// Compile function body (parameters and block) - 对齐body
-fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr) -> Result<(), String> {
+fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr, ismethod: bool) -> Result<(), String> {
     // Enter function block
     enter_block(child, false)?;
+
+    // If method, create 'self' parameter first (对齐 lparser.c body函数)
+    if ismethod {
+        new_localvar(child, "self".to_string())?;
+        adjustlocalvars(child, 1);
+    }
 
     // Parse parameters
     if let Some(param_list) = closure.get_params_list() {
@@ -615,21 +627,20 @@ fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr) -> Resu
             }
         }
 
+        // 如果是方法，param_count需要加1（包含self）
+        if ismethod {
+            param_count += 1;
+        }
+
         child.chunk.param_count = param_count;
         child.chunk.is_vararg = has_vararg;
 
         // Activate parameter variables
-        adjustlocalvars(child, param_count);
+        adjustlocalvars(child, param_count - if ismethod { 1 } else { 0 });
 
         // Generate VARARGPREP if function is vararg
         if has_vararg {
-            helpers::code_abc(
-                child,
-                OpCode::VarargPrep,
-                param_count as u32,
-                0,
-                0,
-            );
+            helpers::code_abc(child, OpCode::VarargPrep, param_count as u32, 0, 0);
         }
     }
 
@@ -651,4 +662,272 @@ fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr) -> Resu
     }
 
     Ok(())
+}
+
+/// Compile function call expression - 对齐funcargs
+fn compile_function_call(c: &mut Compiler, call_expr: &LuaCallExpr) -> Result<ExpDesc, String> {
+    use super::exp2reg;
+
+    // Get the prefix expression (function to call)
+    let prefix = call_expr
+        .get_prefix_expr()
+        .ok_or("call expression missing prefix")?;
+
+    // Compile the function expression
+    let mut func = expr(c, &prefix)?;
+
+    // Process the function to ensure it's in a register
+    exp2reg::discharge_vars(c, &mut func);
+
+    let base = if matches!(func.kind, expdesc::ExpKind::VNonReloc) {
+        func.info as u32
+    } else {
+        exp2reg::exp2nextreg(c, &mut func);
+        func.info as u32
+    };
+
+    // Get argument list
+    let args = call_expr
+        .get_args_list()
+        .ok_or("call expression missing arguments")?
+        .get_args()
+        .collect::<Vec<_>>();
+    let mut nargs = 0i32;
+
+    // Compile each argument
+    for (i, arg) in args.iter().enumerate() {
+        let mut e = expr(c, &arg)?;
+
+        // Last argument might be multi-return (call or vararg)
+        if i == args.len() - 1
+            && matches!(e.kind, expdesc::ExpKind::VCall | expdesc::ExpKind::VVararg)
+        {
+            // Set to return all values
+            exp2reg::set_returns(c, &mut e, -1);
+            nargs = -1; // Indicate variable number of args
+        } else {
+            exp2reg::exp2nextreg(c, &mut e);
+            nargs += 1;
+        }
+    }
+
+    // Generate CALL instruction
+    let line = c.last_line;
+    c.chunk.line_info.push(line);
+
+    let b = if nargs == -1 { 0 } else { (nargs + 1) as u32 };
+    let pc = super::helpers::code_abc(c, crate::lua_vm::OpCode::Call, base, b, 2); // C=2: want 1 result
+
+    // Free registers after the call
+    c.freereg = base + 1;
+
+    // Return call expression descriptor
+    let mut v = ExpDesc::new_void();
+    v.kind = expdesc::ExpKind::VCall;
+    v.info = pc as u32;
+    Ok(v)
+}
+
+/// Compile table constructor - 对齐constructor
+fn compile_table_constructor(
+    c: &mut Compiler,
+    table_expr: &LuaTableExpr,
+) -> Result<ExpDesc, String> {
+    use super::exp2reg;
+    use super::helpers;
+
+    // Allocate register for the table
+    let reg = c.freereg;
+    helpers::reserve_regs(c, 1);
+
+    // Generate NEWTABLE instruction
+    let pc = helpers::code_abc(c, crate::lua_vm::OpCode::NewTable, reg, 0, 0);
+
+    // Get table fields
+    let fields = table_expr.get_fields();
+
+    let mut narr = 0; // Array elements count
+    let mut nhash = 0; // Hash elements count
+    let mut tostore = 0; // Pending array elements to store
+
+    for field in fields {
+        if field.is_value_field() {
+            if let Some(value_expr) = field.get_value_expr() {
+                let mut v = expr(c, &value_expr)?;
+
+                // Check if last field and is multi-return
+                if matches!(v.kind, expdesc::ExpKind::VCall | expdesc::ExpKind::VVararg) {
+                    // Last field with multi-return - set all returns
+                    exp2reg::set_returns(c, &mut v, -1);
+
+                    // Generate SETLIST for pending elements
+                    if tostore > 0 {
+                        helpers::code_abc(
+                            c,
+                            crate::lua_vm::OpCode::SetList,
+                            reg,
+                            tostore,
+                            narr / 50 + 1,
+                        );
+                        tostore = 0;
+                    }
+
+                    // SETLIST with C=0 to store all remaining values
+                    helpers::code_abc(c, crate::lua_vm::OpCode::SetList, reg, 0, narr / 50 + 1);
+                    break;
+                } else {
+                    exp2reg::exp2nextreg(c, &mut v);
+                    narr += 1;
+                    tostore += 1;
+
+                    // Flush if we have 50 elements (LFIELDS_PER_FLUSH)
+                    if tostore >= 50 {
+                        helpers::code_abc(
+                            c,
+                            crate::lua_vm::OpCode::SetList,
+                            reg,
+                            tostore,
+                            narr / 50,
+                        );
+                        tostore = 0;
+                        c.freereg = reg + 1;
+                    }
+                }
+            } else {
+                if let Some(index_key) = field.get_field_key() {
+                    match index_key {
+                        LuaIndexKey::Expr(key_expr) => {
+                            let mut k = expr(c, &key_expr)?;
+                            exp2reg::exp2val(c, &mut k);
+
+                            if let Some(value_expr) = field.get_value_expr() {
+                                let mut v = expr(c, &value_expr)?;
+                                exp2reg::exp2val(c, &mut v);
+
+                                // Generate SETTABLE instruction
+                                super::exp2reg::discharge_2any_reg(c, &mut k);
+                                super::exp2reg::discharge_2any_reg(c, &mut v);
+                                helpers::code_abc(
+                                    c,
+                                    crate::lua_vm::OpCode::SetTable,
+                                    reg,
+                                    k.info,
+                                    v.info,
+                                );
+                                nhash += 1;
+                            }
+                        }
+                        LuaIndexKey::Name(name_token) => {
+                            let key_name = name_token.get_name_text().to_string();
+                            let k_idx = helpers::string_k(c, key_name);
+                            let mut k = ExpDesc::new_k(k_idx);
+
+                            if let Some(value_expr) = field.get_value_expr() {
+                                let mut v = expr(c, &value_expr)?;
+                                exp2reg::exp2val(c, &mut v);
+
+                                // Generate SETTABLE instruction
+                                super::exp2reg::discharge_2any_reg(c, &mut k);
+                                super::exp2reg::discharge_2any_reg(c, &mut v);
+                                helpers::code_abc(
+                                    c,
+                                    crate::lua_vm::OpCode::SetTable,
+                                    reg,
+                                    k.info,
+                                    v.info,
+                                );
+                                nhash += 1;
+                            }
+                        }
+                        LuaIndexKey::Integer(i) => {
+                            let mut k = ExpDesc::new_int(i.get_int_value());
+
+                            if let Some(value_expr) = field.get_value_expr() {
+                                let mut v = expr(c, &value_expr)?;
+                                exp2reg::exp2val(c, &mut v);
+
+                                // Generate SETTABLE instruction
+                                super::exp2reg::discharge_2any_reg(c, &mut k);
+                                super::exp2reg::discharge_2any_reg(c, &mut v);
+                                helpers::code_abc(
+                                    c,
+                                    crate::lua_vm::OpCode::SetTable,
+                                    reg,
+                                    k.info,
+                                    v.info,
+                                );
+                                nhash += 1;
+                            }
+                        }
+                        LuaIndexKey::String(string_token) => {
+                            let str_val = string_token.get_value();
+                            let k_idx = helpers::string_k(c, str_val.to_string());
+                            let mut k = ExpDesc::new_k(k_idx);
+
+                            if let Some(value_expr) = field.get_value_expr() {
+                                let mut v = expr(c, &value_expr)?;
+                                exp2reg::exp2val(c, &mut v);
+
+                                // Generate SETTABLE instruction
+                                super::exp2reg::discharge_2any_reg(c, &mut k);
+                                super::exp2reg::discharge_2any_reg(c, &mut v);
+                                helpers::code_abc(
+                                    c,
+                                    crate::lua_vm::OpCode::SetTable,
+                                    reg,
+                                    k.info,
+                                    v.info,
+                                );
+                                nhash += 1;
+                            }
+                        }
+                        _ => {
+                            return Err("Invalid table field key".to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush remaining array elements
+    if tostore > 0 {
+        helpers::code_abc(
+            c,
+            crate::lua_vm::OpCode::SetList,
+            reg,
+            tostore,
+            narr / 50 + 1,
+        );
+    }
+
+    // Update NEWTABLE instruction with size hints
+    // Patch the instruction with proper array/hash size hints
+    let arr_size = if narr < 1 {
+        0
+    } else {
+        (narr as f64).log2().ceil() as u32
+    };
+    let hash_size = if nhash < 1 {
+        0
+    } else {
+        (nhash as f64).log2().ceil() as u32
+    };
+
+    // Update the NEWTABLE instruction
+    c.chunk.code[pc] = Instruction::create_abc(
+        crate::lua_vm::OpCode::NewTable,
+        reg,
+        arr_size.min(255),
+        hash_size.min(255),
+    );
+
+    // Reset free register
+    c.freereg = reg + 1;
+
+    // Return table expression descriptor
+    let mut v = ExpDesc::new_void();
+    v.kind = expdesc::ExpKind::VNonReloc;
+    v.info = reg;
+    Ok(v)
 }
