@@ -7,6 +7,103 @@ use super::helpers::*;
 use crate::lua_vm::{Instruction, OpCode};
 use emmylua_parser::BinaryOperator;
 
+//======================================================================================
+// Constant folding (mirrors lcode.c: constfolding L1337-1355)
+//======================================================================================
+
+/// Try to fold binary operation at compile time if both operands are numeric constants
+/// Returns true if folding succeeded, false otherwise
+fn try_const_folding(op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
+    // Extract numeric values from e1 and e2
+    let v1 = match e1.kind {
+        ExpKind::VKInt => Some((e1.ival as f64, true)),  // (value, is_int)
+        ExpKind::VKFlt => Some((e1.nval, false)),
+        _ => None,
+    };
+    
+    let v2 = match e2.kind {
+        ExpKind::VKInt => Some((e2.ival as f64, true)),
+        ExpKind::VKFlt => Some((e2.nval, false)),
+        _ => None,
+    };
+    
+    let (val1, is_int1) = match v1 {
+        Some(v) => v,
+        None => return false,  // e1 is not a numeric constant
+    };
+    
+    let (val2, is_int2) = match v2 {
+        Some(v) => v,
+        None => return false,  // e2 is not a numeric constant
+    };
+    
+    // Perform the operation
+    let result = match op {
+        BinaryOperator::OpAdd => val1 + val2,
+        BinaryOperator::OpSub => val1 - val2,
+        BinaryOperator::OpMul => val1 * val2,
+        BinaryOperator::OpDiv => val1 / val2,
+        BinaryOperator::OpIDiv => (val1 / val2).floor(),
+        BinaryOperator::OpMod => val1 % val2,
+        BinaryOperator::OpPow => val1.powf(val2),
+        BinaryOperator::OpBAnd if is_int1 && is_int2 => {
+            ((val1 as i64) & (val2 as i64)) as f64
+        }
+        BinaryOperator::OpBOr if is_int1 && is_int2 => {
+            ((val1 as i64) | (val2 as i64)) as f64
+        }
+        BinaryOperator::OpBXor if is_int1 && is_int2 => {
+            ((val1 as i64) ^ (val2 as i64)) as f64
+        }
+        BinaryOperator::OpShl if is_int1 && is_int2 => {
+            ((val1 as i64) << (val2 as i64)) as f64
+        }
+        BinaryOperator::OpShr if is_int1 && is_int2 => {
+            ((val1 as i64) >> (val2 as i64)) as f64
+        }
+        _ => return false,  // Operation not foldable or operands invalid
+    };
+    
+    // Check for NaN or -0.0 (Official Lua avoids folding these)
+    if result.is_nan() || (result == 0.0 && result.is_sign_negative()) {
+        return false;
+    }
+    
+    // Determine if result should be integer or float
+    // Result is integer if both operands were integers AND operation preserves integers
+    let result_is_int = is_int1 && is_int2 && matches!(
+        op,
+        BinaryOperator::OpAdd | BinaryOperator::OpSub | BinaryOperator::OpMul | 
+        BinaryOperator::OpIDiv | BinaryOperator::OpMod |
+        BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor |
+        BinaryOperator::OpShl | BinaryOperator::OpShr
+    );
+    
+    // Set e1 to the folded constant
+    if result_is_int {
+        e1.kind = ExpKind::VKInt;
+        e1.ival = result as i64;
+    } else {
+        e1.kind = ExpKind::VKFlt;
+        e1.nval = result;
+    }
+    
+    true
+}
+
+/// Check if operator can be folded (mirrors lcode.h: foldbinop)
+/// Returns true for arithmetic and bitwise operations
+fn can_fold_binop(op: BinaryOperator) -> bool {
+    matches!(
+        op,
+        BinaryOperator::OpAdd | BinaryOperator::OpSub | BinaryOperator::OpMul |
+        BinaryOperator::OpDiv | BinaryOperator::OpIDiv | BinaryOperator::OpMod |
+        BinaryOperator::OpPow |
+        BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor |
+        BinaryOperator::OpShl | BinaryOperator::OpShr
+    )
+}
+
 /// Process first operand of binary operation before reading second operand
 /// Lua equivalent: luaK_infix (lcode.c L1637-1679)
 pub fn luak_infix(c: &mut Compiler, op: BinaryOperator, v: &mut ExpDesc) {
@@ -69,6 +166,11 @@ pub fn luak_posfix(
 ) -> Result<(), String> {
     // First discharge vars on e2
     discharge_vars(c, e2);
+
+    // Try constant folding for foldable operations (Official Lua pattern)
+    if can_fold_binop(op) && try_const_folding(op, e1, e2) {
+        return Ok(());  // Folding succeeded, e1 now contains the constant result
+    }
 
     match op {
         BinaryOperator::OpAnd => {
