@@ -6,6 +6,7 @@ mod expr;
 mod helpers;
 mod stmt;
 mod tagmethod;
+mod parse_lua_number;
 
 use rowan::TextRange;
 
