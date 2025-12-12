@@ -795,18 +795,22 @@ fn compile_local_func_stat(c: &mut Compiler, local_func: &LuaLocalFuncStat) -> R
         .get_name_text()
         .to_string();
     
-    // Create local variable first (before compiling body)
+    // Create local variable but don't activate yet (对齐luac localfunc)
+    // The variable will be activated after the function is compiled
     new_localvar(c, name)?;
-    adjustlocalvars(c, 1);
     
-    // Compile function body
+    // Compile function body (this will reserve a register for the closure)
     let closure = local_func.get_closure()
         .ok_or("local function missing body")?;
     let mut b = expr::expr(c, &LuaExpr::ClosureExpr(closure))?;
     
-    // Store in the local variable (which is the last one created)
-    let reg = c.freereg - 1;
-    super::exp2reg::exp2reg(c, &mut b, reg);
+    // Now activate the local variable (对齐luac: adjustlocalvars after body compilation)
+    // This makes the variable point to the register where the closure was placed
+    adjustlocalvars(c, 1);
+    
+    // The function is already in the correct register (from CLOSURE instruction)
+    // No need to move it - just ensure freereg is correct
+    debug_assert!(matches!(b.kind, expdesc::ExpKind::VNonReloc));
     
     Ok(())
 }

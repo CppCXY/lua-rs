@@ -216,14 +216,9 @@ pub(crate) fn ret(c: &mut Compiler, first: u32, nret: i32) {
 
 /// Get number of active variables in register stack (对齐luaY_nvarstack)
 pub(crate) fn nvarstack(c: &Compiler) -> u32 {
-    // Count locals that are in registers (not compile-time constants)
-    let mut count = 0;
-    for local in c.scope_chain.borrow().locals.iter() {
-        if !local.is_const {
-            count = count.max(local.reg + 1);
-        }
-    }
-    count
+    // Return number of active local variables (对齐luaY_nvarstack)
+    // In luac: #define luaY_nvarstack(fs) ((fs)->nactvar)
+    c.nactvar as u32
 }
 
 /// Free a register (对齐freereg)
