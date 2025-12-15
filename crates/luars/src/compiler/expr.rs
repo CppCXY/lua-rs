@@ -581,7 +581,29 @@ fn get_mm_index(op: OpCode) -> u32 {
 fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     use super::helpers;
 
+    // 左操作数总是在寄存器
     let o1 = super::exp2reg::exp2anyreg(c, e1);
+    
+    // 检查是否可以使用EQK优化（对齐Lua 5.4 lcode.c:1386-1392）
+    // 只有EQ操作支持EQK指令
+    if op == OpCode::Eq {
+        // 尝试将右操作数转换为常量
+        if super::exp2reg::exp2k(c, e2) {
+            // 使用EQK指令：EQK A B k，比较R[A]和K[B]
+            super::exp2reg::free_exp(c, e1);
+            let k_idx = e2.info;
+            // 生成EQK指令和JMP（通过cond_jump）
+            // 注意：cond_jump会生成ABC格式，但EQK需要ABCk格式
+            // 所以我们需要直接生成ABCk指令
+            let pc = helpers::code_abck(c, OpCode::EqK, o1, k_idx, 0, false);
+            let jmp = helpers::jump(c);
+            e1.info = jmp as u32;
+            e1.kind = ExpKind::VJmp;
+            return;
+        }
+    }
+    
+    // 标准路径：两个操作数都在寄存器
     let o2 = super::exp2reg::exp2anyreg(c, e2);
 
     super::exp2reg::free_exp(c, e2);

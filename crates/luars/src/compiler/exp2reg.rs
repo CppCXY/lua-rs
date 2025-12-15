@@ -300,11 +300,9 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
             // Also need to update line info if we track it
             // Generate TEST with inverted condition and JMP
             // lcode.c:1122: return condjump(fs, OP_TEST, GETARG_B(ie), 0, 0, !cond);
-            if cond {
-                code_abc(c, OpCode::Test, reg, 0, 0); // inverted
-            } else {
-                code_abc(c, OpCode::Test, reg, 0, 1); // inverted
-            }
+            // Invert the condition (!cond)
+            let k = !cond;
+            code_abck(c, OpCode::Test, reg, 0, 0, k);
             return jump(c);
         }
     }
@@ -316,12 +314,8 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
     // TESTSET A B k: if (not R[B] == k) then pc++ else R[A] := R[B]
     // A is initially NO_REG (255), will be patched later if needed
     // B is the source register
-    // k is the condition (1 = test if true, 0 = test if false)
-    if cond {
-        code_abc(c, OpCode::TestSet, 255, reg, 1);
-    } else {
-        code_abc(c, OpCode::TestSet, 255, reg, 0);
-    }
+    // k is the condition (true = test if true, false = test if false)
+    code_abck(c, OpCode::TestSet, 255, reg, 0, cond);
     jump(c)
 }
 
