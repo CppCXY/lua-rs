@@ -403,16 +403,8 @@ fn compile_while_stat(c: &mut Compiler, while_stat: &LuaWhileStat) -> Result<(),
     // Jump back to condition
     helpers::jump_to(c, whileinit);
 
-    // Leave block and patch breaks
+    // Leave block (this will handle break jumps automatically)
     leave_block(c)?;
-
-    // Patch all break statements to jump here
-    if let Some(loop_info) = c.loop_stack.pop() {
-        let here = helpers::get_label(c);
-        for break_pc in loop_info.break_jumps {
-            helpers::fix_jump(c, break_pc, here);
-        }
-    }
 
     // Patch condition exit to jump here (after loop)
     helpers::patch_to_here(c, condexit);
@@ -459,16 +451,8 @@ fn compile_repeat_stat(c: &mut Compiler, repeat_stat: &LuaRepeatStat) -> Result<
     // Jump back to start if condition is false
     helpers::patch_list(c, condexit, repeat_init);
 
-    // Leave loop block
+    // Leave loop block (this will handle break jumps automatically)
     leave_block(c)?;
-
-    // Patch all break statements
-    if let Some(loop_info) = c.loop_stack.pop() {
-        let here = helpers::get_label(c);
-        for break_pc in loop_info.break_jumps {
-            helpers::fix_jump(c, break_pc, here);
-        }
-    }
 
     Ok(())
 }
@@ -483,6 +467,13 @@ fn compile_generic_for_stat(
 
     // 参考lparser.c:1624: enterblock(fs, &bl, 1) - 外层block，用于整个for语句
     enter_block(c, true)?; // isloop=true
+
+    // Setup loop info for break statements (在外层block)
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
 
     // forlist -> NAME {,NAME} IN explist DO block
     // 参考lparser.c:1591 forlist
@@ -552,7 +543,7 @@ fn compile_generic_for_stat(
         compile_statlist(c, block)?;
     }
 
-    // Leave block
+    // Leave inner block (isloop=false, so won't pop loop_stack)
     leave_block(c)?;
 
     // Fix TFORPREP to jump to after TFORLOOP
@@ -569,6 +560,7 @@ fn compile_generic_for_stat(
     helpers::fix_for_jump(c, endfor, prep + 1, true);
 
     // 参考lparser.c:1633: leaveblock(fs) - 离开外层block
+    // Outer block is isloop=true, so leave_block will pop loop_stack and patch breaks
     leave_block(c)?;
 
     Ok(())
@@ -581,6 +573,13 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(
 
     // 参考lparser.c:1624: enterblock(fs, &bl, 1) - 外层block，用于整个for语句
     enter_block(c, true)?; // isloop=true
+
+    // Setup loop info for break statements (在外层block)
+    c.loop_stack.push(LoopInfo {
+        break_jumps: Vec::new(),
+        scope_depth: c.scope_depth,
+        first_local_register: helpers::nvarstack(c),
+    });
 
     // fornum -> NAME = exp1,exp1[,exp1] DO block
     // 参考lparser.c:1568 fornum
@@ -632,24 +631,17 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(
     // 参考lparser.c:1587: forbody(ls, base, line, 1, 0)
     let prep = helpers::code_abx(c, OpCode::ForPrep, base, 0);
 
-    // Enter loop block
+    // Enter inner loop block
     enter_block(c, false)?;
     adjustlocalvars(c, 1); // activate loop variable (nvars=1 for numeric for)
     helpers::reserve_regs(c, 1);
-
-    // Setup loop info for break statements
-    c.loop_stack.push(LoopInfo {
-        break_jumps: Vec::new(),
-        scope_depth: c.scope_depth,
-        first_local_register: helpers::nvarstack(c),
-    });
 
     // Compile loop body
     if let Some(ref block) = for_stat.get_block() {
         compile_statlist(c, block)?;
     }
 
-    // Leave block
+    // Leave inner block (isloop=false, so won't pop loop_stack)
     leave_block(c)?;
 
     // Fix FORPREP to jump to after FORLOOP if loop is empty
@@ -661,15 +653,8 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(
     // Fix FORLOOP to jump back to right after FORPREP
     helpers::fix_for_jump(c, endfor, prep + 1, true);
 
-    // Patch break statements
-    if let Some(loop_info) = c.loop_stack.pop() {
-        let here = helpers::get_label(c);
-        for break_pc in loop_info.break_jumps {
-            helpers::fix_jump(c, break_pc, here);
-        }
-    }
-
-    // 参考lparser.c:1633: leaveblock(fs) - 离开外层block
+    // 参考lparser.c:1633: leaveblock(fs) - 离开外层block  
+    // Outer block is isloop=true, so leave_block will pop loop_stack and patch breaks
     leave_block(c)?;
 
     Ok(())
@@ -874,6 +859,7 @@ fn compile_local_func_stat(c: &mut Compiler, local_func: &LuaLocalFuncStat) -> R
 /// var1, var2, ... = exp1, exp2, ...
 fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), String> {
     // assignment -> var {, var} = explist
+    // 参考lparser.c:1486-1524 (restassign) 和 lparser.c:1467-1484 (assignment)
 
     // Get variables and expressions
     let (vars, exprs) = assign.get_var_and_expr_list();
@@ -906,57 +892,138 @@ fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), S
         var_descs.push(v.clone());
     }
 
-    // Evaluate right-hand side expressions
+    // 参考lparser.c:1111-1131 (explist): 解析表达式列表
+    // 关键：只有非最后的表达式才exp2nextreg，最后一个交给adjust_assign
+    let base_reg = c.freereg;  // 记录表达式开始的寄存器
+    
     let mut expr_descs: Vec<expdesc::ExpDesc> = Vec::new();
     if nexps > 0 {
         for (i, expr) in exprs.iter().enumerate() {
             let mut e = expr::expr(c, expr)?;
 
             if i < nexps as usize - 1 {
-                // Not the last expression - discharge to next register
+                // 参考lparser.c:1127-1130
                 exp2reg::exp2nextreg(c, &mut e);
             }
-            // Last expression handled below
 
             expr_descs.push(e);
         }
     }
 
-    // Get the last expression (or create void if no expressions)
+    // Get the last expression
     let mut last_expr = if nexps > 0 {
         expr_descs.pop().unwrap()
     } else {
         expdesc::ExpDesc::new_void()
     };
 
-    // Adjust last expression to provide the right number of values
-    adjust_assign(c, nvars, nexps, &mut last_expr);
+    // 参考lparser.c:1514-1520
+    if nexps != nvars {
+        adjust_assign(c, nvars, nexps, &mut last_expr);
+    } else {
+        // 当nexps == nvars时，使用setoneret: 只关闭最后一个表达式
+        // 参考lparser.c:1518-1519
+        use exp2reg;
+        exp2reg::exp2reg(c, &mut last_expr, c.freereg);
+    }
 
-    // Now perform the assignments in reverse order
-    // This is important for cases like: a, b = b, a
-
-    // First, store all values in temporary registers if needed
-    // For simplicity, we'll assign from left to right
-    // The first nvars-1 variables get values from expr_descs
-    // The last variable gets the adjusted last_expr
-
-    let mut expr_idx = 0;
+    // 现在执行赋值
+    // 参考lparser.c:1467-1484 (assignment函数) 和 lparser.c:1481-1484 (storevartop)
+    
+    // 关键理解：
+    // 1. adjust_assign之后，栈上有nvars个值在base_reg开始的连续寄存器中
+    // 2. 官方通过递归restassign，每次只处理一个变量
+    // 3. 我们必须直接生成指令，不能调用store_var（它会分配新寄存器并破坏freereg）
+    
+    // 按顺序赋值给变量
     for (i, var_desc) in var_descs.iter().enumerate() {
-        if i < nexps as usize - 1 {
-            // Use evaluated expression
-            let mut e = expr_descs[expr_idx].clone();
-            exp2reg::store_var(c, var_desc, &mut e);
-            expr_idx += 1;
-        } else if i == nexps as usize - 1 {
-            // Use the last (possibly adjusted) expression
-            exp2reg::store_var(c, var_desc, &mut last_expr);
-        } else {
-            // No more expressions - assign nil
-            let mut nil_expr = expdesc::ExpDesc::new_void();
-            nil_expr.kind = expdesc::ExpKind::VNil;
-            exp2reg::store_var(c, var_desc, &mut nil_expr);
+        let value_reg = base_reg + i as u32;  // 值所在的寄存器
+        
+        match var_desc.kind {
+            expdesc::ExpKind::VLocal => {
+                // 局部变量：生成MOVE指令
+                if value_reg != var_desc.var.ridx {
+                    use super::helpers;
+                    helpers::code_abc(
+                        c,
+                        crate::lua_vm::OpCode::Move,
+                        var_desc.var.ridx,
+                        value_reg,
+                        0,
+                    );
+                }
+            }
+            expdesc::ExpKind::VUpval => {
+                // Upvalue：生成SETUPVAL指令
+                use super::helpers;
+                helpers::code_abc(
+                    c,
+                    crate::lua_vm::OpCode::SetUpval,
+                    value_reg,
+                    var_desc.info,
+                    0,
+                );
+            }
+            expdesc::ExpKind::VIndexUp => {
+                // 索引upvalue：生成SETTABUP指令（用于全局变量）
+                // _ENV[key] = value
+                use super::helpers;
+                helpers::code_abck(
+                    c,
+                    crate::lua_vm::OpCode::SetTabUp,
+                    var_desc.ind.t,
+                    value_reg,
+                    var_desc.ind.idx,
+                    true,  // k=true表示idx是常量索引
+                );
+            }
+            expdesc::ExpKind::VIndexed => {
+                // 表索引：生成SETTABLE指令
+                // t[k] = value
+                use super::helpers;
+                helpers::code_abc(
+                    c,
+                    crate::lua_vm::OpCode::SetTable,
+                    var_desc.ind.t,
+                    var_desc.ind.idx,
+                    value_reg,
+                );
+            }
+            expdesc::ExpKind::VIndexStr => {
+                // 字符串索引：生成SETFIELD指令
+                // t.field = value
+                use super::helpers;
+                helpers::code_abc(
+                    c,
+                    crate::lua_vm::OpCode::SetField,
+                    var_desc.ind.t,
+                    var_desc.ind.idx,
+                    value_reg,
+                );
+            }
+            expdesc::ExpKind::VIndexI => {
+                // 整数索引：生成SETI指令
+                // t[i] = value
+                use super::helpers;
+                helpers::code_abc(
+                    c,
+                    crate::lua_vm::OpCode::SetI,
+                    var_desc.ind.t,
+                    var_desc.ind.idx,
+                    value_reg,
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "Invalid assignment target: {:?}",
+                    var_desc.kind
+                ));
+            }
         }
     }
+    
+    // freereg由compile_statlist在语句结束时统一重置为nvarstack
+    // 我们不需要在这里修改freereg
 
     Ok(())
 }

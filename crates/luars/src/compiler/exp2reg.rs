@@ -31,7 +31,8 @@ pub(crate) fn discharge_vars(c: &mut Compiler, e: &mut ExpDesc) {
         }
         ExpKind::VIndexed => {
             free_reg(c, e.ind.t);
-            free_reg(c, e.ind.idx);
+            // 注意：idx可能是RK编码的常量（高位标志0x100），不应该释放
+            // 参考lcode.c:732-738，官方只调用freexp(e)，当e是VIndexed时不做任何事
             e.info = code_abc(c, OpCode::GetTable, 0, e.ind.t, e.ind.idx) as u32;
             e.kind = ExpKind::VReloc;
         }
@@ -346,8 +347,10 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
     match var.kind {
         ExpKind::VLocal => {
             // Store to local variable
+            // 参考lcode.c:1409-1412: luaK_storevar for VLOCAL
+            // 使用var.var.ridx而不是var.info（info未被设置）
             free_exp(c, ex);
-            exp2reg(c, ex, var.info as u32);
+            exp2reg(c, ex, var.var.ridx);
         }
         ExpKind::VUpval => {
             // Store to upvalue
@@ -412,6 +415,13 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
     // 根据 key 的类型选择索引方式
     if let Some(idx) = valid_op(k) {
         // Key 可以作为 RK 操作数（寄存器或常量）
+        // 对于常量，需要进行RK编码（加上0x100标志）
+        let rk_idx = if k.kind == ExpKind::VK {
+            idx | 0x100  // RK编码：常量索引+0x100
+        } else {
+            idx  // 寄存器直接使用
+        };
+        
         let op = if t.kind == ExpKind::VUpval {
             ExpKind::VIndexUp // upvalue[k]
         } else {
@@ -421,7 +431,7 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
         // CRITICAL: 先exp2anyreg获取t的寄存器，再设置kind
         let t_reg = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
         t.kind = op;
-        t.ind.idx = idx;
+        t.ind.idx = rk_idx;
         t.ind.t = t_reg;
     } else if k.kind == ExpKind::VKStr {
         // 字符串常量索引

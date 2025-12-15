@@ -82,8 +82,9 @@ foreach ($file in $luaFiles) {
         }
         
         # 读取并规范化输出进行比较
+        # 现在我们的输出格式与官方一致：数字 [数字] 指令
         $officialLines = Get-Content $officialOutput | Where-Object { $_ -match '^\s*\d+\s+\[\d+\]\s+\w+' }
-        $ourLines = Get-Content $ourOutput | Where-Object { $_ -match '^\s*\d+\s+\w+' }
+        $ourLines = Get-Content $ourOutput | Where-Object { $_ -match '^\s*\d+\s+\[\d+\]\s+\w+' }
         
         # 简单比较指令数量
         if ($officialLines.Count -ne $ourLines.Count) {
@@ -108,8 +109,9 @@ foreach ($file in $luaFiles) {
         # 详细比较每条指令
         $mismatch = $false
         for ($i = 0; $i -lt $officialLines.Count; $i++) {
+            # 两边格式现在一致，都是：数字 [数字] 指令 参数 ; 注释
             $officialLine = $officialLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s+', ' ' -replace '\s*;.*$', ''
-            $ourLine = $ourLines[$i] -replace '^\s*\d+\s+', '' -replace '\s+', ' '
+            $ourLine = $ourLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s+', ' ' -replace '\s*;.*$', ''
             
             # 规范化指令名称（移除注释和额外空格）
             $officialLine = $officialLine.Trim()
