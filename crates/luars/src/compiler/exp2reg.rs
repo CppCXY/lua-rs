@@ -239,12 +239,9 @@ pub(crate) fn goiffalse(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
         }
         _ => {
             // Generate test and jump（对齐Lua C中的luaK_goiffalse）
-            discharge2anyreg(c, e);
+            // jumponcond handles NOT optimization and discharge2anyreg
+            let jmp = jump_on_cond(c, e, false);
             free_exp(c, e);
-            // TEST指令：if not R then skip next
-            jump_on_cond(c, e.info, false);
-            // JMP指令：跳转到目标位置（稍后patch）
-            let jmp = jump(c);
             jmp as i32
         }
     }
@@ -268,12 +265,9 @@ pub(crate) fn goiftrue(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
         }
         _ => {
             // Generate test and jump（对齐Lua C中的luaK_goiftrue）
-            discharge2anyreg(c, e);
+            // jumponcond handles NOT optimization and discharge2anyreg
+            let jmp = jump_on_cond(c, e, true);
             free_exp(c, e);
-            // TEST指令：if R then skip next
-            jump_on_cond(c, e.info, true);
-            // JMP指令：跳转到目标位置（稍后patch）
-            let jmp = jump(c);
             jmp as i32
         }
     }
@@ -288,12 +282,43 @@ fn negate_condition(_c: &mut Compiler, e: &mut ExpDesc) {
 }
 
 /// Generate conditional jump (对齐jumponcond)
-fn jump_on_cond(c: &mut Compiler, reg: u32, cond: bool) -> usize {
-    if cond {
-        code_abc(c, OpCode::Test, reg, 0, 1)
-    } else {
-        code_abc(c, OpCode::Test, reg, 0, 0)
+/// Returns the position to patch with JMP instruction
+fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
+    use super::helpers;
+    use crate::lua_vm::Instruction;
+    
+    // Optimization: if previous instruction is NOT, remove it and invert condition
+    // This matches luac behavior in lcode.c:1117-1129
+    if e.kind == ExpKind::VReloc {
+        let pc = e.info as usize;
+        if pc < c.chunk.code.len() && helpers::get_op(c, pc as u32) == OpCode::Not {
+            // Get the register from the NOT instruction's B argument BEFORE removing it
+            let inst = c.chunk.code[pc];
+            let reg = Instruction::get_b(inst);
+            // Remove the NOT instruction (对齐removelastinstruction)
+            c.chunk.code.pop();
+            // Also need to update line info if we track it
+            // Generate TEST with inverted condition and JMP
+            // lcode.c:1122: return condjump(fs, OP_TEST, GETARG_B(ie), 0, 0, !cond);
+            if cond {
+                code_abc(c, OpCode::Test, reg, 0, 0); // inverted
+            } else {
+                code_abc(c, OpCode::Test, reg, 0, 1); // inverted
+            }
+            return jump(c);
+        }
     }
+    
+    // Normal case: discharge to register, then generate TEST and JMP
+    // lcode.c:1126-1128
+    discharge2anyreg(c, e);
+    let reg = e.info;
+    if cond {
+        code_abc(c, OpCode::Test, reg, 0, 1);
+    } else {
+        code_abc(c, OpCode::Test, reg, 0, 0);
+    }
+    jump(c)
 }
 
 /// Free register used by expression (对齐freeexp)
