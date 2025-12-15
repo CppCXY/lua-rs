@@ -223,22 +223,33 @@ pub(crate) fn singlevar(c: &mut Compiler, name: &str, var: &mut ExpDesc) -> Resu
     if matches!(var.kind, ExpKind::VVoid) {
         // Not found as local or upvalue - treat as global variable
         // Global variable access: _ENV[name]
-        // First, get _ENV upvalue
+        // 参考lparser.c:467-473
+        
+        // First, get _ENV variable (could be local or upvalue)
         let mut env_var = ExpDesc::new_void();
         singlevaraux(c, "_ENV", &mut env_var, true)?;
         
-        if !matches!(env_var.kind, ExpKind::VUpval) {
+        if matches!(env_var.kind, ExpKind::VVoid) {
             return Err(format!("Cannot access global variable '{}': _ENV not available", name));
         }
         
-        // Now create an indexed expression: _ENV[name]
-        // Add the variable name as a constant
-        let name_idx = super::helpers::string_k(c, name.to_string());
+        // 参考lparser.c:471: luaK_exp2anyregup(fs, var)
+        // Convert _ENV to register if it's not an upvalue or has jumps
+        if env_var.kind != ExpKind::VUpval || exp2reg::has_jumps(&env_var) {
+            exp2reg::exp2anyreg(c, &mut env_var);
+        }
         
-        // Create VIndexUp expression
-        var.kind = ExpKind::VIndexUp;
-        var.ind.t = env_var.info; // _ENV upvalue index
-        var.ind.idx = name_idx;    // name constant index
+        // Create key expression for the variable name
+        // 参考lparser.c:472: codestring(&key, varname)
+        let name_idx = super::helpers::string_k(c, name.to_string());
+        let mut key = ExpDesc::new_void();
+        key.kind = ExpKind::VKStr;
+        key.info = name_idx;
+        
+        // 参考lparser.c:473: luaK_indexed(fs, var, &key)
+        // Use indexed function to create the proper indexed expression
+        *var = env_var;
+        exp2reg::indexed(c, var, &mut key);
     }
     
     Ok(())

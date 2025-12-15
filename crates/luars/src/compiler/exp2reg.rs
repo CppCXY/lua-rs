@@ -219,7 +219,7 @@ pub(crate) fn set_returns(c: &mut Compiler, e: &mut ExpDesc, nresults: i32) {
 }
 
 /// Check if expression has jumps
-fn has_jumps(e: &ExpDesc) -> bool {
+pub(crate) fn has_jumps(e: &ExpDesc) -> bool {
     e.t != NO_JUMP || e.f != NO_JUMP
 }
 
@@ -394,10 +394,20 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
 /// Create indexed expression from table and key (对齐 luaK_indexed)
 /// 根据 key 的类型选择合适的索引方式
 pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
+    // 参考lcode.c:1281-1282: if (k->k == VKSTR) str2K(fs, k);
+    if k.kind == ExpKind::VKStr {
+        // String constant - already in correct form
+    }
+    
     // t 必须已经是寄存器或 upvalue
     debug_assert!(
-        matches!(t.kind, ExpKind::VNonReloc | ExpKind::VLocal | ExpKind::VUpval | ExpKind::VIndexUp)
+        matches!(t.kind, ExpKind::VNonReloc | ExpKind::VLocal | ExpKind::VUpval)
     );
+    
+    // 参考lcode.c:1285-1286: upvalue indexed by non 'Kstr' needs register
+    if t.kind == ExpKind::VUpval && k.kind != ExpKind::VKStr {
+        exp2anyreg(c, t);
+    }
     
     // 根据 key 的类型选择索引方式
     if let Some(idx) = valid_op(k) {
@@ -415,14 +425,21 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
         t.ind.t = t_reg;
     } else if k.kind == ExpKind::VKStr {
         // 字符串常量索引
+        // 参考lcode.c:1297-1299
         let op = if t.kind == ExpKind::VUpval {
             ExpKind::VIndexUp
         } else {
             ExpKind::VIndexStr
         };
         
-        // CRITICAL: 先exp2anyreg获取t的寄存器，再设置kind
-        let t_reg = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
+        // 参考lcode.c:1296: t->u.ind.t = (t->k == VLOCAL) ? t->u.var.ridx: t->u.info;
+        let t_reg = if t.kind == ExpKind::VLocal {
+            t.var.ridx
+        } else if t.kind == ExpKind::VUpval {
+            t.info
+        } else {
+            t.info // VNonReloc
+        };
         let key_idx = k.info;
         t.kind = op;
         t.ind.idx = key_idx;

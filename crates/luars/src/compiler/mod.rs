@@ -394,7 +394,8 @@ fn leave_block(c: &mut Compiler) -> Result<(), String> {
     }
 
     // Emit CLOSE if needed
-    if bl.upval {
+    // 参考lparser.c:682: if (!hasclose && bl->previous && bl->upval)
+    if bl.upval && bl.previous.is_some() {
         let stklevel = helpers::nvarstack(c);
         helpers::code_abc(c, OpCode::Close, stklevel, 0, 0);
     }

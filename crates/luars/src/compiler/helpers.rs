@@ -208,6 +208,15 @@ pub(crate) fn check_stack(c: &mut Compiler, n: u32) {
     }
 }
 
+/// Mark that current block has a to-be-closed variable (对齐marktobeclosed)
+pub(crate) fn marktobeclosed(c: &mut Compiler) {
+    if let Some(ref mut block) = c.block {
+        block.upval = true;
+        block.insidetbc = true;
+    }
+    c.needclose = true;
+}
+
 /// Emit RETURN instruction (对齐luaK_ret)
 pub(crate) fn ret(c: &mut Compiler, first: u32, nret: i32) {
     let op = match nret {
