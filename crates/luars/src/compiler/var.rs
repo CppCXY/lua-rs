@@ -168,50 +168,48 @@ fn singlevaraux(c: &mut Compiler, name: &str, var: &mut ExpDesc, base: bool) -> 
         return Ok(());
     }
     
-    // Not found locally, check if we have a parent compiler
-    if let Some(parent_ptr) = c.prev {
-        // Try to find in parent scope (对齐luac: recursively search in parent)
-        unsafe {
-            let parent = &mut *parent_ptr;
-            
-            // Recursively search in parent (not base level anymore)
-            singlevaraux(parent, name, var, false)?;
-            
-            // Check what we found in parent
-            match var.kind {
-                ExpKind::VLocal | ExpKind::VUpval => {
-                    // Found in parent - create upvalue in current function
-                    // 对齐luac的newupvalue调用
-                    let idx = newupvalue(c, name.to_string(), var)?;
-                    var.kind = ExpKind::VUpval;
-                    var.info = idx;
-                    return Ok(());
-                }
-                ExpKind::VVoid => {
-                    // Not found in parent either - will be treated as global
-                    return Ok(());
-                }
-                _ => {
-                    // Other kinds (constants etc) - return as is
-                    return Ok(());
+    // Not found locally, try existing upvalues first (对齐lparser.c:445)
+    let mut idx = searchupvalue(c, name);
+    
+    if idx < 0 {
+        // Not found as existing upvalue, check if we have a parent compiler
+        if let Some(parent_ptr) = c.prev {
+            // Try to find in parent scope (对齐luac: recursively search in parent)
+            unsafe {
+                let parent = &mut *parent_ptr;
+                
+                // Recursively search in parent (not base level anymore)
+                singlevaraux(parent, name, var, false)?;
+                
+                // Check what we found in parent (对齐lparser.c:448-451)
+                match var.kind {
+                    ExpKind::VLocal | ExpKind::VUpval => {
+                        // Found in parent as local or upvalue - create NEW upvalue in current function
+                        // 对齐luac的newupvalue调用
+                        idx = newupvalue(c, name.to_string(), var)? as i32;
+                    }
+                    ExpKind::VVoid => {
+                        // Not found in parent either - will be treated as global
+                        return Ok(());
+                    }
+                    _ => {
+                        // Other kinds (constants etc) - don't need upvalue at this level
+                        return Ok(());
+                    }
                 }
             }
+        } else {
+            // No parent and no existing upvalue - not found
+            var.kind = ExpKind::VVoid;
+            var.info = 0;
+            return Ok(());
         }
     }
     
-    // No parent compiler - check existing upvalues (for _ENV in main chunk)
-    let idx = searchupvalue(c, name);
-    
-    if idx >= 0 {
-        // Found as existing upvalue
-        var.kind = ExpKind::VUpval;
-        var.info = idx as u32;
-        return Ok(());
-    }
-    
-    // Not found anywhere - this is a global variable access
-    var.kind = ExpKind::VVoid;
-    var.info = 0;
+    // Found as upvalue (either existing or newly created)
+    // 对齐lparser.c:453: init_exp(var, VUPVAL, idx);
+    var.kind = ExpKind::VUpval;
+    var.info = idx as u32;
     Ok(())
 }
 

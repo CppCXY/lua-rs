@@ -309,14 +309,18 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
         }
     }
     
-    // Normal case: discharge to register, then generate TEST and JMP
-    // lcode.c:1126-1128
+    // Normal case: discharge to register, then generate TESTSET and JMP
+    // lcode.c:1126-1128: return condjump(fs, OP_TESTSET, NO_REG, e->u.info, 0, cond);
     discharge2anyreg(c, e);
     let reg = e.info;
+    // TESTSET A B k: if (not R[B] == k) then pc++ else R[A] := R[B]
+    // A is initially NO_REG (255), will be patched later if needed
+    // B is the source register
+    // k is the condition (1 = test if true, 0 = test if false)
     if cond {
-        code_abc(c, OpCode::Test, reg, 0, 1);
+        code_abc(c, OpCode::TestSet, 255, reg, 1);
     } else {
-        code_abc(c, OpCode::Test, reg, 0, 0);
+        code_abc(c, OpCode::TestSet, 255, reg, 0);
     }
     jump(c)
 }
