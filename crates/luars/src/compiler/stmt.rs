@@ -77,8 +77,6 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
     let local_defs = local_stat.get_local_name_list();
     // Parse variable names and attributes
     // local name1 [<attr>], name2 [<attr>], ... [= explist]
-    // TODO: emmylua_parser API needs investigation
-    // Temporarily stub this out until we know the correct API
 
     for name_def in local_defs {
         let name = name_def
@@ -161,11 +159,9 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
             // This requires luaK_exp2const equivalent
             adjust_assign(c, nvars, nexps, &mut e);
         } else {
-            // Compile all expressions
-            // 参考lparser.c:1011 (explist function)
-            let mut last_e = expdesc::ExpDesc::new_void();
-            // 编译第一个表达式
-            last_e = expr::expr(c, &exprs[0])?;
+            // Compile all expressions (参考lparser.c:1011 explist)
+            // 对齐Lua C: expr直接填充v，不需要先初始化为void
+            let mut last_e = expr::expr(c, &exprs[0])?;
             // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
             for ex in exprs.iter().skip(1) {
                 exp2reg::exp2nextreg(c, &mut last_e);
@@ -176,18 +172,20 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
         }
     } else {
         // Different number of variables and expressions - use adjust_assign
-        // 参考lparser.c:1011 (explist function)
-        let mut last_e = expdesc::ExpDesc::new_void();
-
-        if nexps > 0 {
-            // 编译第一个表达式
-            last_e = expr::expr(c, &exprs[0])?;
+        // 参考lparser.c:1011 (explist) 和 lparser.c:1747 (localstat)
+        let mut last_e = if nexps > 0 {
+            // 对齐Lua C: expr直接填充v，不需要先初始化为void
+            let mut e = expr::expr(c, &exprs[0])?;
             // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
             for ex in exprs.iter().skip(1) {
-                exp2reg::exp2nextreg(c, &mut last_e);
-                last_e = expr::expr(c, ex)?;
+                exp2reg::exp2nextreg(c, &mut e);
+                e = expr::expr(c, ex)?;
             }
-        }
+            e
+        } else {
+            // 对齐Lua C: else { e.k = VVOID; nexps = 0; }
+            expdesc::ExpDesc::new_void()
+        };
 
         adjust_assign(c, nvars, nexps, &mut last_e);
         adjustlocalvars(c, nvars as usize);
@@ -197,7 +195,7 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
     if toclose != -1 {
         // Mark the variable as to-be-closed (OP_TBC)
         let level = super::var::reglevel(c, toclose as usize);
-        helpers::code_abc(c, crate::lua_vm::OpCode::Tbc, level, 0, 0);
+        helpers::code_abc(c, OpCode::Tbc, level, 0, 0);
     }
 
     Ok(())
@@ -303,7 +301,7 @@ fn compile_break_stat(c: &mut Compiler) -> Result<(), String> {
         drop(scope);
         
         if needs_close {
-            helpers::code_abc(c, crate::lua_vm::OpCode::Close, first_local as u32, 0, 0);
+            helpers::code_abc(c, OpCode::Close, first_local as u32, 0, 0);
         }
     }
     
@@ -531,7 +529,7 @@ fn compile_generic_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(
     let base = (_base) as u32;
     
     // Generate TFORPREP instruction - prepare for generic for
-    let prep = helpers::code_abx(c, crate::lua_vm::OpCode::TForPrep, base, 0);
+    let prep = helpers::code_abx(c, OpCode::TForPrep, base, 0);
     
     // Setup loop block
     super::enter_block(c, false)?;
@@ -550,10 +548,10 @@ fn compile_generic_for_stat(c: &mut Compiler, for_stat: &LuaForStat) -> Result<(
     helpers::fix_for_jump(c, prep, helpers::get_label(c), false);
     
     // Generate TFORCALL instruction - call iterator
-    helpers::code_abc(c, crate::lua_vm::OpCode::TForCall, base, 0, (nvars - 3) as u32);
+    helpers::code_abc(c, OpCode::TForCall, base, 0, (nvars - 3) as u32);
     
     // Generate TFORLOOP instruction - check result and loop back
-    let endfor = helpers::code_abx(c, crate::lua_vm::OpCode::TForLoop, base, 0);
+    let endfor = helpers::code_abx(c, OpCode::TForLoop, base, 0);
     
     // Fix TFORLOOP to jump back to right after TFORPREP
     helpers::fix_for_jump(c, endfor, prep + 1, true);
@@ -610,7 +608,7 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_range_stat: &LuaForRangeStat) 
     let base = (_base) as u32; // Store base for FORPREP/FORLOOP
     
     // Generate FORPREP instruction - initialize loop and skip if empty
-    let prep = helpers::code_abx(c, crate::lua_vm::OpCode::ForPrep, base, 0);
+    let prep = helpers::code_abx(c, OpCode::ForPrep, base, 0);
     
     // Enter loop block
     super::enter_block(c, false)?; // Not a loop block for enterblock (variables already created)
@@ -636,7 +634,7 @@ fn compile_numeric_for_stat(c: &mut Compiler, for_range_stat: &LuaForRangeStat) 
     helpers::fix_for_jump(c, prep, helpers::get_label(c), false);
     
     // Generate FORLOOP instruction - increment and jump back if not done
-    let endfor = helpers::code_abx(c, crate::lua_vm::OpCode::ForLoop, base, 0);
+    let endfor = helpers::code_abx(c, OpCode::ForLoop, base, 0);
     
     // Fix FORLOOP to jump back to right after FORPREP
     helpers::fix_for_jump(c, endfor, prep + 1, true);
@@ -1032,7 +1030,7 @@ fn compile_goto_stat(c: &mut Compiler, goto_stat: &LuaGotoStat) -> Result<(), St
         
         // Emit CLOSE if needed (对齐luac)
         if nactvar > label_nactvar {
-            helpers::code_abc(c, crate::lua_vm::OpCode::Close, label_nactvar as u32, 0, 0);
+            helpers::code_abc(c, OpCode::Close, label_nactvar as u32, 0, 0);
         }
         
         // Generate jump instruction
