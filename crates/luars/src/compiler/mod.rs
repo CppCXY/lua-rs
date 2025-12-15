@@ -127,8 +127,8 @@ pub(crate) struct GotoInfo {
     pub jump_position: usize, // Position of the jump instruction
     pub scope_depth: usize,   // Scope depth at goto statement
     pub nactvar: usize,       // Number of active variables at goto (对齐luac Labeldesc.nactvar)
-    #[allow(unused)]
-    pub close: bool, // Whether need to close upvalues when jumping
+    pub close: usize, // Index of last to-be-closed variable at goto (对齐luac Labeldesc.close)
+                      // 0 if no to-be-closed variables
 }
 
 impl<'a> Compiler<'a> {

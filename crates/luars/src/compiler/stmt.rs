@@ -1064,33 +1064,53 @@ fn compile_label_stat(c: &mut Compiler, label_stat: &LuaLabelStat) -> Result<(),
     // Resolve pending gotos to this label (对齐luac findgotos)
     if let Some(block) = &c.block {
         let first_goto = block.first_goto;
-        let mut i = first_goto;
-        while i < c.gotos.len() {
-            if c.gotos[i].name == name {
-                let goto_nactvar = c.gotos[i].nactvar;
+        // Iterate pending gotos in reverse so newer gotos (with larger nactvar)
+        // are matched first. This mirrors Lua's handling where recently
+        // created gotos closer to the label should be resolved first.
+        if first_goto < c.gotos.len() {
+            let mut i = c.gotos.len();
+            while i > first_goto {
+                i -= 1;
+                if c.gotos[i].name == name {
+                    let goto_nactvar = c.gotos[i].nactvar;
+                    let goto_close = c.gotos[i].close;
 
-                // Check if goto jumps into scope of any variable (对齐luac)
-                if goto_nactvar < nactvar {
-                    // Get variable name that would be jumped into
-                    let scope = c.scope_chain.borrow();
-                    let var_name = if goto_nactvar < scope.locals.len() {
-                        scope.locals[goto_nactvar].name.clone()
-                    } else {
-                        "?".to_string()
-                    };
-                    drop(scope);
+                    // Check if goto jumps into scope of any variable (对齐luac closegoto)
+                    // 参考lparser.c:1734-1744 closegoto函数
+                    
+                    // 1. Check forward jump into scope (跳入作用域)
+                    // 如果goto是在当前block内创建的（i >= first_goto），允许nactvar不同
+                    let is_in_current_block = i >= first_goto;
+                    if !is_in_current_block && goto_nactvar < nactvar {
+                        let scope = c.scope_chain.borrow();
+                        let var_name = if goto_nactvar < scope.locals.len() {
+                            scope.locals[goto_nactvar].name.clone()
+                        } else {
+                            "?".to_string()
+                        };
+                        drop(scope);
 
-                    return Err(format!(
-                        "<goto {}> at line ? jumps into the scope of local '{}'",
-                        name, var_name
-                    ));
+                        return Err(format!(
+                            "<goto {}> at line ? jumps into the scope of local '{}'",
+                            name, var_name
+                        ));
+                    }
+
+                    // 2. Check backward jump out of to-be-closed scope (跳出to-be-closed作用域)
+                    // 参考lparser.c:1741-1742
+                    // if gt->nactvar > label->nactvar && gt->close > label->nactvar
+                    // close是1-based索引，表示最后一个to-be-closed变量的位置
+                    if goto_nactvar > nactvar && goto_close > nactvar {
+                        return Err(format!(
+                            "<goto {}> jumps into scope of to-be-closed variable",
+                            name
+                        ));
+                    }
+
+                    let goto_info = c.gotos.remove(i);
+                    // Patch the goto jump to this label
+                    helpers::patch_list(c, goto_info.jump_position as i32, pc);
                 }
-
-                let goto_info = c.gotos.remove(i);
-                // Patch the goto jump to this label
-                helpers::patch_list(c, goto_info.jump_position as i32, pc);
-            } else {
-                i += 1;
             }
         }
     }
@@ -1109,7 +1129,17 @@ fn compile_goto_stat(c: &mut Compiler, goto_stat: &LuaGotoStat) -> Result<(), St
         .to_string();
 
     let nactvar = c.nactvar;
-    let close = c.needclose;
+    // Find last to-be-closed variable index (对齐luac)
+    let mut close = 0usize;
+    {
+        let scope = c.scope_chain.borrow();
+        for i in (0..nactvar).rev() {
+            if i < scope.locals.len() && scope.locals[i].is_to_be_closed {
+                close = i + 1; // Lua uses 1-based indexing for close
+                break;
+            }
+        }
+    }
 
     // Try to find the label (for backward jumps) (对齐luac findlabel)
     let mut found_label = None;
@@ -1125,21 +1155,8 @@ fn compile_goto_stat(c: &mut Compiler, goto_stat: &LuaGotoStat) -> Result<(), St
         let label_nactvar = c.labels[label_idx].nactvar;
         let label_position = c.labels[label_idx].position;
 
-        // Backward jump - check scope (对齐luac)
-        if nactvar > label_nactvar {
-            // Check for to-be-closed variables
-            let scope = c.scope_chain.borrow();
-            for i in label_nactvar..nactvar {
-                if i < scope.locals.len() && scope.locals[i].is_to_be_closed {
-                    return Err(format!(
-                        "<goto {}> jumps into scope of to-be-closed variable",
-                        name
-                    ));
-                }
-            }
-        }
-
-        // Emit CLOSE if needed (对齐luac)
+        // Backward jump - emit CLOSE if needed (对齐luac)
+        // Backward jump不需要检查to-be-closed，因为会emit CLOSE指令自动处理
         if nactvar > label_nactvar {
             helpers::code_abc(c, OpCode::Close, label_nactvar as u32, 0, 0);
         }
