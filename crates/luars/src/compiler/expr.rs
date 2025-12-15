@@ -818,15 +818,12 @@ fn compile_function_call(c: &mut Compiler, call_expr: &LuaCallExpr) -> Result<Ex
         }
     } else {
         // 普通函数调用
+        // 参考lparser.c:1040 funcargs中的prefixexp处理
         let mut func = expr(c, &prefix)?;
-        exp2reg::discharge_vars(c, &mut func);
-
-        if matches!(func.kind, expdesc::ExpKind::VNonReloc) {
-            func.info as u32
-        } else {
-            exp2reg::exp2nextreg(c, &mut func);
-            func.info as u32
-        }
+        // 必须调用exp2nextreg确保函数在freereg位置
+        // 这样后续参数才能正确放在func+1, func+2...
+        exp2reg::exp2nextreg(c, &mut func);
+        func.info as u32
     };
 
     // Get argument list
