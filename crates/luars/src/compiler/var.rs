@@ -6,10 +6,12 @@ use super::helpers;
 /// Search for a local variable by name (对齐searchvar)
 /// Returns the expression kind if found, -1 otherwise
 pub(crate) fn searchvar(c: &mut Compiler, name: &str, var: &mut ExpDesc) -> i32 {
-    // Search from most recent to oldest local variable
+    // 关键修复：只搜索已激活的局部变量（nactvar个）
+    // 参考lparser.c:406: for (i = cast_int(fs->nactvar) - 1; i >= 0; i--)
     let scope = c.scope_chain.borrow();
-    for (i, local) in scope.locals.iter().enumerate().rev() {
-        if local.name == name {
+    for i in (0..c.nactvar).rev() {
+        if i < scope.locals.len() && scope.locals[i].name == name {
+            let local = &scope.locals[i];
             // Check if it's a compile-time constant
             if local.is_const {
                 // VK: compile-time constant

@@ -41,6 +41,7 @@ pub(crate) fn adjust_assign(
 
     let needed = nvars - nexps; // extra values needed
 
+    // 参考lcode.c:1343-1360 (adjust_assign)
     // Check if last expression has multiple returns (call or vararg)
     if matches!(e.kind, ExpKind::VCall | ExpKind::VVararg) {
         let mut extra = needed + 1; // discount last expression itself
@@ -49,6 +50,8 @@ pub(crate) fn adjust_assign(
         }
         exp2reg::set_returns(c, e, extra); // last exp. provides the difference
     } else {
+        // 参考lparser.c:492-495
+        // explist返回时最后一个表达式还未discharge，这里discharge它
         if e.kind != ExpKind::VVoid {
             // at least one expression?
             exp2reg::exp2nextreg(c, e); // close last expression
@@ -159,14 +162,16 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
             // This requires luaK_exp2const equivalent
             adjust_assign(c, nvars, nexps, &mut e);
         } else {
-            // Compile all expressions (参考lparser.c:1011 explist)
-            // 对齐Lua C: expr直接填充v，不需要先初始化为void
+            // Compile all expressions (参考lparser.c:1011 explist + lparser.c:1747 localstat)
+            // explist会返回最后一个表达式未discharge，adjust_assign会处理它
             let mut last_e = expr::expr(c, &exprs[0])?;
             // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
             for ex in exprs.iter().skip(1) {
                 exp2reg::exp2nextreg(c, &mut last_e);
                 last_e = expr::expr(c, ex)?;
             }
+            // nvars == nexps时，adjust_assign会discharge最后一个表达式（needed=0）
+            // 然后adjust freereg（fs->freereg += needed，实际不变）
             adjust_assign(c, nvars, nexps, &mut last_e);
             adjustlocalvars(c, nvars as usize);
         }
