@@ -395,12 +395,35 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
     }
 }
 
+/// Convert VKSTR to VK (对齐 str2K)
+fn str2k(_c: &mut Compiler, e: &mut ExpDesc) {
+    debug_assert!(e.kind == ExpKind::VKStr);
+    // VKStr的info已经是stringK返回的常量索引，直接转换kind即可
+    e.kind = ExpKind::VK;
+}
+
+/// Check if expression is a short literal string constant (对齐 isKstr)
+fn is_kstr(c: &Compiler, e: &ExpDesc) -> bool {
+    // 参考lcode.c:1222-1225
+    // isKstr检查：1) 是VK类型 2) 没有跳转 3) 索引在范围内 4) 常量表中是短字符串
+    if e.kind == ExpKind::VK && !has_jumps(e) && e.info <= 0xFF {
+        // 检查常量表中是否为字符串
+        if let Some(val) = c.chunk.constants.get(e.info as usize) {
+            val.is_string()
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
 /// Create indexed expression from table and key (对齐 luaK_indexed)
 /// 根据 key 的类型选择合适的索引方式
 pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
     // 参考lcode.c:1281-1282: if (k->k == VKSTR) str2K(fs, k);
     if k.kind == ExpKind::VKStr {
-        // String constant - already in correct form
+        str2k(c, k);
     }
     
     // t 必须已经是寄存器或 upvalue
@@ -409,73 +432,45 @@ pub(crate) fn indexed(c: &mut Compiler, t: &mut ExpDesc, k: &mut ExpDesc) {
     );
     
     // 参考lcode.c:1285-1286: upvalue indexed by non 'Kstr' needs register
-    if t.kind == ExpKind::VUpval && k.kind != ExpKind::VKStr {
+    if t.kind == ExpKind::VUpval && !is_kstr(c, k) {
         exp2anyreg(c, t);
     }
     
-    // 根据 key 的类型选择索引方式
-    if let Some(idx) = valid_op(k) {
-        // Key 可以作为 RK 操作数（寄存器或常量）
-        // 对于常量，需要进行RK编码（加上0x100标志）
-        let rk_idx = if k.kind == ExpKind::VK {
-            idx | 0x100  // RK编码：常量索引+0x100
-        } else {
-            idx  // 寄存器直接使用
-        };
-        
-        let op = if t.kind == ExpKind::VUpval {
-            ExpKind::VIndexUp // upvalue[k]
-        } else {
-            ExpKind::VIndexed // t[k]
-        };
-        
-        // CRITICAL: 先exp2anyreg获取t的寄存器，再设置kind
-        let t_reg = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
-        t.kind = op;
-        t.ind.idx = rk_idx;
-        t.ind.t = t_reg;
-    } else if k.kind == ExpKind::VKStr {
-        // 字符串常量索引
-        // 参考lcode.c:1297-1299
+    // 根据 key 的类型选择索引方式（对齐lcode.c:1294-1309）
+    // 参考lcode.c:1296: register index of the table
+    let t_reg = if t.kind == ExpKind::VLocal {
+        t.var.ridx
+    } else {
+        t.info
+    };
+    
+    // 参考lcode.c:1297-1299: 优先检查是否为短字符串常量
+    if is_kstr(c, k) {
+        // 短字符串常量索引
         let op = if t.kind == ExpKind::VUpval {
             ExpKind::VIndexUp
         } else {
             ExpKind::VIndexStr
         };
-        
-        // 参考lcode.c:1296: t->u.ind.t = (t->k == VLOCAL) ? t->u.var.ridx: t->u.info;
-        let t_reg = if t.kind == ExpKind::VLocal {
-            t.var.ridx
-        } else if t.kind == ExpKind::VUpval {
-            t.info
-        } else {
-            t.info // VNonReloc
-        };
-        let key_idx = k.info;
         t.kind = op;
-        t.ind.idx = key_idx;
+        t.ind.idx = k.info;  // literal short string
         t.ind.t = t_reg;
     } else if k.kind == ExpKind::VKInt && fits_as_offset(k.ival) {
-        // 整数索引（在范围内）
+        // 参考lcode.c:1300-1303: 整数常量索引（在范围内）
         let op = if t.kind == ExpKind::VUpval {
             ExpKind::VIndexUp
         } else {
             ExpKind::VIndexI
         };
-        
-        // CRITICAL: 先exp2anyreg获取t的寄存器，再设置kind
-        let t_reg = if op == ExpKind::VIndexUp { t.info } else { exp2anyreg(c, t) };
         t.kind = op;
-        t.ind.idx = k.ival as u32;
+        t.ind.idx = k.ival as u32;  // int. constant in proper range
         t.ind.t = t_reg;
     } else {
-        // 通用索引：需要把 key 放到寄存器（对齐 Lua C 实现）
-        // CRITICAL: 必须先 exp2anyreg 获取寄存器，再设置 kind
-        let t_reg = exp2anyreg(c, t);
+        // 参考lcode.c:1304-1307: 通用索引，key必须放到寄存器
         let k_reg = exp2anyreg(c, k);
         t.kind = ExpKind::VIndexed;
         t.ind.t = t_reg;
-        t.ind.idx = k_reg;
+        t.ind.idx = k_reg;  // register
     }
 }
 

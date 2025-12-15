@@ -518,9 +518,12 @@ fn get_k_variant(op: OpCode) -> OpCode {
 }
 
 /// 尝试获取表达式的常量值索引
+/// 对齐官方codearith中的tonumeral检查：只有数值常量才能作为K操作数
 fn try_get_k_value(c: &mut Compiler, e: &mut ExpDesc) -> Option<u32> {
     match e.kind {
-        ExpKind::VK => Some(e.info),  // 已经是常量表索引
+        // 注意：只有VKInt和VKFlt可以作为算术/位运算的K操作数
+        // 字符串常量(VK/VKStr)不能直接用于K变体指令
+        // 参考lcode.c:1505: if (tonumeral(e2, NULL) && luaK_exp2K(fs, e2))
         ExpKind::VKInt => {
             // 整数常量，添加到常量表
             Some(super::helpers::int_k(c, e.ival))
