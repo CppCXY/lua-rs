@@ -923,8 +923,10 @@ fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), S
     } else {
         // 当nexps == nvars时，使用setoneret: 只关闭最后一个表达式
         // 参考lparser.c:1518-1519
+        // 注意：这里不能调用exp2reg，因为它会生成MOVE指令
+        // 应该使用exp2nextreg，让值自然分配到下一个寄存器（base_reg）
         use exp2reg;
-        exp2reg::exp2reg(c, &mut last_expr, c.freereg);
+        exp2reg::exp2nextreg(c, &mut last_expr);
     }
 
     // 现在执行赋值
@@ -967,14 +969,15 @@ fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), S
             expdesc::ExpKind::VIndexUp => {
                 // 索引upvalue：生成SETTABUP指令（用于全局变量）
                 // _ENV[key] = value
+                // SETTABUP A B C k: UpValue[A][K[B]] := RK(C)
                 use super::helpers;
                 helpers::code_abck(
                     c,
                     crate::lua_vm::OpCode::SetTabUp,
-                    var_desc.ind.t,
-                    value_reg,
-                    var_desc.ind.idx,
-                    true,  // k=true表示idx是常量索引
+                    var_desc.ind.t,     // A: upvalue索引
+                    var_desc.ind.idx,   // B: key（常量索引）
+                    value_reg,          // C: value（RK操作数）
+                    true,  // k=true表示B是常量索引
                 );
             }
             expdesc::ExpKind::VIndexed => {

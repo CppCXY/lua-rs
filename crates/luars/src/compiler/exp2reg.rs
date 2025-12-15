@@ -360,8 +360,9 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
         ExpKind::VIndexUp => {
             // Store to indexed upvalue: upval[k] = v
             // Used for global variable assignment like _ENV[x] = v
+            // SETTABUP A B C k: UpValue[A][K[B]] := RK(C)
             let e = exp2anyreg(c, ex);
-            code_abck(c, OpCode::SetTabUp, var.ind.t, e, var.ind.idx, true);
+            code_abck(c, OpCode::SetTabUp, var.ind.t, var.ind.idx, e, true);
             free_exp(c, ex);
         }
         ExpKind::VIndexed => {

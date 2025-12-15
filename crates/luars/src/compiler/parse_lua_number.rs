@@ -76,8 +76,48 @@ pub fn int_token_value(token: &LuaSyntaxToken) -> Result<NumberResult, String> {
                     if let Ok(value) = unsigned_value {
                         return Ok(NumberResult::Uint(value));
                     }
-                } else if let Ok(f) = text.parse::<f64>() {
-                    return Ok(NumberResult::Float(f));
+                } else {
+                    // Lua 5.4行为：对于十六进制/二进制整数溢出，解析为u64然后reinterpret为i64
+                    // 例如：0xFFFFFFFFFFFFFFFF = -1
+                    if matches!(repr, IntegerRepr::Hex | IntegerRepr::Bin) {
+                        let unsigned_value = match repr {
+                            IntegerRepr::Hex => {
+                                let text = &text[2..];
+                                u64::from_str_radix(text, 16)
+                            }
+                            IntegerRepr::Bin => {
+                                let text = &text[2..];
+                                u64::from_str_radix(text, 2)
+                            }
+                            _ => unreachable!(),
+                        };
+                        
+                        if let Ok(value) = unsigned_value {
+                            // Reinterpret u64 as i64 (补码转换)
+                            return Ok(NumberResult::Int(value as i64));
+                        } else {
+                            // 超过64位，转换为浮点数
+                            // 例如：0x13121110090807060504030201
+                            let hex_str = match repr {
+                                IntegerRepr::Hex => &text[2..],
+                                IntegerRepr::Bin => &text[2..],
+                                _ => unreachable!(),
+                            };
+                            
+                            // 手动将十六进制转为浮点数
+                            let base = if matches!(repr, IntegerRepr::Hex) { 16.0 } else { 2.0 };
+                            let mut result = 0.0f64;
+                            for c in hex_str.chars() {
+                                if let Some(digit) = c.to_digit(base as u32) {
+                                    result = result * base + (digit as f64);
+                                }
+                            }
+                            return Ok(NumberResult::Float(result));
+                        }
+                    } else if let Ok(f) = text.parse::<f64>() {
+                        // 十进制整数溢出，解析为浮点数
+                        return Ok(NumberResult::Float(f));
+                    }
                 }
                 
                 Err(format!(
