@@ -219,6 +219,21 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
         // Check if it's a multi-return expression (call or vararg)
         if matches!(e.kind, expdesc::ExpKind::VCall | expdesc::ExpKind::VVararg) {
             exp2reg::set_returns(c, &mut e, -1); // Return all values
+            
+            // Tail call optimization (对齐lparser.c retstat)
+            // 如果是单个函数调用返回，且不在to-be-closed块内，转换为TAILCALL
+            if e.kind == expdesc::ExpKind::VCall {
+                let insidetbc = c.block.as_ref().map_or(false, |b| b.insidetbc);
+                if !insidetbc {
+                    // 将CALL指令改为TAILCALL (参考lparser.c:2623)
+                    let pc = e.info as usize;
+                    crate::lua_vm::Instruction::set_opcode(
+                        &mut c.chunk.code[pc], 
+                        crate::lua_vm::OpCode::TailCall
+                    );
+                }
+            }
+            
             nret = -1; // LUA_MULTRET
         } else {
             exp2reg::exp2anyreg(c, &mut e);
