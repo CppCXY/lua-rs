@@ -932,25 +932,34 @@ fn compile_assign_stat(c: &mut Compiler, assign: &LuaAssignStat) -> Result<(), S
         expdesc::ExpDesc::new_void()
     };
 
-    // 参考lparser.c:1514-1520
-    if nexps != nvars {
-        adjust_assign(c, nvars, nexps, &mut last_expr);
-    } else {
-        // 当nexps == nvars时，使用setoneret: 只关闭最后一个表达式
-        // 参考lparser.c:1518-1519
-        // 注意：这里不能调用exp2reg，因为它会生成MOVE指令
-        // 应该使用exp2nextreg，让值自然分配到下一个寄存器（base_reg）
-        use exp2reg;
-        exp2reg::exp2nextreg(c, &mut last_expr);
+    // 参考lparser.c:1390-1402
+    // 关键：如果nexps == nvars，直接对每个变量调用store_var，传递对应的表达式
+    // 这样可以让store_var决定使用常量还是寄存器（对齐官方实现）
+    if nexps == nvars {
+        // 参考lparser.c:1394-1397
+        // 当变量数和表达式数相等时，直接调用store_var
+        exp2reg::set_one_ret(c, &mut last_expr);
+        
+        // 为已处理的表达式和最后一个表达式调用store_var
+        for (i, var_desc) in var_descs.iter().enumerate() {
+            if i < expr_descs.len() {
+                // 使用已经放到寄存器的表达式
+                let mut e = expr_descs[i].clone();
+                exp2reg::store_var(c, &var_desc, &mut e);
+            } else {
+                // 最后一个变量使用last_expr
+                exp2reg::store_var(c, &var_desc, &mut last_expr);
+            }
+        }
+        return Ok(());
     }
 
-    // 现在执行赋值
-    // 参考lparser.c:1467-1484 (assignment函数) 和 lparser.c:1481-1484 (storevartop)
+    // nexps != nvars的情况：需要adjust_assign
+    // 参考lparser.c:1392-1393和1400-1401
+    adjust_assign(c, nvars, nexps, &mut last_expr);
     
-    // 关键理解：
-    // 1. adjust_assign之后，栈上有nvars个值在base_reg开始的连续寄存器中
-    // 2. 官方通过递归restassign，每次只处理一个变量
-    // 3. 我们必须直接生成指令，不能调用store_var（它会分配新寄存器并破坏freereg）
+    // 现在执行赋值
+    // adjust_assign之后，栈上有nvars个值在base_reg开始的连续寄存器中
     
     // 按顺序赋值给变量
     for (i, var_desc) in var_descs.iter().enumerate() {

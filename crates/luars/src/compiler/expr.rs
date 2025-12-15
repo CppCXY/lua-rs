@@ -446,9 +446,27 @@ fn try_const_folding(op: OpCode, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
 fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     use super::helpers;
 
-    let o2 = super::exp2reg::exp2anyreg(c, e2);
+    // 左操作数总是要放到寄存器
     let o1 = super::exp2reg::exp2anyreg(c, e1);
+    
+    // 检查是否可以使用K后缀指令（对齐Lua 5.4 codebinarith）
+    let (final_op, o2, use_k) = if can_use_k_variant(op) {
+        // 检查右操作数是否为常量
+        if let Some(k) = try_get_k_value(c, e2) {
+            // 使用K后缀指令，o2是常量索引
+            (get_k_variant(op), k, true)
+        } else {
+            // 右操作数不是常量，使用普通指令
+            let o2 = super::exp2reg::exp2anyreg(c, e2);
+            (op, o2, false)
+        }
+    } else {
+        // 不支持K变体，右操作数必须在寄存器
+        let o2 = super::exp2reg::exp2anyreg(c, e2);
+        (op, o2, false)
+    };
 
+    // 释放表达式
     if o1 > o2 {
         super::exp2reg::free_exp(c, e1);
         super::exp2reg::free_exp(c, e2);
@@ -457,38 +475,103 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
         super::exp2reg::free_exp(c, e1);
     }
 
-    e1.info = helpers::code_abc(c, op, 0, o1, o2) as u32;
+    // 生成指令
+    e1.info = helpers::code_abck(c, final_op, 0, o1, o2, use_k) as u32;
     e1.kind = ExpKind::VReloc;
     
     // 生成元方法标记指令（对齐 Lua 5.4 codeMMBin）
-    // MMBIN 用于标记可能触发元方法的二元操作
-    code_mmbin(c, op, o1, o2);
+    if use_k {
+        code_mmbink(c, final_op, o1, o2);
+    } else {
+        code_mmbin(c, final_op, o1, o2);
+    }
+}
+
+/// 检查操作是否支持K后缀变体
+fn can_use_k_variant(op: OpCode) -> bool {
+    matches!(
+        op,
+        OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | 
+        OpCode::IDiv | OpCode::Mod | OpCode::Pow |
+        OpCode::BAnd | OpCode::BOr | OpCode::BXor |
+        OpCode::Shl | OpCode::Shr
+    )
+}
+
+/// 获取K后缀操作码
+fn get_k_variant(op: OpCode) -> OpCode {
+    match op {
+        OpCode::Add => OpCode::AddK,
+        OpCode::Sub => OpCode::SubK,
+        OpCode::Mul => OpCode::MulK,
+        OpCode::Div => OpCode::DivK,
+        OpCode::IDiv => OpCode::IDivK,
+        OpCode::Mod => OpCode::ModK,
+        OpCode::Pow => OpCode::PowK,
+        OpCode::BAnd => OpCode::BAndK,
+        OpCode::BOr => OpCode::BOrK,
+        OpCode::BXor => OpCode::BXorK,
+        OpCode::Shl => OpCode::ShlI,  // 注意：移位用整数立即数
+        OpCode::Shr => OpCode::ShrI,
+        _ => op,
+    }
+}
+
+/// 尝试获取表达式的常量值索引
+fn try_get_k_value(c: &mut Compiler, e: &mut ExpDesc) -> Option<u32> {
+    match e.kind {
+        ExpKind::VK => Some(e.info),  // 已经是常量表索引
+        ExpKind::VKInt => {
+            // 整数常量，添加到常量表
+            Some(super::helpers::int_k(c, e.ival))
+        }
+        ExpKind::VKFlt => {
+            // 浮点常量，添加到常量表
+            Some(super::helpers::number_k(c, e.nval))
+        }
+        _ => None,
+    }
 }
 
 /// 生成元方法二元操作标记（对齐 luaK_codeMMBin in lcode.c）
 fn code_mmbin(c: &mut Compiler, op: OpCode, o1: u32, o2: u32) {
+    let mm = get_mm_index(op);
+    if mm > 0 {
+        use super::helpers::code_abc;
+        code_abc(c, OpCode::MmBin, o1, o2, mm);
+    }
+}
+
+/// 生成带常量的元方法二元操作标记（对齐 luaK_codeMMBinK）
+fn code_mmbink(c: &mut Compiler, op: OpCode, o1: u32, k: u32) {
+    let mm = get_mm_index(op);
+    if mm > 0 {
+        use super::helpers::code_abc;
+        code_abc(c, OpCode::MmBinK, o1, k, mm);
+    }
+}
+
+/// 获取元方法索引
+fn get_mm_index(op: OpCode) -> u32 {
     // 将OpCode映射到元方法ID（参考Lua 5.4 ltm.h中的TM enum）
     // ltm.h定义：TM_INDEX(0), TM_NEWINDEX(1), TM_GC(2), TM_MODE(3), TM_LEN(4), TM_EQ(5),
     // TM_ADD(6), TM_SUB(7), TM_MUL(8), TM_MOD(9), TM_POW(10), TM_DIV(11), TM_IDIV(12),
     // TM_BAND(13), TM_BOR(14), TM_BXOR(15), TM_SHL(16), TM_SHR(17), ...
-    let mm = match op {
-        OpCode::Add => 6,      // TM_ADD
-        OpCode::Sub => 7,      // TM_SUB
-        OpCode::Mul => 8,      // TM_MUL
-        OpCode::Mod => 9,      // TM_MOD
-        OpCode::Pow => 10,     // TM_POW
-        OpCode::Div => 11,     // TM_DIV
-        OpCode::IDiv => 12,    // TM_IDIV
-        OpCode::BAnd => 13,    // TM_BAND
-        OpCode::BOr => 14,     // TM_BOR
-        OpCode::BXor => 15,    // TM_BXOR
-        OpCode::Shl => 16,     // TM_SHL
-        OpCode::Shr => 17,     // TM_SHR
-        _ => return,           // 其他操作不需要MMBIN
-    };
-    
-    use super::helpers::code_abc;
-    code_abc(c, OpCode::MmBin, o1, o2, mm);
+    match op {
+        OpCode::Add | OpCode::AddK => 6,      // TM_ADD
+        OpCode::Sub | OpCode::SubK => 7,      // TM_SUB
+        OpCode::Mul | OpCode::MulK => 8,      // TM_MUL
+        OpCode::Mod | OpCode::ModK => 9,      // TM_MOD
+        OpCode::Pow | OpCode::PowK => 10,     // TM_POW
+        OpCode::Div | OpCode::DivK => 11,     // TM_DIV
+        OpCode::IDiv | OpCode::IDivK => 12,    // TM_IDIV
+        OpCode::BAnd | OpCode::BAndK => 13,    // TM_BAND
+        OpCode::BOr | OpCode::BOrK => 14,     // TM_BOR
+        OpCode::BXor | OpCode::BXorK => 15,    // TM_BXOR
+        OpCode::Shl | OpCode::ShlI => 16,     // TM_SHL
+        OpCode::Shr | OpCode::ShrI => 17,     // TM_SHR
+        _ => 0,                               // 其他操作不需要元方法
+    }
 }
 
 /// 生成比较指令（对齐 codecomp）
@@ -734,7 +817,9 @@ fn exp2rk(c: &mut Compiler, e: &mut ExpDesc) -> bool {
 }
 
 /// Code ABRK instruction format (对齐codeABRK)
-fn code_abrk(c: &mut Compiler, op: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
+/// 这是官方Lua中codeABRK的实现，用于生成SETTABUP/SETFIELD/SETI/SETTABLE等指令
+/// 它会尝试将表达式转换为常量，如果失败则放到寄存器
+pub(crate) fn code_abrk(c: &mut Compiler, op: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
     let k = exp2rk(c, ec);
     let c_val = ec.info;
     helpers::code_abck(c, op, a, b, c_val, k);

@@ -361,26 +361,26 @@ pub(crate) fn store_var(c: &mut Compiler, var: &ExpDesc, ex: &mut ExpDesc) {
             // Store to indexed upvalue: upval[k] = v
             // Used for global variable assignment like _ENV[x] = v
             // SETTABUP A B C k: UpValue[A][K[B]] := RK(C)
-            let e = exp2anyreg(c, ex);
-            code_abck(c, OpCode::SetTabUp, var.ind.t, var.ind.idx, e, true);
+            // 使用code_abrk尝试将值转换为常量（对齐官方luaK_storevar）
+            super::expr::code_abrk(c, OpCode::SetTabUp, var.ind.t, var.ind.idx, ex);
             free_exp(c, ex);
         }
         ExpKind::VIndexed => {
             // Store to table: t[k] = v (对齐luac SETTABLE)
-            let val = exp2anyreg(c, ex);
-            code_abc(c, OpCode::SetTable, var.ind.t, var.ind.idx, val);
+            // 使用code_abrk尝试将值转换为常量（对齐官方luaK_storevar）
+            super::expr::code_abrk(c, OpCode::SetTable, var.ind.t, var.ind.idx, ex);
             free_exp(c, ex);
         }
         ExpKind::VIndexStr => {
             // Store to table with string key: t.field = v (对齐luac SETFIELD)
-            let val = exp2anyreg(c, ex);
-            code_abc(c, OpCode::SetField, var.ind.t, var.ind.idx, val);
+            // 使用code_abrk尝试将值转换为常量（对齐官方luaK_storevar）
+            super::expr::code_abrk(c, OpCode::SetField, var.ind.t, var.ind.idx, ex);
             free_exp(c, ex);
         }
         ExpKind::VIndexI => {
             // Store to table with integer key: t[i] = v (对齐luac SETI)
-            let val = exp2anyreg(c, ex);
-            code_abc(c, OpCode::SetI, var.ind.t, var.ind.idx, val);
+            // 使用code_abrk尝试将值转换为常量（对齐官方luaK_storevar）
+            super::expr::code_abrk(c, OpCode::SetI, var.ind.t, var.ind.idx, ex);
             free_exp(c, ex);
         }
         ExpKind::VNonReloc | ExpKind::VReloc => {
