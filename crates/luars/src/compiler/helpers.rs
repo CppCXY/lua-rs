@@ -34,7 +34,14 @@ pub(crate) fn code_abc(c: &mut Compiler, op: OpCode, a: u32, b: u32, bc: u32) ->
 
 /// Emit an ABCk instruction (对齐luaK_codeABCk)
 pub(crate) fn code_abck(c: &mut Compiler, op: OpCode, a: u32, b: u32, bc: u32, k: bool) -> usize {
-    let instr = Instruction::create_abck(op, a, b, bc, k);
+    // 对齐官方优化：TESTSET with A=NO_REG 转换为 TEST
+    // 这发生在纯条件判断中（如 if cond then），不需要保存测试值
+    let (final_op, final_a) = if op == OpCode::TestSet && a == NO_REG {
+        (OpCode::Test, b)  // TEST 使用 B 作为测试寄存器
+    } else {
+        (op, a)
+    };
+    let instr = Instruction::create_abck(final_op, final_a, b, bc, k);
     code(c, instr)
 }
 
@@ -388,7 +395,9 @@ pub(crate) fn fix_for_jump(c: &mut Compiler, pc: usize, dest: usize, back: bool)
 
 /// Generate conditional jump (对齐 condjump)
 pub(crate) fn cond_jump(c: &mut Compiler, op: OpCode, a: u32, b: u32) -> usize {
-    code_abc(c, op, a, b, 0)
+    // 对齐官方 lcode.c condjump: 生成条件指令后跟JMP
+    code_abc(c, op, a, b, 0);
+    jump(c)  // 返回 JMP 指令的位置
 }
 
 /// Get instruction at position

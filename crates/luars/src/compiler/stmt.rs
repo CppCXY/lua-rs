@@ -332,7 +332,7 @@ fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> 
     // Compile main if condition and block
     if let Some(ref cond) = if_stat.get_condition_expr() {
         let mut v = expr::expr(c, cond)?;
-        exp2reg::goiffalse(c, &mut v);
+        exp2reg::goiftrue(c, &mut v);  // 对齐官方：skip over block if condition is false
         let jf = v.f;  // false list: jump if condition is false
 
         enter_block(c, false)?;
@@ -355,7 +355,7 @@ fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> 
     for elseif in if_stat.get_else_if_clause_list() {
         if let Some(ref cond) = elseif.get_condition_expr() {
             let mut v = expr::expr(c, cond)?;
-            exp2reg::goiffalse(c, &mut v);
+            exp2reg::goiftrue(c, &mut v);  // 对齐官方
             let jf = v.f;  // false list: jump if condition is false
 
             enter_block(c, false)?;

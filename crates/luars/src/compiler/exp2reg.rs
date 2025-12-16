@@ -308,7 +308,7 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
     use super::helpers;
     use crate::lua_vm::Instruction;
     
-    // Optimization: if previous instruction is NOT, remove it and keep condition
+    // Optimization: if previous instruction is NOT, remove it and invert condition
     // This matches luac behavior in lcode.c:1117-1129
     if e.kind == ExpKind::VReloc {
         let pc = e.info as usize;
@@ -320,12 +320,9 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
                 let reg = Instruction::get_b(inst);
                 // Remove the NOT instruction (对齐removelastinstruction)
                 c.chunk.code.pop();
-                // Also need to update line info if we track it
-                // Generate TEST and JMP
+                // Generate TEST with inverted condition and JMP
                 // 对齐官方 lcode.c:1122: return condjump(fs, OP_TEST, GETARG_B(ie), 0, 0, !cond);
-                // 注意：官方的 !cond 是因为官方的 cond 语义与我们不同
-                // 经过测试，我们应该保持 cond 不变
-                code_abck(c, OpCode::Test, reg, 0, 0, cond);
+                code_abck(c, OpCode::Test, reg, 0, 0, !cond);
                 return jump(c);
             }
         }
