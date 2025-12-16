@@ -229,8 +229,9 @@ pub(crate) fn ret(c: &mut Compiler, first: u32, nret: i32) {
     };
     // 所有RETURN变体都应该正确设置A字段（对齐Lua C lcode.c中luaK_ret）
     // Return0和Return1只是Return的优化形式，A字段含义相同
+    // 注意：RETURN指令的C字段固定为1（表示final return），k位固定为1
     if matches!(op, OpCode::Return) {
-        code_abc(c, op, first, (nret + 1) as u32, 0);
+        code_abck(c, op, first, (nret + 1) as u32, 1, true);
     } else if matches!(op, OpCode::Return1) {
         code_abc(c, op, first, 0, 0);
     } else {

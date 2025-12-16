@@ -269,7 +269,7 @@ impl Instruction {
     pub fn create_abck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> u32 {
         ((op as u32) << Self::POS_OP)
             | (a << Self::POS_A)
-            | (if k { 1 } else { 0 } << Self::POS_K)
+            | ((if k { 1 } else { 0 }) << Self::POS_K)
             | (b << Self::POS_B)
             | (c << Self::POS_C)
     }
@@ -436,5 +436,100 @@ mod tests {
 
         let jmp_pos = Instruction::create_sj(OpCode::Jmp, 500);
         assert_eq!(Instruction::get_sj(jmp_pos), 500);
+    }
+
+    #[test]
+    fn test_bit_layout_detailed() {
+        // Test iABC format with k bit at position 15
+        let instr = Instruction::create_abck(OpCode::Add, 10, 20, 30, true);
+        
+        // Manual bit extraction to verify positions
+        let op_bits = instr & 0x7F;  // bits 0-6
+        let a_bits = (instr >> 7) & 0xFF;  // bits 7-14
+        let k_bits = (instr >> 15) & 0x1;  // bit 15
+        let b_bits = (instr >> 16) & 0xFF;  // bits 16-23
+        let c_bits = (instr >> 24) & 0xFF;  // bits 24-31
+        
+        assert_eq!(op_bits, OpCode::Add as u32);
+        assert_eq!(a_bits, 10);
+        assert_eq!(k_bits, 1);
+        assert_eq!(b_bits, 20);
+        assert_eq!(c_bits, 30);
+        
+        // Test with k=false
+        let instr2 = Instruction::create_abck(OpCode::Add, 5, 15, 25, false);
+        let k2_bits = (instr2 >> 15) & 0x1;
+        assert_eq!(k2_bits, 0);
+        assert_eq!(Instruction::get_k(instr2), false);
+    }
+
+    #[test]
+    fn test_position_constants() {
+        // Verify all position constants match Lua 5.4 spec
+        assert_eq!(Instruction::POS_OP, 0);
+        assert_eq!(Instruction::POS_A, 7);
+        assert_eq!(Instruction::POS_K, 15);
+        assert_eq!(Instruction::POS_B, 16);
+        assert_eq!(Instruction::POS_C, 24);
+        assert_eq!(Instruction::POS_BX, 15);  // BX starts at K position
+    }
+
+    #[test]
+    fn test_size_constants() {
+        // Verify all size constants match Lua 5.4 spec
+        assert_eq!(Instruction::SIZE_OP, 7);
+        assert_eq!(Instruction::SIZE_A, 8);
+        assert_eq!(Instruction::SIZE_K, 1);
+        assert_eq!(Instruction::SIZE_B, 8);
+        assert_eq!(Instruction::SIZE_C, 8);
+        assert_eq!(Instruction::SIZE_BX, 17);  // K(1) + B(8) + C(8)
+        assert_eq!(Instruction::SIZE_AX, 25);  // BX(17) + A(8)
+        assert_eq!(Instruction::SIZE_SJ, 25);  // same as AX
+    }
+
+    #[test]
+    fn test_offset_constants() {
+        // Verify offset constants for signed fields
+        assert_eq!(Instruction::OFFSET_SB, 128);
+        assert_eq!(Instruction::OFFSET_SBX, 65535);
+        assert_eq!(Instruction::OFFSET_SJ, 16777215);
+        assert_eq!(Instruction::OFFSET_SC, 127);
+    }
+
+    #[test]
+    fn test_signed_b_field() {
+        // Test sB field (signed B, range -128 to 127)
+        let pos_instr = Instruction::create_abc(OpCode::EqI, 0, 128 + 10, 0);
+        assert_eq!(Instruction::get_sb(pos_instr), 10);
+        
+        let neg_instr = Instruction::create_abc(OpCode::EqI, 0, 128 - 10, 0);
+        assert_eq!(Instruction::get_sb(neg_instr), -10);
+        
+        let zero_instr = Instruction::create_abc(OpCode::EqI, 0, 128, 0);
+        assert_eq!(Instruction::get_sb(zero_instr), 0);
+    }
+
+    #[test]
+    fn test_signed_c_field() {
+        // Test sC field (signed C, range -127 to 128)
+        let pos_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127 + 10);
+        assert_eq!(Instruction::get_sc(pos_instr), 10);
+        
+        let neg_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127 - 10);
+        assert_eq!(Instruction::get_sc(neg_instr), -10);
+        
+        let zero_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127);
+        assert_eq!(Instruction::get_sc(zero_instr), 0);
+    }
+
+    #[test]
+    fn test_return_instruction_k_bit() {
+        // RETURN instruction should have k=1 for final return
+        let ret = Instruction::create_abck(OpCode::Return, 12, 2, 1, true);
+        assert_eq!(Instruction::get_opcode(ret), OpCode::Return);
+        assert_eq!(Instruction::get_a(ret), 12);
+        assert_eq!(Instruction::get_b(ret), 2);
+        assert_eq!(Instruction::get_c(ret), 1);
+        assert_eq!(Instruction::get_k(ret), true);
     }
 }
