@@ -645,18 +645,30 @@ fn postfix_op(
         }
         BinaryOperator::OpConcat => {
             // 字符串连接: v1 .. v2
+            // 关键：检查 v1（左操作数）是否是 CONCAT，而不是 v2
+            // 因为 AST 遍历时，对于 (a .. b) .. c，先处理左边生成 CONCAT，再处理右边
             super::exp2reg::exp2val(c, v2);
-            if v2.kind == ExpKind::VReloc && helpers::get_op(c, v2.info) == OpCode::Concat {
-                // 连接链：v1 .. v2 .. v3 => CONCAT A B C
-                debug_assert!(v1.info == helpers::getarg_b(c, v2.info) as u32 - 1);
-                super::exp2reg::free_exp(c, v1);
-                helpers::setarg_b(c, v2.info, v1.info);
-                v1.kind = ExpKind::VReloc;
-                v1.info = v2.info;
-            } else {
-                // 简单连接
+            if v1.kind == ExpKind::VReloc && helpers::get_op(c, v1.info) == OpCode::Concat {
+                // 合并优化：左边是 CONCAT，增加 B 字段的值数量
+                // v1 是 CONCAT A B，现在要加上 v2，所以 B += 1
                 super::exp2reg::exp2nextreg(c, v2);
-                code_bin_arith(c, OpCode::Concat, v1, v2);
+                let concat_pc = v1.info;
+                let old_b = helpers::getarg_b(c, concat_pc);
+                helpers::setarg_b(c, concat_pc, old_b + 1);
+                // v1 保持不变（仍然指向同一条 CONCAT 指令）
+            } else {
+                // 生成新的 CONCAT：A=v1寄存器, B=2（连接2个值）
+                super::exp2reg::exp2nextreg(c, v2);
+                let reg1 = v1.info;
+                let reg2 = v2.info;
+                // 确保寄存器连续（infix 阶段已经 exp2nextreg）
+                debug_assert!(reg2 == reg1 + 1, "CONCAT registers not consecutive: {} and {}", reg1, reg2);
+                // 释放寄存器
+                super::exp2reg::free_exp(c, v2);
+                super::exp2reg::free_exp(c, v1);
+                // 生成 CONCAT A 2
+                v1.info = helpers::code_abc(c, OpCode::Concat, reg1, 2, 0) as u32;
+                v1.kind = ExpKind::VReloc;
             }
         }
         // 算术运算
