@@ -331,7 +331,8 @@ fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> 
     // Compile main if condition and block
     if let Some(ref cond) = if_stat.get_condition_expr() {
         let mut v = expr::expr(c, cond)?;
-        let jf = exp2reg::goiffalse(c, &mut v);
+        exp2reg::goiffalse(c, &mut v);
+        let jf = v.f;  // false list: jump if condition is false
 
         enter_block(c, false)?;
         if let Some(ref block) = if_stat.get_block() {
@@ -353,7 +354,8 @@ fn compile_if_stat(c: &mut Compiler, if_stat: &LuaIfStat) -> Result<(), String> 
     for elseif in if_stat.get_else_if_clause_list() {
         if let Some(ref cond) = elseif.get_condition_expr() {
             let mut v = expr::expr(c, cond)?;
-            let jf = exp2reg::goiffalse(c, &mut v);
+            exp2reg::goiffalse(c, &mut v);
+            let jf = v.f;  // false list: jump if condition is false
 
             enter_block(c, false)?;
             if let Some(ref block) = elseif.get_block() {
@@ -398,7 +400,8 @@ fn compile_while_stat(c: &mut Compiler, while_stat: &LuaWhileStat) -> Result<(),
     let mut v = expr::expr(c, &cond_expr)?;
 
     // Generate conditional jump (jump if false)
-    let condexit = exp2reg::goiffalse(c, &mut v);
+    exp2reg::goiffalse(c, &mut v);
+    let condexit = v.f;  // false list: exit loop if condition is false
 
     // Enter loop block
     enter_block(c, true)?;
@@ -455,7 +458,8 @@ fn compile_repeat_stat(c: &mut Compiler, repeat_stat: &LuaRepeatStat) -> Result<
         .get_condition_expr()
         .ok_or("repeat statement missing condition")?;
     let mut v = expr::expr(c, &cond_expr)?;
-    let condexit = exp2reg::goiftrue(c, &mut v);
+    exp2reg::goiftrue(c, &mut v);
+    let condexit = v.t;  // true list: exit loop if condition is true
 
     // Leave inner scope
     leave_block(c)?;

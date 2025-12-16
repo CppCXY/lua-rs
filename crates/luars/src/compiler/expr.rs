@@ -632,14 +632,14 @@ fn postfix_op(
         BinaryOperator::OpAnd => {
             // and: v1 and v2
             debug_assert!(v1.t == helpers::NO_JUMP); // 左操作数为 true 时继续
-            super::exp2reg::discharge_2any_reg(c, v2);
+            // 官方实现：不discharge，直接连接跳转列表
             helpers::concat(c, &mut v2.f, v1.f);
             *v1 = v2.clone();
         }
         BinaryOperator::OpOr => {
             // or: v1 or v2
             debug_assert!(v1.f == helpers::NO_JUMP); // 左操作数为 false 时继续
-            super::exp2reg::discharge_2any_reg(c, v2);
+            // 官方实现：不discharge，直接连接跳转列表
             helpers::concat(c, &mut v2.t, v1.t);
             *v1 = v2.clone();
         }

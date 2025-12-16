@@ -168,8 +168,41 @@ pub(crate) fn exp2reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
     if e.kind == ExpKind::VJmp {
         concat(c, &mut e.t, e.info as i32);
     }
-    if has_jumps(e) {
-        // TODO: Handle jump lists for boolean expressions
+    let has_j = has_jumps(e);
+    if has_j {
+        let mut p_f = NO_JUMP as usize;  // position of an eventual LOAD false
+        let mut p_t = NO_JUMP as usize;  // position of an eventual LOAD true
+        
+        let need_t = need_value(c, e.t);
+        let need_f = need_value(c, e.f);
+        
+        // Check if we need to generate load instructions for tests that don't produce values
+        if need_t || need_f {
+            // Generate a jump to skip the boolean loading instructions if expression is not a test
+            let fj = if e.kind == ExpKind::VJmp {
+                NO_JUMP as usize
+            } else {
+                jump(c) as usize
+            };
+            
+            // Generate LOADFALSE + skip next instruction
+            p_f = code_abc(c, OpCode::LoadFalse, reg, 0, 0) as usize;
+            code_abc(c, OpCode::Jmp, 0, 1, 0);  // skip next instruction
+            
+            // Generate LOADTRUE
+            p_t = code_abc(c, OpCode::LoadTrue, reg, 0, 0) as usize;
+            
+            // Patch the jump around booleans
+            patch_to_here(c, fj as i32);
+        }
+        
+        let final_label = get_label(c);
+        
+        // Patch false list: TESTSETs jump to final with value in reg, others jump to p_f (LOADFALSE)
+        patch_list_aux(c, e.f, final_label, reg, p_f);
+        
+        // Patch true list: TESTSETs jump to final with value in reg, others jump to p_t (LOADTRUE)
+        patch_list_aux(c, e.t, final_label, reg, p_t);
     }
     e.f = NO_JUMP;
     e.t = NO_JUMP;
@@ -223,52 +256,42 @@ pub(crate) fn has_jumps(e: &ExpDesc) -> bool {
 }
 
 /// Generate jump if expression is false (对齐luaK_goiffalse)
-pub(crate) fn goiffalse(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
+pub(crate) fn goiffalse(c: &mut Compiler, e: &mut ExpDesc) {
     discharge_vars(c, e);
-    match e.kind {
+    let pc = match e.kind {
         ExpKind::VJmp => {
-            // Already a jump - negate condition
-            negate_condition(c, e);
-            e.f
+            e.info as i32  // already a jump
         }
         ExpKind::VNil | ExpKind::VFalse => {
-            // Always false - no jump needed
-            NO_JUMP
+            NO_JUMP  // always false; do nothing
         }
         _ => {
-            // Generate test and jump（对齐Lua C中的luaK_goiffalse）
-            // jumponcond handles NOT optimization and discharge2anyreg
-            let jmp = jump_on_cond(c, e, false);
-            free_exp(c, e);
-            jmp as i32
+            jump_on_cond(c, e, true) as i32  // jump if true
         }
-    }
+    };
+    concat(c, &mut e.t, pc);  // insert new jump in 't' list
+    patch_to_here(c, e.f);  // false list jumps to here (to go through)
+    e.f = NO_JUMP;
 }
 
 /// Generate jump if expression is true (对齐luaK_goiftrue)
-pub(crate) fn goiftrue(c: &mut Compiler, e: &mut ExpDesc) -> i32 {
+pub(crate) fn goiftrue(c: &mut Compiler, e: &mut ExpDesc) {
     discharge_vars(c, e);
-    match e.kind {
+    let pc = match e.kind {
         ExpKind::VJmp => {
-            // Already a jump - keep condition
-            e.t
+            negate_condition(c, e);  // jump when it is false
+            e.info as i32  // save jump position
         }
-        ExpKind::VNil | ExpKind::VFalse => {
-            // Always false - jump unconditionally
-            jump(c) as i32
-        }
-        ExpKind::VTrue | ExpKind::VK | ExpKind::VKFlt | ExpKind::VKInt | ExpKind::VKStr => {
-            // Always true - no jump
-            NO_JUMP
+        ExpKind::VK | ExpKind::VKFlt | ExpKind::VKInt | ExpKind::VKStr | ExpKind::VTrue => {
+            NO_JUMP  // always true; do nothing
         }
         _ => {
-            // Generate test and jump（对齐Lua C中的luaK_goiftrue）
-            // jumponcond handles NOT optimization and discharge2anyreg
-            let jmp = jump_on_cond(c, e, true);
-            free_exp(c, e);
-            jmp as i32
+            jump_on_cond(c, e, false) as i32  // jump when false
         }
-    }
+    };
+    concat(c, &mut e.f, pc);  // insert new jump in false list
+    patch_to_here(c, e.t);  // true list jumps to here (to go through)
+    e.t = NO_JUMP;
 }
 
 /// Negate condition of jump (对齐negatecondition)
@@ -305,15 +328,13 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
         }
     }
     
-    // Normal case: discharge to register, then generate TEST and JMP
-    // lcode.c:1126-1128 shows luac can use either TEST or TESTSET
-    // But observation shows luac prefers TEST for most cases
-    // TESTSET is only used when explicitly needed for assignment
+    // Normal case: discharge to register, then generate TESTSET and JMP
+    // 对齐lcode.c:1126-1128中的jumponcond实现
+    // 生成TESTSET指令，A字段设为NO_REG（255），后续在exp2reg中patch
     discharge2anyreg(c, e);
     let reg = e.info;
-    // Use TEST instruction: TEST A k
-    // k is the condition (true = test if true, false = test if false)
-    code_abck(c, OpCode::Test, reg, 0, 0, cond);
+    // Generate TESTSET with A=NO_REG, will be patched later in exp2reg
+    code_abck(c, OpCode::TestSet, NO_REG, reg, 0, cond);
     jump(c)
 }
 
@@ -516,5 +537,88 @@ pub(crate) fn discharge_2any_reg(c: &mut Compiler, e: &mut ExpDesc) {
     if e.kind != ExpKind::VNonReloc {
         reserve_regs(c, 1);
         discharge2reg(c, e, c.freereg - 1);
+    }
+}
+
+/// Check if jump list needs values (对齐need_value)
+/// Returns true if any instruction in the jump list is not a TESTSET
+fn need_value(c: &Compiler, mut list: i32) -> bool {
+    let orig_list = list;
+    let mut count = 0;
+    while list != NO_JUMP {
+        let i = get_jump_control(c, list as usize);
+        let opcode = Instruction::get_opcode(i);
+        if opcode != OpCode::TestSet {
+            return true;
+        }
+        count += 1;
+        list = get_jump(c, list as usize);
+    }
+    false
+}
+
+/// Patch TESTSET instruction or convert to TEST (对齐patchtestreg)
+/// Returns true if instruction was TESTSET and was patched
+fn patch_test_reg(c: &mut Compiler, node: i32, reg: u32) -> bool {
+    let i_ptr = get_jump_control_mut(c, node as usize);
+    let opcode = Instruction::get_opcode(*i_ptr);
+    let old_instr = *i_ptr;
+    
+    if opcode != OpCode::TestSet {
+        return false;
+    }
+    
+    let b = Instruction::get_b(*i_ptr);
+    let old_a = Instruction::get_a(*i_ptr);
+    if reg != NO_REG && reg != b {
+        // Set destination register
+        Instruction::set_a(i_ptr, reg);
+    } else {
+        // No register to put value or register already has the value;
+        // change instruction to simple TEST
+        let k = Instruction::get_k(*i_ptr);
+        *i_ptr = Instruction::create_abck(OpCode::Test, b, 0, 0, k);
+    }
+    true
+}
+
+/// Patch jump list with two targets (对齐patchlistaux)
+/// Tests producing values jump to vtarget (and put values in reg)
+/// Other tests jump to dtarget
+fn patch_list_aux(c: &mut Compiler, mut list: i32, vtarget: usize, reg: u32, dtarget: usize) {
+    let mut count = 0;
+    while list != NO_JUMP {
+        let next = get_jump(c, list as usize);
+        if patch_test_reg(c, list, reg) {
+            fix_jump(c, list as usize, vtarget);
+        } else {
+            fix_jump(c, list as usize, dtarget);
+        }
+        count += 1;
+        list = next;
+    }
+}
+
+/// Get mutable pointer to jump control instruction
+fn get_jump_control_mut<'a>(c: &'a mut Compiler, pc: usize) -> &'a mut u32 {
+    // 官方lcode.h:85: #define getjumpcontrol(fs,pc)	(&(fs)->f->code[(pc)-1])
+    // 如果pc指向JMP指令，返回前一条指令（TESTSET等控制指令）
+    // 否则pc本身就是控制指令（如某些不需要JMP的情况）
+    if pc >= 1 && Instruction::get_opcode(c.chunk.code[pc]) == OpCode::Jmp {
+        &mut c.chunk.code[pc - 1]
+    } else {
+        &mut c.chunk.code[pc]
+    }
+}
+
+/// Get jump control instruction (对齐getjumpcontrol)
+fn get_jump_control(c: &Compiler, pc: usize) -> u32 {
+    // 官方lcode.h:85: #define getjumpcontrol(fs,pc)	(&(fs)->f->code[(pc)-1])
+    // 如果pc指向JMP指令，返回前一条指令（TESTSET等控制指令）
+    // 否则pc本身就是控制指令
+    if pc >= 1 && Instruction::get_opcode(c.chunk.code[pc]) == OpCode::Jmp {
+        c.chunk.code[pc - 1]
+    } else {
+        c.chunk.code[pc]
     }
 }

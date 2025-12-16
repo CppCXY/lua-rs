@@ -6,6 +6,9 @@ use crate::lua_vm::{Instruction, OpCode};
 /// NO_JUMP constant - invalid jump position
 pub const NO_JUMP: i32 = -1;
 
+/// NO_REG constant - no specific register (used for TESTSET patching)
+pub const NO_REG: u32 = 255;
+
 /// Maximum number of registers in a Lua function
 const MAXREGS: u32 = 255;
 
@@ -76,7 +79,7 @@ pub(crate) fn fix_jump(c: &mut Compiler, pc: usize, dest: usize) {
 }
 
 /// Get jump destination (对齐getjump)
-fn get_jump(c: &Compiler, pc: usize) -> i32 {
+pub(crate) fn get_jump(c: &Compiler, pc: usize) -> i32 {
     let instr = c.chunk.code[pc];
     let offset = Instruction::get_sj(instr);
     if offset == NO_JUMP {
