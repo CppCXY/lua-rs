@@ -1010,8 +1010,10 @@ fn compile_table_constructor(
     let reg = c.freereg;
     helpers::reserve_regs(c, 1);
 
-    // Generate NEWTABLE instruction
+    // Generate NEWTABLE instruction (对齐官方实现：立即生成 EXTRAARG 占位)
     let pc = helpers::code_abc(c, crate::lua_vm::OpCode::NewTable, reg, 0, 0);
+    // 立即生成 EXTRAARG 占位（官方总是生成 NEWTABLE + EXTRAARG 对）
+    helpers::code_ax(c, crate::lua_vm::OpCode::ExtraArg, 0);
 
     // Get table fields
     let fields = table_expr.get_fields();
@@ -1171,26 +1173,9 @@ fn compile_table_constructor(
         );
     }
 
-    // Update NEWTABLE instruction with size hints
-    // Patch the instruction with proper array/hash size hints
-    let arr_size = if narr < 1 {
-        0
-    } else {
-        (narr as f64).log2().ceil() as u32
-    };
-    let hash_size = if nhash < 1 {
-        0
-    } else {
-        (nhash as f64).log2().ceil() as u32
-    };
-
-    // Update the NEWTABLE instruction
-    c.chunk.code[pc] = Instruction::create_abc(
-        crate::lua_vm::OpCode::NewTable,
-        reg,
-        arr_size.min(255),
-        hash_size.min(255),
-    );
+    // Update NEWTABLE instruction with size hints and EXTRAARG (对齐luaK_settablesize)
+    // 官方实现：总是生成 NEWTABLE + EXTRAARG 两条指令
+    helpers::set_table_size(c, pc, reg, narr, nhash);
 
     // Reset free register
     c.freereg = reg + 1;

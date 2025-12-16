@@ -50,6 +50,12 @@ pub(crate) fn code_asbx(c: &mut Compiler, op: OpCode, a: u32, sbx: i32) -> usize
     code(c, instr)
 }
 
+/// Emit an Ax instruction (对齐codeAx / CREATE_Ax)
+pub(crate) fn code_ax(c: &mut Compiler, op: OpCode, ax: u32) -> usize {
+    let instr = Instruction::create_ax(op, ax);
+    code(c, instr)
+}
+
 /// Emit an sJ instruction (对齐codesJ)
 pub(crate) fn code_sj(c: &mut Compiler, op: OpCode, sj: i32) -> usize {
     let instr = Instruction::create_sj(op, sj);
@@ -274,6 +280,30 @@ pub(crate) fn finish(c: &mut Compiler) {
             c.chunk.code[i] = instr;
         }
     }
+}
+
+/// Set table size and update EXTRAARG (对齐luaK_settablesize)
+/// 注意：不使用 insert，因为 EXTRAARG 在 code_table_constructor 中已经预留
+pub(crate) fn set_table_size(c: &mut Compiler, pc: usize, ra: u32, asize: u32, hsize: u32) {
+    use crate::lua_vm::Instruction;
+    
+    // Calculate hash size (ceil(log2(hsize)) + 1)
+    let rb = if hsize != 0 {
+        ((hsize as f64).log2().ceil() as u32) + 1
+    } else {
+        0
+    };
+    
+    // Split array size into two parts
+    let extra = asize / 256;  // MAXARG_C + 1 = 256
+    let rc = asize % 256;
+    let k = extra > 0;  // k=1 if needs extra argument
+    
+    // Update NEWTABLE instruction at pc
+    c.chunk.code[pc] = Instruction::create_abck(OpCode::NewTable, ra, rb, rc, k);
+    
+    // Update EXTRAARG instruction at pc+1 (对齐官方: *(inst + 1) = CREATE_Ax(OP_EXTRAARG, extra))
+    c.chunk.code[pc + 1] = Instruction::create_ax(OpCode::ExtraArg, extra);
 }
 
 /// Get number of active variables in register stack (对齐luaY_nvarstack)
