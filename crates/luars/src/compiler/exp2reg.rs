@@ -530,16 +530,6 @@ fn fits_as_offset(n: i64) -> bool {
     n >= 0 && n < 256
 }
 
-/// Check if expression is valid as RK operand and return its index
-fn valid_op(e: &ExpDesc) -> Option<u32> {
-    match e.kind {
-        ExpKind::VK => Some(e.info), // 常量池索引
-        // VKInt 和 VKFlt 不应该走这个路径，它们需要特殊处理
-        // 因为整数和浮点数存储在 ival/nval，不是 info
-        _ => None,
-    }
-}
-
 /// Discharge expression to any register (对齐 luaK_exp2anyreg)
 pub(crate) fn discharge_2any_reg(c: &mut Compiler, e: &mut ExpDesc) {
     discharge_vars(c, e);
@@ -552,15 +542,12 @@ pub(crate) fn discharge_2any_reg(c: &mut Compiler, e: &mut ExpDesc) {
 /// Check if jump list needs values (对齐need_value)
 /// Returns true if any instruction in the jump list is not a TESTSET
 fn need_value(c: &Compiler, mut list: i32) -> bool {
-    let orig_list = list;
-    let mut count = 0;
     while list != NO_JUMP {
         let i = get_jump_control(c, list as usize);
         let opcode = Instruction::get_opcode(i);
         if opcode != OpCode::TestSet {
             return true;
         }
-        count += 1;
         list = get_jump(c, list as usize);
     }
     false
@@ -571,14 +558,12 @@ fn need_value(c: &Compiler, mut list: i32) -> bool {
 fn patch_test_reg(c: &mut Compiler, node: i32, reg: u32) -> bool {
     let i_ptr = get_jump_control_mut(c, node as usize);
     let opcode = Instruction::get_opcode(*i_ptr);
-    let old_instr = *i_ptr;
     
     if opcode != OpCode::TestSet {
         return false;
     }
     
     let b = Instruction::get_b(*i_ptr);
-    let old_a = Instruction::get_a(*i_ptr);
     if reg != NO_REG && reg != b {
         // Set destination register
         Instruction::set_a(i_ptr, reg);
@@ -595,7 +580,6 @@ fn patch_test_reg(c: &mut Compiler, node: i32, reg: u32) -> bool {
 /// Tests producing values jump to vtarget (and put values in reg)
 /// Other tests jump to dtarget
 fn patch_list_aux(c: &mut Compiler, mut list: i32, vtarget: usize, reg: u32, dtarget: usize) {
-    let mut count = 0;
     while list != NO_JUMP {
         let next = get_jump(c, list as usize);
         if patch_test_reg(c, list, reg) {
@@ -603,7 +587,6 @@ fn patch_list_aux(c: &mut Compiler, mut list: i32, vtarget: usize, reg: u32, dta
         } else {
             fix_jump(c, list as usize, dtarget);
         }
-        count += 1;
         list = next;
     }
 }

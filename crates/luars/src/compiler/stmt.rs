@@ -129,67 +129,31 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
         nvars += 1;
     }
 
-    // Parse initialization expressions if present
+    // Parse initialization expressions if present (对齐官方lparser.c:1747-1760 localstat)
     let exprs: Vec<_> = local_stat.get_value_exprs().collect();
     let nexps = exprs.len() as i32;
 
-    if nexps == 0 {
-        // No initialization - all variables get nil
-        // Special case: const without initializer is compile-time constant nil
-        adjustlocalvars(c, nvars as usize);
-    } else if nvars == nexps {
-        // Equal number of variables and expressions
-        // Check if last variable is const and can be compile-time constant
-        let scope = c.scope_chain.borrow();
-        let vidx = scope.locals.len() - 1;
-        let is_last_const = scope.locals.get(vidx).map(|l| l.is_const).unwrap_or(false);
-        drop(scope);
-
-        if is_last_const && nexps > 0 {
-            // Try to evaluate as compile-time constant
-            let mut e = expr::expr(c, &exprs[(nexps - 1) as usize])?;
-
-            // For now, only simple constants can be compile-time (TODO: add luaK_exp2const)
-            // Activate all variables
-            adjustlocalvars(c, nvars as usize);
-
-            // TODO: Implement compile-time constant optimization
-            // This requires luaK_exp2const equivalent
-            adjust_assign(c, nvars, nexps, &mut e);
-        } else {
-            // Compile all expressions (参考lparser.c:1011 explist + lparser.c:1747 localstat)
-            // explist会返回最后一个表达式未discharge，adjust_assign会处理它
-            let mut last_e = expr::expr(c, &exprs[0])?;
-            // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
-            for ex in exprs.iter().skip(1) {
-                exp2reg::exp2nextreg(c, &mut last_e);
-                last_e = expr::expr(c, ex)?;
-            }
-            // nvars == nexps时，adjust_assign会discharge最后一个表达式（needed=0）
-            // 然后adjust freereg（fs->freereg += needed，实际不变）
-            adjust_assign(c, nvars, nexps, &mut last_e);
-            adjustlocalvars(c, nvars as usize);
+    // Compile expression list (对齐官方explist逻辑)
+    let mut last_e = if nexps > 0 {
+        let mut e = expr::expr(c, &exprs[0])?;
+        // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
+        for ex in exprs.iter().skip(1) {
+            exp2reg::exp2nextreg(c, &mut e);
+            e = expr::expr(c, ex)?;
         }
+        e
     } else {
-        // Different number of variables and expressions - use adjust_assign
-        // 参考lparser.c:1011 (explist) 和 lparser.c:1747 (localstat)
-        let mut last_e = if nexps > 0 {
-            // 对齐Lua C: expr直接填充v，不需要先初始化为void
-            let mut e = expr::expr(c, &exprs[0])?;
-            // 对于后续表达式：先discharge前一个到nextreg，再编译当前的
-            for ex in exprs.iter().skip(1) {
-                exp2reg::exp2nextreg(c, &mut e);
-                e = expr::expr(c, ex)?;
-            }
-            e
-        } else {
-            // 对齐Lua C: else { e.k = VVOID; nexps = 0; }
-            expdesc::ExpDesc::new_void()
-        };
+        // 对齐Lua C: else { e.k = VVOID; nexps = 0; }
+        expdesc::ExpDesc::new_void()
+    };
 
-        adjust_assign(c, nvars, nexps, &mut last_e);
-        adjustlocalvars(c, nvars as usize);
-    }
+    // Check for compile-time constant optimization (对齐官方lparser.c:1753-1758)
+    // if (nvars == nexps && var->vd.kind == RDKCONST && luaK_exp2const(fs, &e, &var->k))
+    // TODO: Implement luaK_exp2const for compile-time constant optimization
+    
+    // adjust_assign will handle LOADNIL generation for uninitialized variables
+    adjust_assign(c, nvars, nexps, &mut last_e);
+    adjustlocalvars(c, nvars as usize);
 
     // Handle to-be-closed variable
     if toclose != -1 {

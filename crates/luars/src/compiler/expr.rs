@@ -1,4 +1,4 @@
-use crate::Instruction;
+
 use crate::compiler::parse_lua_number::NumberResult;
 
 // Expression compilation (对齐lparser.c的expression parsing)
@@ -180,7 +180,9 @@ pub(crate) fn compile_index_expr(
 
     let mut t = expr(c, &prefix)?;
 
-    // Discharge table to register or upvalue
+    // 对齐官方fieldsel处理：先exp2anyregup确保t在寄存器或upvalue中
+    // 但关键是：如果t已经是VIndexStr等延迟状态，exp2anyregup会通过discharge_vars生成指令
+    // 然后indexed会基于这个新的VReloc/VNonReloc再次设置为VIndexStr
     super::exp2reg::exp2anyregup(c, &mut t);
 
     // Get the index/key
@@ -446,18 +448,22 @@ fn try_const_folding(op: OpCode, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
 fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     use super::helpers;
 
-    // 特殊处理移位和减法优化（对齐官方lcode.c OPR_SUB/OPR_SHR/OPR_SHL case）
+    // 特殊处理移位和减法优化（对齐官方lcode.c luaK_posfix中的OPR_SUB/OPR_SHR/OPR_SHL case）
+    
     // 1. SUB优化：x - n => ADDI x, -n + MMBINI x, n, TM_SUB（如果n fit sC）
+    // 对齐lcode.c:1743: if (finishbinexpneg(fs, e1, e2, OP_ADDI, line, TM_SUB))
     if op == OpCode::Sub {
         if let ExpKind::VKInt = e2.kind {
             let val = e2.ival;
             if val >= -127 && val <= 128 && (-val) >= -127 && (-val) <= 128 {
-                // 可以优化为ADDI
+                // 对齐finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
-                super::exp2reg::free_exp(c, e1);
-                // ADDI: c = (-val) + 127
                 let imm = ((-val + 127) & 0xFF) as u32;
-                e1.info = helpers::code_abc(c, OpCode::AddI, 0, o1, imm) as u32;
+                let pc = helpers::code_abc(c, OpCode::AddI, 0, o1, imm);
+                // 关键：先free，再改kind（此时e1还是VNonReloc，可以被free）
+                super::exp2reg::free_exp(c, e1);
+                super::exp2reg::free_exp(c, e2);
+                e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
                 // MMBINI: 第二个参数是原始值val（不是负值）
                 let imm_mm = ((val + 128) & 0xFF) as u32;
@@ -468,16 +474,19 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
     }
 
     // 2. SHR优化：x >> n => SHRI x, n + MMBINI x, n, TM_SHR（如果n fit sC）
+    // 对齐lcode.c:1760-1764
     if op == OpCode::Shr {
         if let ExpKind::VKInt = e2.kind {
             let val = e2.ival;
             if val >= -128 && val <= 127 {
-                // 可以使用SHRI立即数
+                // 对齐codebini → finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
-                super::exp2reg::free_exp(c, e1);
-                // SHRI: c = val + 127
                 let imm = ((val + 127) & 0xFF) as u32;
-                e1.info = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm) as u32;
+                let pc = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm);
+                // 关键：先free，再改kind
+                super::exp2reg::free_exp(c, e1);
+                super::exp2reg::free_exp(c, e2);
+                e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
                 // MMBINI
                 let imm_mm = ((val + 128) & 0xFF) as u32;
@@ -487,37 +496,43 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
         }
     }
 
-    // 3. SHL优化（对齐官方lcode.c OPR_SHL case）
+    // 3. SHL优化（对齐官方lcode.c:1746-1758）
     if op == OpCode::Shl {
         // 特殊情况1：I << x 使用SHLI（立即数在前）
+        // 对齐lcode.c:1747-1750
         if e1.kind == ExpKind::VKInt {
             let val = e1.ival;
             if val >= -128 && val <= 127 {
                 // swap e1 和 e2，对齐官方swapexps
                 std::mem::swap(e1, e2);
-                // 现在e1=原e2(x in register), e2=原e1(constant I)
+                // 对齐codebini → finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
-                super::exp2reg::free_exp(c, e1);
-                // SHLI: A=0(VReloc), B=寄存器(e1), C=立即数(e2)
                 let imm = ((val + 127) & 0xFF) as u32;
-                e1.info = helpers::code_abc(c, OpCode::ShlI, 0, o1, imm) as u32;
+                let pc = helpers::code_abc(c, OpCode::ShlI, 0, o1, imm);
+                // 关键：先free，再改kind（此时e1是VNonReloc，可以被释放）
+                super::exp2reg::free_exp(c, e1);
+                super::exp2reg::free_exp(c, e2);
+                e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
-                // MMBINI: flip=1
+                // MMBINI: 参数是原始值val，flip=1
                 let imm_mm = ((val + 128) & 0xFF) as u32;
                 helpers::code_abck(c, OpCode::MmBinI, o1, imm_mm, 16, true); // TM_SHL=16
                 return;
             }
         }
         // 特殊情况2：x << n => SHRI x, -n（如果n fit sC）
+        // 对齐lcode.c:1751-1753
         if let ExpKind::VKInt = e2.kind {
             let val = e2.ival;
             if val >= -127 && val <= 128 && (-val) >= -128 && (-val) <= 127 {
-                // 可以优化为SHRI
+                // 对齐finishbinexpneg: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
-                super::exp2reg::free_exp(c, e1);
-                // SHRI: c = (-val) + 127
                 let imm = ((-val + 127) & 0xFF) as u32;
-                e1.info = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm) as u32;
+                let pc = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm);
+                // 关键：先free，再改kind
+                super::exp2reg::free_exp(c, e1);
+                super::exp2reg::free_exp(c, e2);
+                e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
                 // MMBINI: 参数是原始值val，元方法是TM_SHL
                 let imm_mm = ((val + 128) & 0xFF) as u32;
@@ -683,7 +698,7 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, i
                 let imm = ((val + 128) & 0xFF) as u32;
                 // 生成EQI指令，k位对齐官方：condjump(fs, op, r1, r2, isfloat, (opr == OPR_EQ))
                 // 即：对于==，k=1（!inv）；对于~=，k=0（inv）
-                let pc = helpers::code_abck(c, OpCode::EqI, o1, imm, 0, !inv);
+                helpers::code_abck(c, OpCode::EqI, o1, imm, 0, !inv);
                 let jmp = helpers::jump(c);
                 e1.info = jmp as u32;
                 e1.kind = ExpKind::VJmp;
@@ -698,7 +713,7 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, i
             super::exp2reg::free_exp(c, e1);
             let k_idx = e2.info;
             // 生成EQK指令，k位对齐官方：对于==，k=1；对于~=，k=0
-            let pc = helpers::code_abck(c, OpCode::EqK, o1, k_idx, 0, !inv);
+            helpers::code_abck(c, OpCode::EqK, o1, k_idx, 0, !inv);
             let jmp = helpers::jump(c);
             e1.info = jmp as u32;
             e1.kind = ExpKind::VJmp;
@@ -709,8 +724,15 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, i
     // 标准路径：两个操作数都在寄存器
     let o2 = super::exp2reg::exp2anyreg(c, e2);
 
-    super::exp2reg::free_exp(c, e2);
-    super::exp2reg::free_exp(c, e1);
+    // 对齐官方freeexps：按从大到小顺序释放寄存器（先释放高寄存器，再释放低寄存器）
+    // 这样确保freereg正确回退
+    if o1 > o2 {
+        super::exp2reg::free_exp(c, e1);
+        super::exp2reg::free_exp(c, e2);
+    } else {
+        super::exp2reg::free_exp(c, e2);
+        super::exp2reg::free_exp(c, e1);
+    }
 
     // 生成比较指令（结果是跳转）
     // 对齐官方lcode.c:1608: e1->u.info = condjump(fs, op, r1, r2, isfloat, (opr == OPR_EQ));
