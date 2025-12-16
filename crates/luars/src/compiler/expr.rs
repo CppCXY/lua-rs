@@ -446,7 +446,88 @@ fn try_const_folding(op: OpCode, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
 fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     use super::helpers;
 
-    // 左操作数总是要放到寄存器
+    // 特殊处理移位和减法优化（对齐官方lcode.c OPR_SUB/OPR_SHR/OPR_SHL case）
+    // 1. SUB优化：x - n => ADDI x, -n + MMBINI x, n, TM_SUB（如果n fit sC）
+    if op == OpCode::Sub {
+        if let ExpKind::VKInt = e2.kind {
+            let val = e2.ival;
+            if val >= -127 && val <= 128 && (-val) >= -127 && (-val) <= 128 {
+                // 可以优化为ADDI
+                let o1 = super::exp2reg::exp2anyreg(c, e1);
+                super::exp2reg::free_exp(c, e1);
+                // ADDI: c = (-val) + 127
+                let imm = ((-val + 127) & 0xFF) as u32;
+                e1.info = helpers::code_abc(c, OpCode::AddI, 0, o1, imm) as u32;
+                e1.kind = ExpKind::VReloc;
+                // MMBINI: 第二个参数是原始值val（不是负值）
+                let imm_mm = ((val + 128) & 0xFF) as u32;
+                helpers::code_abc(c, OpCode::MmBinI, o1, imm_mm, 7); // TM_SUB=7
+                return;
+            }
+        }
+    }
+
+    // 2. SHR优化：x >> n => SHRI x, n + MMBINI x, n, TM_SHR（如果n fit sC）
+    if op == OpCode::Shr {
+        if let ExpKind::VKInt = e2.kind {
+            let val = e2.ival;
+            if val >= -128 && val <= 127 {
+                // 可以使用SHRI立即数
+                let o1 = super::exp2reg::exp2anyreg(c, e1);
+                super::exp2reg::free_exp(c, e1);
+                // SHRI: c = val + 127
+                let imm = ((val + 127) & 0xFF) as u32;
+                e1.info = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm) as u32;
+                e1.kind = ExpKind::VReloc;
+                // MMBINI
+                let imm_mm = ((val + 128) & 0xFF) as u32;
+                helpers::code_abc(c, OpCode::MmBinI, o1, imm_mm, 17); // TM_SHR=17
+                return;
+            }
+        }
+    }
+
+    // 3. SHL优化（对齐官方lcode.c OPR_SHL case）
+    if op == OpCode::Shl {
+        // 特殊情况1：I << x 使用SHLI（立即数在前）
+        if e1.kind == ExpKind::VKInt {
+            let val = e1.ival;
+            if val >= -128 && val <= 127 {
+                // swap e1 和 e2，对齐官方swapexps
+                std::mem::swap(e1, e2);
+                // 现在e1=原e2(x in register), e2=原e1(constant I)
+                let o1 = super::exp2reg::exp2anyreg(c, e1);
+                super::exp2reg::free_exp(c, e1);
+                // SHLI: A=0(VReloc), B=寄存器(e1), C=立即数(e2)
+                let imm = ((val + 127) & 0xFF) as u32;
+                e1.info = helpers::code_abc(c, OpCode::ShlI, 0, o1, imm) as u32;
+                e1.kind = ExpKind::VReloc;
+                // MMBINI: flip=1
+                let imm_mm = ((val + 128) & 0xFF) as u32;
+                helpers::code_abck(c, OpCode::MmBinI, o1, imm_mm, 16, true); // TM_SHL=16
+                return;
+            }
+        }
+        // 特殊情况2：x << n => SHRI x, -n（如果n fit sC）
+        if let ExpKind::VKInt = e2.kind {
+            let val = e2.ival;
+            if val >= -127 && val <= 128 && (-val) >= -128 && (-val) <= 127 {
+                // 可以优化为SHRI
+                let o1 = super::exp2reg::exp2anyreg(c, e1);
+                super::exp2reg::free_exp(c, e1);
+                // SHRI: c = (-val) + 127
+                let imm = ((-val + 127) & 0xFF) as u32;
+                e1.info = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm) as u32;
+                e1.kind = ExpKind::VReloc;
+                // MMBINI: 参数是原始值val，元方法是TM_SHL
+                let imm_mm = ((val + 128) & 0xFF) as u32;
+                helpers::code_abc(c, OpCode::MmBinI, o1, imm_mm, 16); // TM_SHL=16
+                return;
+            }
+        }
+    }
+
+    // 标准路径：左操作数总是要放到寄存器
     let o1 = super::exp2reg::exp2anyreg(c, e1);
     
     // 检查是否可以使用K后缀指令（对齐Lua 5.4 codebinarith）
@@ -585,17 +666,39 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, i
     // 左操作数总是在寄存器
     let o1 = super::exp2reg::exp2anyreg(c, e1);
     
-    // 检查是否可以使用EQK优化（对齐Lua 5.4 lcode.c:1386-1392）
-    // 只有EQ操作支持EQK指令
+    // 检查是否可以使用EQI或EQK优化（对齐Lua 5.4 lcode.c:1369-1386 codeeq函数）
+    // 只有EQ操作支持EQI/EQK指令
     if op == OpCode::Eq {
-        // 尝试将右操作数转换为常量
+        // 首先检查是否可以用EQI（立即数形式）
+        // 对齐官方lcode.c:1377: if (isSCnumber(e2, &im, &isfloat))
+        // isSCnumber检查是否是可以fit到sC字段的整数（-128到127）
+        if let ExpKind::VKInt = e2.kind {
+            let val = e2.ival;
+            // fitsC: (l_castS2U(i) + OFFSET_sC <= cast_uint(MAXARG_C))
+            // OFFSET_sC = 128, MAXARG_C = 255, 所以范围是-128到127
+            if val >= -128 && val <= 127 {
+                // 使用EQI指令：EQI A sB k，比较R[A]和立即数sB
+                super::exp2reg::free_exp(c, e1);
+                // int2sC(i) = (i) + OFFSET_sC = val + 128
+                let imm = ((val + 128) & 0xFF) as u32;
+                // 生成EQI指令，k位对齐官方：condjump(fs, op, r1, r2, isfloat, (opr == OPR_EQ))
+                // 即：对于==，k=1（!inv）；对于~=，k=0（inv）
+                let pc = helpers::code_abck(c, OpCode::EqI, o1, imm, 0, !inv);
+                let jmp = helpers::jump(c);
+                e1.info = jmp as u32;
+                e1.kind = ExpKind::VJmp;
+                return;
+            }
+        }
+        
+        // 然后尝试将右操作数转换为常量（EQK）
+        // 对齐官方lcode.c:1381: else if (exp2RK(fs, e2))
         if super::exp2reg::exp2k(c, e2) {
             // 使用EQK指令：EQK A B k，比较R[A]和K[B]
             super::exp2reg::free_exp(c, e1);
             let k_idx = e2.info;
-            // 生成EQK指令，k位表示是否反转条件
-            // 对于~=，inv=true，所以k=1
-            let pc = helpers::code_abck(c, OpCode::EqK, o1, k_idx, 0, inv);
+            // 生成EQK指令，k位对齐官方：对于==，k=1；对于~=，k=0
+            let pc = helpers::code_abck(c, OpCode::EqK, o1, k_idx, 0, !inv);
             let jmp = helpers::jump(c);
             e1.info = jmp as u32;
             e1.kind = ExpKind::VJmp;
@@ -610,8 +713,11 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, i
     super::exp2reg::free_exp(c, e1);
 
     // 生成比较指令（结果是跳转）
-    // 注意：对于寄存器比较，inv通过交换跳转链来实现
-    e1.info = helpers::cond_jump(c, op, o1, o2) as u32;
+    // 对齐官方lcode.c:1608: e1->u.info = condjump(fs, op, r1, r2, isfloat, (opr == OPR_EQ));
+    // 对于EQ: k=1(相等时跳转), inv=false表示==, inv=true表示~=
+    // 对于其他比较(LT/LE): k=1(条件为真时跳转)
+    let k = if op == OpCode::Eq { !inv } else { true };
+    e1.info = helpers::cond_jump(c, op, o1, o2, k) as u32;
     e1.kind = ExpKind::VJmp;
 }
 

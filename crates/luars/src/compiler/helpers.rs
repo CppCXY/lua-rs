@@ -394,9 +394,9 @@ pub(crate) fn fix_for_jump(c: &mut Compiler, pc: usize, dest: usize, back: bool)
 }
 
 /// Generate conditional jump (对齐 condjump)
-pub(crate) fn cond_jump(c: &mut Compiler, op: OpCode, a: u32, b: u32) -> usize {
+pub(crate) fn cond_jump(c: &mut Compiler, op: OpCode, a: u32, b: u32, k: bool) -> usize {
     // 对齐官方 lcode.c condjump: 生成条件指令后跟JMP
-    code_abc(c, op, a, b, 0);
+    code_abck(c, op, a, b, 0, k);
     jump(c)  // 返回 JMP 指令的位置
 }
 

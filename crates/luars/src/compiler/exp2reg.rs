@@ -185,11 +185,12 @@ pub(crate) fn exp2reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
                 jump(c) as usize
             };
             
-            // Generate LOADFALSE + skip next instruction
-            p_f = code_abc(c, OpCode::LoadFalse, reg, 0, 0) as usize;
-            code_abc(c, OpCode::Jmp, 0, 1, 0);  // skip next instruction
+            // Generate LFALSESKIP (LoadFalse + skip next instruction)
+            // 对齐官方: p_f = code_loadbool(fs, reg, OP_LFALSESKIP);
+            p_f = code_abc(c, OpCode::LFalseSkip, reg, 0, 0) as usize;
             
             // Generate LOADTRUE
+            // 对齐官方: p_t = code_loadbool(fs, reg, OP_LOADTRUE);
             p_t = code_abc(c, OpCode::LoadTrue, reg, 0, 0) as usize;
             
             // Patch the jump around booleans
@@ -295,11 +296,19 @@ pub(crate) fn goiftrue(c: &mut Compiler, e: &mut ExpDesc) {
 }
 
 /// Negate condition of jump (对齐negatecondition)
-fn negate_condition(_c: &mut Compiler, e: &mut ExpDesc) {
-    // Swap true and false jump lists
-    let temp = e.t;
-    e.t = e.f;
-    e.f = temp;
+/// 反转跳转控制指令的k位（条件标志），而不是交换t/f列表
+fn negate_condition(c: &mut Compiler, e: &mut ExpDesc) {
+    use crate::lua_vm::Instruction;
+    // 对齐lcode.c:1090-1096
+    // static void negatecondition (FuncState *fs, expdesc *e) {
+    //   Instruction *pc = getjumpcontrol(fs, e->u.info);
+    //   lua_assert(testTMode(GET_OPCODE(*pc)) && GET_OPCODE(*pc) != OP_TESTSET && GET_OPCODE(*pc) != OP_TEST);
+    //   SETARG_k(*pc, (GETARG_k(*pc) ^ 1));
+    // }
+    let pc_pos = e.info as usize;
+    let instr_ptr = get_jump_control_mut(c, pc_pos);
+    let k = Instruction::get_k(*instr_ptr);
+    Instruction::set_k(instr_ptr, !k);  // 反转k位
 }
 
 /// Generate conditional jump (对齐jumponcond)
@@ -330,8 +339,8 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
     
     // Normal case: discharge to register, then generate TESTSET and JMP
     // 对齐lcode.c:1126-1128中的jumponcond实现
-    // 生成TESTSET指令，A字段设为NO_REG（255），后续在exp2reg中patch
     discharge2anyreg(c, e);
+    free_exp(c, e);  // 对齐官方：freeexp(fs, e);
     let reg = e.info;
     // Generate TESTSET with A=NO_REG, will be patched later in exp2reg
     code_abck(c, OpCode::TestSet, NO_REG, reg, 0, cond);
