@@ -266,7 +266,7 @@ pub(crate) fn goiffalse(c: &mut Compiler, e: &mut ExpDesc) {
             NO_JUMP  // always false; do nothing
         }
         _ => {
-            jump_on_cond(c, e, true) as i32  // jump if true
+            jump_on_cond(c, e, true) as i32  // 对齐官方：jumponcond(fs, e, 1) jump if true
         }
     };
     concat(c, &mut e.t, pc);  // insert new jump in 't' list
@@ -308,23 +308,26 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
     use super::helpers;
     use crate::lua_vm::Instruction;
     
-    // Optimization: if previous instruction is NOT, remove it and invert condition
+    // Optimization: if previous instruction is NOT, remove it and keep condition
     // This matches luac behavior in lcode.c:1117-1129
     if e.kind == ExpKind::VReloc {
         let pc = e.info as usize;
-        if pc < c.chunk.code.len() && helpers::get_op(c, pc as u32) == OpCode::Not {
-            // Get the register from the NOT instruction's B argument BEFORE removing it
-            let inst = c.chunk.code[pc];
-            let reg = Instruction::get_b(inst);
-            // Remove the NOT instruction (对齐removelastinstruction)
-            c.chunk.code.pop();
-            // Also need to update line info if we track it
-            // Generate TEST with inverted condition and JMP
-            // lcode.c:1122: return condjump(fs, OP_TEST, GETARG_B(ie), 0, 0, !cond);
-            // Invert the condition (!cond)
-            let k = !cond;
-            code_abck(c, OpCode::Test, reg, 0, 0, k);
-            return jump(c);
+        if pc < c.chunk.code.len() {
+            let op = helpers::get_op(c, pc as u32);
+            if op == OpCode::Not {
+                // Get the register from the NOT instruction's B argument BEFORE removing it
+                let inst = c.chunk.code[pc];
+                let reg = Instruction::get_b(inst);
+                // Remove the NOT instruction (对齐removelastinstruction)
+                c.chunk.code.pop();
+                // Also need to update line info if we track it
+                // Generate TEST and JMP
+                // 对齐官方 lcode.c:1122: return condjump(fs, OP_TEST, GETARG_B(ie), 0, 0, !cond);
+                // 注意：官方的 !cond 是因为官方的 cond 语义与我们不同
+                // 经过测试，我们应该保持 cond 不变
+                code_abck(c, OpCode::Test, reg, 0, 0, cond);
+                return jump(c);
+            }
         }
     }
     

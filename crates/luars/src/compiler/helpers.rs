@@ -233,6 +233,12 @@ pub(crate) fn ret(c: &mut Compiler, first: u32, nret: i32) {
         1 => OpCode::Return1,
         _ => OpCode::Return,
     };
+    
+    // eprintln!("[ret] Generating {:?} with first={}, nret={}, B={}", 
+    //     op, first, nret, nret + 1);
+    // eprintln!("[ret] Context: nactvar={}, freereg={}, needclose={}", 
+    //     c.nactvar, c.freereg, c.needclose);
+    
     // 对齐Lua 5.4的luaK_ret: 使用luaK_codeABC(fs, op, first, nret + 1, 0)
     // 所有RETURN变体的B字段都是nret+1（表示返回值数量+1）
     // k位和C字段在finish阶段设置（luaK_finish）
@@ -308,9 +314,27 @@ pub(crate) fn set_table_size(c: &mut Compiler, pc: usize, ra: u32, asize: u32, h
 
 /// Get number of active variables in register stack (对齐luaY_nvarstack)
 pub(crate) fn nvarstack(c: &Compiler) -> u32 {
-    // Return number of active local variables (对齐luaY_nvarstack)
-    // In luac: #define luaY_nvarstack(fs) ((fs)->nactvar)
-    c.nactvar as u32
+    // 对齐官方实现：return reglevel(fs, fs->nactvar);
+    // reglevel 从最后一个变量向前找，返回第一个非编译期常量变量的寄存器+1
+    // 如果所有变量都是编译期常量，返回0
+    let scope = c.scope_chain.borrow();
+    let nactvar = c.nactvar;
+    
+    // 从后向前遍历活跃变量
+    for i in (0..nactvar).rev() {
+        if let Some(local) = scope.locals.get(i) {
+            // 跳过编译期常量 (RDKCTC)
+            if !local.is_const {
+                let result = local.reg + 1;
+                // eprintln!("[nvarstack] nactvar={}, found non-const var '{}' at reg {}, returning {}", 
+                //     nactvar, local.name, local.reg, result);
+                return result;
+            }
+        }
+    }
+    
+    // eprintln!("[nvarstack] nactvar={}, no variables in registers, returning 0", nactvar);
+    0  // 没有变量在寄存器中
 }
 
 /// Free a register (对齐freereg)

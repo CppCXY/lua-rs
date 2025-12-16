@@ -203,7 +203,7 @@ fn compile_local_stat(c: &mut Compiler, local_stat: &LuaLocalStat) -> Result<(),
 
 /// Compile return statement (对齐retstat)
 fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), String> {
-    let first = helpers::nvarstack(c);
+    let mut first = helpers::nvarstack(c);  // 初始值（无返回值时用）
     let mut nret: i32 = 0;
 
     // Get return expressions and collect them
@@ -236,7 +236,8 @@ fn compile_return_stat(c: &mut Compiler, ret: &LuaReturnStat) -> Result<(), Stri
             
             nret = -1; // LUA_MULTRET
         } else {
-            exp2reg::exp2anyreg(c, &mut e);
+            // 对齐官方：if (nret == 1) first = luaK_exp2anyreg(fs, &e);
+            first = exp2reg::exp2anyreg(c, &mut e);  // 使用表达式所在的寄存器！
             nret = 1;
         }
     } else {
