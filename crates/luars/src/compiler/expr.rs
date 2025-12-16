@@ -578,7 +578,8 @@ fn get_mm_index(op: OpCode) -> u32 {
 }
 
 /// 生成比较指令（对齐 codecomp）
-fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+/// inv参数表示是否反转条件（用于~=）
+fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, inv: bool) {
     use super::helpers;
 
     // 左操作数总是在寄存器
@@ -592,10 +593,9 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
             // 使用EQK指令：EQK A B k，比较R[A]和K[B]
             super::exp2reg::free_exp(c, e1);
             let k_idx = e2.info;
-            // 生成EQK指令和JMP（通过cond_jump）
-            // 注意：cond_jump会生成ABC格式，但EQK需要ABCk格式
-            // 所以我们需要直接生成ABCk指令
-            let pc = helpers::code_abck(c, OpCode::EqK, o1, k_idx, 0, false);
+            // 生成EQK指令，k位表示是否反转条件
+            // 对于~=，inv=true，所以k=1
+            let pc = helpers::code_abck(c, OpCode::EqK, o1, k_idx, 0, inv);
             let jmp = helpers::jump(c);
             e1.info = jmp as u32;
             e1.kind = ExpKind::VJmp;
@@ -610,6 +610,7 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     super::exp2reg::free_exp(c, e1);
 
     // 生成比较指令（结果是跳转）
+    // 注意：对于寄存器比较，inv通过交换跳转链来实现
     e1.info = helpers::cond_jump(c, op, o1, o2) as u32;
     e1.kind = ExpKind::VJmp;
 }
@@ -673,22 +674,22 @@ fn postfix_op(
         BinaryOperator::OpShl => code_arith(c, OpCode::Shl, v1, v2)?,
         BinaryOperator::OpShr => code_arith(c, OpCode::Shr, v1, v2)?,
         // 比较运算
-        BinaryOperator::OpEq => code_comp(c, OpCode::Eq, v1, v2),
+        BinaryOperator::OpEq => code_comp(c, OpCode::Eq, v1, v2, false),
         BinaryOperator::OpNe => {
-            code_comp(c, OpCode::Eq, v1, v2);
-            // ~= 是 == 的否定，交换 true/false 跳转链
+            code_comp(c, OpCode::Eq, v1, v2, true);
+            // ~= 是 == 的否定，对于EQK k位已经设置，对于EQ需要交换跳转链
             std::mem::swap(&mut v1.t, &mut v1.f);
         }
-        BinaryOperator::OpLt => code_comp(c, OpCode::Lt, v1, v2),
-        BinaryOperator::OpLe => code_comp(c, OpCode::Le, v1, v2),
+        BinaryOperator::OpLt => code_comp(c, OpCode::Lt, v1, v2, false),
+        BinaryOperator::OpLe => code_comp(c, OpCode::Le, v1, v2, false),
         BinaryOperator::OpGt => {
             // > 转换为 <
-            code_comp(c, OpCode::Lt, v2, v1);
+            code_comp(c, OpCode::Lt, v2, v1, false);
             *v1 = v2.clone();
         }
         BinaryOperator::OpGe => {
             // >= 转换为 <=
-            code_comp(c, OpCode::Le, v2, v1);
+            code_comp(c, OpCode::Le, v2, v1, false);
             *v1 = v2.clone();
         }
         BinaryOperator::OpNop => {}
@@ -795,6 +796,9 @@ fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr, ismetho
 
         // Activate parameter variables
         adjustlocalvars(child, param_count - if ismethod { 1 } else { 0 });
+        
+        // Reserve registers for parameters (对齐luaK_reserveregs)
+        helpers::reserve_regs(child, child.nactvar as u32);
 
         // Generate VARARGPREP if function is vararg
         if has_vararg {

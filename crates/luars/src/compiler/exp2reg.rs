@@ -55,9 +55,7 @@ fn discharge2reg(c: &mut Compiler, e: &mut ExpDesc, reg: u32) {
         ExpKind::VKFlt => code_float(c, reg, e.nval),
         ExpKind::VReloc => {
             let pc = e.info as usize;
-            let mut instr = c.chunk.code[pc];
-            Instruction::set_a(&mut instr, reg);
-            c.chunk.code[pc] = instr;
+            Instruction::set_a(&mut c.chunk.code[pc], reg);
         }
         ExpKind::VNonReloc => {
             if reg != e.info {
@@ -307,15 +305,15 @@ fn jump_on_cond(c: &mut Compiler, e: &mut ExpDesc, cond: bool) -> usize {
         }
     }
     
-    // Normal case: discharge to register, then generate TESTSET and JMP
-    // lcode.c:1126-1128: return condjump(fs, OP_TESTSET, NO_REG, e->u.info, 0, cond);
+    // Normal case: discharge to register, then generate TEST and JMP
+    // lcode.c:1126-1128 shows luac can use either TEST or TESTSET
+    // But observation shows luac prefers TEST for most cases
+    // TESTSET is only used when explicitly needed for assignment
     discharge2anyreg(c, e);
     let reg = e.info;
-    // TESTSET A B k: if (not R[B] == k) then pc++ else R[A] := R[B]
-    // A is initially NO_REG (255), will be patched later if needed
-    // B is the source register
+    // Use TEST instruction: TEST A k
     // k is the condition (true = test if true, false = test if false)
-    code_abck(c, OpCode::TestSet, 255, reg, 0, cond);
+    code_abck(c, OpCode::Test, reg, 0, 0, cond);
     jump(c)
 }
 
