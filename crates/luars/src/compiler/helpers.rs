@@ -227,16 +227,52 @@ pub(crate) fn ret(c: &mut Compiler, first: u32, nret: i32) {
         1 => OpCode::Return1,
         _ => OpCode::Return,
     };
-    // 所有RETURN变体都应该正确设置A字段（对齐Lua C lcode.c中luaK_ret）
-    // Return0和Return1只是Return的优化形式，A字段含义相同
-    // 注意：RETURN指令的C字段固定为1（表示final return），k位固定为1
-    if matches!(op, OpCode::Return) {
-        code_abck(c, op, first, (nret + 1) as u32, 1, true);
-    } else if matches!(op, OpCode::Return1) {
-        code_abc(c, op, first, 0, 0);
-    } else {
-        // Return0: 仍然需要设置first参数
-        code_abc(c, op, first, 0, 0);
+    // 对齐Lua 5.4的luaK_ret: 使用luaK_codeABC(fs, op, first, nret + 1, 0)
+    // 所有RETURN变体的B字段都是nret+1（表示返回值数量+1）
+    // k位和C字段在finish阶段设置（luaK_finish）
+    // k=1: 需要关闭upvalues (needclose)
+    // C: vararg函数的参数数量+1
+    code_abc(c, op, first, (nret + 1) as u32, 0);
+}
+
+/// Finish code generation with final adjustments (对齐luaK_finish)
+pub(crate) fn finish(c: &mut Compiler) {
+    let pc = c.chunk.code.len();
+    for i in 0..pc {
+        let mut instr = c.chunk.code[i];
+        let op = Instruction::get_opcode(instr);
+        
+        match op {
+            OpCode::Return0 | OpCode::Return1 => {
+                // 如果需要关闭upvalues或者是vararg函数，转换为OP_RETURN
+                if c.needclose || c.chunk.is_vararg {
+                    Instruction::set_opcode(&mut instr, OpCode::Return);
+                    c.chunk.code[i] = instr;
+                    // 继续处理OP_RETURN的情况
+                } else {
+                    continue;
+                }
+            }
+            OpCode::Return | OpCode::TailCall => {}
+            _ => continue,
+        }
+        
+        // 更新指令（如果被修改过）
+        instr = c.chunk.code[i];
+        
+        // 处理OP_RETURN和OP_TAILCALL
+        if matches!(Instruction::get_opcode(instr), OpCode::Return | OpCode::TailCall) {
+            // 如果需要关闭upvalues，设置k=1
+            if c.needclose {
+                Instruction::set_k(&mut instr, true);
+            }
+            // 如果是vararg函数，设置C为参数数量+1
+            if c.chunk.is_vararg {
+                let num_params = c.chunk.param_count as u32;
+                Instruction::set_c(&mut instr, num_params + 1);
+            }
+            c.chunk.code[i] = instr;
+        }
     }
 }
 

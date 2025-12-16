@@ -829,6 +829,9 @@ fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr, ismetho
         child.chunk.max_stack_size = child.peak_freereg as usize;
     }
 
+    // 对齐luaK_finish: 最后调整RETURN/TAILCALL指令的k位和C字段
+    helpers::finish(child);
+
     Ok(())
 }
 

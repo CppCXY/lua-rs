@@ -303,6 +303,9 @@ fn compile_chunk(c: &mut Compiler, chunk: &LuaChunk) -> Result<(), String> {
         c.chunk.max_stack_size = c.peak_freereg as usize;
     }
 
+    // 对齐luaK_finish: 最后调整RETURN/TAILCALL指令的k位和C字段
+    helpers::finish(c);
+
     Ok(())
 }
 
