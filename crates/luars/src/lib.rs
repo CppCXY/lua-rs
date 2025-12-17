@@ -15,7 +15,7 @@ pub mod lua_pattern;
 pub mod lua_value;
 pub mod lua_vm;
 pub mod stdlib;
-pub use compiler::Compiler;
+// pub use compiler::Compiler; // Removed - using direct parse function now
 #[cfg(feature = "loadlib")]
 pub use ffi::FFIState;
 pub use gc::*;

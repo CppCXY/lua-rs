@@ -13,7 +13,7 @@ use crate::lua_value::{
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
-use crate::{Compiler, ObjectPool, lib_registry};
+use crate::{ObjectPool, lib_registry};
 pub use opcode::{Instruction, OpCode};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -377,7 +377,7 @@ impl LuaVM {
 
     /// Compile source code using VM's string pool
     pub fn compile(&mut self, source: &str) -> LuaResult<Chunk> {
-        let chunk = match Compiler::compile(self, source) {
+        let chunk = match crate::compiler::lua_parse(source, &mut self.object_pool) {
             Ok(c) => c,
             Err(e) => return Err(self.compile_error(e)),
         };
@@ -385,8 +385,9 @@ impl LuaVM {
         Ok(chunk)
     }
 
-    pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<Chunk> {
-        let chunk = match Compiler::compile_with_name(self, source, chunk_name) {
+    pub fn compile_with_name(&mut self, source: &str, _chunk_name: &str) -> LuaResult<Chunk> {
+        // TODO: use chunk_name once implemented
+        let chunk = match crate::compiler::lua_parse(source, &mut self.object_pool) {
             Ok(c) => c,
             Err(e) => return Err(self.compile_error(e)),
         };
