@@ -1,8 +1,10 @@
-// Code generation - Port from lcode.c
+// Code generation - Port from lcode.c (Lua 5.4.8)
+// This file corresponds to lua-5.4.8/src/lcode.c
 use crate::compiler::func_state::FuncState;
 use crate::lua_vm::{Instruction, OpCode};
 
-// Port of luaK_code from lcode.c
+// Port of luaK_codeABC from lcode.c:397-402
+// int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize {
     let mut instr = (op as u32) << Instruction::POS_OP;
     Instruction::set_a(&mut instr, a);
@@ -14,7 +16,8 @@ pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize
     pc
 }
 
-// Port of luaK_codeABx from lcode.c  
+// Port of luaK_codeABx from lcode.c:409-414
+// int luaK_codeABx (FuncState *fs, OpCode o, int a, unsigned int bc)
 pub fn code_abx(fs: &mut FuncState, op: OpCode, a: u32, bx: u32) -> usize {
     let mut instr = (op as u32) << Instruction::POS_OP;
     Instruction::set_a(&mut instr, a);
@@ -25,7 +28,8 @@ pub fn code_abx(fs: &mut FuncState, op: OpCode, a: u32, bx: u32) -> usize {
     pc
 }
 
-// Port of luaK_codeAsBx from lcode.c
+// Port of codeAsBx from lcode.c:419-424
+// static int codeAsBx (FuncState *fs, OpCode o, int a, int bc)
 pub fn code_asbx(fs: &mut FuncState, op: OpCode, a: u32, sbx: i32) -> usize {
     let mut instr = (op as u32) << Instruction::POS_OP;
     Instruction::set_a(&mut instr, a);
@@ -37,7 +41,8 @@ pub fn code_asbx(fs: &mut FuncState, op: OpCode, a: u32, sbx: i32) -> usize {
     pc
 }
 
-// Port of luaK_codeABCk from lcode.c
+// Port of luaK_codeABCk from lcode.c:397-402
+// int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool) -> usize {
     let mut instr = (op as u32) << Instruction::POS_OP;
     Instruction::set_a(&mut instr, a);
@@ -52,28 +57,33 @@ pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool
 
 use crate::compiler::expression::{ExpDesc, ExpKind};
 
-// Port of luaK_ret from lcode.c
+// Port of luaK_ret from lcode.c:207-214
+// void luaK_ret (FuncState *fs, int first, int nret)
 pub fn ret(fs: &mut FuncState, first: u8, nret: u8) -> usize {
     code_abc(fs, OpCode::Return, first as u32, (nret + 1) as u32, 0)
 }
 
-// Port of luaK_jump from lcode.c
+// Port of luaK_jump from lcode.c:200-202
+// int luaK_jump (FuncState *fs)
 pub fn jump(fs: &mut FuncState) -> usize {
     code_asbx(fs, OpCode::Jmp, 0, -1)
 }
 
-// Port of luaK_getlabel from lcode.c
+// Port of luaK_getlabel from lcode.c:234-237
+// int luaK_getlabel (FuncState *fs)
 pub fn get_label(fs: &FuncState) -> usize {
     fs.pc
 }
 
-// Port of luaK_patchtohere from lcode.c
+// Port of luaK_patchtohere from lcode.c:312-315
+// void luaK_patchtohere (FuncState *fs, int list)
 pub fn patchtohere(fs: &mut FuncState, list: isize) {
     let here = get_label(fs) as isize;
     patchlist(fs, list, here);
 }
 
-// Port of luaK_concat from lcode.c
+// Port of luaK_concat from lcode.c:174-186
+// void luaK_concat (FuncState *fs, int *l1, int l2)
 pub fn concat(fs: &mut FuncState, l1: &mut isize, l2: isize) {
     if l2 == -1 {
         return;
@@ -91,7 +101,8 @@ pub fn concat(fs: &mut FuncState, l1: &mut isize, l2: isize) {
     }
 }
 
-// Port of luaK_patchlist from lcode.c
+// Port of luaK_patchlist from lcode.c:299-305
+// void luaK_patchlist (FuncState *fs, int list, int target)
 pub fn patchlist(fs: &mut FuncState, mut list: isize, target: isize) {
     while list != -1 {
         let next = get_jump(fs, list as usize);
@@ -114,6 +125,8 @@ fn get_jump(fs: &FuncState, pc: usize) -> isize {
     }
 }
 
+// Port of fixjump from lcode.c:162-169
+// static void fixjump (FuncState *fs, int pc, int dest)
 // Helper: patch jump instruction
 pub fn fix_jump(fs: &mut FuncState, pc: usize, target: usize) {
     if pc >= fs.chunk.code.len() {
@@ -130,7 +143,54 @@ pub fn fix_jump(fs: &mut FuncState, pc: usize, target: usize) {
     Instruction::set_bx(instr, bx);
 }
 
-// Port of luaK_exp2nextreg from lcode.c
+// Port of need_value from lcode.c:900-908
+// static int need_value (FuncState *fs, int list)
+// Check whether list has any jump that do not produce a value
+fn need_value(fs: &FuncState, mut list: isize) -> bool {
+    const NO_JUMP: isize = -1;
+    while list != NO_JUMP {
+        let i = fs.chunk.code[list as usize];
+        let op = OpCode::from(Instruction::get_opcode(i));
+        if op != OpCode::TestSet {
+            return true;
+        }
+        list = get_jump(fs, list as usize);
+    }
+    false
+}
+
+// Port of code_loadbool from lcode.c:889-892
+// static int code_loadbool (FuncState *fs, int A, OpCode op)
+fn code_loadbool(fs: &mut FuncState, a: u8, op: OpCode) -> usize {
+    get_label(fs); // those instructions may be jump targets
+    code_abc(fs, op, a as u32, 0, 0)
+}
+
+// Port of patchlistaux from lcode.c:271-292
+// static void patchlistaux (FuncState *fs, int list, int vtarget, int reg, int dtarget)
+fn patchlistaux(fs: &mut FuncState, mut list: isize, vtarget: isize, reg: u8, dtarget: isize) {
+    const NO_JUMP: isize = -1;
+    while list != NO_JUMP {
+        let next = get_jump(fs, list as usize);
+        let pc = get_jump_control(fs, list as usize);
+        if pc < fs.chunk.code.len() {
+            let instr = fs.chunk.code[pc];
+            let op = OpCode::from(Instruction::get_opcode(instr));
+            if op == OpCode::TestSet {
+                // Patch TESTSET destination register
+                Instruction::set_a(&mut fs.chunk.code[pc], reg as u32);
+                fix_jump(fs, list as usize, vtarget as usize);
+            } else {
+                // Jump does not produce a value - patch to dtarget
+                fix_jump(fs, list as usize, dtarget as usize);
+            }
+        }
+        list = next;
+    }
+}
+
+// Port of luaK_exp2nextreg from lcode.c:944-949
+// void luaK_exp2nextreg (FuncState *fs, expdesc *e)
 pub fn exp2nextreg(fs: &mut FuncState, e: &mut ExpDesc) -> u8 {
     discharge_vars(fs, e);
     free_exp(fs, e);
@@ -140,7 +200,8 @@ pub fn exp2nextreg(fs: &mut FuncState, e: &mut ExpDesc) -> u8 {
     reg
 }
 
-// Port of luaK_exp2anyreg from lcode.c
+// Port of luaK_exp2anyreg from lcode.c:956-972
+// int luaK_exp2anyreg (FuncState *fs, expdesc *e)
 pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExpDesc) -> u8 {
     discharge_vars(fs, e);
     if e.kind == ExpKind::VNONRELOC {
@@ -155,25 +216,38 @@ pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExpDesc) -> u8 {
     exp2nextreg(fs, e)
 }
 
-// Port of luaK_exp2reg from lcode.c
+// Port of exp2reg from lcode.c:915-938
+// static void exp2reg (FuncState *fs, expdesc *e, int reg)
 pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
     discharge2reg(fs, e, reg);
     if e.kind == ExpKind::VJMP {
+        // lcode.c:918: expression itself is a test
         concat(fs, &mut e.t, unsafe { e.u.info as isize });
     }
     if e.has_jumps() {
-        let _p_f = -1;
-        let _p_t = -1;
-        let _final_label = get_label(fs);
-        // patchlist to true/false
-        // TODO: Complete jump patching logic
+        // lcode.c:919-934: need to patch jump lists
+        let mut p_f = -1_isize; // position of an eventual LOAD false
+        let mut p_t = -1_isize; // position of an eventual LOAD true
+        
+        if need_value(fs, e.t) || need_value(fs, e.f) {
+            // lcode.c:922-926
+            let fj = if e.kind == ExpKind::VJMP { -1 } else { jump(fs) as isize };
+            p_f = code_loadbool(fs, reg, OpCode::LFalseSkip) as isize;
+            p_t = code_loadbool(fs, reg, OpCode::LoadTrue) as isize;
+            patchtohere(fs, fj);
+        }
+        let final_label = get_label(fs) as isize;
+        patchlistaux(fs, e.f, final_label, reg, p_f);
+        patchlistaux(fs, e.t, final_label, reg, p_t);
     }
-    e.kind = ExpKind::VNONRELOC;
+    e.f = -1;
+    e.t = -1;
     e.u.info = reg as i32;
+    e.kind = ExpKind::VNONRELOC;
 }
 
-// Port of luaK_exp2val from lcode.c
-// Port of dischargevars from lcode.c
+// Port of luaK_dischargevars from lcode.c:766-817
+// void luaK_dischargevars (FuncState *fs, expdesc *e)
 pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
     match e.kind {
         ExpKind::VLOCAL => {
@@ -211,27 +285,39 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
     }
 }
 
-// Port of discharge2reg from lcode.c
+// Port of discharge2reg from lcode.c:822-875
+// static void discharge2reg (FuncState *fs, expdesc *e, int reg)
 pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
     discharge_vars(fs, e);
     match e.kind {
         ExpKind::VNIL => {
-            code_abc(fs, OpCode::LoadNil, reg as u32, 0, 0);
+            // lcode.c:829
+            code_abc(fs, OpCode::LoadNil, reg as u32, 1, 0); // n=1 for single nil
         }
-        ExpKind::VFALSE | ExpKind::VTRUE => {
-            // LoadBool not available, use LoadNil/LoadK instead
-            if e.kind == ExpKind::VTRUE {
-                code_abc(fs, OpCode::LoadTrue, reg as u32, 0, 0);
-            } else {
-                code_abc(fs, OpCode::LoadFalse, reg as u32, 0, 0);
-            }
+        ExpKind::VFALSE => {
+            // lcode.c:832
+            code_abc(fs, OpCode::LoadFalse, reg as u32, 0, 0);
+        }
+        ExpKind::VTRUE => {
+            // lcode.c:835
+            code_abc(fs, OpCode::LoadTrue, reg as u32, 0, 0);
+        }
+        ExpKind::VKSTR => {
+            // lcode.c:838-839: str2K(fs, e); FALLTHROUGH to VK
+            str2k(fs, e);
+            // Now fall through to VK case
+            code_abx(fs, OpCode::LoadK, reg as u32, unsafe { e.u.info as u32 });
         }
         ExpKind::VK => {
+            // lcode.c:841: luaK_codek(fs, reg, e->u.info);
             code_abx(fs, OpCode::LoadK, reg as u32, unsafe { e.u.info as u32 });
         }
         ExpKind::VKFLT => {
-            // TODO: Add constant to chunk
-            code_abx(fs, OpCode::LoadK, reg as u32, 0);
+            // lcode.c:844: luaK_float(fs, reg, e->u.nval);
+            // Use LoadF for floats
+            let val = unsafe { e.u.nval };
+            let k_idx = number_k(fs, val);
+            code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
         }
         ExpKind::VKINT => {
             code_asbx(fs, OpCode::LoadI, reg as u32, unsafe { e.u.ival as i32 });
@@ -258,14 +344,16 @@ pub fn free_exp(fs: &mut FuncState, e: &ExpDesc) {
     }
 }
 
-// Port of freereg from lcode.c
+// Port of freereg from lcode.c:527-531
+// static void freereg (FuncState *fs, int reg)
 pub fn free_reg(fs: &mut FuncState, reg: u8) {
     if reg >= fs.nactvar && reg < fs.freereg {
         fs.freereg -= 1;
     }
 }
 
-// Port of reserveregs from lcode.c
+// Port of luaK_reserveregs from lcode.c:511-516
+// void luaK_reserveregs (FuncState *fs, int n)
 pub fn reserve_regs(fs: &mut FuncState, n: u8) {
     fs.freereg += n;
     if (fs.freereg as usize) > fs.chunk.max_stack_size {
@@ -273,14 +361,17 @@ pub fn reserve_regs(fs: &mut FuncState, n: u8) {
     }
 }
 
-// Port of luaK_nil from lcode.c
+// Port of luaK_nil from lcode.c:136-155
+// void luaK_nil (FuncState *fs, int from, int n)
+// NOTE: Simplified version without OP_LOADNIL optimization
 pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
     if n > 0 {
         code_abc(fs, OpCode::LoadNil, from as u32, (n - 1) as u32, 0);
     }
 }
 
-// Port of luaK_setoneret from lcode.c
+// Port of luaK_setoneret from lcode.c:755-765
+// void luaK_setoneret (FuncState *fs, expdesc *e)
 pub fn setoneret(fs: &mut FuncState, e: &mut ExpDesc) {
     if e.kind == ExpKind::VCALL {
         e.kind = ExpKind::VNONRELOC;
@@ -293,18 +384,8 @@ pub fn setoneret(fs: &mut FuncState, e: &mut ExpDesc) {
     }
 }
 
-// Port of luaK_setreturns from lcode.c (lines 722-732)
-// void luaK_setreturns (FuncState *fs, expdesc *e, int nresults) {
-//   Instruction *pc = &getinstruction(fs, e);
-//   if (e->k == VCALL)
-//     SETARG_C(*pc, nresults + 1);
-//   else {
-//     lua_assert(e->k == VVARARG);
-//     SETARG_C(*pc, nresults + 1);
-//     SETARG_A(*pc, fs->freereg);
-//     luaK_reserveregs(fs, 1);
-//   }
-// }
+// Port of luaK_setreturns from lcode.c:722-732
+// void luaK_setreturns (FuncState *fs, expdesc *e, int nresults)
 pub fn setreturns(fs: &mut FuncState, e: &mut ExpDesc, nresults: u8) {
     let pc = unsafe { e.u.info as usize };
     if e.kind == ExpKind::VCALL {
@@ -317,7 +398,8 @@ pub fn setreturns(fs: &mut FuncState, e: &mut ExpDesc, nresults: u8) {
     }
 }
 
-// Port of tonumeral from lcode.c (lines 59-73)
+// Port of tonumeral from lcode.c:59-73
+// static int tonumeral (const expdesc *e, TValue *v)
 fn tonumeral(e: &ExpDesc, _v: Option<&mut f64>) -> bool {
     if e.has_jumps() {
         return false;
@@ -358,6 +440,8 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
     add_constant(fs, LuaValue::float(n))
 }
 
+// Port of stringK from lcode.c:577-581
+// static int stringK (FuncState *fs, TString *s)
 // Add string constant to chunk
 pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     // Intern string to ObjectPool and get StringId
@@ -367,6 +451,17 @@ pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     let value = LuaValue::string(string_id);
     fs.chunk.constants.push(value);
     fs.chunk.constants.len() - 1
+}
+
+// Port of str2K from lcode.c:738-742
+// static void str2K (FuncState *fs, expdesc *e)
+// Convert a VKSTR to a VK
+fn str2k(_fs: &mut FuncState, e: &mut ExpDesc) {
+    if e.kind == ExpKind::VKSTR {
+        // String is already in constants (stored in e.u.info), just change kind
+        e.kind = ExpKind::VK;
+        // e.u.info already contains the constant index
+    }
 }
 
 // Helper to add constant to chunk
@@ -402,7 +497,8 @@ fn constants_equal(a: &LuaValue, b: &LuaValue) -> bool {
     false
 }
 
-// Port of luaK_exp2K from lcode.c (lines 1000-1026)
+// Port of luaK_exp2K from lcode.c:1000-1026
+// static int luaK_exp2K (FuncState *fs, expdesc *e)
 fn exp2k(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
     if !e.has_jumps() {
         let info = match e.kind {
@@ -428,7 +524,8 @@ fn exp2k(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
     false
 }
 
-// Port of exp2RK from lcode.c (lines 1030-1036)
+// Port of exp2RK from lcode.c:1036-1042
+// static int exp2RK (FuncState *fs, expdesc *e)
 fn exp2rk(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
     if exp2k(fs, e) {
         true
@@ -438,7 +535,8 @@ fn exp2rk(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
     }
 }
 
-// Port of getjumpcontrol from lcode.c (lines 245-250)
+// Port of getjumpcontrol from lcode.c:245-250
+// static Instruction *getjumpcontrol (FuncState *fs, int pc)
 fn get_jump_control(fs: &FuncState, pc: usize) -> usize {
     if pc >= 1 && pc < fs.chunk.code.len() {
         let prev_instr = fs.chunk.code[pc - 1];
@@ -454,7 +552,8 @@ fn get_jump_control(fs: &FuncState, pc: usize) -> usize {
     pc
 }
 
-// Port of negatecondition from lcode.c (lines 1103-1108)
+// Port of negatecondition from lcode.c:1103-1108
+// static void negatecondition (FuncState *fs, expdesc *e)
 fn negatecondition(fs: &mut FuncState, e: &mut ExpDesc) {
     let pc = get_jump_control(fs, unsafe { e.u.info as usize });
     if pc < fs.chunk.code.len() {
@@ -464,13 +563,15 @@ fn negatecondition(fs: &mut FuncState, e: &mut ExpDesc) {
     }
 }
 
-// Port of condjump from lcode.c (lines 223-226)
+// Port of condjump from lcode.c:223-226
+// static int condjump (FuncState *fs, OpCode op, int A, int B, int C, int k)
 fn condjump(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool) -> isize {
     code_abck(fs, op, a, b, c, k);
     jump(fs) as isize
 }
 
-// Port of discharge2anyreg from lcode.c (lines 882-886)
+// Port of discharge2anyreg from lcode.c:882-886
+// static void discharge2anyreg (FuncState *fs, expdesc *e)
 fn discharge2anyreg(fs: &mut FuncState, e: &mut ExpDesc) {
     if e.kind != ExpKind::VNONRELOC {
         reserve_regs(fs, 1);
@@ -488,7 +589,8 @@ fn remove_last_instruction(fs: &mut FuncState) {
 
 const NO_REG: u32 = 255;
 
-// Port of jumponcond from lcode.c (lines 1118-1130)
+// Port of jumponcond from lcode.c:1118-1130
+// static int jumponcond (FuncState *fs, expdesc *e, int cond)
 fn jumponcond(fs: &mut FuncState, e: &mut ExpDesc, cond: bool) -> isize {
     if e.kind == ExpKind::VRELOC {
         let ie = fs.chunk.code[unsafe { e.u.info as usize }];
@@ -503,7 +605,8 @@ fn jumponcond(fs: &mut FuncState, e: &mut ExpDesc, cond: bool) -> isize {
     condjump(fs, OpCode::TestSet, NO_REG, unsafe { e.u.info as u32 }, 0, cond)
 }
 
-// Port of luaK_goiftrue from lcode.c (lines 1135-1160)
+// Port of luaK_goiftrue from lcode.c:1135-1160
+// void luaK_goiftrue (FuncState *fs, expdesc *e)
 pub fn goiftrue(fs: &mut FuncState, e: &mut ExpDesc) {
     discharge_vars(fs, e);
     let pc = match e.kind {
@@ -521,7 +624,8 @@ pub fn goiftrue(fs: &mut FuncState, e: &mut ExpDesc) {
     e.t = -1;
 }
 
-// Port of luaK_goiffalse from lcode.c (lines 1162-1183)
+// Port of luaK_goiffalse from lcode.c:1165-1183
+// void luaK_goiffalse (FuncState *fs, expdesc *e)
 pub fn goiffalse(fs: &mut FuncState, e: &mut ExpDesc) {
     discharge_vars(fs, e);
     let pc = match e.kind {
@@ -535,7 +639,7 @@ pub fn goiffalse(fs: &mut FuncState, e: &mut ExpDesc) {
     e.f = -1;
 }
 
-// Binary operator enum to match C code
+// Binary operator enum matching BinOpr in lparser.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOpr {
     Add, Sub, Mul, Div, IDiv, Mod, Pow,
@@ -545,7 +649,8 @@ pub enum BinOpr {
     And, Or,
 }
 
-// Port of luaK_infix from lcode.c (lines 1637-1678)
+// Port of luaK_infix from lcode.c:1637-1678
+// void luaK_infix (FuncState *fs, BinOpr op, expdesc *v)
 pub fn infix(fs: &mut FuncState, op: BinOpr, v: &mut ExpDesc) {
     discharge_vars(fs, v);
     match op {
@@ -620,14 +725,16 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
     e.u.info = res as i32;
 }
 
-// Port of luaK_exp2anyregup from lcode.c (lines 978-981)
+// Port of luaK_exp2anyregup from lcode.c:978-981
+// void luaK_exp2anyregup (FuncState *fs, expdesc *e)
 pub fn exp2anyregup(fs: &mut FuncState, e: &mut ExpDesc) {
     if e.kind != ExpKind::VUPVAL || e.has_jumps() {
         exp2anyreg(fs, e);
     }
 }
 
-// Port of luaK_exp2val from lcode.c (lines 988-993)
+// Port of luaK_exp2val from lcode.c:988-993
+// void luaK_exp2val (FuncState *fs, expdesc *e)
 pub fn exp2val(fs: &mut FuncState, e: &mut ExpDesc) {
     if e.kind == ExpKind::VJMP || e.has_jumps() {
         exp2anyreg(fs, e);
@@ -636,7 +743,8 @@ pub fn exp2val(fs: &mut FuncState, e: &mut ExpDesc) {
     }
 }
 
-// Port of luaK_indexed from lcode.c (lines 1280-1310)
+// Port of luaK_indexed from lcode.c:1280-1310
+// void luaK_indexed (FuncState *fs, expdesc *t, expdesc *k)
 pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
     use crate::compiler::expression::ExpKind;
     
@@ -689,7 +797,8 @@ fn is_cint(e: &ExpDesc) -> bool {
     e.kind == ExpKind::VKINT
 }
 
-// Port of luaK_self from lcode.c (lines 1087-1097)
+// Port of luaK_self from lcode.c:1087-1097
+// void luaK_self (FuncState *fs, expdesc *e, expdesc *key)
 pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key_idx: u8) {
     let ereg = exp2anyreg(fs, e);
     free_exp(fs, e);
@@ -708,7 +817,8 @@ pub fn setmultret(fs: &mut FuncState, e: &mut ExpDesc) {
     setreturns(fs, e, 0); // 0 means LUA_MULTRET
 }
 
-// Port of luaK_fixline from lcode.c (lines 1787-1790)
+// Port of luaK_fixline from lcode.c:1787-1790
+// void luaK_fixline (FuncState *fs, int line)
 pub fn fixline(fs: &mut FuncState, line: usize) {
     // Remove last line info and add it again with new line
     // For now, we just ensure line_info has correct size
@@ -718,7 +828,8 @@ pub fn fixline(fs: &mut FuncState, line: usize) {
     }
 }
 
-// Port of luaK_exp2const from lcode.c (lines 85-108)
+// Port of luaK_exp2const from lcode.c:85-108
+// int luaK_exp2const (FuncState *fs, const expdesc *e, TValue *v)
 pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<crate::lua_value::LuaValue> {
     if e.has_jumps() {
         return None;

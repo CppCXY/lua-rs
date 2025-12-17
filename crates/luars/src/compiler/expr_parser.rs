@@ -1,4 +1,5 @@
-// Expression parsing - port from lparser.c
+// Expression parsing - Port from lparser.c (Lua 5.4.8)
+// This file corresponds to expression parsing parts of lua-5.4.8/src/lparser.c
 use crate::compiler::expression::{ExpDesc, ExpKind};
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parse_literal::{
@@ -609,36 +610,43 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     expect(fs, LuaTokenKind::TkRightParen)?;
 
-    // Create child FuncState for the function body
-    // Use unsafe block to work around borrow checker
+    // Port of body function from lparser.c:989-1008
+    // body ->  '(' parlist ')' block END
+    
+    // lparser.c:993: Create new FuncState for nested function
+    // FuncState new_fs; new_fs.f = addprototype(ls); open_func(ls, &new_fs, &bl);
     let fs_ptr = fs as *mut FuncState;
     let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
 
-    // Add VARARGPREP if vararg
+    // lparser.c:994: If vararg, generate VARARGPREP instruction
     if is_vararg {
         code::code_abc(&mut child_fs, OpCode::VarargPrep, 0, 0, 0);
     }
 
-    // Register parameters as local variables
+    // lparser.c:996-999: Register parameters as local variables
+    // parlist(ls); adjustlocalvars(ls, nparams);
     for param in params {
         child_fs.new_localvar(param, VarKind::VDKREG);
     }
     child_fs.adjust_local_vars(child_fs.actvar.len() as u8);
 
-    // Parse body statements
+    // lparser.c:1002: Parse function body statements
+    // statlist(ls);
     statement::statlist(&mut child_fs)?;
 
+    // lparser.c:1004: Expect END token
     expect(&mut child_fs, LuaTokenKind::TkEnd)?;
 
-    // Generate final RETURN
+    // Generate final RETURN instruction
     code::ret(&mut child_fs, 0, 0);
 
     // Get completed child chunk and upvalue information
     let mut child_chunk = child_fs.chunk;
     let child_upvalues = child_fs.upvalues;
 
-    // Convert upvalues to UpvalueDesc and store in chunk
-    // In Lua 5.4, upvalue information is stored in the Proto, not as pseudo-instructions
+    // Port of lparser.c:722-726 (codeclosure)
+    // In Lua 5.4, upvalue information is stored in Proto.upvalues[], NOT as pseudo-instructions
+    // This is different from Lua 5.1 which used pseudo-instructions after OP_CLOSURE
     for upval in &child_upvalues {
         child_chunk
             .upvalue_descs
@@ -649,13 +657,13 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     }
     child_chunk.upvalue_count = child_upvalues.len();
 
-    // Add child as a prototype in parent
+    // lparser.c:1005: Add child proto to parent (addprototype)
     let proto_idx = fs.chunk.child_protos.len();
     fs.chunk.child_protos.push(std::rc::Rc::new(child_chunk));
 
-    // Generate CLOSURE instruction to create function object
-    // CLOSURE A Bx: R[A] := closure(KPROTO[Bx])
-    // The upvalue information is already stored in KPROTO[Bx].upvalue_descs
+    // lparser.c:1005: Generate CLOSURE instruction (codeclosure)
+    // OP_CLOSURE A Bx: R[A] := closure(KPROTO[Bx])
+    // Upvalue descriptors are in KPROTO[Bx].upvalues, not as following instructions
     let reg = fs.freereg;
     code::reserve_regs(fs, 1);
     code::code_abx(fs, OpCode::Closure, reg as u32, proto_idx as u32);

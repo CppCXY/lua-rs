@@ -1,5 +1,6 @@
 use crate::compiler::expr_parser::{body, expr, suffixedexp};
-// Statement parsing - Port from lparser.c
+// Statement parsing - Port from lparser.c (Lua 5.4.8)
+// This file corresponds to statement parsing parts of lua-5.4.8/src/lparser.c
 use crate::Instruction;
 use crate::compiler::expression::ExpDesc;
 use crate::compiler::func_state::{BlockCnt, FuncState, LabelDesc};
@@ -7,7 +8,8 @@ use crate::compiler::parser::LuaTokenKind;
 use crate::compiler::{ExpKind, VarKind, code};
 use crate::lua_vm::OpCode;
 
-// Port of statlist from lparser.c
+// Port of statlist from lparser.c:1529-1536
+// static void statlist (LexState *ls)
 pub fn statlist(fs: &mut FuncState) -> Result<(), String> {
     // statlist -> { stat [';'] }
     while !block_follow(fs, true) {
@@ -20,7 +22,8 @@ pub fn statlist(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of block_follow from lparser.c
+// Port of block_follow from lparser.c:1504-1510
+// static int block_follow (LexState *ls, int withuntil)
 fn block_follow(fs: &FuncState, withuntil: bool) -> bool {
     match fs.lexer.current_token() {
         LuaTokenKind::TkElse
@@ -198,10 +201,11 @@ fn block(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of retstat from lparser.c (lines 1812-1843)
+// Port of retstat from lparser.c:1812-1843
+// static void retstat (LexState *ls)
+// stat -> RETURN [explist] [';']
 fn retstat(fs: &mut FuncState) -> Result<(), String> {
     use crate::compiler::expression::ExpKind;
-    // retstat -> RETURN [explist] [';']
     let mut first = fs.freereg;
     let mut nret: i32;
     let mut e = ExpDesc::new_void();
