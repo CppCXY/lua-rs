@@ -1,4 +1,3 @@
-
 use crate::compiler::parse_lua_number::NumberResult;
 
 // Expression compilation (对齐lparser.c的expression parsing)
@@ -28,32 +27,125 @@ pub(crate) fn expr(c: &mut Compiler, node: &LuaExpr) -> Result<ExpDesc, String> 
         }
 
         // 二元运算符
-        LuaExpr::BinaryExpr(binary) => {
-            let (left, right) = binary
-                .get_exprs()
-                .ok_or("binary expression missing operands")?;
-            let op_token = binary
-                .get_op_token()
-                .ok_or("binary expression missing operator")?;
-
-            // 递归编译左操作数
-            let mut v1 = expr(c, &left)?;
-
-            // 中缀处理
-            infix_op(c, &op_token, &mut v1)?;
-
-            // 递归编译右操作数
-            let mut v2 = expr(c, &right)?;
-
-            // 后缀处理
-            postfix_op(c, &op_token, &mut v1, &mut v2)?;
-
-            Ok(v1)
-        }
+        LuaExpr::BinaryExpr(binary) => binary_exp(c, binary.clone()),
 
         // 其他表达式
         _ => simple_exp(c, node),
     }
+}
+
+enum BinaryExprNode {
+    Expr(LuaExpr),
+    Op(LuaBinaryOpToken),
+}
+
+fn binary_exp(c: &mut Compiler, binary_expr: LuaBinaryExpr) -> Result<ExpDesc, String> {
+    // 第一步：铺平BinaryExpr树，收集所有操作数和操作符
+    // 使用递归栈来深度优先遍历，确保正确的顺序
+    let mut binary_expr_list: Vec<BinaryExprNode> = vec![];
+    
+    // 辅助函数：递归铺平BinaryExpr
+    fn flatten_binary(
+        expr: LuaExpr,
+        list: &mut Vec<BinaryExprNode>,
+    ) -> Result<(), String> {
+        match expr {
+            LuaExpr::BinaryExpr(binary) => {
+                let (left, right) = binary
+                    .get_exprs()
+                    .ok_or("binary expression missing operands")?;
+                let op = binary
+                    .get_op_token()
+                    .ok_or("binary expression missing operator")?;
+                
+                // 先递归处理左边
+                flatten_binary(left.clone(), list)?;
+                // 添加操作符
+                list.push(BinaryExprNode::Op(op));
+                // 再递归处理右边
+                flatten_binary(right.clone(), list)?;
+                
+                Ok(())
+            }
+            _ => {
+                // 非BinaryExpr，直接添加
+                list.push(BinaryExprNode::Expr(expr));
+                Ok(())
+            }
+        }
+    }
+    
+    // 铺平整个BinaryExpr树
+    flatten_binary(LuaExpr::BinaryExpr(binary_expr), &mut binary_expr_list)?;
+    
+    eprintln!("[binary_exp] Flattened list length: {}", binary_expr_list.len());
+    
+    // 第二步：按顺序处理铺平后的列表
+    // 应该是：Expr, Op, Expr, Op, Expr...
+    if binary_expr_list.is_empty() {
+        return Err("Empty binary expression list".to_string());
+    }
+    
+    // 编译第一个操作数
+    let first_expr = match &binary_expr_list[0] {
+        BinaryExprNode::Expr(e) => e,
+        _ => return Err("Expected expression at position 0".to_string()),
+    };
+    let mut v1 = expr(c, first_expr)?;
+    
+    // 处理后续的操作符和操作数对
+    let mut i = 1;
+    while i < binary_expr_list.len() {
+        // 获取操作符
+        let op_token = match &binary_expr_list[i] {
+            BinaryExprNode::Op(op) => op.clone(),
+            _ => return Err(format!("Expected operator at position {}", i)),
+        };
+        i += 1;
+        
+        // 中缀处理
+        infix_op(c, &op_token, &mut v1)?;
+        
+        // 获取右操作数
+        if i >= binary_expr_list.len() {
+            return Err("Missing right operand".to_string());
+        }
+        let right_expr = match &binary_expr_list[i] {
+            BinaryExprNode::Expr(e) => e,
+            _ => return Err(format!("Expected expression at position {}", i)),
+        };
+        i += 1;
+        
+        // 编译右操作数
+        let mut v2 = expr(c, right_expr)?;
+        
+        // 后缀处理
+        postfix_op(c, &op_token, &mut v1, &mut v2)?;
+        
+        eprintln!("[binary_exp] After postfix_op: v1.kind={:?}, i={}, len={}, freereg={}",
+                  v1.kind, i, binary_expr_list.len(), c.freereg);
+        
+        // 关键修复：如果v1是VReloc且还有后续操作，立即discharge避免freereg增加
+        // 原因：VReloc在exp2nextreg时会reserve新寄存器，导致后续free时freereg不匹配
+        // 对齐官方：虽然官方也用VReloc，但它的freeexps会正确维护freereg
+        // 我们这里简化处理：有后续操作时立即discharge到VNonReloc
+        if v1.kind == ExpKind::VReloc && i < binary_expr_list.len() {
+            eprintln!("[binary_exp] Discharging VReloc early: v1.info={}, freereg={}", v1.info, c.freereg);
+            // 使用当前freereg作为目标寄存器，不要reserve新寄存器
+            super::exp2reg::discharge_vars(c, &mut v1);
+            if v1.kind == ExpKind::VReloc {
+                // VReloc在discharge_vars后还是VReloc，需要手动patch
+                super::helpers::reserve_regs(c, 1);
+                let target_reg = c.freereg - 1;
+                eprintln!("[binary_exp] Patching VReloc to reg={}", target_reg);
+                super::exp2reg::exp2reg(c, &mut v1, target_reg);
+            }
+            eprintln!("[binary_exp] After discharge: v1.kind={:?}, v1.info={}, freereg={}",
+                      v1.kind, v1.info, c.freereg);
+        }
+    }
+    
+    Ok(v1)
 }
 
 /// Compile a simple expression (对齐simpleexp)
@@ -161,91 +253,190 @@ pub(crate) fn simple_exp(c: &mut Compiler, node: &LuaExpr) -> Result<ExpDesc, St
             // Table constructor expression (对齐constructor)
             compile_table_constructor(c, table_expr)
         }
-        _ => {
-            // TODO: Handle other expression types (calls, tables, binary ops, etc.)
-            Err(format!("Unsupported expression type: {:?}", node))
-        }
+        _ => Err(format!("Unsupported expression type: {:?}", node)),
     }
 }
 
-/// Compile index expression: t[k] or t.field or t:method (对齐yindex和fieldsel)
+/// 辅助函数：循环处理铺平后的IndexExpr链
+/// 对齐官方Lua的suffixedexp循环处理方式
+fn compile_index_chain(
+    c: &mut Compiler,
+    var_expr_chain: &[LuaVarExpr],
+    t: &mut ExpDesc,
+) -> Result<(), String> {
+    if var_expr_chain.is_empty() {
+        return Err("Empty var_expr_chain".to_string());
+    }
+
+    // 第一个元素是基础表达式（NameExpr）
+    match &var_expr_chain[0] {
+        LuaVarExpr::NameExpr(name_expr) => {
+            eprintln!(
+                "[compile_index_chain] Base: NameExpr, freereg={}",
+                c.freereg
+            );
+            let name_text = name_expr
+                .get_name_token()
+                .ok_or("Name expression missing token")?
+                .get_name_text()
+                .to_string();
+            super::var::singlevar(c, &name_text, t)?;
+            eprintln!(
+                "[compile_index_chain] After base: t.kind={:?}, t.info={}, freereg={}",
+                t.kind, t.info, c.freereg
+            );
+        }
+        _ => {
+            return Err("First element of var_expr_chain must be NameExpr".to_string());
+        }
+    }
+
+    // 循环处理后续的IndexExpr，对齐官方suffixedexp的for循环  
+    for (i, var_expr) in var_expr_chain.iter().enumerate().skip(1) {
+        match var_expr {
+            LuaVarExpr::IndexExpr(index_expr) => {
+                eprintln!(
+                    "[compile_index_chain] Processing index level {}: t.kind={:?}, freereg={}",
+                    i, t.kind, c.freereg
+                );
+
+                // indexed要求t必须是VNonReloc/VLocal/VUpval
+                // 所以必须discharge之前的indexed状态
+                if matches!(
+                    t.kind,
+                    ExpKind::VIndexStr | ExpKind::VIndexUp | ExpKind::VIndexI | ExpKind::VIndexed
+                ) {
+                    eprintln!(
+                        "[compile_index_chain] Discharging previous index: t.kind={:?}",
+                        t.kind
+                    );
+                    super::exp2reg::exp2anyregup(c, t);
+                    eprintln!(
+                        "[compile_index_chain] After discharge: t.kind={:?}, t.info={}, freereg={}",
+                        t.kind, t.info, c.freereg
+                    );
+                }
+
+                // 提取当前层的key并生成indexed（延迟状态）
+                if let Some(index_token) = index_expr.get_index_token() {
+                    if index_token.is_dot() || index_token.is_colon() {
+                        // .field访问
+                        if let Some(key) = index_expr.get_index_key() {
+                            let key_name = match key {
+                                LuaIndexKey::Name(name_token) => {
+                                    name_token.get_name_text().to_string()
+                                }
+                                _ => return Err("Dot/Colon notation requires name key".to_string()),
+                            };
+                            eprintln!(
+                                "[compile_index_chain] Dot access key='{}', freereg={}",
+                                key_name, c.freereg
+                            );
+                            let k_idx = helpers::string_k(c, key_name);
+                            let mut k = ExpDesc::new_kstr(k_idx);
+                            super::exp2reg::indexed(c, t, &mut k);
+                            eprintln!(
+                                "[compile_index_chain] After indexed: t.kind={:?}, t.info={}, freereg={}",
+                                t.kind, t.info, c.freereg
+                            );
+                        } else {
+                            return Err("Dot notation missing key".to_string());
+                        }
+                    } else if index_token.is_left_bracket() {
+                        // [key]访问
+                        if let Some(key) = index_expr.get_index_key() {
+                            let mut k = match key {
+                                LuaIndexKey::Expr(key_expr) => expr(c, &key_expr)?,
+                                LuaIndexKey::Name(name_token) => {
+                                    let name = name_token.get_name_text().to_string();
+                                    let mut v = ExpDesc::new_void();
+                                    super::var::singlevar(c, &name, &mut v)?;
+                                    v
+                                }
+                                LuaIndexKey::String(str_token) => {
+                                    let str_val = str_token.get_value();
+                                    let k_idx = helpers::string_k(c, str_val);
+                                    ExpDesc::new_k(k_idx)
+                                }
+                                LuaIndexKey::Integer(int_token) => {
+                                    ExpDesc::new_int(int_token.get_int_value())
+                                }
+                                LuaIndexKey::Idx(_) => {
+                                    return Err("Invalid index key type".to_string());
+                                }
+                            };
+                            super::exp2reg::exp2val(c, &mut k);
+                            super::exp2reg::indexed(c, t, &mut k);
+                        } else {
+                            return Err("Bracket notation missing key".to_string());
+                        }
+                    } else {
+                        return Err("Invalid index token".to_string());
+                    }
+                } else {
+                    return Err("Index expression missing token".to_string());
+                }
+            }
+            _ => {
+                return Err(format!("Expected IndexExpr at position {}", i));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Compile index expression: t[k] or t.field or t:method
+/// 关键优化：铺平递归IndexExpr结构，循环处理，对齐官方Lua的suffixedexp
+/// 官方suffixedexp使用for循环，每次fieldsel按顺序discharge前一个结果
 pub(crate) fn compile_index_expr(
     c: &mut Compiler,
     index_expr: &LuaIndexExpr,
 ) -> Result<ExpDesc, String> {
-    // Get the prefix expression (table)
-    let prefix = index_expr
-        .get_prefix_expr()
-        .ok_or("Index expression missing prefix")?;
+    eprintln!("[compile_index_expr] Start: freereg={}", c.freereg);
 
-    let mut t = expr(c, &prefix)?;
+    // 第一步：铺平递归结构，收集从外到内的所有IndexExpr
+    // 使用克隆的表达式避免生命周期问题
+    let mut var_expr_chain = vec![];
+    let mut current_expr = LuaExpr::IndexExpr(index_expr.clone());
 
-    // 对齐官方fieldsel处理：先exp2anyregup确保t在寄存器或upvalue中
-    // 但关键是：如果t已经是VIndexStr等延迟状态，exp2anyregup会通过discharge_vars生成指令
-    // 然后indexed会基于这个新的VReloc/VNonReloc再次设置为VIndexStr
-    super::exp2reg::exp2anyregup(c, &mut t);
-
-    // Get the index/key
-    if let Some(index_token) = index_expr.get_index_token() {
-        // 注意：冒号语法在这里不报错，因为可能是在函数调用context中
-        // 会在compile_function_call中特殊处理
-        
-        if index_token.is_dot() || index_token.is_colon() {
-            // Dot/Colon notation: t.field 或 t:method
-            // 注意：冒号在这里和点号处理相同，实际的SELF指令会在函数调用时生成
-            if let Some(key) = index_expr.get_index_key() {
-                let key_name = match key {
-                    LuaIndexKey::Name(name_token) => name_token.get_name_text().to_string(),
-                    _ => return Err("Dot/Colon notation requires name key".to_string()),
-                };
-
-                // Create string constant for field name (对齐luac，使用VKStr)
-                let k_idx = helpers::string_k(c, key_name);
-                let mut k = ExpDesc::new_kstr(k_idx);
-
-                // Create indexed expression
-                super::exp2reg::indexed(c, &mut t, &mut k);
-                return Ok(t);
+    // 从最外层开始，一直遍历到最内层
+    loop {
+        match current_expr {
+            LuaExpr::IndexExpr(idx) => {
+                var_expr_chain.push(LuaVarExpr::IndexExpr(idx.clone()));
+                if let Some(prefix) = idx.get_prefix_expr() {
+                    current_expr = prefix.clone();
+                } else {
+                    return Err("Index expression missing prefix".to_string());
+                }
             }
-        } else if index_token.is_left_bracket() {
-            // Bracket notation: t[expr]
-            if let Some(key) = index_expr.get_index_key() {
-                let mut k = match key {
-                    LuaIndexKey::Expr(key_expr) => expr(c, &key_expr)?,
-                    LuaIndexKey::Name(name_token) => {
-                        // In bracket context, treat name as variable reference
-                        let name_text = name_token.get_name_text().to_string();
-                        let mut v = ExpDesc::new_void();
-                        super::var::singlevar(c, &name_text, &mut v)?;
-                        v
-                    }
-                    LuaIndexKey::String(str_token) => {
-                        // String literal key
-                        let str_val = str_token.get_value();
-                        let k_idx = helpers::string_k(c, str_val.to_string());
-                        ExpDesc::new_k(k_idx)
-                    }
-                    LuaIndexKey::Integer(int_token) => {
-                        // Integer literal key
-                        ExpDesc::new_int(int_token.get_int_value())
-                    }
-                    LuaIndexKey::Idx(_) => {
-                        // Generic index (shouldn't normally happen in well-formed code)
-                        return Err("Invalid index key type".to_string());
-                    }
-                };
-
-                // Ensure key value is computed
-                super::exp2reg::exp2val(c, &mut k);
-
-                // Create indexed expression
-                super::exp2reg::indexed(c, &mut t, &mut k);
-                return Ok(t);
+            LuaExpr::NameExpr(name) => {
+                var_expr_chain.push(LuaVarExpr::NameExpr(name.clone()));
+                break;
+            }
+            _ => {
+                return Err("Invalid prefix expression in index chain".to_string());
             }
         }
     }
 
-    Err("Invalid index expression".to_string())
+    // 第二步：反转数组，得到从内到外的顺序（NameExpr在前，最外层IndexExpr在后）
+    var_expr_chain.reverse();
+    eprintln!(
+        "[compile_index_expr] Chain length: {}",
+        var_expr_chain.len()
+    );
+
+    // 第三步：循环处理，对齐官方suffixedexp的for循环
+    let mut t = ExpDesc::new_void();
+    compile_index_chain(c, &var_expr_chain, &mut t)?;
+
+    eprintln!(
+        "[compile_index_expr] End: t.kind={:?}, t.info={}, freereg={}",
+        t.kind, t.info, c.freereg
+    );
+    Ok(t)
 }
 
 /// 应用一元运算符 (对齐 luaK_prefix)
@@ -449,7 +640,7 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
     use super::helpers;
 
     // 特殊处理移位和减法优化（对齐官方lcode.c luaK_posfix中的OPR_SUB/OPR_SHR/OPR_SHL case）
-    
+
     // 1. SUB优化：x - n => ADDI x, -n + MMBINI x, n, TM_SUB（如果n fit sC）
     // 对齐lcode.c:1743: if (finishbinexpneg(fs, e1, e2, OP_ADDI, line, TM_SUB))
     if op == OpCode::Sub {
@@ -459,10 +650,12 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
                 // 对齐finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
                 let imm = ((-val + 127) & 0xFF) as u32;
+                // 对齐官方：A字段先设置为0，后续通过VReloc patch
                 let pc = helpers::code_abc(c, OpCode::AddI, 0, o1, imm);
-                // 关键：先free，再改kind（此时e1还是VNonReloc，可以被free）
+                // freeexps
                 super::exp2reg::free_exp(c, e1);
                 super::exp2reg::free_exp(c, e2);
+                // 关键：设置为VReloc，后续exp2anyreg会patch A字段
                 e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
                 // MMBINI: 第二个参数是原始值val（不是负值）
@@ -482,10 +675,12 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
                 // 对齐codebini → finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
                 let imm = ((val + 127) & 0xFF) as u32;
+                // 对齐官方：A字段先设置为0，后续通过VReloc patch
                 let pc = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm);
-                // 关键：先free，再改kind
+                // freeexps
                 super::exp2reg::free_exp(c, e1);
                 super::exp2reg::free_exp(c, e2);
+                // 设置为VReloc
                 e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
                 // MMBINI
@@ -508,10 +703,12 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
                 // 对齐codebini → finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
                 let imm = ((val + 127) & 0xFF) as u32;
+                // 对齐官方：A字段先设置为0，后续通过VReloc patch
                 let pc = helpers::code_abc(c, OpCode::ShlI, 0, o1, imm);
-                // 关键：先free，再改kind（此时e1是VNonReloc，可以被释放）
+                // freeexps
                 super::exp2reg::free_exp(c, e1);
                 super::exp2reg::free_exp(c, e2);
+                // 设置为VReloc
                 e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
                 // MMBINI: 参数是原始值val，flip=1
@@ -528,12 +725,14 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
                 // 对齐finishbinexpneg: exp2anyreg → 生成指令 → freeexps → 修改kind
                 let o1 = super::exp2reg::exp2anyreg(c, e1);
                 let imm = ((-val + 127) & 0xFF) as u32;
-                let pc = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm);
+                // 关键：A字段直接使用o1
+                helpers::code_abc(c, OpCode::ShrI, o1, o1, imm);
                 // 关键：先free，再改kind
                 super::exp2reg::free_exp(c, e1);
                 super::exp2reg::free_exp(c, e2);
-                e1.info = pc as u32;
-                e1.kind = ExpKind::VReloc;
+                // 结果已经在寄存器o1中
+                e1.info = o1;
+                e1.kind = ExpKind::VNonReloc;
                 // MMBINI: 参数是原始值val，元方法是TM_SHL
                 let imm_mm = ((val + 128) & 0xFF) as u32;
                 helpers::code_abc(c, OpCode::MmBinI, o1, imm_mm, 16); // TM_SHL=16
@@ -544,7 +743,7 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
 
     // 标准路径：左操作数总是要放到寄存器
     let o1 = super::exp2reg::exp2anyreg(c, e1);
-    
+
     // 检查是否可以使用K后缀指令（对齐Lua 5.4 codebinarith）
     let (final_op, o2, use_k) = if can_use_k_variant(op) {
         // 检查右操作数是否为常量
@@ -574,7 +773,7 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
     // 生成指令
     e1.info = helpers::code_abck(c, final_op, 0, o1, o2, use_k) as u32;
     e1.kind = ExpKind::VReloc;
-    
+
     // 生成元方法标记指令（对齐 Lua 5.4 codeMMBin）
     if use_k {
         code_mmbink(c, final_op, o1, o2);
@@ -587,10 +786,18 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
 fn can_use_k_variant(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | 
-        OpCode::IDiv | OpCode::Mod | OpCode::Pow |
-        OpCode::BAnd | OpCode::BOr | OpCode::BXor |
-        OpCode::Shl | OpCode::Shr
+        OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Div
+            | OpCode::IDiv
+            | OpCode::Mod
+            | OpCode::Pow
+            | OpCode::BAnd
+            | OpCode::BOr
+            | OpCode::BXor
+            | OpCode::Shl
+            | OpCode::Shr
     )
 }
 
@@ -607,7 +814,7 @@ fn get_k_variant(op: OpCode) -> OpCode {
         OpCode::BAnd => OpCode::BAndK,
         OpCode::BOr => OpCode::BOrK,
         OpCode::BXor => OpCode::BXorK,
-        OpCode::Shl => OpCode::ShlI,  // 注意：移位用整数立即数
+        OpCode::Shl => OpCode::ShlI, // 注意：移位用整数立即数
         OpCode::Shr => OpCode::ShrI,
         _ => op,
     }
@@ -657,19 +864,19 @@ fn get_mm_index(op: OpCode) -> u32 {
     // TM_ADD(6), TM_SUB(7), TM_MUL(8), TM_MOD(9), TM_POW(10), TM_DIV(11), TM_IDIV(12),
     // TM_BAND(13), TM_BOR(14), TM_BXOR(15), TM_SHL(16), TM_SHR(17), ...
     match op {
-        OpCode::Add | OpCode::AddK => 6,      // TM_ADD
-        OpCode::Sub | OpCode::SubK => 7,      // TM_SUB
-        OpCode::Mul | OpCode::MulK => 8,      // TM_MUL
-        OpCode::Mod | OpCode::ModK => 9,      // TM_MOD
-        OpCode::Pow | OpCode::PowK => 10,     // TM_POW
-        OpCode::Div | OpCode::DivK => 11,     // TM_DIV
-        OpCode::IDiv | OpCode::IDivK => 12,    // TM_IDIV
-        OpCode::BAnd | OpCode::BAndK => 13,    // TM_BAND
-        OpCode::BOr | OpCode::BOrK => 14,     // TM_BOR
-        OpCode::BXor | OpCode::BXorK => 15,    // TM_BXOR
-        OpCode::Shl | OpCode::ShlI => 16,     // TM_SHL
-        OpCode::Shr | OpCode::ShrI => 17,     // TM_SHR
-        _ => 0,                               // 其他操作不需要元方法
+        OpCode::Add | OpCode::AddK => 6,    // TM_ADD
+        OpCode::Sub | OpCode::SubK => 7,    // TM_SUB
+        OpCode::Mul | OpCode::MulK => 8,    // TM_MUL
+        OpCode::Mod | OpCode::ModK => 9,    // TM_MOD
+        OpCode::Pow | OpCode::PowK => 10,   // TM_POW
+        OpCode::Div | OpCode::DivK => 11,   // TM_DIV
+        OpCode::IDiv | OpCode::IDivK => 12, // TM_IDIV
+        OpCode::BAnd | OpCode::BAndK => 13, // TM_BAND
+        OpCode::BOr | OpCode::BOrK => 14,   // TM_BOR
+        OpCode::BXor | OpCode::BXorK => 15, // TM_BXOR
+        OpCode::Shl | OpCode::ShlI => 16,   // TM_SHL
+        OpCode::Shr | OpCode::ShrI => 17,   // TM_SHR
+        _ => 0,                             // 其他操作不需要元方法
     }
 }
 
@@ -678,9 +885,24 @@ fn get_mm_index(op: OpCode) -> u32 {
 fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, inv: bool) {
     use super::helpers;
 
+    use std::io::{self, Write};
+    let _ = writeln!(
+        io::stderr(),
+        "[code_comp] Start: e1.kind={:?}, e1.info={}, freereg={}",
+        e1.kind,
+        e1.info,
+        c.freereg
+    );
     // 左操作数总是在寄存器
     let o1 = super::exp2reg::exp2anyreg(c, e1);
-    
+    let _ = writeln!(
+        io::stderr(),
+        "[code_comp] After exp2anyreg(e1): o1={}, e1.kind={:?}, freereg={}",
+        o1,
+        e1.kind,
+        c.freereg
+    );
+
     // 检查是否可以使用EQI或EQK优化（对齐Lua 5.4 lcode.c:1369-1386 codeeq函数）
     // 只有EQ操作支持EQI/EQK指令
     if op == OpCode::Eq {
@@ -705,7 +927,7 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, i
                 return;
             }
         }
-        
+
         // 然后尝试将右操作数转换为常量（EQK）
         // 对齐官方lcode.c:1381: else if (exp2RK(fs, e2))
         if super::exp2reg::exp2k(c, e2) {
@@ -720,7 +942,7 @@ fn code_comp(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc, i
             return;
         }
     }
-    
+
     // 标准路径：两个操作数都在寄存器
     let o2 = super::exp2reg::exp2anyreg(c, e2);
 
@@ -790,7 +1012,12 @@ fn postfix_op(
                 let reg1 = v1.info;
                 let reg2 = v2.info;
                 // 确保寄存器连续（infix 阶段已经 exp2nextreg）
-                debug_assert!(reg2 == reg1 + 1, "CONCAT registers not consecutive: {} and {}", reg1, reg2);
+                debug_assert!(
+                    reg2 == reg1 + 1,
+                    "CONCAT registers not consecutive: {} and {}",
+                    reg1,
+                    reg2
+                );
                 // 释放寄存器
                 super::exp2reg::free_exp(c, v2);
                 super::exp2reg::free_exp(c, v1);
@@ -839,7 +1066,11 @@ fn postfix_op(
 }
 
 /// Compile closure expression (anonymous function) - 对齐body
-pub(crate) fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, ismethod: bool) -> Result<ExpDesc, String> {
+pub(crate) fn compile_closure_expr(
+    c: &mut Compiler,
+    closure: &LuaClosureExpr,
+    ismethod: bool,
+) -> Result<ExpDesc, String> {
     // Create a child compiler for the nested function
     let parent_scope = c.scope_chain.clone();
     let vm_ptr = c.vm_ptr;
@@ -867,16 +1098,17 @@ pub(crate) fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, i
         scope.upvalues.clone()
     };
     let num_upvalues = upvalue_descs.len();
-    
+
     // Store upvalue descriptors in child chunk (对齐luac的Proto.upvalues)
     child_compiler.chunk.upvalue_count = num_upvalues;
-    child_compiler.chunk.upvalue_descs = upvalue_descs.iter().map(|uv| {
-        crate::lua_value::UpvalueDesc {
+    child_compiler.chunk.upvalue_descs = upvalue_descs
+        .iter()
+        .map(|uv| crate::lua_value::UpvalueDesc {
             is_local: uv.is_local,
             index: uv.index,
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     // Store the child chunk
     c.child_chunks.push(child_compiler.chunk);
     let proto_idx = c.child_chunks.len() - 1;
@@ -890,7 +1122,7 @@ pub(crate) fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, i
     // After CLOSURE, we need to emit instructions to describe how to capture each upvalue
     // 在luac 5.4中，这些信息已经在upvalue_descs中，VM会根据它来捕获upvalues
     // 但我们仍然需要确保upvalue_descs已正确设置
-    
+
     // Return expression descriptor (already in register after reserve_regs)
     let mut v = ExpDesc::new_void();
     v.kind = expdesc::ExpKind::VNonReloc;
@@ -899,7 +1131,11 @@ pub(crate) fn compile_closure_expr(c: &mut Compiler, closure: &LuaClosureExpr, i
 }
 
 /// Compile function body (parameters and block) - 对齐body
-fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr, ismethod: bool) -> Result<(), String> {
+fn compile_function_body(
+    child: &mut Compiler,
+    closure: &LuaClosureExpr,
+    ismethod: bool,
+) -> Result<(), String> {
     // Enter function block
     enter_block(child, false)?;
 
@@ -936,7 +1172,7 @@ fn compile_function_body(child: &mut Compiler, closure: &LuaClosureExpr, ismetho
 
         // Activate parameter variables
         adjustlocalvars(child, param_count - if ismethod { 1 } else { 0 });
-        
+
         // Reserve registers for parameters (对齐luaK_reserveregs)
         helpers::reserve_regs(child, child.nactvar as u32);
 
@@ -1004,23 +1240,23 @@ fn code_self(c: &mut Compiler, e: &mut ExpDesc, key: &mut ExpDesc) -> u32 {
     // Ensure object is in a register
     super::exp2reg::exp2anyreg(c, e);
     let ereg = e.info; // register where object was placed
-    
+
     // Free the object register since SELF will use new registers
     helpers::freeexp(c, e);
-    
+
     // Allocate base register for SELF
     e.info = c.freereg;
     e.kind = expdesc::ExpKind::VNonReloc;
-    
+
     // Reserve 2 registers: one for method, one for self parameter
     helpers::reserve_regs(c, 2);
-    
+
     // Generate SELF instruction
     code_abrk(c, OpCode::Self_, e.info, ereg, key);
-    
+
     // Free key expression
     helpers::freeexp(c, key);
-    
+
     e.info
 }
 
@@ -1050,10 +1286,11 @@ fn compile_function_call(c: &mut Compiler, call_expr: &LuaCallExpr) -> Result<Ex
         // 使用SELF指令：SELF A B C  =>  R(A+1):=R(B); R(A):=R(B)[RK(C)]
         if let LuaExpr::IndexExpr(index_expr) = &prefix {
             // 编译对象表达式
-            let obj_prefix = index_expr.get_prefix_expr()
+            let obj_prefix = index_expr
+                .get_prefix_expr()
                 .ok_or("method call missing object")?;
             let mut obj = expr(c, &obj_prefix)?;
-            
+
             // 获取方法名
             let method_name = if let Some(key) = index_expr.get_index_key() {
                 match key {
@@ -1063,11 +1300,11 @@ fn compile_function_call(c: &mut Compiler, call_expr: &LuaCallExpr) -> Result<Ex
             } else {
                 return Err("Method call missing method name".to_string());
             };
-            
+
             // 创建方法名的字符串常量
             let k_idx = super::helpers::string_k(c, method_name);
             let mut key = ExpDesc::new_kstr(k_idx);
-            
+
             // 生成SELF指令 (对齐luaK_self)
             code_self(c, &mut obj, &mut key)
         } else {
