@@ -1,6 +1,7 @@
 // Code generation - Port from lcode.c (Lua 5.4.8)
 // This file corresponds to lua-5.4.8/src/lcode.c
 use crate::compiler::func_state::FuncState;
+use crate::compiler::parser::BinaryOperator;
 use crate::lua_vm::{Instruction, OpCode};
 
 // Port of luaK_codeABC from lcode.c:397-402
@@ -97,7 +98,10 @@ pub fn concat(fs: &mut FuncState, l1: &mut isize, l2: isize) {
             list = next;
             next = get_jump(fs, list as usize);
         }
-        fix_jump(fs, list as usize, l2 as usize);
+        // Only fix jump if l2 is a valid target (not NO_JUMP)
+        if l2 >= 0 {
+            fix_jump(fs, list as usize, l2 as usize);
+        }
     }
 }
 
@@ -106,7 +110,10 @@ pub fn concat(fs: &mut FuncState, l1: &mut isize, l2: isize) {
 pub fn patchlist(fs: &mut FuncState, mut list: isize, target: isize) {
     while list != -1 {
         let next = get_jump(fs, list as usize);
-        fix_jump(fs, list as usize, target as usize);
+        // Only fix jump if target is valid (not NO_JUMP)
+        if target >= 0 {
+            fix_jump(fs, list as usize, target as usize);
+        }
         list = next;
     }
 }
@@ -179,10 +186,15 @@ fn patchlistaux(fs: &mut FuncState, mut list: isize, vtarget: isize, reg: u8, dt
             if op == OpCode::TestSet {
                 // Patch TESTSET destination register
                 Instruction::set_a(&mut fs.chunk.code[pc], reg as u32);
-                fix_jump(fs, list as usize, vtarget as usize);
+                // Only fix jump if vtarget is valid
+                if vtarget >= 0 {
+                    fix_jump(fs, list as usize, vtarget as usize);
+                }
             } else {
                 // Jump does not produce a value - patch to dtarget
-                fix_jump(fs, list as usize, dtarget as usize);
+                if dtarget >= 0 {
+                    fix_jump(fs, list as usize, dtarget as usize);
+                }
             }
         }
         list = next;
@@ -228,10 +240,14 @@ pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
         // lcode.c:919-934: need to patch jump lists
         let mut p_f = -1_isize; // position of an eventual LOAD false
         let mut p_t = -1_isize; // position of an eventual LOAD true
-        
+
         if need_value(fs, e.t) || need_value(fs, e.f) {
             // lcode.c:922-926
-            let fj = if e.kind == ExpKind::VJMP { -1 } else { jump(fs) as isize };
+            let fj = if e.kind == ExpKind::VJMP {
+                -1
+            } else {
+                jump(fs) as isize
+            };
             p_f = code_loadbool(fs, reg, OpCode::LFalseSkip) as isize;
             p_t = code_loadbool(fs, reg, OpCode::LoadTrue) as isize;
             patchtohere(fs, fj);
@@ -259,23 +275,43 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
             e.kind = ExpKind::VRELOC;
         }
         ExpKind::VINDEXUP => {
-            e.u.info = code_abc(fs, OpCode::GetTabUp, 0, unsafe { e.u.ind.t as u32 }, unsafe { e.u.ind.idx as u32 }) as i32;
+            e.u.info = code_abc(
+                fs,
+                OpCode::GetTabUp,
+                0,
+                unsafe { e.u.ind.t as u32 },
+                unsafe { e.u.ind.idx as u32 },
+            ) as i32;
             e.kind = ExpKind::VRELOC;
         }
         ExpKind::VINDEXI => {
             free_reg(fs, unsafe { e.u.ind.t as u8 });
-            e.u.info = code_abc(fs, OpCode::GetI, 0, unsafe { e.u.ind.t as u32 }, unsafe { e.u.ind.idx as u32 }) as i32;
+            e.u.info = code_abc(fs, OpCode::GetI, 0, unsafe { e.u.ind.t as u32 }, unsafe {
+                e.u.ind.idx as u32
+            }) as i32;
             e.kind = ExpKind::VRELOC;
         }
         ExpKind::VINDEXSTR => {
             free_reg(fs, unsafe { e.u.ind.t as u8 });
-            e.u.info = code_abc(fs, OpCode::GetField, 0, unsafe { e.u.ind.t as u32 }, unsafe { e.u.ind.idx as u32 }) as i32;
+            e.u.info = code_abc(
+                fs,
+                OpCode::GetField,
+                0,
+                unsafe { e.u.ind.t as u32 },
+                unsafe { e.u.ind.idx as u32 },
+            ) as i32;
             e.kind = ExpKind::VRELOC;
         }
         ExpKind::VINDEXED => {
             free_reg(fs, unsafe { e.u.ind.idx as u8 });
             free_reg(fs, unsafe { e.u.ind.t as u8 });
-            e.u.info = code_abc(fs, OpCode::GetTable, 0, unsafe { e.u.ind.t as u32 }, unsafe { e.u.ind.idx as u32 }) as i32;
+            e.u.info = code_abc(
+                fs,
+                OpCode::GetTable,
+                0,
+                unsafe { e.u.ind.t as u32 },
+                unsafe { e.u.ind.idx as u32 },
+            ) as i32;
             e.kind = ExpKind::VRELOC;
         }
         ExpKind::VVARARG | ExpKind::VCALL => {
@@ -514,7 +550,7 @@ fn exp2k(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
             ExpKind::VK => unsafe { e.u.info as usize },
             _ => return false,
         };
-        
+
         if info <= MAXINDEXRK {
             e.kind = ExpKind::VK;
             e.u.info = info as i32;
@@ -542,10 +578,20 @@ fn get_jump_control(fs: &FuncState, pc: usize) -> usize {
         let prev_instr = fs.chunk.code[pc - 1];
         let prev_op = OpCode::from(Instruction::get_opcode(prev_instr));
         // Check if previous instruction is a test mode instruction
-        if matches!(prev_op, OpCode::Test | OpCode::TestSet | 
-                    OpCode::Eq | OpCode::Lt | OpCode::Le |
-                    OpCode::EqK | OpCode::EqI | OpCode::LtI | 
-                    OpCode::LeI | OpCode::GtI | OpCode::GeI) {
+        if matches!(
+            prev_op,
+            OpCode::Test
+                | OpCode::TestSet
+                | OpCode::Eq
+                | OpCode::Lt
+                | OpCode::Le
+                | OpCode::EqK
+                | OpCode::EqI
+                | OpCode::LtI
+                | OpCode::LeI
+                | OpCode::GtI
+                | OpCode::GeI
+        ) {
             return pc - 1;
         }
     }
@@ -602,7 +648,14 @@ fn jumponcond(fs: &mut FuncState, e: &mut ExpDesc, cond: bool) -> isize {
     }
     discharge2anyreg(fs, e);
     free_exp(fs, e);
-    condjump(fs, OpCode::TestSet, NO_REG, unsafe { e.u.info as u32 }, 0, cond)
+    condjump(
+        fs,
+        OpCode::TestSet,
+        NO_REG,
+        unsafe { e.u.info as u32 },
+        0,
+        cond,
+    )
 }
 
 // Port of luaK_goiftrue from lcode.c:1135-1160
@@ -639,88 +692,220 @@ pub fn goiffalse(fs: &mut FuncState, e: &mut ExpDesc) {
     e.f = -1;
 }
 
-// Binary operator enum matching BinOpr in lparser.h
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinOpr {
-    Add, Sub, Mul, Div, IDiv, Mod, Pow,
-    BAnd, BOr, BXor, Shl, Shr,
-    Concat,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
-}
-
 // Port of luaK_infix from lcode.c:1637-1678
 // void luaK_infix (FuncState *fs, BinOpr op, expdesc *v)
-pub fn infix(fs: &mut FuncState, op: BinOpr, v: &mut ExpDesc) {
+pub fn infix(fs: &mut FuncState, op: BinaryOperator, v: &mut ExpDesc) {
     discharge_vars(fs, v);
     match op {
-        BinOpr::And => {
+        BinaryOperator::OpAnd => {
             goiftrue(fs, v);
         }
-        BinOpr::Or => {
+        BinaryOperator::OpOr => {
             goiffalse(fs, v);
         }
-        BinOpr::Concat => {
+        BinaryOperator::OpConcat => {
             exp2nextreg(fs, v);
         }
-        BinOpr::Add | BinOpr::Sub | BinOpr::Mul | BinOpr::Div | BinOpr::IDiv |
-        BinOpr::Mod | BinOpr::Pow | BinOpr::BAnd | BinOpr::BOr | BinOpr::BXor |
-        BinOpr::Shl | BinOpr::Shr => {
+        BinaryOperator::OpAdd
+        | BinaryOperator::OpSub
+        | BinaryOperator::OpMul
+        | BinaryOperator::OpDiv
+        | BinaryOperator::OpIDiv
+        | BinaryOperator::OpMod
+        | BinaryOperator::OpPow
+        | BinaryOperator::OpBAnd
+        | BinaryOperator::OpBOr
+        | BinaryOperator::OpBXor
+        | BinaryOperator::OpShl
+        | BinaryOperator::OpShr => {
             if !tonumeral(v, None) {
                 exp2anyreg(fs, v);
             }
         }
-        BinOpr::Eq | BinOpr::Ne => {
+        BinaryOperator::OpEq | BinaryOperator::OpNe => {
             if !tonumeral(v, None) {
                 exp2rk(fs, v);
             }
         }
-        BinOpr::Lt | BinOpr::Le | BinOpr::Gt | BinOpr::Ge => {
+        BinaryOperator::OpLt
+        | BinaryOperator::OpLe
+        | BinaryOperator::OpGt
+        | BinaryOperator::OpGe => {
             if !tonumeral(v, None) {
                 exp2anyreg(fs, v);
             }
         }
+        BinaryOperator::OpNop => {}
     }
 }
 
-// Simplified implementation of luaK_posfix - generate binary operation
-pub fn posfix(fs: &mut FuncState, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDesc) {
-    discharge_vars(fs, e2);
-    
-    // Save freereg before allocating operands
-    let old_free = fs.freereg;
-    
-    // Get operands in registers
-    let o1 = exp2anyreg(fs, e1);
-    let o2 = exp2anyreg(fs, e2);
-    
-    // Free both operand registers
-    free_reg(fs, o2);
-    free_reg(fs, o1);
-    
-    // Restore freereg and allocate result register
-    fs.freereg = old_free;
-    let res = fs.freereg;
-    reserve_regs(fs, 1);
-    
-    // Generate binary op instruction
-    code_abc(fs, op, res as u32, o1 as u32, o2 as u32);
-    
-    e1.kind = ExpKind::VNONRELOC;
-    e1.u.info = res as i32;
+// Port of swapexps from lcode.c:1588-1592
+fn swapexps(e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    std::mem::swap(e1, e2);
 }
 
-// Simplified implementation of luaK_prefix - generate unary operation  
+// Port of codeconcat from lcode.c:1686-1698
+// Create code for '(e1 .. e2)'
+fn codeconcat(fs: &mut FuncState, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    // Check if previous instruction is CONCAT to merge multiple concatenations
+    if fs.pc > 0 {
+        let prev_pc = fs.pc - 1;
+        let prev_instr = fs.chunk.code[prev_pc];
+        if OpCode::from(Instruction::get_opcode(prev_instr)) == OpCode::Concat {
+            let n = Instruction::get_b(prev_instr);
+            let a = Instruction::get_a(prev_instr);
+            if unsafe { e1.u.info as u32 } + 1 == a {
+                free_exp(fs, e2);
+                Instruction::set_a(&mut fs.chunk.code[prev_pc], unsafe { e1.u.info as u32 });
+                Instruction::set_b(&mut fs.chunk.code[prev_pc], n + 1);
+                return;
+            }
+        }
+    }
+    // New concat opcode
+    code_abc(fs, OpCode::Concat, unsafe { e1.u.info as u32 }, 2, 0);
+    free_exp(fs, e2);
+}
+
+// Port of codeeq from lcode.c:1561-1574
+// Code for equality operators (==, ~=)
+fn codeeq(fs: &mut FuncState, op: crate::compiler::parser::BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    use crate::compiler::parser::BinaryOperator;
+    
+    let o1 = exp2anyreg(fs, e1);
+    let o2 = exp2anyreg(fs, e2);
+    free_exp(fs, e2);
+    free_exp(fs, e1);
+    
+    // EQ produces a boolean result via jump
+    let k = (op == BinaryOperator::OpEq) as u32; // 1 for ==, 0 for ~=
+    let pc = condjump(fs, OpCode::Eq, o1 as u32, o2 as u32, 0, k != 0);
+    
+    e1.kind = ExpKind::VJMP;
+    e1.u.info = pc as i32;
+}
+
+// Port of codeorder from lcode.c:1533-1559
+// Code for order operators (<, <=)
+fn codeorder(fs: &mut FuncState, op: crate::compiler::parser::BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    use crate::compiler::parser::BinaryOperator;
+    
+    let o1 = exp2anyreg(fs, e1);
+    let o2 = exp2anyreg(fs, e2);
+    free_exp(fs, e2);
+    free_exp(fs, e1);
+    
+    let opcode = if op == BinaryOperator::OpLt {
+        OpCode::Lt
+    } else {
+        OpCode::Le
+    };
+    
+    let pc = condjump(fs, opcode, o1 as u32, o2 as u32, 0, true);
+    
+    e1.kind = ExpKind::VJMP;
+    e1.u.info = pc as i32;
+}
+
+// Port of luaK_posfix from lcode.c:1706-1783
+// void luaK_posfix (FuncState *fs, BinOpr opr, expdesc *e1, expdesc *e2, int line)
+pub fn posfix(fs: &mut FuncState, op: crate::compiler::parser::BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    use crate::compiler::parser::BinaryOperator;
+    
+    discharge_vars(fs, e2);
+
+    match op {
+        // lcode.c:1711-1715: OPR_AND
+        BinaryOperator::OpAnd => {
+            // e1.t should be NO_JUMP (closed by luaK_goiftrue in infix)
+            concat(fs, &mut e2.f, e1.f);
+            *e1 = e2.clone();
+        }
+        // lcode.c:1716-1720: OPR_OR
+        BinaryOperator::OpOr => {
+            // e1.f should be NO_JUMP (closed by luaK_goiffalse in infix)
+            concat(fs, &mut e2.t, e1.t);
+            *e1 = e2.clone();
+        }
+        // lcode.c:1721-1724: OPR_CONCAT
+        BinaryOperator::OpConcat => {
+            exp2nextreg(fs, e2);
+            codeconcat(fs, e1, e2);
+        }
+        // lcode.c:1762-1764: OPR_EQ, OPR_NE
+        BinaryOperator::OpEq | BinaryOperator::OpNe => {
+            codeeq(fs, op, e1, e2);
+        }
+        // lcode.c:1765-1775: OPR_GT, OPR_GE (convert to LT, LE by swapping)
+        BinaryOperator::OpGt | BinaryOperator::OpGe => {
+            // '(a > b)' <=> '(b < a)';  '(a >= b)' <=> '(b <= a)'
+            swapexps(e1, e2);
+            let new_op = if op == BinaryOperator::OpGt {
+                BinaryOperator::OpLt
+            } else {
+                BinaryOperator::OpLe
+            };
+            codeorder(fs, new_op, e1, e2);
+        }
+        // lcode.c:1776-1778: OPR_LT, OPR_LE
+        BinaryOperator::OpLt | BinaryOperator::OpLe => {
+            codeorder(fs, op, e1, e2);
+        }
+        // All other arithmetic/bitwise operators: generate opcode instruction
+        _ => {
+            // Save freereg before allocating operands
+            let old_free = fs.freereg;
+
+            // Get operands in registers
+            let o1 = exp2anyreg(fs, e1);
+            let o2 = exp2anyreg(fs, e2);
+
+            // Free both operand registers
+            free_reg(fs, o2);
+            free_reg(fs, o1);
+
+            // Restore freereg and allocate result register
+            fs.freereg = old_free;
+            let res = fs.freereg;
+            reserve_regs(fs, 1);
+
+            // Get the opcode for this operator
+            let opcode = match op {
+                BinaryOperator::OpAdd => OpCode::Add,
+                BinaryOperator::OpSub => OpCode::Sub,
+                BinaryOperator::OpMul => OpCode::Mul,
+                BinaryOperator::OpDiv => OpCode::Div,
+                BinaryOperator::OpIDiv => OpCode::IDiv,
+                BinaryOperator::OpMod => OpCode::Mod,
+                BinaryOperator::OpPow => OpCode::Pow,
+                BinaryOperator::OpShl => OpCode::Shl,
+                BinaryOperator::OpShr => OpCode::Shr,
+                BinaryOperator::OpBAnd => OpCode::BAnd,
+                BinaryOperator::OpBOr => OpCode::BOr,
+                BinaryOperator::OpBXor => OpCode::BXor,
+                _ => unreachable!("Invalid operator for opcode generation"),
+            };
+
+            // Generate binary op instruction
+            code_abc(fs, opcode, res as u32, o1 as u32, o2 as u32);
+
+            e1.kind = ExpKind::VNONRELOC;
+            e1.u.info = res as i32;
+        }
+    }
+}
+
+// Simplified implementation of luaK_prefix - generate unary operation
 pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
     discharge_vars(fs, e);
-    
+
     let o = exp2anyreg(fs, e);
     free_reg(fs, o);
-    
+
     let res = fs.freereg;
     reserve_regs(fs, 1);
     code_abc(fs, op, res as u32, o as u32, 0);
-    
+
     e.kind = ExpKind::VNONRELOC;
     e.u.info = res as i32;
 }
@@ -747,7 +932,7 @@ pub fn exp2val(fs: &mut FuncState, e: &mut ExpDesc) {
 // void luaK_indexed (FuncState *fs, expdesc *t, expdesc *k)
 pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
     use crate::compiler::expression::ExpKind;
-    
+
     // Convert string to constant if needed
     if k.kind == ExpKind::VKSTR {
         // str2K - convert to constant
@@ -755,12 +940,12 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
         k.kind = ExpKind::VK;
         k.u.info = k_idx as i32;
     }
-    
+
     // Table must be in local/nonreloc/upval
     if t.kind == ExpKind::VUPVAL && !is_kstr(k) {
         exp2anyreg(fs, t);
     }
-    
+
     if t.kind == ExpKind::VUPVAL {
         let temp = unsafe { t.u.info };
         t.u.ind.t = temp as i16;
@@ -773,7 +958,7 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
         } else {
             unsafe { t.u.info as i16 }
         };
-        
+
         if is_kstr(k) {
             t.u.ind.idx = unsafe { k.u.info as i16 };
             t.kind = ExpKind::VINDEXSTR;
@@ -802,12 +987,12 @@ fn is_cint(e: &ExpDesc) -> bool {
 pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key_idx: u8) {
     let ereg = exp2anyreg(fs, e);
     free_exp(fs, e);
-    
+
     let base = fs.freereg;
     e.u.info = base as i32;
     e.kind = ExpKind::VNONRELOC;
     reserve_regs(fs, 2); // function and 'self'
-    
+
     // SELF A B C: R(A+1) := R(B); R(A) := R(B)[RK(C)]
     code_abc(fs, OpCode::Self_, base as u32, ereg as u32, key_idx as u32);
 }
@@ -834,7 +1019,7 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<crate::lua_value::LuaVal
     if e.has_jumps() {
         return None;
     }
-    
+
     match e.kind {
         ExpKind::VFALSE => Some(LuaValue::boolean(false)),
         ExpKind::VTRUE => Some(LuaValue::boolean(true)),

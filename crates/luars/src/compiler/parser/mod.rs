@@ -2,6 +2,7 @@ mod error;
 mod lexer;
 mod lexer_config;
 mod lua_language_level;
+mod lua_operator_kind;
 mod lua_token_data;
 mod lua_token_kind;
 mod parser_config;
@@ -10,8 +11,8 @@ mod text_range;
 
 pub use crate::compiler::parser::{
     error::LuaParseError, lexer::LuaLexer, lua_language_level::LuaLanguageLevel,
-    lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind, parser_config::ParserConfig,
-    reader::Reader, text_range::SourceRange,
+    lua_operator_kind::*, lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind,
+    parser_config::ParserConfig, reader::Reader, text_range::SourceRange,
 };
 
 pub struct LuaParser<'a> {
@@ -22,7 +23,7 @@ pub struct LuaParser<'a> {
     pub parse_config: ParserConfig,
     #[allow(unused)]
     pub(crate) errors: Vec<LuaParseError>,
-    pub line: usize
+    pub line: usize,
 }
 
 impl<'a> LuaParser<'a> {
@@ -42,7 +43,7 @@ impl<'a> LuaParser<'a> {
             current_token: LuaTokenKind::None,
             parse_config: config,
             errors,
-            line: 1
+            line: 1,
         };
 
         parser.init();

@@ -5,65 +5,12 @@ use crate::compiler::func_state::FuncState;
 use crate::compiler::parse_literal::{
     NumberResult, parse_float_token_value, parse_int_token_value, parse_string_token_value,
 };
-use crate::compiler::parser::LuaTokenKind;
-use crate::compiler::{VarKind, string_k, code};
+use crate::compiler::parser::{
+    BinaryOperator, LuaTokenKind, UNARY_PRIORITY, UnaryOperator, to_binary_operator,
+    to_unary_operator,
+};
+use crate::compiler::{VarKind, code, string_k};
 use crate::lua_vm::OpCode;
-
-// Binary operator priorities (from lparser.c)
-const PRIORITY: [(u8, u8); 14] = [
-    (10, 10), // +
-    (10, 10), // -
-    (11, 11), // *
-    (11, 11), // /
-    (11, 11), // %
-    (14, 13), // ^ (right associative)
-    (11, 11), // //
-    (6, 6),   // &
-    (4, 4),   // |
-    (5, 5),   // ~
-    (7, 7),   // <<
-    (7, 7),   // >>
-    (9, 8),   // ..  (right associative)
-    (3, 3),   // ==, <, <=, ~=, >, >=
-];
-
-const UNARY_PRIORITY: u8 = 12;
-
-// Map index to BinOpr for infix processing
-const BINOP_FOR_INFIX: [code::BinOpr; 14] = [
-    code::BinOpr::Add,    // 0: +
-    code::BinOpr::Sub,    // 1: -
-    code::BinOpr::Mul,    // 2: *
-    code::BinOpr::Div,    // 3: /
-    code::BinOpr::Mod,    // 4: %
-    code::BinOpr::Pow,    // 5: ^
-    code::BinOpr::IDiv,   // 6: //
-    code::BinOpr::BAnd,   // 7: &
-    code::BinOpr::BOr,    // 8: |
-    code::BinOpr::BXor,   // 9: ~
-    code::BinOpr::Shl,    // 10: <<
-    code::BinOpr::Shr,    // 11: >>
-    code::BinOpr::Concat, // 12: ..
-    code::BinOpr::Eq,     // 13: ==, <, <=, ~=, >, >=
-];
-
-// Map index to OpCode for posfix code generation
-const BINOP_OPCODES: [OpCode; 14] = [
-    OpCode::Add,    // 0: +
-    OpCode::Sub,    // 1: -
-    OpCode::Mul,    // 2: *
-    OpCode::Div,    // 3: /
-    OpCode::Mod,    // 4: %
-    OpCode::Pow,    // 5: ^
-    OpCode::IDiv,   // 6: //
-    OpCode::BAnd,   // 7: &
-    OpCode::BOr,    // 8: |
-    OpCode::BXor,   // 9: ~
-    OpCode::Shl,    // 10: <<
-    OpCode::Shr,    // 11: >>
-    OpCode::Concat, // 12: ..
-    OpCode::Eq,     // 13: ==, <, <=, ~=, >, >=
-];
 
 // Port of init_exp from lparser.c
 fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {
@@ -71,32 +18,6 @@ fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {
     e.u.info = info;
     e.t = -1;
     e.f = -1;
-}
-
-// Get binary operator from token
-fn get_binop(tk: LuaTokenKind) -> Option<usize> {
-    match tk {
-        LuaTokenKind::TkPlus => Some(0),
-        LuaTokenKind::TkMinus => Some(1),
-        LuaTokenKind::TkMul => Some(2),
-        LuaTokenKind::TkDiv => Some(3),
-        LuaTokenKind::TkMod => Some(4),
-        LuaTokenKind::TkPow => Some(5),
-        LuaTokenKind::TkIDiv => Some(6),
-        LuaTokenKind::TkBitAnd => Some(7),
-        LuaTokenKind::TkBitOr => Some(8),
-        LuaTokenKind::TkBitXor => Some(9),
-        LuaTokenKind::TkShl => Some(10),
-        LuaTokenKind::TkShr => Some(11),
-        LuaTokenKind::TkConcat => Some(12),
-        LuaTokenKind::TkEq
-        | LuaTokenKind::TkLt
-        | LuaTokenKind::TkLe
-        | LuaTokenKind::TkNe
-        | LuaTokenKind::TkGt
-        | LuaTokenKind::TkGe => Some(13),
-        _ => None,
-    }
 }
 
 // Port of expr from lparser.c
@@ -112,11 +33,21 @@ pub(crate) fn expr_internal(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), S
     Ok(())
 }
 
+fn get_unary_opcode(op: UnaryOperator) -> OpCode {
+    match op {
+        UnaryOperator::OpBNot => OpCode::BNot,
+        UnaryOperator::OpNot => OpCode::Not,
+        UnaryOperator::OpLen => OpCode::Len,
+        UnaryOperator::OpUnm => OpCode::Unm,
+        UnaryOperator::OpNop => unreachable!("No opcode for OpNop"),
+    }
+}
+
 // Port of subexpr from lparser.c
-fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: u8) -> Result<u8, String> {
-    let uop = get_unop(fs.lexer.current_token());
-    if uop.is_some() {
-        let op = uop.unwrap();
+fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<(), String> {
+    let uop = to_unary_operator(fs.lexer.current_token());
+    if uop != UnaryOperator::OpNop {
+        let op = get_unary_opcode(uop);
         fs.lexer.bump();
         subexpr(fs, v, UNARY_PRIORITY)?;
         code::prefix(fs, op, v);
@@ -125,35 +56,25 @@ fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: u8) -> Result<u8, String>
     }
 
     // Expand while operators have priorities higher than limit
-    let mut op = get_binop(fs.lexer.current_token());
-    while op.is_some() && PRIORITY[op.unwrap()].0 > limit {
-        let op_idx = op.unwrap();
-        let bin_opr = BINOP_FOR_INFIX[op_idx];
-        let opcode = BINOP_OPCODES[op_idx];
+    // Port of lparser.c:1274-1282
+    let mut op = to_binary_operator(fs.lexer.current_token());
+    while op != BinaryOperator::OpNop && op.get_priority().left > limit {
         fs.lexer.bump();
 
-        code::infix(fs, bin_opr, v);
+        // lcode.c:1637-1676: luaK_infix handles special cases like 'and', 'or'
+        code::infix(fs, op, v);
 
         let mut v2 = ExpDesc::new_void();
-        let _nextop = subexpr(fs, &mut v2, PRIORITY[op_idx].1)?;
+        subexpr(fs, &mut v2, op.get_priority().right)?;
 
-        code::posfix(fs, opcode, v, &mut v2);
+        // lcode.c:1706-1783: luaK_posfix
+        // 'and' and 'or' don't generate opcodes - they use control flow
+        code::posfix(fs, op, v, &mut v2);
 
-        op = get_binop(fs.lexer.current_token());
+        op = to_binary_operator(fs.lexer.current_token());
     }
 
-    Ok(op.map(|o| PRIORITY[o].0).unwrap_or(0))
-}
-
-// Get unary operator
-fn get_unop(tk: LuaTokenKind) -> Option<OpCode> {
-    match tk {
-        LuaTokenKind::TkNot => Some(OpCode::Not),
-        LuaTokenKind::TkMinus => Some(OpCode::Unm),
-        LuaTokenKind::TkBitXor => Some(OpCode::BNot),
-        LuaTokenKind::TkLen => Some(OpCode::Len),
-        _ => None,
-    }
+    Ok(())
 }
 
 // Port of simpleexp from lparser.c
@@ -447,10 +368,16 @@ fn singlevaraux(fs: *mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
     }
 }
 
-// Port of fieldsel from lparser.c
+// Port of fieldsel from lparser.c:811-819
+// fieldsel -> ['.' | ':'] NAME
 pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
-    code::exp2anyreg(fs, v);
+    // lparser.c:815: luaK_exp2anyregup(fs, v);
+    code::exp2anyregup(fs, v);
 
+    // lparser.c:816: luaX_next(ls);  /* skip the dot or colon */
+    fs.lexer.bump();
+
+    // lparser.c:817: codename(ls, &key);
     if fs.lexer.current_token() != LuaTokenKind::TkName {
         return Err("expected field name".to_string());
     }
@@ -458,6 +385,7 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     let field = fs.lexer.current_token_text().to_string();
     fs.lexer.bump();
 
+    // lparser.c:818: luaK_indexed(fs, v, &key);
     let idx = string_k(fs, field);
     *v = ExpDesc::new_indexed(unsafe { v.u.info as u8 }, idx as u8);
 
@@ -612,7 +540,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     // Port of body function from lparser.c:989-1008
     // body ->  '(' parlist ')' block END
-    
+
     // lparser.c:993: Create new FuncState for nested function
     // FuncState new_fs; new_fs.f = addprototype(ls); open_func(ls, &new_fs, &bl);
     let fs_ptr = fs as *mut FuncState;
