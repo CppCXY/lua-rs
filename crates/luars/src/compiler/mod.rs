@@ -18,6 +18,7 @@ pub use func_state::*;
 use crate::compiler::parser::{LuaLanguageLevel, LuaParser, LuaTokenKind};
 use crate::lua_value::Chunk;
 use crate::gc::ObjectPool;
+use crate::lua_vm::OpCode;
 
 // Structures are now in separate files (func_state.rs, expression.rs)
 
@@ -30,6 +31,15 @@ pub fn lua_parse(source: &str, pool: &mut ObjectPool) -> Result<Chunk, String> {
     
     // Port of mainfunc from lparser.c
     // main function is always vararg
+    
+    // Generate VARARGPREP if function is vararg
+    if fs.is_vararg {
+        code::code_abc(&mut fs, OpCode::VarargPrep, 0, 0, 0);
+    }
+    
+    // Main function in Lua 5.4 has _ENV as first local variable
+    fs.new_localvar("_ENV".to_string(), VarKind::VDKREG);
+    fs.adjust_local_vars(1);
     
     // Open first block  
     let bl = BlockCnt {
@@ -54,6 +64,9 @@ pub fn lua_parse(source: &str, pool: &mut ObjectPool) -> Result<Chunk, String> {
             fs.lexer.line
         ));
     }
+    
+    // Generate final RETURN (return with 0 values)
+    code::ret(&mut fs, 0, 0);
     
     Ok(fs.chunk)
 }

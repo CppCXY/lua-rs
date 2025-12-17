@@ -3,10 +3,19 @@ use crate::compiler::parser::LuaParser;
 use crate::lua_value::Chunk;
 use crate::gc::ObjectPool;
 
+// Upvalue descriptor
+#[derive(Clone)]
+pub struct Upvaldesc {
+    pub name: String,    // upvalue name
+    pub in_stack: bool,  // whether it is in stack (register)
+    pub idx: u8,         // index of upvalue (in stack or in outer function's list)
+    pub kind: VarKind,   // kind of variable
+}
+
 // Port of FuncState from lparser.h
 pub struct FuncState<'a> {
     pub chunk: Chunk,
-    pub prev: Option<Box<FuncState<'a>>>,
+    pub prev: Option<&'a mut FuncState<'a>>,  // parent function state
     pub lexer: &'a mut LuaParser<'a>,
     pub pool: &'a mut ObjectPool,
     pub block_list: Option<Box<BlockCnt>>,
@@ -15,12 +24,14 @@ pub struct FuncState<'a> {
     pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
     pub labels: Vec<LabelDesc>, // list of active labels
     pub actvar: Vec<VarDesc>, // list of active local variables
+    pub upvalues: Vec<Upvaldesc>, // upvalue descriptors
     pub nactvar: u8,         // number of active local variables
     pub nups: u8,            // number of upvalues
     pub freereg: u8,         // first free register
     pub iwthabs: u8,         // instructions issued since last absolute line info
     pub needclose: bool,     // true if function needs to close upvalues when returning
     pub is_vararg: bool,     // true if function is vararg
+    pub first_local: usize,  // index of first local variable in prev
 }
 
 // Port of BlockCnt from lparser.c
@@ -86,6 +97,36 @@ impl<'a> FuncState<'a> {
             needclose: false,
             is_vararg,
             actvar: Vec::new(),
+            upvalues: Vec::new(),
+            first_local: 0,
+        }
+    }
+    
+    // Create child function state
+    pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
+        // Get references from parent - we'll need unsafe here due to borrow checker
+        let lexer_ptr = parent.lexer as *mut LuaParser<'a>;
+        let pool_ptr = parent.pool as *mut ObjectPool;
+        
+        FuncState {
+            chunk: Chunk::new(),
+            prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
+            lexer: unsafe { &mut *lexer_ptr },
+            pool: unsafe { &mut *pool_ptr },
+            block_list: None,
+            pc: 0,
+            last_target: 0,
+            pending_gotos: Vec::new(),
+            labels: Vec::new(),
+            nactvar: 0,
+            nups: 0,
+            freereg: 0,
+            iwthabs: 0,
+            needclose: false,
+            is_vararg,
+            actvar: Vec::new(),
+            upvalues: Vec::new(),
+            first_local: parent.actvar.len(),
         }
     }
     
@@ -114,6 +155,8 @@ impl<'a> FuncState<'a> {
         for i in self.nactvar..new_nactvar {
             if let Some(var) = self.actvar.get_mut(i as usize) {
                 var.ridx = i as i16;
+                // Add variable name to chunk's locals for debugging
+                self.chunk.locals.push(var.name.clone());
             }
         }
         
@@ -126,5 +169,71 @@ impl<'a> FuncState<'a> {
             self.nactvar -= 1;
             self.freereg -= 1;
         }
+    }
+    
+    // Port of searchvar from lparser.c (lines 390-404)
+    pub fn searchvar(&self, name: &str, var: &mut crate::compiler::expression::ExpDesc) -> i32 {
+        use crate::compiler::expression::ExpKind;
+        
+        for i in (0..self.nactvar as usize).rev() {
+            if let Some(vd) = self.actvar.get(i) {
+                if vd.name == name {
+                    if vd.kind == VarKind::RDKCTC {
+                        *var = crate::compiler::expression::ExpDesc::new_int(i as i64);
+                        return ExpKind::VCONST as i32;
+                    } else {
+                        *var = crate::compiler::expression::ExpDesc::new_local(i as u8, 0);
+                        return ExpKind::VLOCAL as i32;
+                    }
+                }
+            }
+        }
+        -1
+    }
+    
+    // Port of searchupvalue from lparser.c (lines 340-351)
+    pub fn searchupvalue(&self, name: &str) -> i32 {
+        for i in 0..self.nups as usize {
+            if self.upvalues[i].name == name {
+                return i as i32;
+            }
+        }
+        -1
+    }
+    
+    // Port of newupvalue from lparser.c (lines 364-382)
+    pub fn newupvalue(&mut self, name: &str, v: &crate::compiler::expression::ExpDesc) -> i32 {
+        use crate::compiler::expression::ExpKind;
+        
+        let prev_ptr = match &self.prev {
+            Some(p) => *p as *const _ as *mut FuncState,
+            None => std::ptr::null_mut(),
+        };
+        
+        let (in_stack, idx, kind) = unsafe {
+            if v.kind == ExpKind::VLOCAL {
+                let vidx = v.u.var.vidx;
+                let ridx = v.u.var.ridx;
+                let prev = &*prev_ptr;
+                let vd = &prev.actvar[vidx as usize];
+                (true, ridx as u8, vd.kind)
+            } else {
+                let info = v.u.info as usize;
+                let prev = &*prev_ptr;
+                let up = &prev.upvalues[info];
+                (false, info as u8, up.kind)
+            }
+        };
+        
+        self.upvalues.push(Upvaldesc { 
+            name: name.to_string(),
+            in_stack, 
+            idx, 
+            kind 
+        });
+        self.chunk.upvalue_count = self.upvalues.len();
+        self.nups = self.upvalues.len() as u8;
+        
+        (self.nups - 1) as i32
     }
 }

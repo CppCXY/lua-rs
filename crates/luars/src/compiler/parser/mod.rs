@@ -20,6 +20,7 @@ pub struct LuaParser<'a> {
     token_index: usize,
     current_token: LuaTokenKind,
     pub parse_config: ParserConfig,
+    #[allow(unused)]
     pub(crate) errors: Vec<LuaParseError>,
     pub line: usize
 }

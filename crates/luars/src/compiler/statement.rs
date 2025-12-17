@@ -203,25 +203,37 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
     // retstat -> RETURN [explist] [';']
     let first = fs.freereg;
     let mut nret = 0;
+    let mut e = ExpDesc::new_void();
 
     if block_follow(fs, true) || fs.lexer.current_token() == LuaTokenKind::TkSemicolon {
         // return with no values
     } else {
-        nret = explist(fs)?;
+        nret = explist(fs, &mut e)?;
     }
 
-    code::code_abc(fs, OpCode::Return, first as u32, (nret + 1) as u32, 0);
+    code::ret(fs, first, nret as u8);
     testnext(fs, LuaTokenKind::TkSemicolon);
     Ok(())
 }
 
 // Port of explist from lparser.c
-fn explist(fs: &mut FuncState) -> Result<usize, String> {
-    // explist -> expr { ',' expr }
+// static int explist (LexState *ls, expdesc *v) {
+//   int n = 1;
+//   expr(ls, v);
+//   while (testnext(ls, ',')) {
+//     luaK_exp2nextreg(ls->fs, v);
+//     expr(ls, v);
+//     n++;
+//   }
+//   return n;
+// }
+pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
+    use crate::compiler::expr_parser::expr_internal;
     let mut n = 1;
-    expr(fs)?;
+    expr_internal(fs, e)?;
     while testnext(fs, LuaTokenKind::TkComma) {
-        expr(fs)?;
+        code::exp2nextreg(fs, e);
+        expr_internal(fs, e)?;
         n += 1;
     }
     Ok(n)
@@ -296,36 +308,59 @@ fn labelstat(fs: &mut FuncState) -> Result<(), String> {
 
 // Port of test_then_block from lparser.c
 fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), String> {
+    static mut CALL_COUNT: usize = 0;
+    unsafe {
+        CALL_COUNT += 1;
+        let count = CALL_COUNT;
+        eprintln!("[{}] test_then_block: current token = {:?}", count, fs.lexer.current_token());
+        if count > 10 {
+            eprintln!("test_then_block called > 10 times!");
+            std::process::abort();
+        }
+    }
     // test_then_block -> [IF | ELSEIF] cond THEN block
+    fs.lexer.bump(); // skip IF or ELSEIF
+    
     // Parse condition
+    eprintln!("test_then_block: parsing condition, token = {:?}", fs.lexer.current_token());
     let mut v = expr(fs)?;
+    eprintln!("test_then_block: condition parsed, token = {:?}", fs.lexer.current_token());
 
     check(fs, LuaTokenKind::TkThen)?;
+    eprintln!("test_then_block: checked THEN, about to bump");
+    fs.lexer.bump(); // consume THEN
+    eprintln!("test_then_block: bumped THEN, token = {:?}", fs.lexer.current_token());
 
     // Generate conditional jump
-    if v.kind == crate::compiler::expression::ExpKind::VJMP {
-        // Condition already generates jump
-    } else {
-        // Need to generate test
+    eprintln!("test_then_block: about to generate conditional jump");
+    if v.kind != crate::compiler::expression::ExpKind::VJMP {
         code::exp2nextreg(fs, &mut v);
     }
+    eprintln!("test_then_block: generated exp2nextreg");
 
     // Jump to else/end if condition is false
     let jf = code::jump(fs);
+    eprintln!("test_then_block: generated jump, jf = {}", jf);
 
     // Parse then block
+    eprintln!("test_then_block: about to parse block");
     block(fs)?;
+    eprintln!("test_then_block: parsed block, current token = {:?}", fs.lexer.current_token());
 
     // Jump to end after then block
     if fs.lexer.current_token() == LuaTokenKind::TkElseIf
         || fs.lexer.current_token() == LuaTokenKind::TkElse
     {
+        eprintln!("test_then_block: about to generate escape jump");
         let jmp = code::jump(fs) as isize;
         code::concat(fs, escapelist, jmp);
+        eprintln!("test_then_block: generated escape jump");
     }
 
     // Patch false jump to here
+    eprintln!("test_then_block: about to patch false jump");
     code::patchtohere(fs, jf as isize);
+    eprintln!("test_then_block: patched false jump, returning");
 
     Ok(())
 }
@@ -333,13 +368,10 @@ fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), Str
 // Port of ifstat from lparser.c
 fn ifstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END
-    fs.lexer.bump(); // skip IF
-
     let mut escapelist: isize = -1;
     test_then_block(fs, &mut escapelist)?;
 
     while fs.lexer.current_token() == LuaTokenKind::TkElseIf {
-        fs.lexer.bump(); // skip ELSEIF
         test_then_block(fs, &mut escapelist)?;
     }
 
@@ -534,15 +566,11 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     let base = fs.freereg;
 
     // Parse iterator expressions
-    let nexps = explist(fs)?;
+    let mut e = ExpDesc::new_void();
+    let nexps = explist(fs, &mut e)?;
 
     // Adjust to 3 values (generator, state, control)
-    if nexps < 3 {
-        for _ in nexps..3 {
-            code::nil(fs, fs.freereg, 1);
-            code::reserve_regs(fs, 1);
-        }
-    }
+    adjust_assign(fs, 3, nexps, &mut e);
 
     // Create loop variables
     for varname in varnames {
@@ -586,7 +614,7 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
 }
 
 // Port of funcstat from lparser.c
-fn funcstat(fs: &mut FuncState, _line: usize) -> Result<(), String> {
+fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // funcstat -> FUNCTION funcname body
     fs.lexer.bump(); // skip FUNCTION
 
@@ -611,9 +639,14 @@ fn funcstat(fs: &mut FuncState, _line: usize) -> Result<(), String> {
     let mut func_val = ExpDesc::new_void();
     crate::compiler::expr_parser::body(fs, &mut func_val, is_method)?;
 
+    // Check if variable is readonly
+    check_readonly(fs, &base)?;
+    
     // Store function: base = func_val
-    // This uses the same storevar logic as assignment
     storevar(fs, &base, &mut func_val);
+    
+    // Fix line information: definition happens in the first line
+    code::fixline(fs, line);
 
     Ok(())
 }
@@ -670,19 +703,64 @@ fn check_to_close(fs: &mut FuncState, level: isize) {
 }
 
 // Port of localstat from lparser.c
+// Port of localstat from lparser.c - line 1725
+// static void localstat (LexState *ls) {
+//   FuncState *fs = ls->fs;
+//   int toclose = -1;
+//   Vardesc *var;
+//   int vidx, kind;
+//   int nvars = 0;
+//   int nexps;
+//   expdesc e;
+//   do {
+//     vidx = new_localvar(ls, str_checkname(ls));
+//     kind = getlocalattribute(ls);
+//     getlocalvardesc(fs, vidx)->vd.kind = kind;
+//     if (kind == RDKTOCLOSE) {
+//       if (toclose != -1)
+//         luaK_semerror(ls, "multiple to-be-closed variables in local list");
+//       toclose = fs->nactvar + nvars;
+//     }
+//     nvars++;
+//   } while (testnext(ls, ','));
+//   if (testnext(ls, '='))
+//     nexps = explist(ls, &e);
+//   else {
+//     e.k = VVOID;
+//     nexps = 0;
+//   }
+//   var = getlocalvardesc(fs, vidx);
+//   if (nvars == nexps &&
+//       var->vd.kind == RDKCONST &&
+//       luaK_exp2const(fs, &e, &var->k)) {
+//     var->vd.kind = RDKCTC;
+//     adjustlocalvars(ls, nvars - 1);
+//     fs->nactvar++;
+//   }
+//   else {
+//     adjust_assign(ls, nvars, nexps, &e);
+//     adjustlocalvars(ls, nvars);
+//   }
+//   checktoclose(fs, toclose);
+// }
 fn localstat(fs: &mut FuncState) -> Result<(), String> {
     use crate::compiler::func_state::VarKind;
 
-    // localstat -> LOCAL NAME ATTRIB { ',' NAME ATTRIB } ['=' explist]
-    let mut toclose: isize = -1; // index of to-be-closed variable (if any)
+    let mut toclose: isize = -1;
     let mut nvars = 0;
-    let mut vars = Vec::new();
+    let mut e = ExpDesc::new_void();
 
+    // Parse variable list
     loop {
         let name = str_checkname(fs)?;
+        let vidx = fs.new_localvar(name, VarKind::VDKREG);
         let kind = get_local_attribute(fs)?;
+        
+        // Set kind for this variable
+        if let Some(var) = fs.get_local_var_desc(vidx) {
+            var.kind = kind;
+        }
 
-        // Check for to-be-closed
         if kind == VarKind::RDKTOCLOSE {
             if toclose != -1 {
                 return Err("multiple to-be-closed variables in local list".to_string());
@@ -690,7 +768,6 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
             toclose = (fs.nactvar + nvars) as isize;
         }
 
-        vars.push((name, kind));
         nvars += 1;
 
         if !testnext(fs, LuaTokenKind::TkComma) {
@@ -698,41 +775,39 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
         }
     }
 
+    // Parse optional initialization
     let nexps = if testnext(fs, LuaTokenKind::TkAssign) {
-        explist(fs)?
+        explist(fs, &mut e)?
     } else {
+        e.kind = crate::compiler::expression::ExpKind::VVOID;
         0
     };
 
-    // Get last variable
-    let last_vidx = vars.len() - 1;
-    let last_kind = vars[last_vidx].1;
-
     // Check for compile-time constant optimization
-    if nvars as usize == nexps && last_kind == VarKind::RDKCONST {
-        // TODO: Check if expression is compile-time constant
-        // For now, treat as regular const
-    }
-
-    // Register local variables
-    for (var_name, kind) in vars {
-        let vidx = fs.new_localvar(var_name, kind);
-        // Update kind in descriptor
-        if let Some(var) = fs.get_local_var_desc(vidx) {
-            var.kind = kind;
+    // Get last variable
+    let last_vidx = (fs.nactvar + nvars - 1) as u16;
+    let is_const_opt = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
+        nvars as usize == nexps && 
+        var_desc.kind == VarKind::RDKCONST &&
+        code::exp2const(fs, &e).is_some()
+    } else {
+        false
+    };
+    
+    if is_const_opt {
+        // Variable is a compile-time constant
+        if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
+            var_desc.kind = VarKind::RDKCTC;
         }
+        fs.adjust_local_vars(nvars - 1);  // exclude last variable
+        fs.nactvar += 1;  // but count it
+        check_to_close(fs, toclose);
+        return Ok(());
     }
+    
+    adjust_assign(fs, nvars as usize, nexps, &mut e);
+    fs.adjust_local_vars(nvars);
 
-    // Adjust assignment and registers
-    if (nexps as u8) < nvars {
-        let missing = nvars - nexps as u8;
-        code::nil(fs, fs.freereg, missing);
-        code::reserve_regs(fs, missing);
-    }
-
-    fs.adjust_local_vars(nvars as u8);
-
-    // Generate TBC instruction if needed
     check_to_close(fs, toclose);
 
     Ok(())
@@ -825,7 +900,7 @@ fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc
             code::setoneret(fs, e);
         } else {
             // Adjust to return the right number
-            // TODO: setreturns implementation
+            code::setreturns(fs, e, extra as u8);
         }
     } else {
         if e.kind != ExpKind::VVOID {
@@ -920,7 +995,7 @@ fn restassign(fs: &mut FuncState, lh: &mut LhsAssign, nvars: usize) -> Result<()
     }
 
     // Check if variable is readonly (const)
-    // TODO: check_readonly
+    check_readonly(fs, &lh.v)?;
 
     if testnext(fs, LuaTokenKind::TkComma) {
         // restassign -> ',' suffixedexp restassign
@@ -946,7 +1021,8 @@ fn restassign(fs: &mut FuncState, lh: &mut LhsAssign, nvars: usize) -> Result<()
     } else {
         // restassign -> '=' explist
         check(fs, LuaTokenKind::TkAssign)?;
-        let nexps = explist(fs)?;
+        fs.lexer.bump(); // consume '='
+        let nexps = explist(fs, &mut e)?;
 
         if nexps != nvars {
             adjust_assign(fs, nvars, nexps, &mut e);
@@ -992,5 +1068,50 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+// Port of check_readonly from lparser.c (lines 277-304)
+fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
+    use crate::compiler::expression::ExpKind;
+    
+    let varname: Option<String> = match e.kind {
+        ExpKind::VCONST => {
+            // TODO: Get variable name from actvar array
+            Some("<const>".to_string())
+        }
+        ExpKind::VLOCAL => {
+            // Check if local variable is const
+            if let Some(var_desc) = fs.get_local_var_desc(unsafe { e.u.var.vidx } as u16) {
+                if var_desc.kind != VarKind::VDKREG {
+                    Some(var_desc.name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        ExpKind::VUPVAL => {
+            // Check if upvalue is const
+            let upval_idx = unsafe { e.u.info } as usize;
+            if upval_idx < fs.upvalues.len() {
+                let upval = &fs.upvalues[upval_idx];
+                if upval.kind != VarKind::VDKREG {
+                    Some(upval.name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    
+    if let Some(name) = varname {
+        return Err(format!("attempt to assign to const variable '{}'", name));
+    }
+    
     Ok(())
 }
