@@ -4,7 +4,6 @@
 
 /// Expression kind - determines how the expression value is represented
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(unused)]
 pub enum ExpKind {
     /// No value (void expression)
     VVoid,
@@ -266,7 +265,6 @@ pub fn is_rk(e: &ExpDesc) -> bool {
 }
 
 /// Check if expression is a constant
-#[allow(dead_code)]
 pub fn is_const(e: &ExpDesc) -> bool {
     matches!(
         e.kind,

@@ -44,7 +44,7 @@ fn binary_exp(c: &mut Compiler, binary_expr: LuaBinaryExpr) -> Result<ExpDesc, S
     // 使用递归栈来深度优先遍历，确保正确的顺序
     let mut binary_expr_list: Vec<BinaryExprNode> = vec![];
     
-    // 辅助函数：递归铺平BinaryExpr
+    // 辅助函数：递归铺平BinaryExpr（不展开ParenExpr，保持优先级）
     fn flatten_binary(
         expr: LuaExpr,
         list: &mut Vec<BinaryExprNode>,
@@ -58,6 +58,8 @@ fn binary_exp(c: &mut Compiler, binary_expr: LuaBinaryExpr) -> Result<ExpDesc, S
                     .get_op_token()
                     .ok_or("binary expression missing operator")?;
                 
+                eprintln!("[flatten_binary] BinaryExpr op={:?}, recursing into left and right", op);
+                
                 // 先递归处理左边
                 flatten_binary(left.clone(), list)?;
                 // 添加操作符
@@ -68,7 +70,7 @@ fn binary_exp(c: &mut Compiler, binary_expr: LuaBinaryExpr) -> Result<ExpDesc, S
                 Ok(())
             }
             _ => {
-                // 非BinaryExpr，直接添加
+                // 非BinaryExpr（包括ParenExpr），直接添加，交给expr()处理
                 list.push(BinaryExprNode::Expr(expr));
                 Ok(())
             }
@@ -77,8 +79,6 @@ fn binary_exp(c: &mut Compiler, binary_expr: LuaBinaryExpr) -> Result<ExpDesc, S
     
     // 铺平整个BinaryExpr树
     flatten_binary(LuaExpr::BinaryExpr(binary_expr), &mut binary_expr_list)?;
-    
-    eprintln!("[binary_exp] Flattened list length: {}", binary_expr_list.len());
     
     // 第二步：按顺序处理铺平后的列表
     // 应该是：Expr, Op, Expr, Op, Expr...
@@ -91,9 +91,19 @@ fn binary_exp(c: &mut Compiler, binary_expr: LuaBinaryExpr) -> Result<ExpDesc, S
         BinaryExprNode::Expr(e) => e,
         _ => return Err("Expected expression at position 0".to_string()),
     };
-    let mut v1 = expr(c, first_expr)?;
+    // 关键：ParenExpr需要用expr()递归处理，其他用simple_exp()
+    // BinaryExpr应该已经被flatten了
+    let mut v1 = if matches!(first_expr, LuaExpr::ParenExpr(_)) {
+        expr(c, first_expr)?
+    } else {
+        if matches!(first_expr, LuaExpr::BinaryExpr(_)) {
+            return Err("BinaryExpr should have been flattened!".to_string());
+        }
+        simple_exp(c, first_expr)?
+    };
     
-    // 处理后续的操作符和操作数对
+    // 第三步：循环处理铺平后的列表
+    // ParenExpr不展开，作为完整单元通过expr()递归处理，保持优先级
     let mut i = 1;
     while i < binary_expr_list.len() {
         // 获取操作符
@@ -116,8 +126,15 @@ fn binary_exp(c: &mut Compiler, binary_expr: LuaBinaryExpr) -> Result<ExpDesc, S
         };
         i += 1;
         
-        // 编译右操作数
-        let mut v2 = expr(c, right_expr)?;
+        // 编译右操作数 - ParenExpr用expr()，其他用simple_exp()
+        let mut v2 = if matches!(right_expr, LuaExpr::ParenExpr(_)) {
+            expr(c, right_expr)?
+        } else {
+            if matches!(right_expr, LuaExpr::BinaryExpr(_)) {
+                return Err("BinaryExpr should have been flattened!".to_string());
+            }
+            simple_exp(c, right_expr)?
+        };
         
         // 后缀处理
         postfix_op(c, &op_token, &mut v1, &mut v2)?;
@@ -647,20 +664,17 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
         if let ExpKind::VKInt = e2.kind {
             let val = e2.ival;
             if val >= -127 && val <= 128 && (-val) >= -127 && (-val) <= 128 {
-                // 对齐finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
-                let o1 = super::exp2reg::exp2anyreg(c, e1);
-                let imm = ((-val + 127) & 0xFF) as u32;
-                // 对齐官方：A字段先设置为0，后续通过VReloc patch
-                let pc = helpers::code_abc(c, OpCode::AddI, 0, o1, imm);
-                // freeexps
-                super::exp2reg::free_exp(c, e1);
+                // 完全照抄官方finishbinexpval逻辑
+                let v1 = super::exp2reg::exp2anyreg(c, e1);  // 获取e1的寄存器号
+                let v2 = ((-val + 127) & 0xFF) as u32;
+                let pc = helpers::code_abc(c, OpCode::AddI, 0, v1, v2);
+                super::exp2reg::free_exp(c, e1);  // freeexps
                 super::exp2reg::free_exp(c, e2);
-                // 关键：设置为VReloc，后续exp2anyreg会patch A字段
                 e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
-                // MMBINI: 第二个参数是原始值val（不是负值）
+                // MMBINI使用保存的v1，不是e1.info（e1已经是VReloc了）
                 let imm_mm = ((val + 128) & 0xFF) as u32;
-                helpers::code_abc(c, OpCode::MmBinI, o1, imm_mm, 7); // TM_SUB=7
+                helpers::code_abc(c, OpCode::MmBinI, v1, imm_mm, 7);
                 return;
             }
         }
@@ -672,20 +686,17 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
         if let ExpKind::VKInt = e2.kind {
             let val = e2.ival;
             if val >= -128 && val <= 127 {
-                // 对齐codebini → finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
-                let o1 = super::exp2reg::exp2anyreg(c, e1);
-                let imm = ((val + 127) & 0xFF) as u32;
-                // 对齐官方：A字段先设置为0，后续通过VReloc patch
-                let pc = helpers::code_abc(c, OpCode::ShrI, 0, o1, imm);
-                // freeexps
+                // 完全照抄官方finishbinexpval逻辑
+                let v1 = super::exp2reg::exp2anyreg(c, e1);
+                let v2 = ((val + 127) & 0xFF) as u32;
+                let pc = helpers::code_abc(c, OpCode::ShrI, 0, v1, v2);
                 super::exp2reg::free_exp(c, e1);
                 super::exp2reg::free_exp(c, e2);
-                // 设置为VReloc
                 e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
-                // MMBINI
+                // MMBINI使用保存的v1
                 let imm_mm = ((val + 128) & 0xFF) as u32;
-                helpers::code_abc(c, OpCode::MmBinI, o1, imm_mm, 17); // TM_SHR=17
+                helpers::code_abc(c, OpCode::MmBinI, v1, imm_mm, 17);
                 return;
             }
         }
@@ -700,20 +711,17 @@ fn code_bin_arith(c: &mut Compiler, op: OpCode, e1: &mut ExpDesc, e2: &mut ExpDe
             if val >= -128 && val <= 127 {
                 // swap e1 和 e2，对齐官方swapexps
                 std::mem::swap(e1, e2);
-                // 对齐codebini → finishbinexpval: exp2anyreg → 生成指令 → freeexps → 修改kind
-                let o1 = super::exp2reg::exp2anyreg(c, e1);
-                let imm = ((val + 127) & 0xFF) as u32;
-                // 对齐官方：A字段先设置为0，后续通过VReloc patch
-                let pc = helpers::code_abc(c, OpCode::ShlI, 0, o1, imm);
-                // freeexps
+                // 完全照抄官方finishbinexpval逻辑
+                let v1 = super::exp2reg::exp2anyreg(c, e1);
+                let v2 = ((val + 127) & 0xFF) as u32;
+                let pc = helpers::code_abc(c, OpCode::ShlI, 0, v1, v2);
                 super::exp2reg::free_exp(c, e1);
                 super::exp2reg::free_exp(c, e2);
-                // 设置为VReloc
                 e1.info = pc as u32;
                 e1.kind = ExpKind::VReloc;
-                // MMBINI: 参数是原始值val，flip=1
+                // MMBINI使用保存的v1，flip=1
                 let imm_mm = ((val + 128) & 0xFF) as u32;
-                helpers::code_abck(c, OpCode::MmBinI, o1, imm_mm, 16, true); // TM_SHL=16
+                helpers::code_abck(c, OpCode::MmBinI, v1, imm_mm, 16, true);
                 return;
             }
         }
