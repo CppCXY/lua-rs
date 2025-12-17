@@ -198,17 +198,41 @@ fn block(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of retstat from lparser.c
+// Port of retstat from lparser.c (lines 1812-1843)
 fn retstat(fs: &mut FuncState) -> Result<(), String> {
+    use crate::compiler::expression::ExpKind;
     // retstat -> RETURN [explist] [';']
-    let first = fs.freereg;
-    let mut nret = 0;
+    let mut first = fs.freereg;
+    let mut nret: i32;
     let mut e = ExpDesc::new_void();
 
     if block_follow(fs, true) || fs.lexer.current_token() == LuaTokenKind::TkSemicolon {
         // return with no values
+        nret = 0;
     } else {
-        nret = explist(fs, &mut e)?;
+        nret = explist(fs, &mut e)? as i32;
+        // Check if expression has multiple returns (VCALL or VVARARG)
+        if matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG) {
+            code::setmultret(fs, &mut e);
+            if e.kind == ExpKind::VCALL && nret == 1 {
+                // Tail call optimization
+                let pc = unsafe { e.u.info as usize };
+                if pc < fs.chunk.code.len() {
+                    let instr = &mut fs.chunk.code[pc];
+                    *instr = (*instr & !0x7F) | (OpCode::TailCall as u32);
+                }
+            }
+            nret = -1; // LUA_MULTRET
+        } else {
+            if nret == 1 {
+                // Only one single value - can use original slot
+                first = code::exp2anyreg(fs, &mut e);
+            } else {
+                // Values must go to the top of the stack
+                code::exp2nextreg(fs, &mut e);
+                // nret == fs->freereg - first
+            }
+        }
     }
 
     code::ret(fs, first, nret as u8);

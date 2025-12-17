@@ -358,9 +358,15 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
     add_constant(fs, LuaValue::float(n))
 }
 
-// Add string to constants (takes StringId, not String)
-fn string_k(fs: &mut FuncState, id: crate::gc::StringId) -> usize {
-    add_constant(fs, LuaValue::string(id))
+// Add string constant to chunk
+pub fn string_k(fs: &mut FuncState, s: String) -> usize {
+    // Intern string to ObjectPool and get StringId
+    let (string_id, _) = fs.pool.create_string(&s);
+
+    // Add LuaValue with StringId to constants
+    let value = LuaValue::string(string_id);
+    fs.chunk.constants.push(value);
+    fs.chunk.constants.len() - 1
 }
 
 // Helper to add constant to chunk

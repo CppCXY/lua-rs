@@ -5,9 +5,8 @@ use crate::compiler::parse_literal::{
     NumberResult, parse_float_token_value, parse_int_token_value, parse_string_token_value,
 };
 use crate::compiler::parser::LuaTokenKind;
-use crate::compiler::{VarKind, code};
+use crate::compiler::{VarKind, string_k, code};
 use crate::lua_vm::OpCode;
-use crate::LuaValue;
 
 // Binary operator priorities (from lparser.c)
 const PRIORITY: [(u8, u8); 14] = [
@@ -199,7 +198,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             let string_content = parse_string_token_value(text, fs.lexer.current_token());
             match string_content {
                 Ok(s) => {
-                    let idx = add_string_constant(fs, s);
+                    let idx = string_k(fs, s);
                     *v = ExpDesc::new_k(idx);
                 }
                 Err(e) => {
@@ -293,7 +292,7 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
                 // self:method(...) is sugar for self.method(self, ...)
                 // Generate SELF instruction
-                let key_idx = add_string_constant(fs, method_name);
+                let key_idx = string_k(fs, method_name);
                 code::self_op(fs, v, key_idx as u8);
 
                 funcargs(fs, v)?;
@@ -341,7 +340,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
             // funcargs -> STRING
             let text = fs.lexer.current_token_text();
             let string_content = parse_string_token_value(text, fs.lexer.current_token())?;
-            let k_idx = add_string_constant(fs, string_content);
+            let k_idx = string_k(fs, string_content);
             fs.lexer.bump();
             args = ExpDesc::new_k(k_idx);
         }
@@ -405,7 +404,7 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         code::exp2anyregup(fs, v);
 
         // Key is variable name
-        let k_idx = add_string_constant(fs, name);
+        let k_idx = string_k(fs, name);
         let mut key = ExpDesc::new_k(k_idx);
 
         // env[varname]
@@ -458,7 +457,7 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     let field = fs.lexer.current_token_text().to_string();
     fs.lexer.bump();
 
-    let idx = add_string_constant(fs, field);
+    let idx = string_k(fs, field);
     *v = ExpDesc::new_indexed(unsafe { v.u.info as u8 }, idx as u8);
 
     Ok(())
@@ -489,7 +488,7 @@ fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                 fs.lexer.bump();
                 fs.lexer.bump(); // skip =
 
-                let field_idx = add_string_constant(fs, field_name);
+                let field_idx = string_k(fs, field_name);
                 let mut val = ExpDesc::new_void();
                 expr_internal(fs, &mut val)?;
 
@@ -634,29 +633,32 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // Generate final RETURN
     code::ret(&mut child_fs, 0, 0);
 
-    // Get completed child chunk
-    let child_chunk = child_fs.chunk;
+    // Get completed child chunk and upvalue information
+    let mut child_chunk = child_fs.chunk;
+    let child_upvalues = child_fs.upvalues;
 
-    // Add child as a prototype in parent (safe again after child_fs is consumed)
+    // Convert upvalues to UpvalueDesc and store in chunk
+    // In Lua 5.4, upvalue information is stored in the Proto, not as pseudo-instructions
+    for upval in &child_upvalues {
+        child_chunk
+            .upvalue_descs
+            .push(crate::lua_value::UpvalueDesc {
+                is_local: upval.in_stack, // true if captures parent local
+                index: upval.idx as u32,  // index in parent's register or upvalue array
+            });
+    }
+    child_chunk.upvalue_count = child_upvalues.len();
+
+    // Add child as a prototype in parent
     let proto_idx = fs.chunk.child_protos.len();
     fs.chunk.child_protos.push(std::rc::Rc::new(child_chunk));
 
     // Generate CLOSURE instruction to create function object
+    // CLOSURE A Bx: R[A] := closure(KPROTO[Bx])
+    // The upvalue information is already stored in KPROTO[Bx].upvalue_descs
     let reg = fs.freereg;
     code::reserve_regs(fs, 1);
     code::code_abx(fs, OpCode::Closure, reg as u32, proto_idx as u32);
-
-    // Encode upvalue information after CLOSURE instruction
-    // In Lua 5.4, upvalues are encoded using pseudo-instructions
-    for upval in &child_fs.upvalues {
-        if upval.in_stack {
-            // Upvalue refers to local in parent: use MOVE pseudo-instruction
-            code::code_abc(fs, OpCode::Move, 0, upval.idx as u32, 0);
-        } else {
-            // Upvalue refers to upvalue in parent: use GetUpval pseudo-instruction  
-            code::code_abc(fs, OpCode::GetUpval, 0, upval.idx as u32, 0);
-        }
-    }
 
     *v = ExpDesc::new_nonreloc(reg);
     Ok(())
@@ -674,15 +676,4 @@ fn expect(fs: &mut FuncState, tk: LuaTokenKind) -> Result<(), String> {
             fs.lexer.current_token()
         ))
     }
-}
-
-// Add string constant to chunk
-fn add_string_constant(fs: &mut FuncState, s: String) -> usize {
-    // Intern string to ObjectPool and get StringId
-    let (string_id, _) = fs.pool.create_string(&s);
-
-    // Add LuaValue with StringId to constants
-    let value = LuaValue::string(string_id);
-    fs.chunk.constants.push(value);
-    fs.chunk.constants.len() - 1
 }
