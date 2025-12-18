@@ -68,7 +68,15 @@ fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
         } else if val.is_string() {
             // 获取实际字符串内容（对齐luac）
             if let Some(s) = vm.get_string(val) {
-                format!("\"{}\"", s.as_str())
+                let content = s.as_str();
+                let char_count = content.chars().count();
+                // 如果字符串超过64个字符，截断并添加 ...
+                if char_count > 64 {
+                    let truncated: String = content.chars().take(64).collect();
+                    format!("\"{} ...\"", truncated)
+                } else {
+                    format!("\"{}\"", content)
+                }
             } else {
                 format!("string({})", idx)
             }
