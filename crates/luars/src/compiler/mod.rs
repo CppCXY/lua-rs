@@ -55,8 +55,7 @@ pub fn compile_code_with_name(
     let mut parser = LuaParser::new(source, tokens, level);
     // Check for lexer errors before parsing
 
-    let mut fs = FuncState::new(&mut parser, pool, true);
-    fs.source_name = chunk_name.to_string();
+    let mut fs = FuncState::new(&mut parser, pool, true, chunk_name.to_string());
 
     // Port of mainfunc from lparser.c
     // main function is always vararg
@@ -95,6 +94,11 @@ pub fn compile_code_with_name(
 
     // Set vararg flag on chunk
     fs.chunk.is_vararg = fs.is_vararg;
+    
+    // Set source name and line info for main chunk
+    fs.chunk.source_name = Some(chunk_name.to_string());
+    fs.chunk.linedefined = 0;  // Main function starts at line 0
+    fs.chunk.lastlinedefined = 0;  // Main function ends at line 0 (convention)
 
     Ok(fs.chunk)
 }

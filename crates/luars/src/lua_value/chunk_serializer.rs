@@ -297,6 +297,8 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         upvalue_descs,
         source_name,
         line_info,
+        linedefined: 0,
+        lastlinedefined: 0,
     })
 }
 
@@ -465,6 +467,8 @@ fn read_chunk_with_strings(
         upvalue_descs,
         source_name,
         line_info,
+        linedefined: 0,
+        lastlinedefined: 0,
     })
 }
 

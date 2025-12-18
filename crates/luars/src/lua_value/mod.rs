@@ -426,6 +426,8 @@ pub struct Chunk {
     pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
     pub source_name: Option<String>,  // Source file/chunk name for debugging
     pub line_info: Vec<u32>,          // Line number for each instruction (for debug)
+    pub linedefined: usize,           // Line where function starts (0 for main)
+    pub lastlinedefined: usize,       // Line where function ends (0 for main)
 }
 
 impl Chunk {
@@ -442,6 +444,8 @@ impl Chunk {
             upvalue_descs: Vec::new(),
             source_name: None,
             line_info: Vec::new(),
+            linedefined: 0,
+            lastlinedefined: 0,
         }
     }
 }

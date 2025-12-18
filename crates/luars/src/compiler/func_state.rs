@@ -81,7 +81,7 @@ pub struct VarDesc {
 }
 
 impl<'a> FuncState<'a> {
-    pub fn new(lexer: &'a mut LuaParser<'a>, pool: &'a mut ObjectPool, is_vararg: bool) -> Self {
+    pub fn new(lexer: &'a mut LuaParser<'a>, pool: &'a mut ObjectPool, is_vararg: bool, source_name: String) -> Self {
         FuncState {
             chunk: Chunk::new(),
             prev: None,
@@ -100,7 +100,7 @@ impl<'a> FuncState<'a> {
             is_vararg,
             actvar: Vec::new(),
             upvalues: Vec::new(),
-            source_name: String::from("@<input>"),
+            source_name,
             first_local: 0,
         }
     }

@@ -511,6 +511,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     use crate::compiler::func_state::FuncState;
     use crate::compiler::statement;
 
+    // Record the line where function is defined
+    let linedefined = fs.lexer.line;
+
     expect(fs, LuaTokenKind::TkLeftParen)?;
 
     // Determine if vararg before creating child
@@ -569,6 +572,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // statlist(ls);
     statement::statlist(&mut child_fs)?;
 
+    // Record the line where function ends (before consuming END token)
+    let lastlinedefined = child_fs.lexer.line;
+
     // lparser.c:1004: Expect END token
     expect(&mut child_fs, LuaTokenKind::TkEnd)?;
 
@@ -578,6 +584,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // Get completed child chunk and upvalue information
     let mut child_chunk = child_fs.chunk;
     child_chunk.is_vararg = child_fs.is_vararg; // Set vararg flag on chunk
+    child_chunk.linedefined = linedefined;
+    child_chunk.lastlinedefined = lastlinedefined;
+    child_chunk.source_name = Some(child_fs.source_name.clone());
     let child_upvalues = child_fs.upvalues;
 
     // Port of lparser.c:722-726 (codeclosure)
