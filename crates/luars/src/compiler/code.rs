@@ -528,7 +528,7 @@ pub fn free_reg(fs: &mut FuncState, reg: u8) {
 // Port of luaK_reserveregs from lcode.c:511-516
 // void luaK_reserveregs (FuncState *fs, int n)
 pub fn reserve_regs(fs: &mut FuncState, n: u8) {
-    fs.freereg += n;
+    fs.freereg = fs.freereg.saturating_add(n);
     if (fs.freereg as usize) > fs.chunk.max_stack_size {
         fs.chunk.max_stack_size = fs.freereg as usize;
     }
@@ -1248,4 +1248,81 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<crate::lua_value::LuaVal
         }
         _ => None,
     }
+}
+
+// LUA_MULTRET constant from lua.h
+pub const LUA_MULTRET: u32 = u32::MAX;
+
+// Port of hasmultret from lcode.c:86-90
+pub fn hasmultret(e: &ExpDesc) -> bool {
+    matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG)
+}
+
+// Port of luaK_setlist from lcode.c:1810-1823
+pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
+    debug_assert!(tostore != 0);
+    
+    let c = if tostore == LUA_MULTRET {
+        0
+    } else {
+        tostore
+    };
+
+    const MAXARG_C: u32 = 255; // 8-bit C field
+    
+    if nelems <= MAXARG_C {
+        code_abc(fs, OpCode::SetList, base as u32, c, nelems);
+    } else {
+        // Need extra argument for large index
+        let extra = nelems / (MAXARG_C + 1);
+        let c_arg = nelems % (MAXARG_C + 1);
+        code_abck(fs, OpCode::SetList, base as u32, c, c_arg, true);
+        code_extraarg(fs, extra);
+    }
+    
+    fs.freereg = base + 1; // free registers with list values
+}
+
+// Port of luaK_settablesize from lcode.c:1827-1854
+pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u32) {
+    // Compute the array size code (B argument)
+    let mut b = if asize > 0 {
+        let mut temp = asize;
+        let mut extra = 0;
+        while temp >= 16 {
+            extra += 1;
+            temp = (temp + 1) >> 1;
+        }
+        (extra << 4) | (temp - 1)
+    } else {
+        0
+    };
+
+    // Compute the hash size code (C argument)
+    let mut c = if hsize > 0 {
+        let mut temp = hsize;
+        let mut extra = 0;
+        while temp >= 16 {
+            extra += 1;
+            temp = (temp + 1) >> 1;
+        }
+        (extra << 4) | (temp - 1)
+    } else {
+        0
+    };
+
+    // Update the NEWTABLE instruction
+    let inst = &mut fs.chunk.code[pc];
+    let opcode = Instruction::get_opcode(*inst);
+    debug_assert_eq!(opcode, OpCode::NewTable);
+    
+    *inst = Instruction::create_abc(OpCode::NewTable, ra as u32, b, c);
+}
+
+// Port of luaK_codeextraarg from lcode.c:415-419
+pub fn code_extraarg(fs: &mut FuncState, a: u32) -> usize {
+    let inst = Instruction::create_ax(OpCode::ExtraArg, a);
+    fs.chunk.code.push(inst);
+    fs.chunk.line_info.push(fs.lexer.line as u32);
+    fs.chunk.code.len() - 1
 }

@@ -1,4 +1,3 @@
-mod error;
 mod lexer;
 mod lexer_config;
 mod lua_language_level;

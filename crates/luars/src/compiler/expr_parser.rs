@@ -12,6 +12,9 @@ use crate::compiler::parser::{
 use crate::compiler::{VarKind, code, string_k};
 use crate::lua_vm::OpCode;
 
+// From lopcodes.h - maximum list items per flush
+const LFIELDS_PER_FLUSH: u32 = 50;
+
 // Port of init_exp from lparser.c
 fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {
     e.kind = kind;
@@ -399,100 +402,172 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     Ok(())
 }
 
-// Port of constructor from lparser.c
-fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+// Port of ConsControl from lparser.c
+struct ConsControl {
+    v: ExpDesc,      // last list item read
+    table_reg: u8,   // table register
+    na: u32,         // number of array elements already stored
+    nh: u32,         // total number of record elements
+    tostore: u32,    // number of array elements pending to be stored
+}
+
+impl ConsControl {
+    fn new(table_reg: u8) -> Self {
+        Self {
+            v: ExpDesc::new_void(),
+            table_reg,
+            na: 0,
+            nh: 0,
+            tostore: 0,
+        }
+    }
+}
+
+// Port of closelistfield from lparser.c
+fn closelistfield(fs: &mut FuncState, cc: &mut ConsControl) {
+    if cc.v.kind == ExpKind::VVOID {
+        return; // there is no list item
+    }
+    code::exp2nextreg(fs, &mut cc.v);
+    cc.v.kind = ExpKind::VVOID;
+    if cc.tostore == LFIELDS_PER_FLUSH {
+        code::setlist(fs, cc.table_reg, cc.na, cc.tostore); // flush
+        cc.na += cc.tostore;
+        cc.tostore = 0; // no more items pending
+    }
+}
+
+// Port of lastlistfield from lparser.c
+fn lastlistfield(fs: &mut FuncState, cc: &mut ConsControl) {
+    if cc.tostore == 0 {
+        return;
+    }
+    if code::hasmultret(&cc.v) {
+        code::setmultret(fs, &mut cc.v);
+        code::setlist(fs, cc.table_reg, cc.na, code::LUA_MULTRET);
+        cc.na -= 1; // do not count last expression (unknown number of elements)
+    } else {
+        if cc.v.kind != ExpKind::VVOID {
+            code::exp2nextreg(fs, &mut cc.v);
+        }
+        code::setlist(fs, cc.table_reg, cc.na, cc.tostore);
+    }
+    cc.na += cc.tostore;
+}
+
+// Port of listfield from lparser.c
+fn listfield(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
+    expr_internal(fs, &mut cc.v)?;
+    cc.tostore += 1;
+    Ok(())
+}
+
+// Port of field from lparser.c
+fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
     use crate::compiler::expression::ExpKind;
 
+    if fs.lexer.current_token() == LuaTokenKind::TkLeftBracket {
+        // [exp] = exp (general field)
+        fs.lexer.bump();
+        let mut key = ExpDesc::new_void();
+        expr_internal(fs, &mut key)?;
+        expect(fs, LuaTokenKind::TkRightBracket)?;
+        expect(fs, LuaTokenKind::TkAssign)?;
+
+        let mut val = ExpDesc::new_void();
+        expr_internal(fs, &mut val)?;
+
+        // Check if key is string constant for SetField optimization
+        if key.kind == ExpKind::VKSTR {
+            let key_idx = unsafe { key.u.info as u32 };
+            let val_reg = code::exp2anyreg(fs, &mut val);
+            code::code_abc(
+                fs,
+                OpCode::SetField,
+                cc.table_reg as u32,
+                key_idx,
+                val_reg as u32,
+            );
+        }
+        // Check if key is integer constant for SetI optimization
+        else if key.kind == ExpKind::VKINT {
+            let key_int = unsafe { key.u.ival as u32 };
+            let val_reg = code::exp2anyreg(fs, &mut val);
+            code::code_abc(
+                fs,
+                OpCode::SetI,
+                cc.table_reg as u32,
+                key_int,
+                val_reg as u32,
+            );
+        } else {
+            // General case: SetTable instruction
+            let key_reg = code::exp2anyreg(fs, &mut key);
+            let val_reg = code::exp2anyreg(fs, &mut val);
+            code::code_abc(
+                fs,
+                OpCode::SetTable,
+                cc.table_reg as u32,
+                key_reg as u32,
+                val_reg as u32,
+            );
+        }
+        cc.nh += 1;
+    } else if fs.lexer.current_token() == LuaTokenKind::TkName {
+        // Check if it's name = exp (record field) or just a list item
+        let next = fs.lexer.peek_next_token();
+        if next == LuaTokenKind::TkAssign {
+            // name = exp (record field)
+            let field_name = fs.lexer.current_token_text().to_string();
+            fs.lexer.bump();
+            fs.lexer.bump(); // skip =
+
+            let field_idx = string_k(fs, field_name);
+            let mut val = ExpDesc::new_void();
+            expr_internal(fs, &mut val)?;
+
+            // t[field] = val -> SetField instruction
+            let val_reg = code::exp2anyreg(fs, &mut val);
+            code::code_abc(
+                fs,
+                OpCode::SetField,
+                cc.table_reg as u32,
+                field_idx as u32,
+                val_reg as u32,
+            );
+            cc.nh += 1;
+        } else {
+            // Just a list item
+            listfield(fs, cc)?;
+        }
+    } else {
+        // List item
+        listfield(fs, cc)?;
+    }
+
+    Ok(())
+}
+
+// Port of constructor from lparser.c
+fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     expect(fs, LuaTokenKind::TkLeftBrace)?;
 
-    let reg = fs.freereg;
+    let table_reg = fs.freereg;
     code::reserve_regs(fs, 1);
-    code::code_abc(fs, OpCode::NewTable, reg as u32, 0, 0);
-    *v = ExpDesc::new_nonreloc(reg);
+    let pc = code::code_abc(fs, OpCode::NewTable, table_reg as u32, 0, 0);
+    code::code_extraarg(fs, 0); // space for extra arg
+    *v = ExpDesc::new_nonreloc(table_reg);
 
-    let mut list_items = 0; // Number of list items [1], [2], etc.
+    let mut cc = ConsControl::new(table_reg);
 
     // Parse table fields
-    while fs.lexer.current_token() != LuaTokenKind::TkRightBrace {
-        // Field or list item
-        if fs.lexer.current_token() == LuaTokenKind::TkName {
-            // Might be field or expression
-            let next = fs.lexer.peek_next_token();
-            if next == LuaTokenKind::TkAssign {
-                // name = exp (record field)
-                let field_name = fs.lexer.current_token_text().to_string();
-                fs.lexer.bump();
-                fs.lexer.bump(); // skip =
-
-                let field_idx = string_k(fs, field_name);
-                let mut val = ExpDesc::new_void();
-                expr_internal(fs, &mut val)?;
-
-                // t[field] = val  -> SetField instruction
-                let val_reg = code::exp2anyreg(fs, &mut val);
-                code::code_abc(
-                    fs,
-                    OpCode::SetField,
-                    reg as u32,
-                    field_idx as u32,
-                    val_reg as u32,
-                );
-            } else {
-                // Just an expression in list
-                list_items += 1;
-                let mut val = ExpDesc::new_void();
-                expr_internal(fs, &mut val)?;
-
-                // t[list_items] = val -> SetI instruction
-                let val_reg = code::exp2anyreg(fs, &mut val);
-                code::code_abc(fs, OpCode::SetI, reg as u32, list_items, val_reg as u32);
-            }
-        } else if fs.lexer.current_token() == LuaTokenKind::TkLeftBracket {
-            // [exp] = exp (general index)
-            fs.lexer.bump();
-            let mut key = ExpDesc::new_void();
-            expr_internal(fs, &mut key)?;
-            expect(fs, LuaTokenKind::TkRightBracket)?;
-            expect(fs, LuaTokenKind::TkAssign)?;
-
-            let mut val = ExpDesc::new_void();
-            expr_internal(fs, &mut val)?;
-
-            // Check if key is string constant for SetField optimization
-            if key.kind == ExpKind::VKSTR {
-                let key_idx = unsafe { key.u.info as u32 };
-                let val_reg = code::exp2anyreg(fs, &mut val);
-                code::code_abc(fs, OpCode::SetField, reg as u32, key_idx, val_reg as u32);
-            }
-            // Check if key is integer constant for SetI optimization
-            else if key.kind == ExpKind::VKINT {
-                let key_int = unsafe { key.u.ival as u32 };
-                let val_reg = code::exp2anyreg(fs, &mut val);
-                code::code_abc(fs, OpCode::SetI, reg as u32, key_int, val_reg as u32);
-            } else {
-                // General case: SetTable instruction
-                let key_reg = code::exp2anyreg(fs, &mut key);
-                let val_reg = code::exp2anyreg(fs, &mut val);
-                code::code_abc(
-                    fs,
-                    OpCode::SetTable,
-                    reg as u32,
-                    key_reg as u32,
-                    val_reg as u32,
-                );
-            }
-        } else {
-            // List item without bracket
-            list_items += 1;
-            let mut val = ExpDesc::new_void();
-            expr_internal(fs, &mut val)?;
-
-            // t[list_items] = val -> SetI instruction
-            let val_reg = code::exp2anyreg(fs, &mut val);
-            code::code_abc(fs, OpCode::SetI, reg as u32, list_items, val_reg as u32);
+    loop {
+        if fs.lexer.current_token() == LuaTokenKind::TkRightBrace {
+            break;
         }
+        closelistfield(fs, &mut cc);
+        field(fs, &mut cc)?;
 
-        // Optional separator
         if !matches!(
             fs.lexer.current_token(),
             LuaTokenKind::TkComma | LuaTokenKind::TkSemicolon
@@ -503,6 +578,8 @@ fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     }
 
     expect(fs, LuaTokenKind::TkRightBrace)?;
+    lastlistfield(fs, &mut cc);
+    code::settablesize(fs, pc, table_reg, cc.na, cc.nh);
     Ok(())
 }
 
