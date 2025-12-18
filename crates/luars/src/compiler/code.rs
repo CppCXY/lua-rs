@@ -160,6 +160,92 @@ pub fn ret(fs: &mut FuncState, first: u8, nret: u8) -> usize {
     code_abc(fs, op, first as u32, nret.wrapping_add(1) as u32, 0)
 }
 
+// Port of luaK_finish from lcode.c:1847-1876
+// void luaK_finish (FuncState *fs)
+pub fn finish(fs: &mut FuncState) {
+    let needclose = fs.needclose;
+    let is_vararg = fs.is_vararg;
+    let num_params = fs.chunk.param_count;
+    
+    for i in 0..fs.pc {
+        let instr = &mut fs.chunk.code[i];
+        let opcode = OpCode::from(Instruction::get_opcode(*instr));
+        
+        match opcode {
+            OpCode::Return0 | OpCode::Return1 => {
+                // lcode.c:1854-1859: Convert RETURN0/RETURN1 to RETURN if needed
+                if needclose || is_vararg {
+                    // Convert to RETURN
+                    let a = Instruction::get_a(*instr);
+                    let b = Instruction::get_b(*instr);
+                    let mut new_instr = Instruction::create_abck(OpCode::Return, a, b, 0, false);
+                    
+                    // lcode.c:1861-1865: Set k and C fields
+                    if needclose {
+                        Instruction::set_k(&mut new_instr, true);
+                    }
+                    if is_vararg {
+                        Instruction::set_c(&mut new_instr, (num_params + 1) as u32);
+                    }
+                    
+                    *instr = new_instr;
+                }
+            }
+            OpCode::Return | OpCode::TailCall => {
+                // lcode.c:1861-1865: Set k and C fields for existing RETURN/TAILCALL
+                if needclose {
+                    Instruction::set_k(instr, true);
+                }
+                if is_vararg {
+                    Instruction::set_c(instr, (num_params + 1) as u32);
+                }
+            }
+            OpCode::Jmp => {
+                // lcode.c:1867-1870: Fix jumps to final target
+                let target = finaltarget(&fs.chunk.code, i);
+                fixjump_at(fs, i, target);
+            }
+            _ => {}
+        }
+    }
+}
+
+// Helper for finish: find final target of a jump chain
+fn finaltarget(code: &[u32], mut pc: usize) -> usize {
+    let mut count = 0;
+    while count < 100 {  // Prevent infinite loops
+        if pc >= code.len() {
+            break;
+        }
+        let instr = code[pc];
+        if OpCode::from(Instruction::get_opcode(instr)) != OpCode::Jmp {
+            break;
+        }
+        let offset = Instruction::get_sj(instr) as isize;
+        if offset == -1 {
+            break;
+        }
+        let next_pc = (pc as isize) + 1 + offset;
+        if next_pc < 0 || next_pc >= code.len() as isize {
+            break;
+        }
+        pc = next_pc as usize;
+        count += 1;
+    }
+    pc
+}
+
+// Helper for finish: fix jump at specific pc
+fn fixjump_at(fs: &mut FuncState, pc: usize, target: usize) {
+    let offset = (target as isize) - (pc as isize) - 1;
+    if offset < i32::MIN as isize || offset > i32::MAX as isize {
+        return;
+    }
+    
+    let instr = &mut fs.chunk.code[pc];
+    Instruction::set_sj(instr, offset as i32);
+}
+
 // Port of luaK_jump from lcode.c:200-202
 // int luaK_jump (FuncState *fs)
 pub fn jump(fs: &mut FuncState) -> usize {
@@ -198,18 +284,14 @@ pub fn concat(fs: &mut FuncState, l1: &mut isize, l2: isize) {
     }
 }
 
-// Port of luaK_patchlist from lcode.c:299-305
+// Port of luaK_patchlist from lcode.c:307-310
 // void luaK_patchlist (FuncState *fs, int list, int target)
-pub fn patchlist(fs: &mut FuncState, mut list: isize, target: isize) {
+pub fn patchlist(fs: &mut FuncState, list: isize, target: isize) {
     if target < 0 {
-        // Invalid target, don't patch
         return;
     }
-    while list != -1 {
-        let next = get_jump(fs, list as usize);
-        fix_jump(fs, list as usize, target as usize);
-        list = next;
-    }
+    // lcode.c:309: patchlistaux(fs, list, target, NO_REG, target);
+    patchlistaux(fs, list, target, NO_REG as u8, target);
 }
 
 // Helper: get jump target from instruction
@@ -298,21 +380,21 @@ fn patchtestreg(fs: &mut FuncState, node: usize, reg: u8) -> bool {
 
 // Port of patchlistaux from lcode.c:271-292
 // static void patchlistaux (FuncState *fs, int list, int vtarget, int reg, int dtarget)
+// Port of patchlistaux from lcode.c:285-298
+// Traverse a list of tests, patching their destination address and registers
+// Tests producing values jump to 'vtarget' (and put their values in 'reg')
+// Other tests jump to 'dtarget'
 fn patchlistaux(fs: &mut FuncState, mut list: isize, vtarget: isize, reg: u8, dtarget: isize) {
     const NO_JUMP: isize = -1;
     while list != NO_JUMP {
         let next = get_jump(fs, list as usize);
-        // Try to patch TESTSET instruction (may convert to TEST)
+        // lcode.c:293: if (patchtestreg(fs, list, reg))
         if patchtestreg(fs, list as usize, reg) {
-            // Successfully patched a TESTSET
-            if vtarget >= 0 {
-                fix_jump(fs, list as usize, vtarget as usize);
-            }
+            // lcode.c:294: fixjump(fs, list, vtarget);
+            fix_jump(fs, list as usize, vtarget as usize);
         } else {
-            // Not a TESTSET - patch jump to dtarget
-            if dtarget >= 0 {
-                fix_jump(fs, list as usize, dtarget as usize);
-            }
+            // lcode.c:296: fixjump(fs, list, dtarget);
+            fix_jump(fs, list as usize, dtarget as usize);
         }
         list = next;
     }

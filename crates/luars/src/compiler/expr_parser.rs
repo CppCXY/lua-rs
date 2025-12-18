@@ -673,6 +673,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // Generate final RETURN instruction
     code::ret(&mut child_fs, 0, 0);
 
+    // Port of close_func from lparser.c:763 - finish code generation
+    code::finish(&mut child_fs);
+
     // Get completed child chunk and upvalue information
     let mut child_chunk = child_fs.chunk;
     child_chunk.is_vararg = child_fs.is_vararg; // Set vararg flag on chunk

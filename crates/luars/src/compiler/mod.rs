@@ -102,6 +102,9 @@ pub fn compile_code_with_name(
     // Generate final RETURN (return with 0 values)
     code::ret(&mut fs, 0, 0);
 
+    // Port of close_func from lparser.c:763 - finish code generation
+    code::finish(&mut fs);
+
     // Set vararg flag on chunk
     fs.chunk.is_vararg = fs.is_vararg;
     

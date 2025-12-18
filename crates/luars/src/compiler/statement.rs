@@ -174,12 +174,33 @@ fn enterblock(fs: &mut FuncState, bl: &mut BlockCnt, isloop: bool) {
 }
 
 // Port of leaveblock from lparser.c
+// Port of leaveblock from lparser.c:672-692
 fn leaveblock(fs: &mut FuncState) {
     if let Some(bl) = fs.block_list.take() {
-        fs.block_list = bl.previous;
+        let stklevel = bl.nactvar as usize;  // level outside the block
+        
+        // Remove block locals
+        fs.remove_vars(bl.nactvar);
+        
+        // Check if needs close instruction
+        // lparser.c:682: if (!hasclose && bl->previous && bl->upval)
+        let needs_close = bl.previous.is_some() && bl.upval;
+        
+        if needs_close {
+            // Generate CLOSE instruction
+            code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
+            // Mark that this function needs close handling
+            fs.needclose = true;
+        }
+        
+        // Free registers
+        fs.freereg = stklevel as u8;
+        
         // Remove labels and gotos from this block
         fs.labels.truncate(bl.first_label);
-        fs.nactvar = bl.nactvar;
+        
+        // Restore previous block
+        fs.block_list = bl.previous;
     }
 }
 
@@ -469,8 +490,21 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
 }
 
 // Port of forstat from lparser.c
+// Port of forstat from lparser.c:1617-1636
 fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // forstat -> FOR (fornum | forlist) END
+    // lparser.c:1623: enterblock(fs, &bl, 1);  /* scope for loop and control variables */
+    let mut bl = BlockCnt {
+        previous: None,
+        first_label: 0,
+        first_goto: 0,
+        nactvar: fs.nactvar,
+        upval: false,
+        is_loop: true,
+        in_scope: true,
+    };
+    enterblock(fs, &mut bl, true);
+
     fs.lexer.bump(); // skip FOR
     let varname = str_checkname(fs)?;
 
@@ -489,6 +523,10 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     }
 
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkFor, line)?;
+    
+    // lparser.c:1633: leaveblock(fs);  /* loop scope ('break' jumps to this point) */
+    leaveblock(fs);
+    
     Ok(())
 }
 
@@ -623,6 +661,9 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // Activate the 4 control variables
     fs.adjust_local_vars(4);
 
+    // lparser.c:1612: marktobeclosed(fs); /* last control var. must be closed */
+    mark_to_be_closed(fs);
+
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
 
@@ -735,6 +776,29 @@ fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
         }
     } else {
         Ok(VarKind::VDKREG) // regular variable
+    }
+}
+
+// Port of markupval from lparser.c:411-417
+// Mark block where variable at given level was defined (to emit close instructions later)
+fn mark_upval(fs: &mut FuncState, level: u8) {
+    let mut bl_opt = fs.block_list.as_mut();
+    while let Some(bl) = bl_opt {
+        if bl.nactvar <= level {
+            bl.upval = true;
+            fs.needclose = true;
+            break;
+        }
+        bl_opt = bl.previous.as_mut();
+    }
+}
+
+// Port of marktobeclosed from lparser.c:423-429
+// Mark that current block has a to-be-closed variable
+fn mark_to_be_closed(fs: &mut FuncState) {
+    if let Some(ref mut bl) = fs.block_list {
+        bl.upval = true;
+        fs.needclose = true;
     }
 }
 
