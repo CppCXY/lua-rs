@@ -120,7 +120,7 @@ fn check(fs: &mut FuncState, expected: LuaTokenKind) -> Result<(), String> {
 fn error_expected(fs: &mut FuncState, token: LuaTokenKind) -> Result<(), String> {
     Err(format!(
         "{}:{}: syntax error: expected '{}', got '{}'",
-        "<source>",
+        fs.source_name,
         fs.lexer.line,
         token,
         fs.lexer.current_token()
@@ -139,7 +139,7 @@ fn check_match(
         } else {
             return Err(format!(
                 "{}:{}: syntax error: expected '{}' (to close '{}' at line {})",
-                "<source>", fs.lexer.line, what, who, where_
+                fs.source_name, fs.lexer.line, what, who, where_
             ));
         }
     }
@@ -322,6 +322,7 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
 fn labelstat(fs: &mut FuncState) -> Result<(), String> {
     let name = str_checkname(fs)?;
     check(fs, LuaTokenKind::TkDbColon)?;
+    fs.lexer.bump();  // skip '::'
 
     let label = LabelDesc {
         name,
@@ -334,61 +335,38 @@ fn labelstat(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of test_then_block from lparser.c
+// Port of test_then_block from lparser.c:1635-1668
 fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), String> {
-    static mut CALL_COUNT: usize = 0;
-    unsafe {
-        CALL_COUNT += 1;
-        let count = CALL_COUNT;
-        eprintln!("[{}] test_then_block: current token = {:?}", count, fs.lexer.current_token());
-        if count > 10 {
-            eprintln!("test_then_block called > 10 times!");
-            std::process::abort();
-        }
-    }
     // test_then_block -> [IF | ELSEIF] cond THEN block
     fs.lexer.bump(); // skip IF or ELSEIF
     
-    // Parse condition
-    eprintln!("test_then_block: parsing condition, token = {:?}", fs.lexer.current_token());
+    // lparser.c:1642: expr(ls, &v);
     let mut v = expr(fs)?;
-    eprintln!("test_then_block: condition parsed, token = {:?}", fs.lexer.current_token());
 
+    // lparser.c:1643: checknext(ls, TK_THEN);
     check(fs, LuaTokenKind::TkThen)?;
-    eprintln!("test_then_block: checked THEN, about to bump");
     fs.lexer.bump(); // consume THEN
-    eprintln!("test_then_block: bumped THEN, token = {:?}", fs.lexer.current_token());
 
-    // Generate conditional jump
-    eprintln!("test_then_block: about to generate conditional jump");
-    if v.kind != crate::compiler::expression::ExpKind::VJMP {
-        code::exp2nextreg(fs, &mut v);
-    }
-    eprintln!("test_then_block: generated exp2nextreg");
+    // Regular case (not a break)
+    // lparser.c:1657: luaK_goiftrue(ls->fs, &v); /* skip over block if condition is false */
+    code::goiftrue(fs, &mut v);
 
-    // Jump to else/end if condition is false
-    let jf = code::jump(fs);
-    eprintln!("test_then_block: generated jump, jf = {}", jf);
+    // lparser.c:1659: jf = v.f;
+    let jf = v.f;
 
-    // Parse then block
-    eprintln!("test_then_block: about to parse block");
+    // lparser.c:1661: statlist(ls); /* 'then' part */
     block(fs)?;
-    eprintln!("test_then_block: parsed block, current token = {:?}", fs.lexer.current_token());
 
-    // Jump to end after then block
+    // lparser.c:1663-1665: Jump to end after then block if followed by else/elseif
     if fs.lexer.current_token() == LuaTokenKind::TkElseIf
         || fs.lexer.current_token() == LuaTokenKind::TkElse
     {
-        eprintln!("test_then_block: about to generate escape jump");
         let jmp = code::jump(fs) as isize;
         code::concat(fs, escapelist, jmp);
-        eprintln!("test_then_block: generated escape jump");
     }
 
-    // Patch false jump to here
-    eprintln!("test_then_block: about to patch false jump");
-    code::patchtohere(fs, jf as isize);
-    eprintln!("test_then_block: patched false jump, returning");
+    // lparser.c:1666: luaK_patchtohere(fs, jf);
+    code::patchtohere(fs, jf);
 
     Ok(())
 }
@@ -439,6 +417,7 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     };
     enterblock(fs, &mut bl, true);
     check(fs, LuaTokenKind::TkDo)?;
+    fs.lexer.bump();  // skip 'do'
     block(fs)?;
 
     // Jump back to condition
@@ -511,7 +490,7 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         _ => {
             return Err(format!(
                 "{}:{}: '=' or 'in' expected",
-                "<source>", fs.lexer.line
+                fs.source_name, fs.lexer.line
             ));
         }
     }
@@ -522,32 +501,48 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
 
 fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), String> {
     // fornum -> NAME = exp, exp [,exp] forbody
-    fs.lexer.bump(); // skip '='
-
-    // Reserve registers for internal loop variables
+    // Port of lparser.c:1568-1590
+    
+    // Reserve registers for internal loop variables (must be done before parsing expressions)
     let base = fs.freereg;
+    
+    // Create 3 internal control variables: (for state), (for state), (for state)
+    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
+    
+    // Create the loop variable
+    fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
+    
+    check(fs, LuaTokenKind::TkAssign)?;  // check '='
+    fs.lexer.bump();  // skip '='
 
-    // Parse initial, limit, step
-    expr(fs)?; // initial value (index)
+    // Parse initial, limit, step (exp1 = expr + exp2nextreg)
+    let mut e = expr(fs)?;
+    code::exp2nextreg(fs, &mut e);
     check(fs, LuaTokenKind::TkComma)?;
-    expr(fs)?; // limit
+    fs.lexer.bump();  // skip ','
+    
+    let mut e = expr(fs)?;
+    code::exp2nextreg(fs, &mut e);
 
     if testnext(fs, LuaTokenKind::TkComma) {
-        expr(fs)?; // step
+        let mut e = expr(fs)?;
+        code::exp2nextreg(fs, &mut e);
     } else {
         // Default step = 1
         code::code_asbx(fs, OpCode::LoadI, fs.freereg as u32, 1);
         code::reserve_regs(fs, 1);
     }
 
-    // Create loop variable
-    fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
-    fs.adjust_local_vars(1);
+    // Adjust local variables (3 control variables)
+    fs.adjust_local_vars(3);
 
     // Generate FORPREP
     let prep_jump = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
 
     check(fs, LuaTokenKind::TkDo)?;
+    fs.lexer.bump();  // skip 'do'
 
     let mut bl = BlockCnt {
         previous: None,
@@ -581,32 +576,41 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
 fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // forlist -> NAME {,NAME} IN explist forbody
-    let mut nvars = 1;
-    let mut varnames = vec![indexname];
-
+    // Port of lparser.c:1591-1616
+    let mut nvars = 5;  // gen, state, control, toclose, 'indexname'
+    
+    let base = fs.freereg;
+    
+    // Create 4 internal control variables
+    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
+    
+    // Create declared variables (starting with indexname)
+    fs.new_localvar(indexname, crate::compiler::func_state::VarKind::VDKREG);
+    
     while testnext(fs, LuaTokenKind::TkComma) {
-        varnames.push(str_checkname(fs)?);
+        let varname = str_checkname(fs)?;
+        fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
         nvars += 1;
     }
 
     check(fs, LuaTokenKind::TkIn)?;
-
-    let base = fs.freereg;
+    fs.lexer.bump();  // skip IN
 
     // Parse iterator expressions
     let mut e = ExpDesc::new_void();
     let nexps = explist(fs, &mut e)?;
 
-    // Adjust to 3 values (generator, state, control)
-    adjust_assign(fs, 3, nexps, &mut e);
+    // Adjust to 4 values (generator, state, control, toclose)
+    adjust_assign(fs, 4, nexps, &mut e);
 
-    // Create loop variables
-    for varname in varnames {
-        fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
-    }
-    fs.adjust_local_vars(nvars as u8);
+    // Activate the 4 control variables
+    fs.adjust_local_vars(4);
 
     check(fs, LuaTokenKind::TkDo)?;
+    fs.lexer.bump();  // skip 'do'
 
     let loop_start = fs.pc;
 
@@ -707,6 +711,7 @@ fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
         fs.lexer.bump();
 
         check(fs, LuaTokenKind::TkGt)?;
+        fs.lexer.bump();  // skip '>'
 
         if attr == "const" {
             Ok(VarKind::RDKCONST)

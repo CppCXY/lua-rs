@@ -23,11 +23,16 @@ use crate::lua_vm::OpCode;
 // Structures are now in separate files (func_state.rs, expression.rs)
 
 // Port of luaY_parser from lparser.c
-pub fn lua_parse(source: &str, pool: &mut ObjectPool) -> Result<Chunk, String> {
+pub fn compile_code(source: &str, pool: &mut ObjectPool) -> Result<Chunk, String> {
+    compile_code_with_name(source, pool, "@<input>")
+}
+
+pub fn compile_code_with_name(source: &str, pool: &mut ObjectPool, chunk_name: &str) -> Result<Chunk, String> {
     let level = LuaLanguageLevel::Lua54;
     let mut parser = LuaParser::new(source, level);
     
     let mut fs = FuncState::new(&mut parser, pool, true);
+    fs.source_name = chunk_name.to_string();
     
     // Port of mainfunc from lparser.c
     // main function is always vararg
@@ -59,9 +64,10 @@ pub fn lua_parse(source: &str, pool: &mut ObjectPool) -> Result<Chunk, String> {
     // Check for proper ending
     if fs.lexer.current_token() != LuaTokenKind::TkEof {
         return Err(format!(
-            "{}:{}: syntax error: expected end of file",
-            "<source>",
-            fs.lexer.line
+            "{}:{}: syntax error: expected end of file, got '{}'",
+            fs.source_name,
+            fs.lexer.line,
+            fs.lexer.current_token_text()
         ));
     }
     

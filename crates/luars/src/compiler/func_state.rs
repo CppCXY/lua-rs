@@ -32,6 +32,7 @@ pub struct FuncState<'a> {
     pub needclose: bool,     // true if function needs to close upvalues when returning
     pub is_vararg: bool,     // true if function is vararg
     pub first_local: usize,  // index of first local variable in prev
+    pub source_name: String, // source file name for error messages
 }
 
 // Port of BlockCnt from lparser.c
@@ -98,6 +99,7 @@ impl<'a> FuncState<'a> {
             is_vararg,
             actvar: Vec::new(),
             upvalues: Vec::new(),
+            source_name: String::from("@<input>"),
             first_local: 0,
         }
     }
@@ -127,6 +129,7 @@ impl<'a> FuncState<'a> {
             actvar: Vec::new(),
             upvalues: Vec::new(),
             first_local: parent.actvar.len(),
+            source_name: parent.source_name.clone(),
         }
     }
     

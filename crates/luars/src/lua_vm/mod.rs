@@ -5,6 +5,7 @@ mod lua_call_frame;
 mod lua_error;
 mod opcode;
 
+use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{FunctionId, GC, GcFunction, GcId, TableId, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
@@ -377,7 +378,7 @@ impl LuaVM {
 
     /// Compile source code using VM's string pool
     pub fn compile(&mut self, source: &str) -> LuaResult<Chunk> {
-        let chunk = match crate::compiler::lua_parse(source, &mut self.object_pool) {
+        let chunk = match compile_code(source, &mut self.object_pool) {
             Ok(c) => c,
             Err(e) => return Err(self.compile_error(e)),
         };
@@ -385,9 +386,8 @@ impl LuaVM {
         Ok(chunk)
     }
 
-    pub fn compile_with_name(&mut self, source: &str, _chunk_name: &str) -> LuaResult<Chunk> {
-        // TODO: use chunk_name once implemented
-        let chunk = match crate::compiler::lua_parse(source, &mut self.object_pool) {
+    pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<Chunk> {
+        let chunk = match compile_code_with_name(source, &mut self.object_pool, chunk_name) {
             Ok(c) => c,
             Err(e) => return Err(self.compile_error(e)),
         };

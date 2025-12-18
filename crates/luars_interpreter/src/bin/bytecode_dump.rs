@@ -21,13 +21,21 @@ fn main() {
     };
 
     let mut vm = LuaVM::new();
-    match vm.compile_with_name(&source, &filename) {
+    
+    // Create chunk name with @ prefix like Lua
+    let chunk_name = if filename.starts_with('@') {
+        filename.clone()
+    } else {
+        format!("@{}", filename)
+    };
+    
+    match vm.compile_with_name(&source, &chunk_name) {
         Ok(chunk) => {
             dump_chunk(&chunk, &filename, 0, 0, true, &vm);
         }
-        Err(e) => {
-            eprintln!("Compilation error: {}", e);
-            eprintln!("Details: {}", vm.get_error_message());
+        Err(_) => {
+            let err_msg = vm.get_error_message();
+            eprintln!("{}", err_msg);
             std::process::exit(1);
         }
     }
@@ -123,7 +131,7 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
         } else {
             0
         };
-
+        
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
             OpCode::Vararg => format!("VARARG {} {}", a, b),
@@ -343,6 +351,10 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
         // Print instruction in luac format: [line] OPCODE args ; comment
         println!("\t{}\t[{}]\t{}{}", pc + 1, line, detail, comment);
     }
+    
+    // Flush stdout to ensure all output is written
+    use std::io::Write;
+    std::io::stdout().flush().ok();
 
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {

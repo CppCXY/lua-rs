@@ -4,6 +4,51 @@ use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::lua_vm::{Instruction, OpCode};
 
+// Port of int2sC from lcode.c (macro)
+// Convert integer to sC format (with OFFSET_sC = 128)
+fn int2sc(i: i32) -> u32 {
+    ((i as u32).wrapping_add(128)) & 0xFF
+}
+
+// Port of fitsC from lcode.c:660-662
+// Check whether 'i' can be stored in an 'sC' operand
+fn fits_c(i: i64) -> bool {
+    let offset_sc = 128i64;
+    let max_arg_c = 255u32; // MAXARG_C = 255 for 8-bit C field
+    (i.wrapping_add(offset_sc) as u64) <= (max_arg_c as u64)
+}
+
+// Port of isSCnumber from lcode.c:1257-1271
+// Check whether expression 'e' is a literal integer or float in proper range to fit in sC
+fn is_scnumber(e: &ExpDesc, pi: &mut i32, isfloat: &mut bool) -> bool {
+    use crate::compiler::expression::ExpKind;
+
+    let i = match e.kind {
+        ExpKind::VKINT => unsafe { e.u.ival },
+        ExpKind::VKFLT => {
+            // Try to convert float to integer
+            let fval = unsafe { e.u.nval };
+            let ival = fval as i64;
+            // Check if float is exactly equal to integer (F2Ieq mode)
+            if (ival as f64) == fval {
+                *isfloat = true;
+                ival
+            } else {
+                return false; // Not an integer-equivalent float
+            }
+        }
+        _ => return false, // Not a number
+    };
+
+    // Check if it has jumps and if it fits in C field
+    if !e.has_jumps() && fits_c(i) {
+        *pi = int2sc(i as i32) as i32;
+        true
+    } else {
+        false
+    }
+}
+
 // Port of luaK_codeABC from lcode.c:397-402
 // int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize {
@@ -56,18 +101,33 @@ pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool
     pc
 }
 
+// Generate instruction with sJ field (for JMP)
+pub fn code_asj(fs: &mut FuncState, op: OpCode, sj: i32) -> usize {
+    let instr = Instruction::create_sj(op, sj);
+    let pc = fs.pc;
+    fs.chunk.code.push(instr);
+    fs.pc += 1;
+    pc
+}
+
 use crate::compiler::expression::{ExpDesc, ExpKind};
 
 // Port of luaK_ret from lcode.c:207-214
 // void luaK_ret (FuncState *fs, int first, int nret)
 pub fn ret(fs: &mut FuncState, first: u8, nret: u8) -> usize {
-    code_abc(fs, OpCode::Return, first as u32, (nret + 1) as u32, 0)
+    code_abc(
+        fs,
+        OpCode::Return,
+        first as u32,
+        nret.wrapping_add(1) as u32,
+        0,
+    )
 }
 
 // Port of luaK_jump from lcode.c:200-202
 // int luaK_jump (FuncState *fs)
 pub fn jump(fs: &mut FuncState) -> usize {
-    code_asbx(fs, OpCode::Jmp, 0, -1)
+    code_asj(fs, OpCode::Jmp, -1)
 }
 
 // Port of luaK_getlabel from lcode.c:234-237
@@ -98,37 +158,38 @@ pub fn concat(fs: &mut FuncState, l1: &mut isize, l2: isize) {
             list = next;
             next = get_jump(fs, list as usize);
         }
-        // Only fix jump if l2 is a valid target (not NO_JUMP)
-        if l2 >= 0 {
-            fix_jump(fs, list as usize, l2 as usize);
-        }
+        fix_jump(fs, list as usize, l2 as usize);
     }
 }
 
 // Port of luaK_patchlist from lcode.c:299-305
 // void luaK_patchlist (FuncState *fs, int list, int target)
 pub fn patchlist(fs: &mut FuncState, mut list: isize, target: isize) {
+    if target < 0 {
+        // Invalid target, don't patch
+        return;
+    }
     while list != -1 {
         let next = get_jump(fs, list as usize);
-        // Only fix jump if target is valid (not NO_JUMP)
-        if target >= 0 {
-            fix_jump(fs, list as usize, target as usize);
-        }
+        fix_jump(fs, list as usize, target as usize);
         list = next;
     }
 }
 
 // Helper: get jump target from instruction
+// Port of getjump from lcode.c:259-265
 fn get_jump(fs: &FuncState, pc: usize) -> isize {
     if pc >= fs.chunk.code.len() {
         return -1;
     }
     let instr = fs.chunk.code[pc];
-    let offset = Instruction::get_sbx(instr) as i32 - Instruction::OFFSET_SBX;
+    let offset = Instruction::get_sj(instr);
     if offset == -1 {
         -1
     } else {
-        (pc as isize) + 1 + (offset as isize)
+        let target = (pc as isize) + 1 + (offset as isize);
+        // Ensure target is valid (non-negative)
+        if target < 0 { -1 } else { target }
     }
 }
 
@@ -140,14 +201,13 @@ pub fn fix_jump(fs: &mut FuncState, pc: usize, target: usize) {
         return;
     }
     let offset = (target as isize) - (pc as isize) - 1;
-    let max_sbx = (1 << (Instruction::SIZE_BX - 1)) - 1;
-    if offset < -(Instruction::OFFSET_SBX as isize) || offset > max_sbx {
+    let max_sj = (Instruction::MAX_SJ >> 1) as isize;
+    if offset < -max_sj || offset > max_sj {
         // Error: jump too long
         return;
     }
     let instr = &mut fs.chunk.code[pc];
-    let bx = (offset + Instruction::OFFSET_SBX as isize) as u32;
-    Instruction::set_bx(instr, bx);
+    Instruction::set_sj(instr, offset as i32);
 }
 
 // Port of need_value from lcode.c:900-908
@@ -186,7 +246,6 @@ fn patchlistaux(fs: &mut FuncState, mut list: isize, vtarget: isize, reg: u8, dt
             if op == OpCode::TestSet {
                 // Patch TESTSET destination register
                 Instruction::set_a(&mut fs.chunk.code[pc], reg as u32);
-                // Only fix jump if vtarget is valid
                 if vtarget >= 0 {
                     fix_jump(fs, list as usize, vtarget as usize);
                 }
@@ -373,10 +432,43 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
     e.u.info = reg as i32;
 }
 
-// Port of freeexp from lcode.c
+// Port of freeexp from lcode.c:558-561
+// static void freeexp (FuncState *fs, expdesc *e)
 pub fn free_exp(fs: &mut FuncState, e: &ExpDesc) {
     if e.kind == ExpKind::VNONRELOC {
         free_reg(fs, unsafe { e.u.info as u8 });
+    }
+}
+
+// Port of freeexps from lcode.c:567-572
+// Free registers used by expressions 'e1' and 'e2' (if any) in proper order
+fn free_exps(fs: &mut FuncState, e1: &ExpDesc, e2: &ExpDesc) {
+    let r1 = if e1.kind == ExpKind::VNONRELOC {
+        unsafe { e1.u.info }
+    } else {
+        -1
+    };
+    let r2 = if e2.kind == ExpKind::VNONRELOC {
+        unsafe { e2.u.info }
+    } else {
+        -1
+    };
+
+    // Free in proper order (higher register first)
+    if r1 > r2 {
+        if r1 >= 0 {
+            free_reg(fs, r1 as u8);
+        }
+        if r2 >= 0 {
+            free_reg(fs, r2 as u8);
+        }
+    } else {
+        if r2 >= 0 {
+            free_reg(fs, r2 as u8);
+        }
+        if r1 >= 0 {
+            free_reg(fs, r1 as u8);
+        }
     }
 }
 
@@ -767,51 +859,124 @@ fn codeconcat(fs: &mut FuncState, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     free_exp(fs, e2);
 }
 
-// Port of codeeq from lcode.c:1561-1574
-// Code for equality operators (==, ~=)
-fn codeeq(fs: &mut FuncState, op: crate::compiler::parser::BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+// Port of codeeq from lcode.c:1585-1612
+// Emit code for equality comparisons ('==', '~=')
+// 'e1' was already put as RK by 'luaK_infix'
+fn codeeq(
+    fs: &mut FuncState,
+    op: crate::compiler::parser::BinaryOperator,
+    e1: &mut ExpDesc,
+    e2: &mut ExpDesc,
+) {
     use crate::compiler::parser::BinaryOperator;
-    
-    let o1 = exp2anyreg(fs, e1);
-    let o2 = exp2anyreg(fs, e2);
-    free_exp(fs, e2);
-    free_exp(fs, e1);
-    
-    // EQ produces a boolean result via jump
-    let k = (op == BinaryOperator::OpEq) as u32; // 1 for ==, 0 for ~=
-    let pc = condjump(fs, OpCode::Eq, o1 as u32, o2 as u32, 0, k != 0);
-    
-    e1.kind = ExpKind::VJMP;
+
+    let r1: u32;
+    let r2: u32;
+    let mut im: i32 = 0;
+    let mut isfloat: bool = false;
+    let opcode: OpCode;
+
+    // If e1 is not in a register, swap operands
+    if e1.kind != ExpKind::VNONRELOC {
+        // e1 is VK, VKINT, or VKFLT
+        swapexps(e1, e2);
+    }
+
+    // First expression must be in register
+    r1 = exp2anyreg(fs, e1) as u32;
+
+    // Check if e2 is a small constant number (fits in sC)
+    if is_scnumber(e2, &mut im, &mut isfloat) {
+        opcode = OpCode::EqI;
+        r2 = im as u32; // immediate operand
+    }
+    // Check if e2 is a constant (can use K operand)
+    else if exp2rk(fs, e2) {
+        opcode = OpCode::EqK;
+        r2 = unsafe { e2.u.info as u32 }; // constant index
+    }
+    // Regular case: compare two registers
+    else {
+        opcode = OpCode::Eq;
+        r2 = exp2anyreg(fs, e2) as u32;
+    }
+
+    free_exps(fs, e1, e2);
+
+    let k = op == BinaryOperator::OpEq;
+    let pc = condjump(fs, opcode, r1, r2, isfloat as u32, k);
+
     e1.u.info = pc as i32;
+    e1.kind = ExpKind::VJMP;
 }
 
-// Port of codeorder from lcode.c:1533-1559
-// Code for order operators (<, <=)
-fn codeorder(fs: &mut FuncState, op: crate::compiler::parser::BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
-    use crate::compiler::parser::BinaryOperator;
-    
-    let o1 = exp2anyreg(fs, e1);
-    let o2 = exp2anyreg(fs, e2);
-    free_exp(fs, e2);
-    free_exp(fs, e1);
-    
-    let opcode = if op == BinaryOperator::OpLt {
-        OpCode::Lt
-    } else {
-        OpCode::Le
-    };
-    
-    let pc = condjump(fs, opcode, o1 as u32, o2 as u32, 0, true);
-    
-    e1.kind = ExpKind::VJMP;
+// Port of codeorder from lcode.c:1553-1581
+// Emit code for order comparisons. When using an immediate operand,
+// 'isfloat' tells whether the original value was a float.
+fn codeorder(
+    fs: &mut FuncState,
+    op: BinaryOperator,
+    e1: &mut ExpDesc,
+    e2: &mut ExpDesc,
+) {
+    let r1: u32;
+    let r2: u32;
+    let mut im: i32 = 0;
+    let mut isfloat: bool = false;
+    let opcode: OpCode;
+
+    // Check if e2 is a small constant (can use immediate)
+    if is_scnumber(e2, &mut im, &mut isfloat) {
+        // Use immediate operand
+        r1 = exp2anyreg(fs, e1) as u32;
+        r2 = im as u32;
+        // Map operator to immediate version: < -> LTI, <= -> LEI
+        opcode = match op {
+            BinaryOperator::OpLt => OpCode::LtI,
+            BinaryOperator::OpLe => OpCode::LeI,
+            _ => unreachable!(),
+        };
+    }
+    // Check if e1 is a small constant (transform and swap)
+    else if is_scnumber(e1, &mut im, &mut isfloat) {
+        // Transform (A < B) to (B > A) and (A <= B) to (B >= A)
+        r1 = exp2anyreg(fs, e2) as u32;
+        r2 = im as u32;
+        opcode = match op {
+            BinaryOperator::OpLt => OpCode::GtI, // A < B => B > A
+            BinaryOperator::OpLe => OpCode::GeI, // A <= B => B >= A
+            _ => unreachable!(),
+        };
+    }
+    // Regular case: compare two registers
+    else {
+        r1 = exp2anyreg(fs, e1) as u32;
+        r2 = exp2anyreg(fs, e2) as u32;
+        opcode = match op {
+            BinaryOperator::OpLt => OpCode::Lt,
+            BinaryOperator::OpLe => OpCode::Le,
+            _ => unreachable!(),
+        };
+    }
+
+    free_exps(fs, e1, e2);
+
+    let pc = condjump(fs, opcode, r1, r2, isfloat as u32, true);
+
     e1.u.info = pc as i32;
+    e1.kind = ExpKind::VJMP;
 }
 
 // Port of luaK_posfix from lcode.c:1706-1783
 // void luaK_posfix (FuncState *fs, BinOpr opr, expdesc *e1, expdesc *e2, int line)
-pub fn posfix(fs: &mut FuncState, op: crate::compiler::parser::BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+pub fn posfix(
+    fs: &mut FuncState,
+    op: crate::compiler::parser::BinaryOperator,
+    e1: &mut ExpDesc,
+    e2: &mut ExpDesc,
+) {
     use crate::compiler::parser::BinaryOperator;
-    
+
     discharge_vars(fs, e2);
 
     match op {

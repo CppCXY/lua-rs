@@ -142,8 +142,16 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             fs.lexer.bump();
         }
         LuaTokenKind::TkDots => {
-            // Vararg
+            // lparser.c:1169-1173: vararg
+            // Check if inside vararg function
+            if !fs.chunk.is_vararg {
+                return Err("cannot use '...' outside a vararg function".to_string());
+            }
+            // lparser.c:1173: init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, 0, 1));
+            let pc = code::code_abc(fs, OpCode::Vararg, 0, 0, 1);
             *v = ExpDesc::new_void();
+            v.kind = ExpKind::VVARARG;
+            v.u.info = pc as i32;
             fs.lexer.bump();
         }
         LuaTokenKind::TkLeftBrace => {
@@ -180,7 +188,9 @@ fn primaryexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         }
         _ => {
             return Err(format!(
-                "unexpected symbol {}",
+                "{}:{}: syntax error: unexpected symbol '{}'",
+                fs.source_name,
+                fs.lexer.line,
                 fs.lexer.current_token_text()
             ));
         }
