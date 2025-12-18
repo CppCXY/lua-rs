@@ -585,6 +585,7 @@ fn tonumeral(e: &ExpDesc, _v: Option<&mut f64>) -> bool {
 
 // Constant management functions
 use crate::lua_value::LuaValue;
+use crate::StringId;
 
 const MAXINDEXRK: usize = 255; // Maximum index for R/K operands
 
@@ -613,61 +614,47 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
     add_constant(fs, LuaValue::float(n))
 }
 
-// Port of stringK from lcode.c:577-581
+// Port of stringK from lcode.c:576-580
 // static int stringK (FuncState *fs, TString *s)
-// Add string constant to chunk
 pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     // Intern string to ObjectPool and get StringId
     let (string_id, _) = fs.pool.create_string(&s);
 
-    // Add LuaValue with StringId to constants
+    // Add LuaValue with StringId to constants (check for duplicates)
     let value = LuaValue::string(string_id);
-    fs.chunk.constants.push(value);
-    fs.chunk.constants.len() - 1
+    add_constant(fs, value)
 }
 
 // Port of str2K from lcode.c:738-742
 // static void str2K (FuncState *fs, expdesc *e)
 // Convert a VKSTR to a VK
-fn str2k(_fs: &mut FuncState, e: &mut ExpDesc) {
+// static void str2K (FuncState *fs, expdesc *e) {
+//   lua_assert(e->k == VKSTR);
+//   e->u.info = stringK(fs, e->u.strval);
+//   e->k = VK;
+// }
+fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
     if e.kind == ExpKind::VKSTR {
         // String is already in constants (stored in e.u.info), just change kind
         e.kind = ExpKind::VK;
-        // e.u.info already contains the constant index
+        let string_id = StringId(unsafe { e.u.info as u32 });
+        let value = LuaValue::string(string_id);
+        let const_idx = add_constant(fs, value);
+        e.u.info = const_idx as i32;
     }
 }
 
 // Helper to add constant to chunk
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     // Try to find existing constant
-    for (i, k) in fs.chunk.constants.iter().enumerate() {
-        if constants_equal(k, &value) {
-            return i;
-        }
+    if let Some(idx) = fs.chunk_constants_map.get(&value) {
+        return *idx;
     }
     // Add new constant
     fs.chunk.constants.push(value);
-    fs.chunk.constants.len() - 1
-}
-
-// Check if two constants are equal
-fn constants_equal(a: &LuaValue, b: &LuaValue) -> bool {
-    if a.is_nil() && b.is_nil() {
-        return true;
-    }
-    if a.is_boolean() && b.is_boolean() {
-        return a.as_boolean() == b.as_boolean();
-    }
-    if a.is_integer() && b.is_integer() {
-        return a.as_integer() == b.as_integer();
-    }
-    if a.is_float() && b.is_float() {
-        return a.as_float() == b.as_float();
-    }
-    if a.is_string() && b.is_string() {
-        return a.as_string_id() == b.as_string_id();
-    }
-    false
+    let idx = fs.chunk.constants.len() - 1;
+    fs.chunk_constants_map.insert(value, idx);
+    idx
 }
 
 // Port of luaK_exp2K from lcode.c:1000-1026
@@ -1044,46 +1031,92 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
         BinaryOperator::OpLt | BinaryOperator::OpLe => {
             codeorder(fs, op, e1, e2);
         }
-        // All other arithmetic/bitwise operators: generate opcode instruction
+        // All other arithmetic/bitwise operators
         _ => {
-            // Save freereg before allocating operands
-            let old_free = fs.freereg;
+            // Try to use K operand optimization (codearith behavior)
+            if exp2k(fs, e2) {
+                // e2 is a K operand, generate K-series instruction
+                let k_idx = unsafe { e2.u.info };
+                let r1 = exp2anyreg(fs, e1);
 
-            // Get operands in registers
-            let o1 = exp2anyreg(fs, e1);
-            let o2 = exp2anyreg(fs, e2);
+                // Determine the K-series opcode
+                let opcode = match op {
+                    BinaryOperator::OpAdd => OpCode::AddK,
+                    BinaryOperator::OpSub => OpCode::SubK,
+                    BinaryOperator::OpMul => OpCode::MulK,
+                    BinaryOperator::OpDiv => OpCode::DivK,
+                    BinaryOperator::OpIDiv => OpCode::IDivK,
+                    BinaryOperator::OpMod => OpCode::ModK,
+                    BinaryOperator::OpPow => OpCode::PowK,
+                    BinaryOperator::OpBAnd => OpCode::BAndK,
+                    BinaryOperator::OpBOr => OpCode::BOrK,
+                    BinaryOperator::OpBXor => OpCode::BXorK,
+                    _ => {
+                        // No K version, fall back to normal instruction
+                        let o2 = exp2anyreg(fs, e2);
+                        free_reg(fs, o2);
+                        free_reg(fs, r1);
 
-            // Free both operand registers
-            free_reg(fs, o2);
-            free_reg(fs, o1);
+                        let res = fs.freereg;
+                        reserve_regs(fs, 1);
 
-            // Restore freereg and allocate result register
-            fs.freereg = old_free;
-            let res = fs.freereg;
-            reserve_regs(fs, 1);
+                        let opcode = match op {
+                            BinaryOperator::OpShl => OpCode::Shl,
+                            BinaryOperator::OpShr => OpCode::Shr,
+                            _ => unreachable!("Invalid operator"),
+                        };
 
-            // Get the opcode for this operator
-            let opcode = match op {
-                BinaryOperator::OpAdd => OpCode::Add,
-                BinaryOperator::OpSub => OpCode::Sub,
-                BinaryOperator::OpMul => OpCode::Mul,
-                BinaryOperator::OpDiv => OpCode::Div,
-                BinaryOperator::OpIDiv => OpCode::IDiv,
-                BinaryOperator::OpMod => OpCode::Mod,
-                BinaryOperator::OpPow => OpCode::Pow,
-                BinaryOperator::OpShl => OpCode::Shl,
-                BinaryOperator::OpShr => OpCode::Shr,
-                BinaryOperator::OpBAnd => OpCode::BAnd,
-                BinaryOperator::OpBOr => OpCode::BOr,
-                BinaryOperator::OpBXor => OpCode::BXor,
-                _ => unreachable!("Invalid operator for opcode generation"),
-            };
+                        code_abc(fs, opcode, res as u32, r1 as u32, o2 as u32);
+                        e1.kind = ExpKind::VNONRELOC;
+                        e1.u.info = res as i32;
+                        return;
+                    }
+                };
 
-            // Generate binary op instruction
-            code_abc(fs, opcode, res as u32, o1 as u32, o2 as u32);
+                free_reg(fs, r1);
+                let res = fs.freereg;
+                reserve_regs(fs, 1);
 
-            e1.kind = ExpKind::VNONRELOC;
-            e1.u.info = res as i32;
+                // Generate K-series instruction: R[A] = R[B] op K[C]
+                code_abc(fs, opcode, res as u32, r1 as u32, k_idx as u32);
+
+                e1.kind = ExpKind::VNONRELOC;
+                e1.u.info = res as i32;
+            } else {
+                // Both operands in registers (codebinNoK behavior)
+                let old_free = fs.freereg;
+
+                let o1 = exp2anyreg(fs, e1);
+                let o2 = exp2anyreg(fs, e2);
+
+                free_reg(fs, o2);
+                free_reg(fs, o1);
+
+                fs.freereg = old_free;
+                let res = fs.freereg;
+                reserve_regs(fs, 1);
+
+                let opcode = match op {
+                    BinaryOperator::OpAdd => OpCode::Add,
+                    BinaryOperator::OpSub => OpCode::Sub,
+                    BinaryOperator::OpMul => OpCode::Mul,
+                    BinaryOperator::OpDiv => OpCode::Div,
+                    BinaryOperator::OpIDiv => OpCode::IDiv,
+                    BinaryOperator::OpMod => OpCode::Mod,
+                    BinaryOperator::OpPow => OpCode::Pow,
+                    BinaryOperator::OpShl => OpCode::Shl,
+                    BinaryOperator::OpShr => OpCode::Shr,
+                    BinaryOperator::OpBAnd => OpCode::BAnd,
+                    BinaryOperator::OpBOr => OpCode::BOr,
+                    BinaryOperator::OpBXor => OpCode::BXor,
+                    _ => unreachable!("Invalid operator for opcode generation"),
+                };
+
+                code_abc(fs, opcode, res as u32, o1 as u32, o2 as u32);
+
+                e1.kind = ExpKind::VNONRELOC;
+                e1.u.info = res as i32;
+            }
         }
     }
 }
@@ -1261,15 +1294,11 @@ pub fn hasmultret(e: &ExpDesc) -> bool {
 // Port of luaK_setlist from lcode.c:1810-1823
 pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
     debug_assert!(tostore != 0);
-    
-    let c = if tostore == LUA_MULTRET {
-        0
-    } else {
-        tostore
-    };
+
+    let c = if tostore == LUA_MULTRET { 0 } else { tostore };
 
     const MAXARG_C: u32 = 255; // 8-bit C field
-    
+
     if nelems <= MAXARG_C {
         code_abc(fs, OpCode::SetList, base as u32, c, nelems);
     } else {
@@ -1279,14 +1308,14 @@ pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
         code_abck(fs, OpCode::SetList, base as u32, c, c_arg, true);
         code_extraarg(fs, extra);
     }
-    
+
     fs.freereg = base + 1; // free registers with list values
 }
 
 // Port of luaK_settablesize from lcode.c:1827-1854
 pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u32) {
     // Compute the array size code (B argument)
-    let mut b = if asize > 0 {
+    let b = if asize > 0 {
         let mut temp = asize;
         let mut extra = 0;
         while temp >= 16 {
@@ -1299,7 +1328,7 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
     };
 
     // Compute the hash size code (C argument)
-    let mut c = if hsize > 0 {
+    let c = if hsize > 0 {
         let mut temp = hsize;
         let mut extra = 0;
         while temp >= 16 {
@@ -1315,7 +1344,7 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
     let inst = &mut fs.chunk.code[pc];
     let opcode = Instruction::get_opcode(*inst);
     debug_assert_eq!(opcode, OpCode::NewTable);
-    
+
     *inst = Instruction::create_abc(OpCode::NewTable, ra as u32, b, c);
 }
 

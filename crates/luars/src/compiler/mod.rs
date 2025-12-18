@@ -65,9 +65,18 @@ pub fn compile_code_with_name(
         code::code_abc(&mut fs, OpCode::VarargPrep, 0, 0, 0);
     }
 
-    // Main function in Lua 5.4 has _ENV as first local variable
-    fs.new_localvar("_ENV".to_string(), VarKind::VDKREG);
-    fs.adjust_local_vars(1);
+    // Main function in Lua 5.4 has _ENV as first upvalue (lparser.c:1928-1931)
+    // env = allocupvalue(fs);
+    // env->instack = 1;
+    // env->idx = 0;
+    // env->kind = VDKREG;
+    fs.upvalues.push(crate::compiler::func_state::Upvaldesc {
+        name: "_ENV".to_string(),
+        in_stack: true,
+        idx: 0,
+        kind: VarKind::VDKREG,
+    });
+    fs.nups = 1;
 
     // Open first block
     let bl = BlockCnt {
@@ -94,6 +103,9 @@ pub fn compile_code_with_name(
 
     // Set vararg flag on chunk
     fs.chunk.is_vararg = fs.is_vararg;
+    
+    // Set upvalue count
+    fs.chunk.upvalue_count = fs.upvalues.len();
     
     // Set source name and line info for main chunk
     fs.chunk.source_name = Some(chunk_name.to_string());

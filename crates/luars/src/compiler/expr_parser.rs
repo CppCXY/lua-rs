@@ -683,14 +683,15 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     let proto_idx = fs.chunk.child_protos.len();
     fs.chunk.child_protos.push(std::rc::Rc::new(child_chunk));
 
-    // lparser.c:1005: Generate CLOSURE instruction (codeclosure)
-    // OP_CLOSURE A Bx: R[A] := closure(KPROTO[Bx])
-    // Upvalue descriptors are in KPROTO[Bx].upvalues, not as following instructions
-    let reg = fs.freereg;
-    code::reserve_regs(fs, 1);
-    code::code_abx(fs, OpCode::Closure, reg as u32, proto_idx as u32);
-
-    *v = ExpDesc::new_nonreloc(reg);
+    // lparser.c:722-726: Generate CLOSURE instruction (codeclosure)
+    // static void codeclosure (LexState *ls, expdesc *v) {
+    //   FuncState *fs = ls->fs->prev;
+    //   init_exp(v, VRELOC, luaK_codeABx(fs, OP_CLOSURE, 0, fs->np - 1));
+    //   luaK_exp2nextreg(fs, v);  /* fix it at the last register */
+    // }
+    let pc = code::code_abx(fs, OpCode::Closure, 0, proto_idx as u32);
+    *v = ExpDesc::new_reloc(pc);
+    code::exp2nextreg(fs, v);
     Ok(())
 }
 

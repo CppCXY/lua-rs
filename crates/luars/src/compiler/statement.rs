@@ -94,6 +94,10 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
         }
     }
 
+    // Port of lparser.c:1912: Free registers after statement
+    // "ls->fs->freereg = luaY_nvarstack(ls->fs);"
+    fs.freereg = fs.nactvar;
+
     // leavelevel(fs.lexer);
     Ok(())
 }

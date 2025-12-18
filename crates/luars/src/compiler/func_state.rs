@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::Chunk;
 // Port of FuncState and related structures from lparser.h
 use crate::gc::ObjectPool;
@@ -19,20 +21,21 @@ pub struct FuncState<'a> {
     pub lexer: &'a mut LuaParser<'a>,
     pub pool: &'a mut ObjectPool,
     pub block_list: Option<Box<BlockCnt>>,
-    pub pc: usize,                     // next position to code (equivalent to pc)
-    pub last_target: usize,            // label of last 'jump label'
-    pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
-    pub labels: Vec<LabelDesc>,        // list of active labels
-    pub actvar: Vec<VarDesc>,          // list of active local variables
-    pub upvalues: Vec<Upvaldesc>,      // upvalue descriptors
-    pub nactvar: u8,                   // number of active local variables
-    pub nups: u8,                      // number of upvalues
-    pub freereg: u8,                   // first free register
-    pub iwthabs: u8,                   // instructions issued since last absolute line info
-    pub needclose: bool,               // true if function needs to close upvalues when returning
-    pub is_vararg: bool,               // true if function is vararg
-    pub first_local: usize,            // index of first local variable in prev
-    pub source_name: String,           // source file name for error messages
+    pub pc: usize,                           // next position to code (equivalent to pc)
+    pub last_target: usize,                  // label of last 'jump label'
+    pub pending_gotos: Vec<LabelDesc>,       // list of pending gotos
+    pub labels: Vec<LabelDesc>,              // list of active labels
+    pub actvar: Vec<VarDesc>,                // list of active local variables
+    pub upvalues: Vec<Upvaldesc>,            // upvalue descriptors
+    pub nactvar: u8,                         // number of active local variables
+    pub nups: u8,                            // number of upvalues
+    pub freereg: u8,                         // first free register
+    pub iwthabs: u8,                         // instructions issued since last absolute line info
+    pub needclose: bool, // true if function needs to close upvalues when returning
+    pub is_vararg: bool, // true if function is vararg
+    pub first_local: usize, // index of first local variable in prev
+    pub source_name: String, // source file name for error messages
+    pub chunk_constants_map: HashMap<LuaValue, usize>, // constant to index mapping for chunk
 }
 
 // Port of BlockCnt from lparser.c
@@ -81,7 +84,12 @@ pub struct VarDesc {
 }
 
 impl<'a> FuncState<'a> {
-    pub fn new(lexer: &'a mut LuaParser<'a>, pool: &'a mut ObjectPool, is_vararg: bool, source_name: String) -> Self {
+    pub fn new(
+        lexer: &'a mut LuaParser<'a>,
+        pool: &'a mut ObjectPool,
+        is_vararg: bool,
+        source_name: String,
+    ) -> Self {
         FuncState {
             chunk: Chunk::new(),
             prev: None,
@@ -102,6 +110,7 @@ impl<'a> FuncState<'a> {
             upvalues: Vec::new(),
             source_name,
             first_local: 0,
+            chunk_constants_map: HashMap::new(),
         }
     }
 
@@ -147,6 +156,7 @@ impl<'a> FuncState<'a> {
             upvalues: Vec::new(),
             first_local: parent.actvar.len(),
             source_name: parent.source_name.clone(),
+            chunk_constants_map: HashMap::new(),
         }
     }
 
@@ -169,19 +179,23 @@ impl<'a> FuncState<'a> {
     }
 
     // Port of adjustlocalvars from lparser.c
+    // Port of adjustlocalvars from lparser.c:311-321
     pub fn adjust_local_vars(&mut self, nvars: u8) {
-        let new_nactvar = self.nactvar + nvars;
-        self.freereg = new_nactvar;
+        // Get current register level (where new variables start)
+        let reglevel = self.nactvar;
 
-        for i in self.nactvar..new_nactvar {
-            if let Some(var) = self.actvar.get_mut(i as usize) {
-                var.ridx = i as i16;
+        for i in 0..nvars {
+            let vidx = self.nactvar as usize;
+            self.nactvar += 1;
+
+            if let Some(var) = self.actvar.get_mut(vidx) {
+                var.ridx = (reglevel + i) as i16;
                 // Add variable name to chunk's locals for debugging
                 self.chunk.locals.push(var.name.clone());
             }
         }
 
-        self.nactvar = new_nactvar;
+        // Official Lua does NOT modify freereg here
     }
 
     // Port of removevars from lparser.c
