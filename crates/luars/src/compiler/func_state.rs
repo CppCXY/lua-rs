@@ -203,6 +203,10 @@ impl<'a> FuncState<'a> {
         while self.nactvar > tolevel {
             self.nactvar -= 1;
             self.freereg -= 1;
+            // Also remove from actvar array to avoid "holes"
+            if (self.nactvar as usize) < self.actvar.len() {
+                self.actvar.remove(self.nactvar as usize);
+            }
         }
     }
 

@@ -584,6 +584,9 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
         in_scope: true,
     };
     enterblock(fs, &mut bl, true);
+    
+    // Activate the loop variable (4th variable)
+    fs.adjust_local_vars(1);
 
     block(fs)?;
 
@@ -599,7 +602,8 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     );
     code::fix_jump(fs, prep_jump, loop_pc + 1);
 
-    fs.remove_vars(fs.nactvar - 1);
+    // Don't remove variables here - the outer forstat's leaveblock will handle it
+    // fs.remove_vars(fs.nactvar - 1);
 
     Ok(())
 }
@@ -682,7 +686,8 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // Fix TFORLOOP to jump back to prep+1 (back jump)
     fix_for_jump(fs, endfor_pc, prep_pc + 1, true);
 
-    fs.remove_vars(fs.nactvar - nvars as u8);
+    // Don't remove variables here - the outer forstat's leaveblock will handle it
+    // fs.remove_vars(fs.nactvar - nvars as u8);
 
     Ok(())
 }
