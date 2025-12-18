@@ -376,4 +376,5 @@ fn dump_chunk(
             dump_chunk(child, filename, child.linedefined, child.lastlinedefined, false, vm);
         }
     }
+    println!("") // for debug
 }

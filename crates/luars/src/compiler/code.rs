@@ -252,7 +252,8 @@ pub fn fix_jump(fs: &mut FuncState, pc: usize, target: usize) {
 fn need_value(fs: &FuncState, mut list: isize) -> bool {
     const NO_JUMP: isize = -1;
     while list != NO_JUMP {
-        let i = fs.chunk.code[list as usize];
+        let control_pc = get_jump_control(fs, list as usize);
+        let i = fs.chunk.code[control_pc];
         let op = OpCode::from(Instruction::get_opcode(i));
         if op != OpCode::TestSet {
             return true;
@@ -1095,13 +1096,15 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     }
                 };
 
-                free_reg(fs, r1);
-                let res = fs.freereg;
-                reserve_regs(fs, 1);
-
-                // Generate K-series instruction: R[A] = R[B] op K[C]
-                let pc = code_abc(fs, opcode, res as u32, r1 as u32, k_idx as u32);
+                // Port of finishbinexpval from lcode.c:1407-1418
+                // Generate K-series instruction with A=0, will be fixed by discharge2reg
+                let pc = code_abc(fs, opcode, 0, r1 as u32, k_idx as u32);
                 
+                // Free both operands (freeexps)
+                free_exp(fs, e1);
+                free_exp(fs, e2);
+                
+                // Mark as relocatable - target register will be decided later
                 e1.kind = ExpKind::VRELOC;
                 e1.u.info = pc as i32;
                 

@@ -648,6 +648,11 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // lparser.c:982: Set numparams after adjustlocalvars
     // f->numparams = cast_byte(fs->nactvar);
     let param_count = child_fs.nactvar as usize;
+    
+    // lparser.c:1001: luaK_reserveregs(fs, fs->nactvar);
+    // Reserve registers for parameters
+    let nactvar = child_fs.nactvar;
+    code::reserve_regs(&mut child_fs, nactvar as u8);
 
     // lparser.c:1002: Parse function body statements
     // statlist(ls);
