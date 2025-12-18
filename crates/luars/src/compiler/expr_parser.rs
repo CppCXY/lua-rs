@@ -9,6 +9,7 @@ use crate::compiler::parser::{
     BinaryOperator, LuaTokenKind, UNARY_PRIORITY, UnaryOperator, to_binary_operator,
     to_unary_operator,
 };
+use crate::compiler::statement::{self, mark_upval};
 use crate::compiler::{VarKind, code, string_k};
 use crate::lua_vm::OpCode;
 
@@ -357,7 +358,9 @@ fn singlevaraux(fs: *mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
     let vkind = fs_ref.searchvar(name, var);
     if vkind >= 0 {
         if vkind == ExpKind::VLOCAL as i32 && !base {
-            // markupval(fs, var->u.var.vidx);
+            // lparser.c:442: markupval(fs, var->u.var.vidx); /* local will be used as an upval */
+            let vidx = unsafe { var.u.var.vidx };
+            mark_upval(fs_ref, vidx as u8);
         }
     } else {
         let vidx = fs_ref.searchupvalue(name);
@@ -470,8 +473,6 @@ fn listfield(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
 
 // Port of field from lparser.c
 fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
-    use crate::compiler::expression::ExpKind;
-
     if fs.lexer.current_token() == LuaTokenKind::TkLeftBracket {
         // [exp] = exp (general field)
         fs.lexer.bump();
@@ -591,9 +592,6 @@ fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
 // Port of body from lparser.c
 pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), String> {
-    use crate::compiler::func_state::FuncState;
-    use crate::compiler::statement;
-
     // Record the line where function is defined
     let linedefined = fs.lexer.line;
 

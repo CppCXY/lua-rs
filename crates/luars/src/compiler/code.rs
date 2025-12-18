@@ -22,8 +22,6 @@ fn fits_c(i: i64) -> bool {
 // Port of isSCnumber from lcode.c:1257-1271
 // Check whether expression 'e' is a literal integer or float in proper range to fit in sC
 fn is_scnumber(e: &ExpDesc, pi: &mut i32, isfloat: &mut bool) -> bool {
-    use crate::compiler::expression::ExpKind;
-
     let i = match e.kind {
         ExpKind::VKINT => unsafe { e.u.ival },
         ExpKind::VKFLT => {
@@ -311,9 +309,6 @@ fn get_jump(fs: &FuncState, pc: usize) -> isize {
     }
 }
 
-// Port of fixjump from lcode.c:162-169
-// static void fixjump (FuncState *fs, int pc, int dest)
-// Helper: patch jump instruction
 pub fn fix_jump(fs: &mut FuncState, pc: usize, target: usize) {
     if pc >= fs.chunk.code.len() {
         return;

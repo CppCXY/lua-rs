@@ -71,7 +71,7 @@ pub fn compile_code_with_name(
     // env->instack = 1;
     // env->idx = 0;
     // env->kind = VDKREG;
-    fs.upvalues.push(crate::compiler::func_state::Upvaldesc {
+    fs.upvalues.push(Upvaldesc {
         name: "_ENV".to_string(),
         in_stack: true,
         idx: 0,

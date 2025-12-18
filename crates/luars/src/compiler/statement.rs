@@ -2,10 +2,9 @@ use crate::compiler::expr_parser::{body, expr, suffixedexp};
 // Statement parsing - Port from lparser.c (Lua 5.4.8)
 // This file corresponds to statement parsing parts of lua-5.4.8/src/lparser.c
 use crate::Instruction;
-use crate::compiler::expression::ExpDesc;
 use crate::compiler::func_state::{BlockCnt, FuncState, LabelDesc};
 use crate::compiler::parser::LuaTokenKind;
-use crate::compiler::{ExpKind, VarKind, code};
+use crate::compiler::{ExpDesc, ExpKind, VarKind, code};
 use crate::lua_vm::OpCode;
 
 // Port of statlist from lparser.c:1529-1536
@@ -177,28 +176,28 @@ fn enterblock(fs: &mut FuncState, bl: &mut BlockCnt, isloop: bool) {
 // Port of leaveblock from lparser.c:672-692
 fn leaveblock(fs: &mut FuncState) {
     if let Some(bl) = fs.block_list.take() {
-        let stklevel = bl.nactvar as usize;  // level outside the block
-        
+        let stklevel = bl.nactvar as usize; // level outside the block
+
         // Remove block locals
         fs.remove_vars(bl.nactvar);
-        
+
         // Check if needs close instruction
         // lparser.c:682: if (!hasclose && bl->previous && bl->upval)
         let needs_close = bl.previous.is_some() && bl.upval;
-        
+
         if needs_close {
             // Generate CLOSE instruction
             code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
             // Mark that this function needs close handling
             fs.needclose = true;
         }
-        
+
         // Free registers
         fs.freereg = stklevel as u8;
-        
+
         // Remove labels and gotos from this block
         fs.labels.truncate(bl.first_label);
-        
+
         // Restore previous block
         fs.block_list = bl.previous;
     }
@@ -225,7 +224,7 @@ fn block(fs: &mut FuncState) -> Result<(), String> {
 // static void retstat (LexState *ls)
 // stat -> RETURN [explist] [';']
 fn retstat(fs: &mut FuncState) -> Result<(), String> {
-    use crate::compiler::expression::ExpKind;
+    use ExpKind;
     let mut first = fs.freereg;
     let mut nret: i32;
     let mut e = ExpDesc::new_void();
@@ -523,10 +522,10 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     }
 
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkFor, line)?;
-    
+
     // lparser.c:1633: leaveblock(fs);  /* loop scope ('break' jumps to this point) */
     leaveblock(fs);
-    
+
     Ok(())
 }
 
@@ -538,21 +537,12 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     let base = fs.freereg;
 
     // Create 3 internal control variables: (for state), (for state), (for state)
-    fs.new_localvar(
-        "(for state)".to_string(),
-        crate::compiler::func_state::VarKind::VDKREG,
-    );
-    fs.new_localvar(
-        "(for state)".to_string(),
-        crate::compiler::func_state::VarKind::VDKREG,
-    );
-    fs.new_localvar(
-        "(for state)".to_string(),
-        crate::compiler::func_state::VarKind::VDKREG,
-    );
+    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
 
     // Create the loop variable
-    fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar(varname, VarKind::VDKREG);
 
     check(fs, LuaTokenKind::TkAssign)?; // check '='
     fs.lexer.bump(); // skip '='
@@ -622,29 +612,17 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     let base = fs.freereg;
 
     // Create 4 internal control variables
-    fs.new_localvar(
-        "(for state)".to_string(),
-        crate::compiler::func_state::VarKind::VDKREG,
-    );
-    fs.new_localvar(
-        "(for state)".to_string(),
-        crate::compiler::func_state::VarKind::VDKREG,
-    );
-    fs.new_localvar(
-        "(for state)".to_string(),
-        crate::compiler::func_state::VarKind::VDKREG,
-    );
-    fs.new_localvar(
-        "(for state)".to_string(),
-        crate::compiler::func_state::VarKind::VDKREG,
-    );
+    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
+    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
 
     // Create declared variables (starting with indexname)
-    fs.new_localvar(indexname, crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar(indexname, VarKind::VDKREG);
 
     while testnext(fs, LuaTokenKind::TkComma) {
         let varname = str_checkname(fs)?;
-        fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
+        fs.new_localvar(varname, VarKind::VDKREG);
         nvars += 1;
     }
 
@@ -667,10 +645,8 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
 
-    let loop_start = fs.pc;
-
-    // Generate TFORPREP (Lua 5.4)
-    code::code_abx(fs, OpCode::TForPrep, base as u32, 0);
+    // lparser.c:1552: Generate TFORPREP with Bx=0, will be fixed later
+    let prep_pc = code::code_abx(fs, OpCode::TForPrep, base as u32, 0);
 
     let mut bl = BlockCnt {
         previous: None,
@@ -683,17 +659,28 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     };
     enterblock(fs, &mut bl, true);
 
+    // lparser.c:1554: adjustlocalvars(ls, nvars); /* activate declared variables */
+    fs.adjust_local_vars((nvars - 4) as u8);
+    code::reserve_regs(fs, (nvars - 4) as u8);
+
     block(fs)?;
 
     leaveblock(fs);
 
-    // Generate TFORLOOP
-    code::code_asbx(
-        fs,
-        OpCode::TForLoop,
-        base as u32,
-        (loop_start as isize - fs.pc as isize - 1) as i32,
-    );
+    // lparser.c:1558: fixforjump(fs, prep, luaK_getlabel(fs), 0);
+    // Fix TFORPREP to jump to current position (after leaveblock)
+    let label_after_block = fs.pc;
+    fix_for_jump(fs, prep_pc, label_after_block, false);
+
+    // lparser.c:1559-1561: Generate TFORCALL for generic for
+    code::code_abc(fs, OpCode::TForCall, base as u32, 0, (nvars - 4) as u32);
+
+    // lparser.c:1562: Generate TFORLOOP with Bx=0, will be fixed later
+    let endfor_pc = code::code_abx(fs, OpCode::TForLoop, base as u32, 0);
+
+    // lparser.c:1563: fixforjump(fs, endfor, prep + 1, 1);
+    // Fix TFORLOOP to jump back to prep+1 (back jump)
+    fix_for_jump(fs, endfor_pc, prep_pc + 1, true);
 
     fs.remove_vars(fs.nactvar - nvars as u8);
 
@@ -743,7 +730,7 @@ fn localfunc(fs: &mut FuncState) -> Result<(), String> {
     let name = str_checkname(fs)?;
 
     // Register local variable
-    fs.new_localvar(name, crate::compiler::func_state::VarKind::VDKREG);
+    fs.new_localvar(name, VarKind::VDKREG);
     fs.adjust_local_vars(1);
 
     // Parse function body
@@ -779,9 +766,27 @@ fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
     }
 }
 
+// Port of fixforjump from lparser.c:1530-1538
+// Fix for instruction at position 'pc' to jump to 'dest'
+// back=true means a back jump (negative offset)
+fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) {
+    let mut offset = (dest as isize) - (pc as isize) - 1;
+    if back {
+        offset = -offset;
+    }
+    if offset > 0x3FFFF {
+        // MAXARG_Bx = 2^18 - 1
+        // Should report error, but for now just clamp
+        offset = 0x3FFFF;
+    }
+
+    // Set Bx field of instruction at pc
+    Instruction::set_bx(&mut fs.chunk.code[pc], offset as u32);
+}
+
 // Port of markupval from lparser.c:411-417
 // Mark block where variable at given level was defined (to emit close instructions later)
-fn mark_upval(fs: &mut FuncState, level: u8) {
+pub fn mark_upval(fs: &mut FuncState, level: u8) {
     let mut bl_opt = fs.block_list.as_mut();
     while let Some(bl) = bl_opt {
         if bl.nactvar <= level {
@@ -854,8 +859,6 @@ fn check_to_close(fs: &mut FuncState, level: isize) {
 //   checktoclose(fs, toclose);
 // }
 fn localstat(fs: &mut FuncState) -> Result<(), String> {
-    use crate::compiler::func_state::VarKind;
-
     let mut toclose: isize = -1;
     let mut nvars = 0;
     let mut e = ExpDesc::new_void();
@@ -889,7 +892,7 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     let nexps = if testnext(fs, LuaTokenKind::TkAssign) {
         explist(fs, &mut e)?
     } else {
-        e.kind = crate::compiler::expression::ExpKind::VVOID;
+        e.kind = ExpKind::VVOID;
         0
     };
 
@@ -933,8 +936,8 @@ struct LhsAssign {
 }
 
 // Port of vkisvar from lparser.c
-fn vkisvar(k: crate::compiler::expression::ExpKind) -> bool {
-    use crate::compiler::expression::ExpKind;
+fn vkisvar(k: ExpKind) -> bool {
+    use ExpKind;
     matches!(
         k,
         ExpKind::VLOCAL
@@ -947,8 +950,8 @@ fn vkisvar(k: crate::compiler::expression::ExpKind) -> bool {
 }
 
 // Port of vkisindexed from lparser.c
-fn vkisindexed(k: crate::compiler::expression::ExpKind) -> bool {
-    use crate::compiler::expression::ExpKind;
+fn vkisindexed(k: ExpKind) -> bool {
+    use ExpKind;
     matches!(
         k,
         ExpKind::VINDEXED | ExpKind::VINDEXUP | ExpKind::VINDEXI | ExpKind::VINDEXSTR
@@ -957,7 +960,7 @@ fn vkisindexed(k: crate::compiler::expression::ExpKind) -> bool {
 
 // Port of check_conflict from lparser.c
 fn check_conflict(fs: &mut FuncState, lh: &LhsAssign, v: &ExpDesc) {
-    use crate::compiler::expression::ExpKind;
+    use ExpKind;
 
     let mut conflict = false;
     let extra = fs.freereg;
@@ -1001,7 +1004,7 @@ fn check_conflict(fs: &mut FuncState, lh: &LhsAssign, v: &ExpDesc) {
 
 // Port of adjust_assign from lparser.c
 fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc) {
-    use crate::compiler::expression::ExpKind;
+    use ExpKind;
 
     let needed = nvars as isize - nexps as isize;
 
@@ -1034,7 +1037,7 @@ fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc
 
 // Port of luaK_storevar from lcode.c
 fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
-    use crate::compiler::expression::ExpKind;
+    use ExpKind;
 
     match var.kind {
         ExpKind::VLOCAL => {
@@ -1147,7 +1150,7 @@ fn restassign(fs: &mut FuncState, lh: &mut LhsAssign, nvars: usize) -> Result<()
     }
 
     // Default assignment
-    e.kind = crate::compiler::expression::ExpKind::VNONRELOC;
+    e.kind = ExpKind::VNONRELOC;
     e.u.info = (fs.freereg - 1) as i32;
     storevar(fs, &lh.v, &mut e);
 
@@ -1186,7 +1189,7 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
 
 // Port of check_readonly from lparser.c (lines 277-304)
 fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
-    use crate::compiler::expression::ExpKind;
+    use ExpKind;
 
     let varname: Option<String> = match e.kind {
         ExpKind::VCONST => {
