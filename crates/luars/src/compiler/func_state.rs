@@ -77,6 +77,7 @@ pub struct VarDesc {
     pub kind: VarKind,  // variable kind
     pub ridx: i16,      // register holding the variable
     pub vidx: u16,      // compiler index
+    pub const_value: Option<crate::lua_value::LuaValue>,  // constant value for compile-time constants
 }
 
 impl<'a> FuncState<'a> {
@@ -141,6 +142,7 @@ impl<'a> FuncState<'a> {
             kind,
             ridx: self.freereg as i16,
             vidx,
+            const_value: None,  // Initially no const value
         });
         vidx
     }
@@ -182,10 +184,15 @@ impl<'a> FuncState<'a> {
             if let Some(vd) = self.actvar.get(i) {
                 if vd.name == name {
                     if vd.kind == VarKind::RDKCTC {
-                        *var = crate::compiler::expression::ExpDesc::new_int(i as i64);
+                        // VCONST: store variable index in u.info for check_readonly
+                        *var = crate::compiler::expression::ExpDesc::new_void();
+                        var.kind = ExpKind::VCONST;
+                        var.u.info = i as i32;
                         return ExpKind::VCONST as i32;
                     } else {
-                        *var = crate::compiler::expression::ExpDesc::new_local(i as u8, 0);
+                        // Get register index from variable descriptor
+                        let ridx = vd.ridx as u8;
+                        *var = crate::compiler::expression::ExpDesc::new_local(ridx, i as u16);
                         return ExpKind::VLOCAL as i32;
                     }
                 }

@@ -74,6 +74,9 @@ pub fn compile_code_with_name(source: &str, pool: &mut ObjectPool, chunk_name: &
     // Generate final RETURN (return with 0 values)
     code::ret(&mut fs, 0, 0);
     
+    // Set vararg flag on chunk
+    fs.chunk.is_vararg = fs.is_vararg;
+    
     Ok(fs.chunk)
 }
 

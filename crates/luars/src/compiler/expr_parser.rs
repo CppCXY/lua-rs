@@ -144,7 +144,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         LuaTokenKind::TkDots => {
             // lparser.c:1169-1173: vararg
             // Check if inside vararg function
-            if !fs.chunk.is_vararg {
+            if !fs.is_vararg {
                 return Err("cannot use '...' outside a vararg function".to_string());
             }
             // lparser.c:1173: init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, 0, 1));
@@ -389,7 +389,9 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
     // lparser.c:817: codename(ls, &key);
     if fs.lexer.current_token() != LuaTokenKind::TkName {
-        return Err("expected field name".to_string());
+        return Err(format!("{}:{}: expected field name, got {:?} '{}'", 
+                          fs.source_name, fs.lexer.line, 
+                          fs.lexer.current_token(), fs.lexer.current_token_text()));
     }
 
     let field = fs.lexer.current_token_text().to_string();
@@ -580,6 +582,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     // Get completed child chunk and upvalue information
     let mut child_chunk = child_fs.chunk;
+    child_chunk.is_vararg = child_fs.is_vararg;  // Set vararg flag on chunk
     let child_upvalues = child_fs.upvalues;
 
     // Port of lparser.c:722-726 (codeclosure)

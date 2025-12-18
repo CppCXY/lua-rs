@@ -6,6 +6,37 @@ enum IntegerRepr {
     Bin,
 }
 
+// Port of luaO_utf8esc from lobject.c:323-338
+// Encode a code point as UTF-8, supporting extended range up to 0x7FFFFFFF
+fn encode_utf8_extended(x: u32) -> Vec<u8> {
+    if x < 0x80 {
+        // ASCII
+        vec![x as u8]
+    } else {
+        // Need continuation bytes
+        let mut bytes = Vec::new();
+        let mut x = x;
+        let mut mfb = 0x3f; // maximum that fits in first byte
+        
+        // Add continuation bytes (backwards)
+        loop {
+            bytes.push(0x80 | (x & 0x3f) as u8);
+            x >>= 6;
+            mfb >>= 1;
+            if x <= mfb {
+                break;
+            }
+        }
+        
+        // Add first byte
+        bytes.push(((!mfb << 1) | x) as u8);
+        
+        // Reverse to get correct order
+        bytes.reverse();
+        bytes
+    }
+}
+
 pub enum NumberResult {
     Int(i64),
     Uint(u64),
@@ -306,13 +337,24 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                             }
                         }
                         'u' => {
-                            // Unicode escape sequence
+                            // Unicode escape sequence (Lua allows up to 0x7FFFFFFF)
                             if let Some('{') = chars.next() {
                                 let unicode_hex =
                                     chars.by_ref().take_while(|c| *c != '}').collect::<String>();
                                 if let Ok(code_point) = u32::from_str_radix(&unicode_hex, 16) {
-                                    if let Some(unicode_char) = std::char::from_u32(code_point) {
-                                        result.push(unicode_char);
+                                    // Lua allows UTF-8 values up to 0x7FFFFFFF (from llex.c:351)
+                                    if code_point <= 0x7FFFFFFF {
+                                        // Try standard Unicode first
+                                        if let Some(unicode_char) = std::char::from_u32(code_point) {
+                                            result.push(unicode_char);
+                                        } else {
+                                            // For values > 0x10FFFF, encode as UTF-8 manually
+                                            // This matches Lua's luaO_utf8esc behavior
+                                            let utf8_bytes = encode_utf8_extended(code_point);
+                                            for byte in utf8_bytes {
+                                                result.push(byte as char);
+                                            }
+                                        }
                                     } else {
                                         return Err(format!(
                                             "Invalid unicode escape sequence '\\u{{{}}}'",

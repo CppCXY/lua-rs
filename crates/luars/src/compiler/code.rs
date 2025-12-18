@@ -49,6 +49,41 @@ fn is_scnumber(e: &ExpDesc, pi: &mut i32, isfloat: &mut bool) -> bool {
     }
 }
 
+// Port of const2exp from lcode.c:693-720
+// Convert a constant value to an expression
+fn const_to_exp(value: crate::lua_value::LuaValue, e: &mut ExpDesc) {
+    use crate::lua_value::LuaValueKind;
+    
+    match value.kind() {
+        LuaValueKind::Integer => {
+            e.kind = ExpKind::VKINT;
+            e.u.ival = value.as_integer().unwrap_or(0);
+        }
+        LuaValueKind::Float => {
+            e.kind = ExpKind::VKFLT;
+            e.u.nval = value.as_float().unwrap_or(0.0);
+        }
+        LuaValueKind::Boolean => {
+            if value.as_boolean().unwrap_or(false) {
+                e.kind = ExpKind::VTRUE;
+            } else {
+                e.kind = ExpKind::VFALSE;
+            }
+        }
+        LuaValueKind::Nil => {
+            e.kind = ExpKind::VNIL;
+        }
+        LuaValueKind::String => {
+            e.kind = ExpKind::VKSTR;
+            e.u.info = value.as_string_id().unwrap_or(crate::StringId(0)).0 as i32;
+        }
+        _ => {
+            // Other types shouldn't appear as compile-time constants
+            e.kind = ExpKind::VNIL;
+        }
+    }
+}
+
 // Port of luaK_codeABC from lcode.c:397-402
 // int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize {
@@ -325,6 +360,16 @@ pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
 // void luaK_dischargevars (FuncState *fs, expdesc *e)
 pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
     match e.kind {
+        ExpKind::VCONST => {
+            // Convert const variable to its actual value
+            let vidx = unsafe { e.u.info } as usize;
+            if let Some(var_desc) = fs.actvar.get(vidx) {
+                if let Some(value) = var_desc.const_value {
+                    // Convert the const value to an expression
+                    const_to_exp(value, e);
+                }
+            }
+        }
         ExpKind::VLOCAL => {
             e.u.info = unsafe { e.u.var.ridx as i32 };
             e.kind = ExpKind::VNONRELOC;
@@ -1210,8 +1255,13 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<crate::lua_value::LuaVal
         ExpKind::VKINT => Some(LuaValue::integer(unsafe { e.u.ival })),
         ExpKind::VKFLT => Some(LuaValue::float(unsafe { e.u.nval })),
         ExpKind::VCONST => {
-            // TODO: get from actvar array
-            None
+            // Get from actvar array (port of const2val from lcode.c:75-78)
+            let vidx = unsafe { e.u.info } as usize;
+            if let Some(var_desc) = fs.actvar.get(vidx) {
+                var_desc.const_value
+            } else {
+                None
+            }
         }
         _ => None,
     }

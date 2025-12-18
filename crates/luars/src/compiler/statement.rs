@@ -657,12 +657,11 @@ fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     
     // Handle field selections: t.a.b.c
     while fs.lexer.current_token() == LuaTokenKind::TkDot {
-        fs.lexer.bump();
         crate::compiler::expr_parser::fieldsel(fs, &mut base)?;
     }
 
     // Handle method definition: function t:method()
-    let is_method = testnext(fs, LuaTokenKind::TkColon);
+    let is_method = fs.lexer.current_token() == LuaTokenKind::TkColon;
     if is_method {
         crate::compiler::expr_parser::fieldsel(fs, &mut base)?;
     }
@@ -819,18 +818,21 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     // Check for compile-time constant optimization
     // Get last variable
     let last_vidx = (fs.nactvar + nvars - 1) as u16;
-    let is_const_opt = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
-        nvars as usize == nexps && 
-        var_desc.kind == VarKind::RDKCONST &&
-        code::exp2const(fs, &e).is_some()
+    let const_value = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
+        if nvars as usize == nexps && var_desc.kind == VarKind::RDKCONST {
+            code::exp2const(fs, &e)
+        } else {
+            None
+        }
     } else {
-        false
+        None
     };
     
-    if is_const_opt {
+    if let Some(value) = const_value {
         // Variable is a compile-time constant
         if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
             var_desc.kind = VarKind::RDKCTC;
+            var_desc.const_value = Some(value);  // Save the constant value
         }
         fs.adjust_local_vars(nvars - 1);  // exclude last variable
         fs.nactvar += 1;  // but count it
@@ -1110,30 +1112,38 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
     
     let varname: Option<String> = match e.kind {
         ExpKind::VCONST => {
-            // TODO: Get variable name from actvar array
-            Some("<const>".to_string())
+            // Get variable name from actvar array
+            let vidx = unsafe { e.u.info } as usize;
+            if let Some(var_desc) = fs.actvar.get(vidx) {
+                Some(var_desc.name.clone())
+            } else {
+                Some("<const>".to_string())
+            }
         }
         ExpKind::VLOCAL => {
-            // Check if local variable is const
-            if let Some(var_desc) = fs.get_local_var_desc(unsafe { e.u.var.vidx } as u16) {
-                if var_desc.kind != VarKind::VDKREG {
-                    Some(var_desc.name.clone())
-                } else {
-                    None
+            // Check if local variable is const or compile-time const
+            // Note: RDKTOCLOSE variables are NOT readonly!
+            let vidx = unsafe { e.u.var.vidx } as u16;
+            if let Some(var_desc) = fs.get_local_var_desc(vidx) {
+                // Only RDKCONST and RDKCTC are truly readonly
+                match var_desc.kind {
+                    VarKind::RDKCONST | VarKind::RDKCTC => Some(var_desc.name.clone()),
+                    _ => None,
                 }
             } else {
                 None
             }
         }
         ExpKind::VUPVAL => {
-            // Check if upvalue is const
+            // Check if upvalue is const or compile-time const
+            // Note: RDKTOCLOSE upvalues are NOT readonly!
             let upval_idx = unsafe { e.u.info } as usize;
             if upval_idx < fs.upvalues.len() {
                 let upval = &fs.upvalues[upval_idx];
-                if upval.kind != VarKind::VDKREG {
-                    Some(upval.name.clone())
-                } else {
-                    None
+                // Only RDKCONST and RDKCTC are truly readonly
+                match upval.kind {
+                    VarKind::RDKCONST | VarKind::RDKCTC => Some(upval.name.clone()),
+                    _ => None,
                 }
             } else {
                 None
