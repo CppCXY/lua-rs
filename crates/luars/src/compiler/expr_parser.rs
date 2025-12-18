@@ -644,6 +644,10 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
         child_fs.new_localvar(param, VarKind::VDKREG);
     }
     child_fs.adjust_local_vars(child_fs.actvar.len() as u8);
+    
+    // lparser.c:982: Set numparams after adjustlocalvars
+    // f->numparams = cast_byte(fs->nactvar);
+    let param_count = child_fs.nactvar as usize;
 
     // lparser.c:1002: Parse function body statements
     // statlist(ls);
@@ -661,6 +665,8 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // Get completed child chunk and upvalue information
     let mut child_chunk = child_fs.chunk;
     child_chunk.is_vararg = child_fs.is_vararg; // Set vararg flag on chunk
+    // param_count excludes ... (vararg), only counts regular parameters
+    child_chunk.param_count = param_count;
     child_chunk.linedefined = linedefined;
     child_chunk.lastlinedefined = lastlinedefined;
     child_chunk.source_name = Some(child_fs.source_name.clone());

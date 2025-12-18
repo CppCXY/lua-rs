@@ -2,6 +2,7 @@
 // This file corresponds to lua-5.4.8/src/lcode.c
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
+use crate::compiler::tm_kind::TmKind;
 use crate::lua_vm::{Instruction, OpCode};
 
 // Port of int2sC from lcode.c (macro)
@@ -150,13 +151,13 @@ use crate::compiler::expression::{ExpDesc, ExpKind};
 // Port of luaK_ret from lcode.c:207-214
 // void luaK_ret (FuncState *fs, int first, int nret)
 pub fn ret(fs: &mut FuncState, first: u8, nret: u8) -> usize {
-    code_abc(
-        fs,
-        OpCode::Return,
-        first as u32,
-        nret.wrapping_add(1) as u32,
-        0,
-    )
+    // Use optimized RETURN0/RETURN1 when possible
+    let op = match nret {
+        0 => OpCode::Return0,
+        1 => OpCode::Return1,
+        _ => OpCode::Return,
+    };
+    code_abc(fs, op, first as u32, nret.wrapping_add(1) as u32, 0)
 }
 
 // Port of luaK_jump from lcode.c:200-202
@@ -268,27 +269,48 @@ fn code_loadbool(fs: &mut FuncState, a: u8, op: OpCode) -> usize {
     code_abc(fs, op, a as u32, 0, 0)
 }
 
+// Port of patchtestreg from lcode.c:260-273
+// static int patchtestreg (FuncState *fs, int node, int reg)
+fn patchtestreg(fs: &mut FuncState, node: usize, reg: u8) -> bool {
+    let pc = get_jump_control(fs, node);
+    if pc >= fs.chunk.code.len() {
+        return false;
+    }
+    
+    let instr = fs.chunk.code[pc];
+    if OpCode::from(Instruction::get_opcode(instr)) != OpCode::TestSet {
+        return false;  // Not a TESTSET instruction
+    }
+    
+    let b = Instruction::get_b(instr);
+    if reg != NO_REG as u8 && reg != b as u8 {
+        // Set destination register
+        Instruction::set_a(&mut fs.chunk.code[pc], reg as u32);
+    } else {
+        // No register to put value or register already has the value
+        // Change instruction to simple TEST
+        let k = Instruction::get_k(instr);
+        fs.chunk.code[pc] = Instruction::create_abck(OpCode::Test, b, 0, 0, k);
+    }
+    true
+}
+
 // Port of patchlistaux from lcode.c:271-292
 // static void patchlistaux (FuncState *fs, int list, int vtarget, int reg, int dtarget)
 fn patchlistaux(fs: &mut FuncState, mut list: isize, vtarget: isize, reg: u8, dtarget: isize) {
     const NO_JUMP: isize = -1;
     while list != NO_JUMP {
         let next = get_jump(fs, list as usize);
-        let pc = get_jump_control(fs, list as usize);
-        if pc < fs.chunk.code.len() {
-            let instr = fs.chunk.code[pc];
-            let op = OpCode::from(Instruction::get_opcode(instr));
-            if op == OpCode::TestSet {
-                // Patch TESTSET destination register
-                Instruction::set_a(&mut fs.chunk.code[pc], reg as u32);
-                if vtarget >= 0 {
-                    fix_jump(fs, list as usize, vtarget as usize);
-                }
-            } else {
-                // Jump does not produce a value - patch to dtarget
-                if dtarget >= 0 {
-                    fix_jump(fs, list as usize, dtarget as usize);
-                }
+        // Try to patch TESTSET instruction (may convert to TEST)
+        if patchtestreg(fs, list as usize, reg) {
+            // Successfully patched a TESTSET
+            if vtarget >= 0 {
+                fix_jump(fs, list as usize, vtarget as usize);
+            }
+        } else {
+            // Not a TESTSET - patch jump to dtarget
+            if dtarget >= 0 {
+                fix_jump(fs, list as usize, dtarget as usize);
             }
         }
         list = next;
@@ -1078,10 +1100,28 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 reserve_regs(fs, 1);
 
                 // Generate K-series instruction: R[A] = R[B] op K[C]
-                code_abc(fs, opcode, res as u32, r1 as u32, k_idx as u32);
-
-                e1.kind = ExpKind::VNONRELOC;
-                e1.u.info = res as i32;
+                let pc = code_abc(fs, opcode, res as u32, r1 as u32, k_idx as u32);
+                
+                e1.kind = ExpKind::VRELOC;
+                e1.u.info = pc as i32;
+                
+                // Generate metamethod fallback instruction (MMBINK)
+                // Like finishbinexpval in lcode.c:1416
+                // TM events from ltm.h (TM_ADD=6, TM_SUB=7, etc.)
+                let tm_event = match op {
+                    BinaryOperator::OpAdd => TmKind::Add, // TM_ADD
+                    BinaryOperator::OpSub => TmKind::Sub,   // TM_SUB
+                    BinaryOperator::OpMul => TmKind::Mul,   // TM_MUL
+                    BinaryOperator::OpMod => TmKind::Mod,   // TM_MOD
+                    BinaryOperator::OpPow => TmKind::Pow,  // TM_POW
+                    BinaryOperator::OpDiv => TmKind::Div,  // TM_DIV
+                    BinaryOperator::OpIDiv => TmKind::IDiv, // TM_IDIV
+                    BinaryOperator::OpBAnd => TmKind::Band, // TM_BAND
+                    BinaryOperator::OpBOr => TmKind::Bor,  // TM_BOR
+                    BinaryOperator::OpBXor => TmKind::Bxor, // TM_BXOR
+                    _ => TmKind::N, // Invalid for other ops
+                };
+                code_abc(fs, OpCode::MmBinK, r1 as u32, k_idx as u32, tm_event as u32);
             } else {
                 // Both operands in registers (codebinNoK behavior)
                 let old_free = fs.freereg;
