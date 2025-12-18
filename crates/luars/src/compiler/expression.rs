@@ -1,34 +1,34 @@
 // Port of expdesc from lcode.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpKind {
-    VVOID,       // when 'expdesc' describes the last expression of a list, this kind means an empty list
-    VNIL,        // constant nil
-    VTRUE,       // constant true
-    VFALSE,      // constant false
-    VK,          // constant in 'k'; info = index of constant in 'k'
-    VKFLT,       // floating constant; nval = numerical float value
-    VKINT,       // integer constant; ival = numerical integer value
-    VKSTR,       // string constant; strval = TString address
-    VNONRELOC,   // expression has its value in a fixed register; info = result register
-    VLOCAL,      // local variable; var.ridx = register index; var.vidx = relative index in 'actvar.arr'
-    VUPVAL,      // upvalue variable; info = index of upvalue in 'upvalues'
-    VCONST,      // compile-time <const> variable; info = absolute index in 'actvar.arr'
-    VINDEXED,    // indexed variable; ind.t = table register; ind.idx = key's R index
-    VINDEXUP,    // indexed upvalue; ind.t = upvalue; ind.idx = key's K index
-    VINDEXI,     // indexed variable with constant integer; ind.t = table register; ind.idx = key's value
-    VINDEXSTR,   // indexed variable with literal string; ind.t = table register; ind.idx = key's K index
-    VJMP,        // expression is a test/comparison; info = pc of corresponding jump instruction
-    VRELOC,      // expression can put result in any register; info = instruction pc
-    VCALL,       // expression is a function call; info = instruction pc
-    VVARARG,     // vararg expression; info = instruction pc
+    VVOID,  // when 'expdesc' describes the last expression of a list, this kind means an empty list
+    VNIL,   // constant nil
+    VTRUE,  // constant true
+    VFALSE, // constant false
+    VK,     // constant in 'k'; info = index of constant in 'k'
+    VKFLT,  // floating constant; nval = numerical float value
+    VKINT,  // integer constant; ival = numerical integer value
+    VKSTR,  // string constant; strval = TString address
+    VNONRELOC, // expression has its value in a fixed register; info = result register
+    VLOCAL, // local variable; var.ridx = register index; var.vidx = relative index in 'actvar.arr'
+    VUPVAL, // upvalue variable; info = index of upvalue in 'upvalues'
+    VCONST, // compile-time <const> variable; info = absolute index in 'actvar.arr'
+    VINDEXED, // indexed variable; ind.t = table register; ind.idx = key's R index
+    VINDEXUP, // indexed upvalue; ind.t = upvalue; ind.idx = key's K index
+    VINDEXI, // indexed variable with constant integer; ind.t = table register; ind.idx = key's value
+    VINDEXSTR, // indexed variable with literal string; ind.t = table register; ind.idx = key's K index
+    VJMP,      // expression is a test/comparison; info = pc of corresponding jump instruction
+    VRELOC,    // expression can put result in any register; info = instruction pc
+    VCALL,     // expression is a function call; info = instruction pc
+    VVARARG,   // vararg expression; info = instruction pc
 }
 
 #[derive(Clone)]
 pub struct ExpDesc {
     pub kind: ExpKind,
     pub u: ExpUnion,
-    pub t: isize,  // patch list of 'exit when true'
-    pub f: isize,  // patch list of 'exit when false'
+    pub t: isize, // patch list of 'exit when true'
+    pub f: isize, // patch list of 'exit when false'
 }
 
 #[derive(Clone, Copy)]
@@ -189,7 +189,6 @@ impl ExpDesc {
     }
 
     pub fn is_numeral(&self) -> bool {
-        matches!(self.kind, ExpKind::VKINT | ExpKind::VKFLT)
-            && !self.has_jumps()
+        matches!(self.kind, ExpKind::VKINT | ExpKind::VKFLT) && !self.has_jumps()
     }
 }

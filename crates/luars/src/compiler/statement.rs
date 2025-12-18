@@ -118,13 +118,8 @@ fn check(fs: &mut FuncState, expected: LuaTokenKind) -> Result<(), String> {
 
 // Port of error_expected from lparser.c
 fn error_expected(fs: &mut FuncState, token: LuaTokenKind) -> Result<(), String> {
-    Err(format!(
-        "{}:{}: syntax error: expected '{}', got '{}'",
-        fs.source_name,
-        fs.lexer.line,
-        token,
-        fs.lexer.current_token()
-    ))
+    let msg = format!("expected '{}'", token);
+    Err(fs.token_error(&msg))
 }
 
 fn check_match(
@@ -137,10 +132,10 @@ fn check_match(
         if where_ == fs.lexer.line {
             error_expected(fs, what)?;
         } else {
-            return Err(format!(
-                "{}:{}: syntax error: expected '{}' (to close '{}' at line {})",
-                fs.source_name, fs.lexer.line, what, who, where_
-            ));
+            return Err(fs.syntax_error(&format!(
+                "expected '{}' (to close '{}' at line {})",
+                what, who, where_
+            )));
         }
     }
     Ok(())
@@ -282,10 +277,7 @@ fn breakstat(fs: &mut FuncState) -> Result<(), String> {
     }
 
     if bl.is_none() {
-        return Err(format!(
-            "{}:{}: no loop to break",
-            "<source>", fs.lexer.line
-        ));
+        return Err(fs.syntax_error("no loop to break"));
     }
 
     // Generate break jump - will be patched later
@@ -322,7 +314,7 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
 fn labelstat(fs: &mut FuncState) -> Result<(), String> {
     let name = str_checkname(fs)?;
     check(fs, LuaTokenKind::TkDbColon)?;
-    fs.lexer.bump();  // skip '::'
+    fs.lexer.bump(); // skip '::'
 
     let label = LabelDesc {
         name,
@@ -339,7 +331,7 @@ fn labelstat(fs: &mut FuncState) -> Result<(), String> {
 fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), String> {
     // test_then_block -> [IF | ELSEIF] cond THEN block
     fs.lexer.bump(); // skip IF or ELSEIF
-    
+
     // lparser.c:1642: expr(ls, &v);
     let mut v = expr(fs)?;
 
@@ -417,7 +409,7 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     };
     enterblock(fs, &mut bl, true);
     check(fs, LuaTokenKind::TkDo)?;
-    fs.lexer.bump();  // skip 'do'
+    fs.lexer.bump(); // skip 'do'
     block(fs)?;
 
     // Jump back to condition
@@ -488,10 +480,7 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
             forlist(fs, varname)?;
         }
         _ => {
-            return Err(format!(
-                "{}:{}: '=' or 'in' expected",
-                fs.source_name, fs.lexer.line
-            ));
+            return Err(fs.token_error("'=' or 'in' expected"));
         }
     }
 
@@ -502,27 +491,36 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
 fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), String> {
     // fornum -> NAME = exp, exp [,exp] forbody
     // Port of lparser.c:1568-1590
-    
+
     // Reserve registers for internal loop variables (must be done before parsing expressions)
     let base = fs.freereg;
-    
+
     // Create 3 internal control variables: (for state), (for state), (for state)
-    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
-    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
-    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
-    
+    fs.new_localvar(
+        "(for state)".to_string(),
+        crate::compiler::func_state::VarKind::VDKREG,
+    );
+    fs.new_localvar(
+        "(for state)".to_string(),
+        crate::compiler::func_state::VarKind::VDKREG,
+    );
+    fs.new_localvar(
+        "(for state)".to_string(),
+        crate::compiler::func_state::VarKind::VDKREG,
+    );
+
     // Create the loop variable
     fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
-    
-    check(fs, LuaTokenKind::TkAssign)?;  // check '='
-    fs.lexer.bump();  // skip '='
+
+    check(fs, LuaTokenKind::TkAssign)?; // check '='
+    fs.lexer.bump(); // skip '='
 
     // Parse initial, limit, step (exp1 = expr + exp2nextreg)
     let mut e = expr(fs)?;
     code::exp2nextreg(fs, &mut e);
     check(fs, LuaTokenKind::TkComma)?;
-    fs.lexer.bump();  // skip ','
-    
+    fs.lexer.bump(); // skip ','
+
     let mut e = expr(fs)?;
     code::exp2nextreg(fs, &mut e);
 
@@ -542,7 +540,7 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     let prep_jump = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
 
     check(fs, LuaTokenKind::TkDo)?;
-    fs.lexer.bump();  // skip 'do'
+    fs.lexer.bump(); // skip 'do'
 
     let mut bl = BlockCnt {
         previous: None,
@@ -577,19 +575,31 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // forlist -> NAME {,NAME} IN explist forbody
     // Port of lparser.c:1591-1616
-    let mut nvars = 5;  // gen, state, control, toclose, 'indexname'
-    
+    let mut nvars = 5; // gen, state, control, toclose, 'indexname'
+
     let base = fs.freereg;
-    
+
     // Create 4 internal control variables
-    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
-    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
-    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
-    fs.new_localvar("(for state)".to_string(), crate::compiler::func_state::VarKind::VDKREG);
-    
+    fs.new_localvar(
+        "(for state)".to_string(),
+        crate::compiler::func_state::VarKind::VDKREG,
+    );
+    fs.new_localvar(
+        "(for state)".to_string(),
+        crate::compiler::func_state::VarKind::VDKREG,
+    );
+    fs.new_localvar(
+        "(for state)".to_string(),
+        crate::compiler::func_state::VarKind::VDKREG,
+    );
+    fs.new_localvar(
+        "(for state)".to_string(),
+        crate::compiler::func_state::VarKind::VDKREG,
+    );
+
     // Create declared variables (starting with indexname)
     fs.new_localvar(indexname, crate::compiler::func_state::VarKind::VDKREG);
-    
+
     while testnext(fs, LuaTokenKind::TkComma) {
         let varname = str_checkname(fs)?;
         fs.new_localvar(varname, crate::compiler::func_state::VarKind::VDKREG);
@@ -597,7 +607,7 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     }
 
     check(fs, LuaTokenKind::TkIn)?;
-    fs.lexer.bump();  // skip IN
+    fs.lexer.bump(); // skip IN
 
     // Parse iterator expressions
     let mut e = ExpDesc::new_void();
@@ -610,7 +620,7 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     fs.adjust_local_vars(4);
 
     check(fs, LuaTokenKind::TkDo)?;
-    fs.lexer.bump();  // skip 'do'
+    fs.lexer.bump(); // skip 'do'
 
     let loop_start = fs.pc;
 
@@ -654,7 +664,7 @@ fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // Parse first name (base variable)
     let mut base = ExpDesc::new_void();
     crate::compiler::expr_parser::singlevar(fs, &mut base)?;
-    
+
     // Handle field selections: t.a.b.c
     while fs.lexer.current_token() == LuaTokenKind::TkDot {
         crate::compiler::expr_parser::fieldsel(fs, &mut base)?;
@@ -672,10 +682,10 @@ fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
 
     // Check if variable is readonly
     check_readonly(fs, &base)?;
-    
+
     // Store function: base = func_val
     storevar(fs, &base, &mut func_val);
-    
+
     // Fix line information: definition happens in the first line
     code::fixline(fs, line);
 
@@ -710,14 +720,14 @@ fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
         fs.lexer.bump();
 
         check(fs, LuaTokenKind::TkGt)?;
-        fs.lexer.bump();  // skip '>'
+        fs.lexer.bump(); // skip '>'
 
         if attr == "const" {
             Ok(VarKind::RDKCONST)
         } else if attr == "close" {
             Ok(VarKind::RDKTOCLOSE)
         } else {
-            Err(format!("unknown attribute '{}'", attr))
+            Err(fs.syntax_error(&format!("unknown attribute '{}'", attr)))
         }
     } else {
         Ok(VarKind::VDKREG) // regular variable
@@ -787,7 +797,7 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
         let name = str_checkname(fs)?;
         let vidx = fs.new_localvar(name, VarKind::VDKREG);
         let kind = get_local_attribute(fs)?;
-        
+
         // Set kind for this variable
         if let Some(var) = fs.get_local_var_desc(vidx) {
             var.kind = kind;
@@ -827,19 +837,19 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     } else {
         None
     };
-    
+
     if let Some(value) = const_value {
         // Variable is a compile-time constant
         if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
             var_desc.kind = VarKind::RDKCTC;
-            var_desc.const_value = Some(value);  // Save the constant value
+            var_desc.const_value = Some(value); // Save the constant value
         }
-        fs.adjust_local_vars(nvars - 1);  // exclude last variable
-        fs.nactvar += 1;  // but count it
+        fs.adjust_local_vars(nvars - 1); // exclude last variable
+        fs.nactvar += 1; // but count it
         check_to_close(fs, toclose);
         return Ok(());
     }
-    
+
     adjust_assign(fs, nvars as usize, nexps, &mut e);
     fs.adjust_local_vars(nvars);
 
@@ -1109,7 +1119,7 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
 // Port of check_readonly from lparser.c (lines 277-304)
 fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
     use crate::compiler::expression::ExpKind;
-    
+
     let varname: Option<String> = match e.kind {
         ExpKind::VCONST => {
             // Get variable name from actvar array
@@ -1151,10 +1161,11 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
         }
         _ => None,
     };
-    
+
     if let Some(name) = varname {
-        return Err(format!("attempt to assign to const variable '{}'", name));
+        let msg = format!("attempt to assign to const variable '{}'", name);
+        return Err(fs.syntax_error(&msg));
     }
-    
+
     Ok(())
 }

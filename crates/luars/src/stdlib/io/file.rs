@@ -27,17 +27,23 @@ enum FileInner {
 impl LuaFile {
     /// Create stdin handle
     pub fn stdin() -> Self {
-        LuaFile { inner: FileInner::Stdin }
+        LuaFile {
+            inner: FileInner::Stdin,
+        }
     }
 
     /// Create stdout handle
     pub fn stdout() -> Self {
-        LuaFile { inner: FileInner::Stdout }
+        LuaFile {
+            inner: FileInner::Stdout,
+        }
     }
 
     /// Create stderr handle
     pub fn stderr() -> Self {
-        LuaFile { inner: FileInner::Stderr }
+        LuaFile {
+            inner: FileInner::Stderr,
+        }
     }
 
     pub fn open_read(path: &str) -> io::Result<Self> {
@@ -87,10 +93,13 @@ impl LuaFile {
     pub fn is_closed(&self) -> bool {
         matches!(self.inner, FileInner::Closed)
     }
-    
+
     /// Check if this is a standard stream (stdin/stdout/stderr)
     pub fn is_std_stream(&self) -> bool {
-        matches!(self.inner, FileInner::Stdin | FileInner::Stdout | FileInner::Stderr)
+        matches!(
+            self.inner,
+            FileInner::Stdin | FileInner::Stdout | FileInner::Stderr
+        )
     }
 
     /// Read operations

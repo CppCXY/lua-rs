@@ -5,42 +5,93 @@
 
 use std::rc::Rc;
 
-use crate::lib_registry::{LibraryModule, LibraryEntry, get_arg, get_args, require_arg};
+use crate::lib_registry::{LibraryEntry, LibraryModule, get_arg, get_args, require_arg};
 use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
 use crate::lua_vm::{LuaResult, LuaVM};
 
 pub fn create_basic_lib() -> LibraryModule {
     let mut module = LibraryModule::new("_G");
-    
+
     // Functions
-    module.entries.push(("print", LibraryEntry::Function(lua_print)));
-    module.entries.push(("type", LibraryEntry::Function(lua_type)));
-    module.entries.push(("assert", LibraryEntry::Function(lua_assert)));
-    module.entries.push(("error", LibraryEntry::Function(lua_error)));
-    module.entries.push(("tonumber", LibraryEntry::Function(lua_tonumber)));
-    module.entries.push(("tostring", LibraryEntry::Function(lua_tostring)));
-    module.entries.push(("select", LibraryEntry::Function(lua_select)));
-    module.entries.push(("ipairs", LibraryEntry::Function(lua_ipairs)));
-    module.entries.push(("pairs", LibraryEntry::Function(lua_pairs)));
-    module.entries.push(("next", LibraryEntry::Function(lua_next)));
-    module.entries.push(("pcall", LibraryEntry::Function(lua_pcall)));
-    module.entries.push(("xpcall", LibraryEntry::Function(lua_xpcall)));
-    module.entries.push(("getmetatable", LibraryEntry::Function(lua_getmetatable)));
-    module.entries.push(("setmetatable", LibraryEntry::Function(lua_setmetatable)));
-    module.entries.push(("rawget", LibraryEntry::Function(lua_rawget)));
-    module.entries.push(("rawset", LibraryEntry::Function(lua_rawset)));
-    module.entries.push(("rawlen", LibraryEntry::Function(lua_rawlen)));
-    module.entries.push(("rawequal", LibraryEntry::Function(lua_rawequal)));
-    module.entries.push(("collectgarbage", LibraryEntry::Function(lua_collectgarbage)));
-    module.entries.push(("require", LibraryEntry::Function(lua_require)));
-    module.entries.push(("load", LibraryEntry::Function(lua_load)));
-    module.entries.push(("loadfile", LibraryEntry::Function(lua_loadfile)));
-    module.entries.push(("dofile", LibraryEntry::Function(lua_dofile)));
-    module.entries.push(("warn", LibraryEntry::Function(lua_warn)));
-    
+    module
+        .entries
+        .push(("print", LibraryEntry::Function(lua_print)));
+    module
+        .entries
+        .push(("type", LibraryEntry::Function(lua_type)));
+    module
+        .entries
+        .push(("assert", LibraryEntry::Function(lua_assert)));
+    module
+        .entries
+        .push(("error", LibraryEntry::Function(lua_error)));
+    module
+        .entries
+        .push(("tonumber", LibraryEntry::Function(lua_tonumber)));
+    module
+        .entries
+        .push(("tostring", LibraryEntry::Function(lua_tostring)));
+    module
+        .entries
+        .push(("select", LibraryEntry::Function(lua_select)));
+    module
+        .entries
+        .push(("ipairs", LibraryEntry::Function(lua_ipairs)));
+    module
+        .entries
+        .push(("pairs", LibraryEntry::Function(lua_pairs)));
+    module
+        .entries
+        .push(("next", LibraryEntry::Function(lua_next)));
+    module
+        .entries
+        .push(("pcall", LibraryEntry::Function(lua_pcall)));
+    module
+        .entries
+        .push(("xpcall", LibraryEntry::Function(lua_xpcall)));
+    module
+        .entries
+        .push(("getmetatable", LibraryEntry::Function(lua_getmetatable)));
+    module
+        .entries
+        .push(("setmetatable", LibraryEntry::Function(lua_setmetatable)));
+    module
+        .entries
+        .push(("rawget", LibraryEntry::Function(lua_rawget)));
+    module
+        .entries
+        .push(("rawset", LibraryEntry::Function(lua_rawset)));
+    module
+        .entries
+        .push(("rawlen", LibraryEntry::Function(lua_rawlen)));
+    module
+        .entries
+        .push(("rawequal", LibraryEntry::Function(lua_rawequal)));
+    module
+        .entries
+        .push(("collectgarbage", LibraryEntry::Function(lua_collectgarbage)));
+    module
+        .entries
+        .push(("require", LibraryEntry::Function(lua_require)));
+    module
+        .entries
+        .push(("load", LibraryEntry::Function(lua_load)));
+    module
+        .entries
+        .push(("loadfile", LibraryEntry::Function(lua_loadfile)));
+    module
+        .entries
+        .push(("dofile", LibraryEntry::Function(lua_dofile)));
+    module
+        .entries
+        .push(("warn", LibraryEntry::Function(lua_warn)));
+
     // Values
-    module.entries.push(("_VERSION", LibraryEntry::Value(|vm| vm.create_string("Lua 5.4"))));
-    
+    module.entries.push((
+        "_VERSION",
+        LibraryEntry::Value(|vm| vm.create_string("Lua 5.4")),
+    ));
+
     module
 }
 
@@ -164,7 +215,7 @@ fn parse_lua_number(s: &str) -> LuaValue {
     if s.is_empty() {
         return LuaValue::nil();
     }
-    
+
     // Check for hex prefix (0x or 0X), with optional sign
     let (sign, rest) = if s.starts_with('-') {
         (-1i64, &s[1..])
@@ -173,12 +224,12 @@ fn parse_lua_number(s: &str) -> LuaValue {
     } else {
         (1i64, s)
     };
-    
+
     let rest = rest.trim_start();
-    
+
     if rest.starts_with("0x") || rest.starts_with("0X") {
         let hex_part = &rest[2..];
-        
+
         // Check if this is a hex float (contains '.' or 'p'/'P')
         if hex_part.contains('.') || hex_part.to_lowercase().contains('p') {
             // Parse hex float: 0xAA.BB or 0xAA.BBpEE or 0xAApEE
@@ -187,7 +238,7 @@ fn parse_lua_number(s: &str) -> LuaValue {
             }
             return LuaValue::nil();
         }
-        
+
         // Plain hex integer
         if let Ok(i) = u64::from_str_radix(hex_part, 16) {
             // Reinterpret as i64 for large values
@@ -196,7 +247,7 @@ fn parse_lua_number(s: &str) -> LuaValue {
         }
         return LuaValue::nil();
     }
-    
+
     // Regular decimal number
     if let Ok(i) = s.parse::<i64>() {
         return LuaValue::integer(i);
@@ -204,52 +255,52 @@ fn parse_lua_number(s: &str) -> LuaValue {
     if let Ok(f) = s.parse::<f64>() {
         return LuaValue::float(f);
     }
-    
+
     LuaValue::nil()
 }
 
 /// Parse hex float like "AA.BB" or "AA.BBpEE" (without 0x prefix)
 fn parse_hex_float(s: &str) -> Option<f64> {
     let s_lower = s.to_lowercase();
-    
+
     // Split by 'p' for exponent
     let (mantissa_str, exp_str) = if let Some(p_pos) = s_lower.find('p') {
         (&s[..p_pos], Some(&s[p_pos + 1..]))
     } else {
         (s, None)
     };
-    
+
     // Parse mantissa (integer.fraction in hex)
     let mantissa = if let Some(dot_pos) = mantissa_str.find('.') {
         let int_part = &mantissa_str[..dot_pos];
         let frac_part = &mantissa_str[dot_pos + 1..];
-        
+
         let int_val = if int_part.is_empty() {
             0u64
         } else {
             u64::from_str_radix(int_part, 16).ok()?
         };
-        
+
         let frac_val = if frac_part.is_empty() {
             0.0
         } else {
             let frac_int = u64::from_str_radix(frac_part, 16).ok()?;
             frac_int as f64 / 16f64.powi(frac_part.len() as i32)
         };
-        
+
         int_val as f64 + frac_val
     } else {
         let int_val = u64::from_str_radix(mantissa_str, 16).ok()?;
         int_val as f64
     };
-    
+
     // Parse exponent (base 2)
     let exp = if let Some(exp_str) = exp_str {
         exp_str.parse::<i32>().ok()?
     } else {
         0
     };
-    
+
     Some(mantissa * 2f64.powi(exp))
 }
 

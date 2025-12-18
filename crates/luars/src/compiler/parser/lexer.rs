@@ -1,6 +1,5 @@
 use crate::compiler::parser::{
-    error::LuaParseError, lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind,
-    reader::Reader,
+    lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind, reader::Reader,
 };
 
 use super::lexer_config::LexerConfig;
@@ -8,56 +7,39 @@ use super::lexer_config::LexerConfig;
 pub struct LuaLexer<'a> {
     reader: Reader<'a>,
     lexer_config: LexerConfig,
-    errors: Option<&'a mut Vec<LuaParseError>>,
-    state: LexerState,
+    error: Option<String>,
+    line: usize,
 }
 
 impl<'a> LuaLexer<'a> {
-    pub fn new(
-        reader: Reader<'a>,
-        lexer_config: LexerConfig,
-        errors: Option<&'a mut Vec<LuaParseError>>,
-    ) -> Self {
-        Self::new_with_state(reader, LexerState::Normal, lexer_config, errors)
-    }
-
-    pub fn new_with_state(
-        reader: Reader<'a>,
-        state: LexerState,
-        lexer_config: LexerConfig,
-        errors: Option<&'a mut Vec<LuaParseError>>,
-    ) -> Self {
+    pub fn new(reader: Reader<'a>, lexer_config: LexerConfig) -> Self {
         LuaLexer {
             reader,
             lexer_config,
-            errors,
-            state,
+            error: None,
+            line: 1,
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<LuaTokenData> {
+    pub fn tokenize(&mut self) -> Result<Vec<LuaTokenData>, String> {
         let mut tokens = vec![];
 
         while !self.reader.is_eof() {
-            let kind = match self.state {
-                LexerState::Normal => self.lex(),
-                LexerState::String(quote) => self.lex_string(quote),
-                LexerState::LongString(sep) => self.lex_long_string(sep),
-                LexerState::LongComment(sep) => {
-                    self.lex_long_string(sep);
-                    LuaTokenKind::TkLongComment
-                }
-            };
-            if kind == LuaTokenKind::TkEof {
+            let kind = self.lex();
+            if kind == LuaTokenKind::TkEof || self.error.is_some() {
                 break;
             }
 
             tokens.push(LuaTokenData::new(kind, self.reader.current_range()));
         }
 
-        tokens
+        if let Some(err) = &self.error {
+            return Err(err.clone());
+        }
+
+        Ok(tokens)
     }
-    
+
     fn name_to_kind(&self, name: &str) -> LuaTokenKind {
         match name {
             "and" => LuaTokenKind::TkAnd,
@@ -111,7 +93,6 @@ impl<'a> LuaLexer<'a> {
                     let sep = self.skip_sep();
                     if self.reader.current_char() == '[' {
                         self.reader.bump();
-                        self.state = LexerState::LongComment(sep);
                         self.lex_long_string(sep);
                         return LuaTokenKind::TkLongComment;
                     }
@@ -132,7 +113,6 @@ impl<'a> LuaLexer<'a> {
                 }
 
                 self.reader.bump();
-                self.state = LexerState::LongString(sep);
                 self.lex_long_string(sep)
             }
             '=' => {
@@ -201,7 +181,6 @@ impl<'a> LuaLexer<'a> {
             '"' | '\'' | '`' => {
                 let quote = self.reader.current_char();
                 self.reader.bump();
-                self.state = LexerState::String(quote);
                 self.lex_string(quote)
             }
             '.' => {
@@ -334,6 +313,7 @@ impl<'a> LuaLexer<'a> {
             }
             _ => {}
         }
+        self.line += 1;
 
         LuaTokenKind::TkEndOfLine
     }
@@ -375,10 +355,6 @@ impl<'a> LuaLexer<'a> {
             }
         }
 
-        if self.reader.current_char() == quote || !self.reader.is_eof() {
-            self.state = LexerState::Normal;
-        }
-
         if self.reader.current_char() != quote {
             self.error(|| format!("unfinished string"));
             return LuaTokenKind::TkString;
@@ -401,14 +377,13 @@ impl<'a> LuaLexer<'a> {
                         break;
                     }
                 }
+                '\n' | '\r' => {
+                    self.lex_new_line();
+                }
                 _ => {
                     self.reader.bump();
                 }
             }
-        }
-
-        if end || !self.reader.is_eof() {
-            self.state = LexerState::Normal;
         }
 
         if !end {
@@ -546,12 +521,7 @@ impl<'a> LuaLexer<'a> {
         F: FnOnce() -> R,
         R: AsRef<str>,
     {
-        if let Some(errors) = &mut self.errors {
-            errors.push(LuaParseError::syntax_error_from(
-                msg().as_ref(),
-                self.reader.current_range(),
-            ))
-        }
+        self.error = Some(format!("{}: {}", self.line, msg().as_ref()));
     }
 }
 
@@ -561,16 +531,4 @@ fn is_name_start(ch: char) -> bool {
 
 fn is_name_continue(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
-}
-
-/// This enum allows preserving lexer state between reader resets. This is used
-/// when lexer doesn't see the whole input source, and only sees a reader
-/// for each individual line. It happens when we're lexing
-/// code blocks in comments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LexerState {
-    Normal,
-    String(char),
-    LongString(usize),
-    LongComment(usize),
 }

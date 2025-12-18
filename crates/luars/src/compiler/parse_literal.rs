@@ -17,7 +17,7 @@ fn encode_utf8_extended(x: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut x = x;
         let mut mfb = 0x3f; // maximum that fits in first byte
-        
+
         // Add continuation bytes (backwards)
         loop {
             bytes.push(0x80 | (x & 0x3f) as u8);
@@ -27,10 +27,10 @@ fn encode_utf8_extended(x: u32) -> Vec<u8> {
                 break;
             }
         }
-        
+
         // Add first byte
         bytes.push(((!mfb << 1) | x) as u8);
-        
+
         // Reverse to get correct order
         bytes.reverse();
         bytes
@@ -345,7 +345,8 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                                     // Lua allows UTF-8 values up to 0x7FFFFFFF (from llex.c:351)
                                     if code_point <= 0x7FFFFFFF {
                                         // Try standard Unicode first
-                                        if let Some(unicode_char) = std::char::from_u32(code_point) {
+                                        if let Some(unicode_char) = std::char::from_u32(code_point)
+                                        {
                                             result.push(unicode_char);
                                         } else {
                                             // For values > 0x10FFFF, encode as UTF-8 manually
@@ -396,10 +397,7 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                             result.push(next_char);
                         }
                         _ => {
-                            return Err(format!(
-                                "Invalid escape sequence '\\{}'",
-                                next_char
-                            ));
+                            return Err(format!("Invalid escape sequence '\\{}'", next_char));
                         }
                     }
                 }

@@ -244,11 +244,11 @@ impl GcFunction {
 }
 
 /// Upvalue with embedded GC header
-/// 
+///
 /// Hybrid design for safety and performance:
 /// - When open: uses stack_index (safe, no dangling pointers)
 /// - When closed: stores value inline (fast, no indirection)
-/// 
+///
 /// Note: We cannot use raw pointers for open upvalues because
 /// register_stack may reallocate, invalidating the pointers.
 pub struct GcUpvalue {

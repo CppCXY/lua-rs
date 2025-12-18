@@ -96,7 +96,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                     *v = ExpDesc::new_float(val);
                 }
                 Err(e) => {
-                    return Err(format!("invalid integer literal: {}", e));
+                    return Err(fs.syntax_error(&format!("invalid integer literal: {}", e)));
                 }
             }
             fs.lexer.bump();
@@ -109,7 +109,9 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                     *v = ExpDesc::new_float(val);
                 }
                 Err(e) => {
-                    return Err(format!("invalid float literal '{}': {}", num_text, e));
+                    return Err(
+                        fs.syntax_error(&format!("invalid float literal '{}': {}", num_text, e))
+                    );
                 }
             }
             fs.lexer.bump();
@@ -124,7 +126,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                     *v = ExpDesc::new_k(idx);
                 }
                 Err(e) => {
-                    return Err(format!("invalid string literal: {}", e));
+                    return Err(fs.syntax_error(&format!("invalid string literal: {}", e)));
                 }
             }
             fs.lexer.bump();
@@ -145,7 +147,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             // lparser.c:1169-1173: vararg
             // Check if inside vararg function
             if !fs.is_vararg {
-                return Err("cannot use '...' outside a vararg function".to_string());
+                return Err(fs.syntax_error("cannot use '...' outside a vararg function"));
             }
             // lparser.c:1173: init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, 0, 1));
             let pc = code::code_abc(fs, OpCode::Vararg, 0, 0, 1);
@@ -187,12 +189,7 @@ fn primaryexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             singlevar(fs, v)?;
         }
         _ => {
-            return Err(format!(
-                "{}:{}: syntax error: unexpected symbol '{}'",
-                fs.source_name,
-                fs.lexer.line,
-                fs.lexer.current_token_text()
-            ));
+            return Err(fs.token_error("unexpected symbol"));
         }
     }
     Ok(())
@@ -389,9 +386,7 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
     // lparser.c:817: codename(ls, &key);
     if fs.lexer.current_token() != LuaTokenKind::TkName {
-        return Err(format!("{}:{}: expected field name, got {:?} '{}'", 
-                          fs.source_name, fs.lexer.line, 
-                          fs.lexer.current_token(), fs.lexer.current_token_text()));
+        return Err(fs.token_error("expected field name"));
     }
 
     let field = fs.lexer.current_token_text().to_string();
@@ -582,7 +577,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     // Get completed child chunk and upvalue information
     let mut child_chunk = child_fs.chunk;
-    child_chunk.is_vararg = child_fs.is_vararg;  // Set vararg flag on chunk
+    child_chunk.is_vararg = child_fs.is_vararg; // Set vararg flag on chunk
     let child_upvalues = child_fs.upvalues;
 
     // Port of lparser.c:722-726 (codeclosure)
@@ -619,10 +614,6 @@ fn expect(fs: &mut FuncState, tk: LuaTokenKind) -> Result<(), String> {
         fs.lexer.bump();
         Ok(())
     } else {
-        Err(format!(
-            "expected {:?}, got {:?}",
-            tk,
-            fs.lexer.current_token()
-        ))
+        Err(fs.token_error(&format!("expected '{:?}'", tk)))
     }
 }

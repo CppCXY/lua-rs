@@ -1,6 +1,5 @@
 use crate::compiler::parser::{lexer_config::LexerConfig, lua_language_level::LuaLanguageLevel};
 
-
 pub struct ParserConfig {
     level: LuaLanguageLevel,
 }
@@ -15,5 +14,4 @@ impl ParserConfig {
             language_level: self.level,
         }
     }
-
 }

@@ -119,30 +119,28 @@ fn string_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 /// string.dump(function [, strip]) - Serialize a function to binary string
 fn string_dump(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     use crate::lua_value::chunk_serializer;
-    
+
     let func_value = require_arg(vm, 1, "string.dump")?;
-    let strip = get_arg(vm, 2)
-        .map(|v| v.is_truthy())
-        .unwrap_or(false);
-    
+    let strip = get_arg(vm, 2).map(|v| v.is_truthy()).unwrap_or(false);
+
     // Get the function ID
     let Some(func_id) = func_value.as_function_id() else {
         return Err(vm.error("bad argument #1 to 'dump' (function expected)".to_string()));
     };
-    
+
     // Get the function from object pool
     let Some(func) = vm.object_pool.get_function(func_id) else {
         return Err(vm.error("bad argument #1 to 'dump' (function expected)".to_string()));
     };
-    
+
     // Check if it's a Lua function (not a C function)
     let Some(chunk) = func.chunk() else {
         return Err(vm.error("unable to dump given function".to_string()));
     };
-    
+
     // Clone the chunk to avoid borrow issues
     let chunk = chunk.clone();
-    
+
     // Serialize the chunk with pool access for string constants
     match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_pool) {
         Ok(bytes) => {
@@ -152,9 +150,7 @@ fn string_dump(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let result = vm.create_string_owned(result_str);
             Ok(MultiValue::single(result))
         }
-        Err(e) => {
-            Err(vm.error(format!("dump error: {}", e)))
-        }
+        Err(e) => Err(vm.error(format!("dump error: {}", e))),
     }
 }
 
@@ -1481,8 +1477,8 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 };
                 size += n;
             }
-            'd' | 'n' => size += 8,  // 'n' is lua_Number (double)
-            'j' | 'J' | 'T' => size += std::mem::size_of::<i64>(),  // lua_Integer / size_t
+            'd' | 'n' => size += 8, // 'n' is lua_Number (double)
+            'j' | 'J' | 'T' => size += std::mem::size_of::<i64>(), // lua_Integer / size_t
             's' => {
                 // Check for size specifier
                 let mut size_str = String::new();
@@ -1517,8 +1513,8 @@ fn string_packsize(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 })?;
                 size += n;
             }
-            'x' => size += 1, // padding byte
-            'X' => {} // empty alignment
+            'x' => size += 1,           // padding byte
+            'X' => {}                   // empty alignment
             '<' | '>' | '=' | '!' => {} // endianness/alignment modifiers
             _ => {
                 return Err(vm.error(format!(

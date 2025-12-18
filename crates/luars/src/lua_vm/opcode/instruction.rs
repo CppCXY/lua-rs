@@ -442,20 +442,20 @@ mod tests {
     fn test_bit_layout_detailed() {
         // Test iABC format with k bit at position 15
         let instr = Instruction::create_abck(OpCode::Add, 10, 20, 30, true);
-        
+
         // Manual bit extraction to verify positions
-        let op_bits = instr & 0x7F;  // bits 0-6
-        let a_bits = (instr >> 7) & 0xFF;  // bits 7-14
-        let k_bits = (instr >> 15) & 0x1;  // bit 15
-        let b_bits = (instr >> 16) & 0xFF;  // bits 16-23
-        let c_bits = (instr >> 24) & 0xFF;  // bits 24-31
-        
+        let op_bits = instr & 0x7F; // bits 0-6
+        let a_bits = (instr >> 7) & 0xFF; // bits 7-14
+        let k_bits = (instr >> 15) & 0x1; // bit 15
+        let b_bits = (instr >> 16) & 0xFF; // bits 16-23
+        let c_bits = (instr >> 24) & 0xFF; // bits 24-31
+
         assert_eq!(op_bits, OpCode::Add as u32);
         assert_eq!(a_bits, 10);
         assert_eq!(k_bits, 1);
         assert_eq!(b_bits, 20);
         assert_eq!(c_bits, 30);
-        
+
         // Test with k=false
         let instr2 = Instruction::create_abck(OpCode::Add, 5, 15, 25, false);
         let k2_bits = (instr2 >> 15) & 0x1;
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(Instruction::POS_K, 15);
         assert_eq!(Instruction::POS_B, 16);
         assert_eq!(Instruction::POS_C, 24);
-        assert_eq!(Instruction::POS_BX, 15);  // BX starts at K position
+        assert_eq!(Instruction::POS_BX, 15); // BX starts at K position
     }
 
     #[test]
@@ -482,9 +482,9 @@ mod tests {
         assert_eq!(Instruction::SIZE_K, 1);
         assert_eq!(Instruction::SIZE_B, 8);
         assert_eq!(Instruction::SIZE_C, 8);
-        assert_eq!(Instruction::SIZE_BX, 17);  // K(1) + B(8) + C(8)
-        assert_eq!(Instruction::SIZE_AX, 25);  // BX(17) + A(8)
-        assert_eq!(Instruction::SIZE_SJ, 25);  // same as AX
+        assert_eq!(Instruction::SIZE_BX, 17); // K(1) + B(8) + C(8)
+        assert_eq!(Instruction::SIZE_AX, 25); // BX(17) + A(8)
+        assert_eq!(Instruction::SIZE_SJ, 25); // same as AX
     }
 
     #[test]
@@ -501,10 +501,10 @@ mod tests {
         // Test sB field (signed B, range -128 to 127)
         let pos_instr = Instruction::create_abc(OpCode::EqI, 0, 128 + 10, 0);
         assert_eq!(Instruction::get_sb(pos_instr), 10);
-        
+
         let neg_instr = Instruction::create_abc(OpCode::EqI, 0, 128 - 10, 0);
         assert_eq!(Instruction::get_sb(neg_instr), -10);
-        
+
         let zero_instr = Instruction::create_abc(OpCode::EqI, 0, 128, 0);
         assert_eq!(Instruction::get_sb(zero_instr), 0);
     }
@@ -514,10 +514,10 @@ mod tests {
         // Test sC field (signed C, range -127 to 128)
         let pos_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127 + 10);
         assert_eq!(Instruction::get_sc(pos_instr), 10);
-        
+
         let neg_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127 - 10);
         assert_eq!(Instruction::get_sc(neg_instr), -10);
-        
+
         let zero_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127);
         assert_eq!(Instruction::get_sc(zero_instr), 0);
     }

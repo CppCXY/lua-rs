@@ -53,7 +53,7 @@ fn is_scnumber(e: &ExpDesc, pi: &mut i32, isfloat: &mut bool) -> bool {
 // Convert a constant value to an expression
 fn const_to_exp(value: crate::lua_value::LuaValue, e: &mut ExpDesc) {
     use crate::lua_value::LuaValueKind;
-    
+
     match value.kind() {
         LuaValueKind::Integer => {
             e.kind = ExpKind::VKINT;
@@ -907,14 +907,7 @@ fn codeconcat(fs: &mut FuncState, e1: &mut ExpDesc, e2: &mut ExpDesc) {
 // Port of codeeq from lcode.c:1585-1612
 // Emit code for equality comparisons ('==', '~=')
 // 'e1' was already put as RK by 'luaK_infix'
-fn codeeq(
-    fs: &mut FuncState,
-    op: crate::compiler::parser::BinaryOperator,
-    e1: &mut ExpDesc,
-    e2: &mut ExpDesc,
-) {
-    use crate::compiler::parser::BinaryOperator;
-
+fn codeeq(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     let r1: u32;
     let r2: u32;
     let mut im: i32 = 0;
@@ -958,12 +951,7 @@ fn codeeq(
 // Port of codeorder from lcode.c:1553-1581
 // Emit code for order comparisons. When using an immediate operand,
 // 'isfloat' tells whether the original value was a float.
-fn codeorder(
-    fs: &mut FuncState,
-    op: BinaryOperator,
-    e1: &mut ExpDesc,
-    e2: &mut ExpDesc,
-) {
+fn codeorder(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     let r1: u32;
     let r2: u32;
     let mut im: i32 = 0;
@@ -1014,13 +1002,8 @@ fn codeorder(
 
 // Port of luaK_posfix from lcode.c:1706-1783
 // void luaK_posfix (FuncState *fs, BinOpr opr, expdesc *e1, expdesc *e2, int line)
-pub fn posfix(
-    fs: &mut FuncState,
-    op: crate::compiler::parser::BinaryOperator,
-    e1: &mut ExpDesc,
-    e2: &mut ExpDesc,
-) {
-    use crate::compiler::parser::BinaryOperator;
+pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+    use BinaryOperator;
 
     discharge_vars(fs, e2);
 

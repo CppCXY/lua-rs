@@ -330,7 +330,9 @@ fn math_randomseed(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         } else if let Some(n) = arg.as_number() {
             n as u64
         } else {
-            return Err(vm.error("bad argument #1 to 'math.randomseed' (number expected)".to_string()));
+            return Err(
+                vm.error("bad argument #1 to 'math.randomseed' (number expected)".to_string())
+            );
         }
     } else {
         // No argument - use time-based seed
@@ -339,14 +341,18 @@ fn math_randomseed(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x853c49e6748fea9b_u64)
     };
-    
+
     // Seed the random state
     RANDOM_STATE.with(|state| {
         // Ensure seed is non-zero for xorshift
-        let s = if seed == 0 { 0x853c49e6748fea9b_u64 } else { seed };
+        let s = if seed == 0 {
+            0x853c49e6748fea9b_u64
+        } else {
+            seed
+        };
         state.set(s);
     });
-    
+
     // Lua 5.4 returns two values from randomseed
     Ok(MultiValue::multiple(vec![
         LuaValue::integer((seed >> 32) as i64),
@@ -415,14 +421,14 @@ fn float_to_integer(f: f64) -> LuaValue {
     // The closest f64 values are:
     // - i64::MIN as f64 = -9223372036854775808.0 (exact)
     // - i64::MAX as f64 = 9223372036854776000.0 (rounded up!)
-    // 
+    //
     // So we check: f >= i64::MIN as f64 AND f < (i64::MAX as f64 + 1.0)
     // But since i64::MAX can't be exactly represented, we use a different check:
     // f must be in the range where f as i64 doesn't overflow
-    const MIN_F: f64 = i64::MIN as f64;  // -9223372036854775808.0
+    const MIN_F: f64 = i64::MIN as f64; // -9223372036854775808.0
     // i64::MAX + 1 = 9223372036854775808 which is exactly representable as f64
-    const MAX_PLUS_ONE: f64 = 9223372036854775808.0;  // 2^63
-    
+    const MAX_PLUS_ONE: f64 = 9223372036854775808.0; // 2^63
+
     if f >= MIN_F && f < MAX_PLUS_ONE {
         let i = f as i64;
         // Verify the conversion is exact

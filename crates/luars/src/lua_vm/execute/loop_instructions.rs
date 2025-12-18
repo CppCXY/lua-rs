@@ -315,11 +315,11 @@ pub fn exec_tforcall(
                 // Common case: 0-2 values
                 unsafe {
                     if c >= 1 {
-                        *vm.register_stack.get_unchecked_mut(result_base) = 
+                        *vm.register_stack.get_unchecked_mut(result_base) =
                             result.first().unwrap_or(LuaValue::nil());
                     }
                     if c >= 2 {
-                        *vm.register_stack.get_unchecked_mut(result_base + 1) = 
+                        *vm.register_stack.get_unchecked_mut(result_base + 1) =
                             result.second().unwrap_or(LuaValue::nil());
                     }
                     // Fill any remaining slots with nil

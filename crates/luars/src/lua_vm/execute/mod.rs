@@ -99,7 +99,7 @@ pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
                 (*frame_ptr).top = 0;
             }
         }
-        
+
         match opcode {
             // ============ HOT PATH: Inline simple instructions (< 10 lines) ============
 

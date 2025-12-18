@@ -21,14 +21,14 @@ fn main() {
     };
 
     let mut vm = LuaVM::new();
-    
+
     // Create chunk name with @ prefix like Lua
     let chunk_name = if filename.starts_with('@') {
         filename.clone()
     } else {
         format!("@{}", filename)
     };
-    
+
     match vm.compile_with_name(&source, &chunk_name) {
         Ok(chunk) => {
             dump_chunk(&chunk, &filename, 0, 0, true, &vm);
@@ -80,27 +80,37 @@ fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
     }
 }
 
-fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined: usize, is_main: bool, vm: &LuaVM) {
+fn dump_chunk(
+    chunk: &Chunk,
+    filename: &str,
+    linedefined: usize,
+    lastlinedefined: usize,
+    is_main: bool,
+    vm: &LuaVM,
+) {
     // Format: main <file:line,line> or function <file:line,line>
     let func_name = if is_main {
         format!("main <{}:0,0>", filename)
     } else {
-        format!("function <{}:{},{}>", filename, linedefined, lastlinedefined)
+        format!(
+            "function <{}:{},{}>",
+            filename, linedefined, lastlinedefined
+        )
     };
-    
+
     // Calculate instruction count
     let ninstr = chunk.code.len();
-    
+
     // Format param info (0+ for vararg, or just number)
     let param_str = if chunk.is_vararg {
         format!("{}+", chunk.param_count)
     } else {
         format!("{}", chunk.param_count)
     };
-    
+
     // Print header like luac: name (ninstr instructions)
     println!("\n{} ({} instructions)", func_name, ninstr);
-    
+
     // Print meta info
     println!(
         "{} params, {} slots, {} upvalue{}, {} local{}, {} constant{}, {} function{}",
@@ -113,7 +123,11 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
         chunk.constants.len(),
         if chunk.constants.len() != 1 { "s" } else { "" },
         chunk.child_protos.len(),
-        if chunk.child_protos.len() != 1 { "s" } else { "" }
+        if chunk.child_protos.len() != 1 {
+            "s"
+        } else {
+            ""
+        }
     );
 
     for (pc, &instr) in chunk.code.iter().enumerate() {
@@ -124,14 +138,14 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
         let bx = Instruction::get_bx(instr);
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
-        
+
         // Get line number for this instruction (luac format)
         let line = if pc < chunk.line_info.len() {
             chunk.line_info[pc]
         } else {
             0
         };
-        
+
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
             OpCode::Vararg => format!("VARARG {} {}", a, b),
@@ -267,7 +281,7 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
             OpCode::ExtraArg => format!("EXTRAARG {}", bx),
             OpCode::Tbc => format!("TBC {}", a),
             OpCode::Close => format!("CLOSE {}", a),
-            
+
             // Bitwise operations
             OpCode::BAnd => format!("BAND {} {} {}", a, b, c),
             OpCode::BOr => format!("BOR {} {} {}", a, b, c),
@@ -275,7 +289,7 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
             OpCode::Shl => format!("SHL {} {} {}", a, b, c),
             OpCode::Shr => format!("SHR {} {} {}", a, b, c),
             OpCode::BNot => format!("BNOT {} {}", a, b),
-            
+
             // Bitwise with constant
             OpCode::BAndK => format!("BANDK {} {} {}", a, b, c),
             OpCode::BOrK => format!("BORK {} {} {}", a, b, c),
@@ -288,7 +302,7 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
                 let sc = Instruction::get_sc(instr);
                 format!("SHLI {} {} {}", a, b, sc)
             }
-            
+
             // Load float/boolean
             OpCode::LoadF => {
                 // LOADF loads a float from sBx field
@@ -298,14 +312,14 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
             OpCode::LoadFalse => format!("LOADFALSE {}", a),
             OpCode::LoadTrue => format!("LOADTRUE {}", a),
             OpCode::LFalseSkip => format!("LFALSESKIP {}", a),
-            
+
             // Test instructions (iAk format)
             OpCode::Test => format!("TEST {} {}", a, k as u32),
             OpCode::TestSet => format!("TESTSET {} {} {}", a, b, k as u32),
-            
+
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
-        
+
         // Add comment for some instructions (like luac)
         let comment = match opcode {
             OpCode::GetTabUp | OpCode::SetTabUp => {
@@ -345,13 +359,13 @@ fn dump_chunk(chunk: &Chunk, filename: &str, linedefined: usize, lastlinedefined
                 };
                 format!(" ; {}", nret)
             }
-            _ => String::new()
+            _ => String::new(),
         };
 
         // Print instruction in luac format: [line] OPCODE args ; comment
         println!("\t{}\t[{}]\t{}{}", pc + 1, line, detail, comment);
     }
-    
+
     // Flush stdout to ensure all output is written
     use std::io::Write;
     std::io::stdout().flush().ok();

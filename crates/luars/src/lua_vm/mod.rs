@@ -10,7 +10,7 @@ use crate::gc::{FunctionId, GC, GcFunction, GcId, TableId, ThreadId, UpvalueId};
 #[cfg(feature = "async")]
 use crate::lua_async::AsyncExecutor;
 use crate::lua_value::{
-    tm_flags, Chunk, CoroutineStatus, LuaString, LuaTable, LuaThread, LuaValue, LuaValueKind
+    Chunk, CoroutineStatus, LuaString, LuaTable, LuaThread, LuaValue, LuaValueKind, tm_flags,
 };
 pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
 pub use crate::lua_vm::lua_error::LuaError;
@@ -710,7 +710,11 @@ impl LuaVM {
 
         // Execute
         let result = if is_first_resume {
-            let func = self.register_stack.get(0).cloned().unwrap_or(LuaValue::nil());
+            let func = self
+                .register_stack
+                .get(0)
+                .cloned()
+                .unwrap_or(LuaValue::nil());
             match self.call_function_internal(func, args) {
                 Ok(values) => Ok(values),
                 Err(LuaError::Yield) => Ok(self.take_yield_values()),
@@ -855,7 +859,7 @@ impl LuaVM {
     /// Returns Err(LuaError::Yield) which will be caught by run() loop
     pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
         if let Some(thread_id) = self.current_thread_id {
-            // Store yield values in the thread  
+            // Store yield values in the thread
             if let Some(thread) = self.object_pool.get_thread_mut(thread_id) {
                 // Avoid clone - move directly
                 thread.yield_values = values;

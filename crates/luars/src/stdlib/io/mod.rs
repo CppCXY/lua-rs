@@ -1,8 +1,8 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 
-use crate::lib_registry::{LibraryModule, LibraryEntry, get_arg, get_args, require_arg};
-use crate::lua_value::{LuaValue, LuaUserdata, MultiValue};
+use crate::lib_registry::{LibraryEntry, LibraryModule, get_arg, get_args, require_arg};
+use crate::lua_value::{LuaUserdata, LuaValue, MultiValue};
 use crate::lua_vm::{LuaResult, LuaVM};
 use std::io::{self, BufRead, Write};
 
@@ -11,25 +11,53 @@ pub use file::{LuaFile, create_file_metatable};
 
 pub fn create_io_lib() -> LibraryModule {
     let mut module = LibraryModule::new("io");
-    
+
     // Functions
-    module.entries.push(("write", LibraryEntry::Function(io_write)));
-    module.entries.push(("read", LibraryEntry::Function(io_read)));
-    module.entries.push(("flush", LibraryEntry::Function(io_flush)));
-    module.entries.push(("open", LibraryEntry::Function(io_open)));
-    module.entries.push(("lines", LibraryEntry::Function(io_lines)));
-    module.entries.push(("input", LibraryEntry::Function(io_input)));
-    module.entries.push(("output", LibraryEntry::Function(io_output)));
-    module.entries.push(("type", LibraryEntry::Function(io_type)));
-    module.entries.push(("tmpfile", LibraryEntry::Function(io_tmpfile)));
-    module.entries.push(("close", LibraryEntry::Function(io_close)));
-    module.entries.push(("popen", LibraryEntry::Function(io_popen)));
-    
+    module
+        .entries
+        .push(("write", LibraryEntry::Function(io_write)));
+    module
+        .entries
+        .push(("read", LibraryEntry::Function(io_read)));
+    module
+        .entries
+        .push(("flush", LibraryEntry::Function(io_flush)));
+    module
+        .entries
+        .push(("open", LibraryEntry::Function(io_open)));
+    module
+        .entries
+        .push(("lines", LibraryEntry::Function(io_lines)));
+    module
+        .entries
+        .push(("input", LibraryEntry::Function(io_input)));
+    module
+        .entries
+        .push(("output", LibraryEntry::Function(io_output)));
+    module
+        .entries
+        .push(("type", LibraryEntry::Function(io_type)));
+    module
+        .entries
+        .push(("tmpfile", LibraryEntry::Function(io_tmpfile)));
+    module
+        .entries
+        .push(("close", LibraryEntry::Function(io_close)));
+    module
+        .entries
+        .push(("popen", LibraryEntry::Function(io_popen)));
+
     // Standard streams
-    module.entries.push(("stdin", LibraryEntry::Value(create_stdin)));
-    module.entries.push(("stdout", LibraryEntry::Value(create_stdout)));
-    module.entries.push(("stderr", LibraryEntry::Value(create_stderr)));
-    
+    module
+        .entries
+        .push(("stdin", LibraryEntry::Value(create_stdin)));
+    module
+        .entries
+        .push(("stdout", LibraryEntry::Value(create_stdout)));
+    module
+        .entries
+        .push(("stderr", LibraryEntry::Value(create_stderr)));
+
     module
 }
 

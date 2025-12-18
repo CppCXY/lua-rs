@@ -1,9 +1,9 @@
 // Lua 5.4 compatible value representation
 // 16 bytes, no pointer caching, all GC objects accessed via ID
+pub mod chunk_serializer;
 mod lua_table;
 mod lua_thread;
 mod lua_value;
-pub mod chunk_serializer;
 
 use crate::LuaVM;
 use crate::lua_vm::LuaResult;

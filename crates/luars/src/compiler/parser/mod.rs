@@ -10,7 +10,7 @@ mod reader;
 mod text_range;
 
 pub use crate::compiler::parser::{
-    error::LuaParseError, lexer::LuaLexer, lua_language_level::LuaLanguageLevel,
+    lexer::LuaLexer, lexer_config::LexerConfig, lua_language_level::LuaLanguageLevel,
     lua_operator_kind::*, lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind,
     parser_config::ParserConfig, reader::Reader, text_range::SourceRange,
 };
@@ -21,20 +21,12 @@ pub struct LuaParser<'a> {
     token_index: usize,
     current_token: LuaTokenKind,
     pub parse_config: ParserConfig,
-    #[allow(unused)]
-    pub(crate) errors: Vec<LuaParseError>,
     pub line: usize,
 }
 
 impl<'a> LuaParser<'a> {
-    pub fn new(text: &'a str, level: LuaLanguageLevel) -> LuaParser<'a> {
-        let mut errors: Vec<LuaParseError> = Vec::new();
+    pub fn new(text: &'a str, tokens: Vec<LuaTokenData>, level: LuaLanguageLevel) -> LuaParser<'a> {
         let config = ParserConfig::new(level);
-        let tokens = {
-            let mut lexer =
-                LuaLexer::new(Reader::new(text), config.lexer_config(), Some(&mut errors));
-            lexer.tokenize()
-        };
 
         let mut parser = LuaParser {
             text,
@@ -42,7 +34,6 @@ impl<'a> LuaParser<'a> {
             token_index: 0,
             current_token: LuaTokenKind::None,
             parse_config: config,
-            errors,
             line: 1,
         };
 
@@ -109,8 +100,12 @@ impl<'a> LuaParser<'a> {
     }
 
     pub fn current_token_text(&self) -> &str {
-        let range = &self.tokens[self.token_index].range;
-        &self.text[range.start_offset..range.end_offset()]
+        if self.token_index < self.tokens.len() {
+            let range = &self.tokens[self.token_index].range;
+            &self.text[range.start_offset..range.end_offset()]
+        } else {
+            "<eof>"
+        }
     }
 
     pub fn set_current_token_kind(&mut self, kind: LuaTokenKind) {

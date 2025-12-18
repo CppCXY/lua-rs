@@ -1,6 +1,5 @@
 use crate::compiler::parser::lua_language_level::LuaLanguageLevel;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexerConfig {
     pub language_level: LuaLanguageLevel,

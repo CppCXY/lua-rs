@@ -169,19 +169,19 @@ pub fn exec_vararg(
     };
 
     let dest_base = base_ptr + a;
-    
+
     // Calculate actual copy count
     let actual_copy_count = if c == 0 {
         vararg_count
     } else {
         (c - 1).min(vararg_count)
     };
-    
+
     // Check for overlap between source (vararg_start..vararg_start+actual_copy_count)
     // and destination (dest_base..dest_base+actual_copy_count)
     let dest_end = dest_base + actual_copy_count;
     let src_end = vararg_start + actual_copy_count;
-    
+
     // Case 1: Complete overlap (dest == src) - data is already in place!
     // This happens when max_stack_size equals the VARARG target register.
     // Just update top and return.
@@ -205,7 +205,7 @@ pub fn exec_vararg(
         }
         return Ok(());
     }
-    
+
     // Case 2: Partial overlap - need to handle carefully
     let has_overlap = actual_copy_count > 0 && !(dest_end <= vararg_start || src_end <= dest_base);
 
@@ -224,7 +224,7 @@ pub fn exec_vararg(
                 vm.register_stack[dest_base + i] = vm.register_stack[vararg_start + i];
             }
         }
-        
+
         if c == 0 {
             let new_top = a + vararg_count;
             unsafe {
@@ -240,7 +240,7 @@ pub fn exec_vararg(
         }
         return Ok(());
     }
-    
+
     // Case 3: No overlap - fast path
     let reg_ptr = vm.register_stack.as_mut_ptr();
 
