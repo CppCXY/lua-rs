@@ -1126,19 +1126,10 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 };
                 code_abc(fs, OpCode::MmBinK, r1 as u32, k_idx as u32, tm_event as u32);
             } else {
-                // Both operands in registers (codebinNoK behavior)
-                let old_free = fs.freereg;
-
-                let o1 = exp2anyreg(fs, e1);
+                // Both operands in registers - port of codebinexpval (lcode.c:1425-1434)
                 let o2 = exp2anyreg(fs, e2);
-
-                free_reg(fs, o2);
-                free_reg(fs, o1);
-
-                fs.freereg = old_free;
-                let res = fs.freereg;
-                reserve_regs(fs, 1);
-
+                
+                // Determine instruction opcode
                 let opcode = match op {
                     BinaryOperator::OpAdd => OpCode::Add,
                     BinaryOperator::OpSub => OpCode::Sub,
@@ -1155,10 +1146,37 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     _ => unreachable!("Invalid operator for opcode generation"),
                 };
 
-                code_abc(fs, opcode, res as u32, o1 as u32, o2 as u32);
-
-                e1.kind = ExpKind::VNONRELOC;
-                e1.u.info = res as i32;
+                // Port of finishbinexpval from lcode.c:1407-1418
+                // Generate instruction with A=0, will be fixed by discharge2reg
+                let o1 = exp2anyreg(fs, e1);
+                let pc = code_abc(fs, opcode, 0, o1 as u32, o2 as u32);
+                
+                // Free both operands (freeexps)
+                free_exp(fs, e1);
+                free_exp(fs, e2);
+                
+                // Mark as relocatable
+                e1.kind = ExpKind::VRELOC;
+                e1.u.info = pc as i32;
+                
+                // Generate metamethod fallback instruction (MMBIN)
+                // Like finishbinexpval in lcode.c:1416
+                let tm_event = match op {
+                    BinaryOperator::OpAdd => TmKind::Add,
+                    BinaryOperator::OpSub => TmKind::Sub,
+                    BinaryOperator::OpMul => TmKind::Mul,
+                    BinaryOperator::OpMod => TmKind::Mod,
+                    BinaryOperator::OpPow => TmKind::Pow,
+                    BinaryOperator::OpDiv => TmKind::Div,
+                    BinaryOperator::OpIDiv => TmKind::IDiv,
+                    BinaryOperator::OpBAnd => TmKind::Band,
+                    BinaryOperator::OpBOr => TmKind::Bor,
+                    BinaryOperator::OpBXor => TmKind::Bxor,
+                    BinaryOperator::OpShl => TmKind::Shl,
+                    BinaryOperator::OpShr => TmKind::Shr,
+                    _ => TmKind::N,
+                };
+                code_abc(fs, OpCode::MmBin, o1 as u32, o2 as u32, tm_event as u32);
             }
         }
     }

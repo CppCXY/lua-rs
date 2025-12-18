@@ -396,8 +396,14 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     fs.lexer.bump();
 
     // lparser.c:818: luaK_indexed(fs, v, &key);
+    // Create a string constant key
     let idx = string_k(fs, field);
-    *v = ExpDesc::new_indexed(unsafe { v.u.info as u8 }, idx as u8);
+    let mut key = ExpDesc::new_void();
+    key.kind = ExpKind::VK;
+    key.u.info = idx as i32;
+    
+    // Call indexed to determine correct index type (VINDEXSTR vs VINDEXED)
+    code::indexed(fs, v, &mut key);
 
     Ok(())
 }
