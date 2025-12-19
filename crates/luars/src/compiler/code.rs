@@ -1586,7 +1586,8 @@ fn is_cint(e: &ExpDesc) -> bool {
 
 // Port of luaK_self from lcode.c:1087-1097
 // void luaK_self (FuncState *fs, expdesc *e, expdesc *key)
-pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key_idx: u8) {
+pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
+    // Port of luaK_self from lcode.c:1087-1097
     let ereg = exp2anyreg(fs, e);
     free_exp(fs, e);
 
@@ -1596,7 +1597,9 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key_idx: u8) {
     reserve_regs(fs, 2); // function and 'self'
 
     // SELF A B C: R(A+1) := R(B); R(A) := R(B)[RK(C)]
-    code_abc(fs, OpCode::Self_, base as u32, ereg as u32, key_idx as u32);
+    // Use code_abrk to support constant keys
+    code_abrk(fs, OpCode::Self_, base as u32, ereg as u32, key);
+    free_exp(fs, key);
 }
 
 // Port of luaK_setmultret - set call/vararg to return multiple values

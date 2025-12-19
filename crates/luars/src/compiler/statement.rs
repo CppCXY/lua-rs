@@ -1061,44 +1061,43 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
             );
         }
         ExpKind::VINDEXED => {
-            let op = OpCode::SetTable;
-            let e = code::exp2anyreg(fs, ex);
-            code::code_abc(
+            // Use code_abrk to support RK operand (register or constant)
+            code::code_abrk(
                 fs,
-                op,
+                OpCode::SetTable,
                 unsafe { var.u.ind.t as u32 },
                 unsafe { var.u.ind.idx as u32 },
-                e as u32,
+                ex,
             );
         }
         ExpKind::VINDEXUP => {
-            let e = code::exp2anyreg(fs, ex);
-            code::code_abc(
+            // Use code_abrk to support RK operand (register or constant)
+            code::code_abrk(
                 fs,
                 OpCode::SetTabUp,
                 unsafe { var.u.ind.t as u32 },
                 unsafe { var.u.ind.idx as u32 },
-                e as u32,
+                ex,
             );
         }
         ExpKind::VINDEXI => {
-            let e = code::exp2anyreg(fs, ex);
-            code::code_abc(
+            // Use code_abrk to support RK operand (register or constant)
+            code::code_abrk(
                 fs,
                 OpCode::SetI,
                 unsafe { var.u.ind.t as u32 },
                 unsafe { var.u.ind.idx as u32 },
-                e as u32,
+                ex,
             );
         }
         ExpKind::VINDEXSTR => {
-            let e = code::exp2anyreg(fs, ex);
-            code::code_abc(
+            // Use code_abrk to support RK operand (register or constant)
+            code::code_abrk(
                 fs,
                 OpCode::SetField,
                 unsafe { var.u.ind.t as u32 },
                 unsafe { var.u.ind.idx as u32 },
-                e as u32,
+                ex,
             );
         }
         _ => {

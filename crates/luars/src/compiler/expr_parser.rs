@@ -1,6 +1,6 @@
 // Expression parsing - Port from lparser.c (Lua 5.4.8)
 // This file corresponds to expression parsing parts of lua-5.4.8/src/lparser.c
-use crate::compiler::expression::{ExpDesc, ExpKind};
+use crate::compiler::expression::{ExpDesc, ExpKind, ExpUnion};
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parse_literal::{
     NumberResult, parse_float_token_value, parse_int_token_value, parse_string_token_value,
@@ -225,8 +225,18 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
                 // self:method(...) is sugar for self.method(self, ...)
                 // Generate SELF instruction
-                let key_idx = string_k(fs, method_name);
-                code::self_op(fs, v, key_idx as u8);
+                // Create VKSTR expression for the method name
+                // Note: In official Lua, codestring sets e->u.strval = s, then exp2K
+                // calls stringK. But our ExpUnion doesn't have strval, so we call
+                // string_k directly here and create VK instead of VKSTR.
+                let k_idx = string_k(fs, method_name);
+                let mut key = ExpDesc {
+                    kind: ExpKind::VK,
+                    u: ExpUnion { info: k_idx as i32 },
+                    t: -1,
+                    f: -1,
+                };
+                code::self_op(fs, v, &mut key);
 
                 funcargs(fs, v)?;
             }
