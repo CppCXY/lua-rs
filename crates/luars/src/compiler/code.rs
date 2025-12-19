@@ -430,10 +430,15 @@ pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExpDesc) -> u8 {
 // Port of exp2reg from lcode.c:915-938
 // static void exp2reg (FuncState *fs, expdesc *e, int reg)
 pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
+    // lcode.c:918: must check VJMP BEFORE discharge2reg, as it changes the kind!
+    let was_vjmp = e.kind == ExpKind::VJMP;
+    let vjmp_info = if was_vjmp { unsafe { e.u.info as isize } } else { -1 };
+    
     discharge2reg(fs, e, reg);
-    if e.kind == ExpKind::VJMP {
-        // lcode.c:918: expression itself is a test
-        concat(fs, &mut e.t, unsafe { e.u.info as isize });
+    
+    if was_vjmp {
+        // expression itself is a test - put this jump in 't' list
+        concat(fs, &mut e.t, vjmp_info);
     }
     if e.has_jumps() {
         // lcode.c:919-934: need to patch jump lists
@@ -442,7 +447,8 @@ pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
 
         if need_value(fs, e.t) || need_value(fs, e.f) {
             // lcode.c:922-926
-            let fj = if e.kind == ExpKind::VJMP {
+            // Note: must use was_vjmp, not e.kind, because discharge2reg already changed it!
+            let fj = if was_vjmp {
                 -1
             } else {
                 jump(fs) as isize
@@ -1101,7 +1107,7 @@ fn foldbinop(op: BinaryOperator) -> bool {
 
 // Check if folding operation is valid and won't raise errors
 // Port of validop from lcode.c:1316-1330
-fn validop(op: BinaryOperator, v1: f64, i1: i64, is_int1: bool, v2: f64, i2: i64, is_int2: bool) -> bool {
+fn validop(op: BinaryOperator, _v1: f64, _i1: i64, is_int1: bool, v2: f64, i2: i64, is_int2: bool) -> bool {
     use BinaryOperator::*;
     match op {
         // Bitwise operations need integer-convertible operands
@@ -1123,7 +1129,7 @@ fn validop(op: BinaryOperator, v1: f64, i1: i64, is_int1: bool, v2: f64, i2: i64
 
 // Try to constant-fold a binary operation
 // Port of constfolding from lcode.c:1337-1356
-fn constfolding(fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
+fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
     use BinaryOperator::*;
     use ExpKind::{VKFLT, VKINT};
     

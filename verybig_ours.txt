@@ -1,0 +1,505 @@
+
+main <lua_tests\testes\verybig.lua:0,0> (69 instructions)
+0+ params, 13 slots, 1 upvalue, 12 locals, 19 constants, 5 functions
+	1	[1]	VARARGPREP 0	
+	2	[4]	GETTABUP 0 0 0	 ; _ENV "print"
+	3	[7]	LOADK 1 1	 ; "testing RK"
+	4	[7]	CALL 0 2 1	 ; 1 in 0 out
+	5	[47]	CLOSURE 0 0	 ; function_0
+	6	[47]	MOVE 1 0	
+	7	[48]	CALL 1 1 1	 ; 0 in 0 out
+	8	[50]	LOADNIL 0 0	 ; 1 out
+	9	[50]	GETTABUP 1 0 2	 ; _ENV "_soft"
+	10	[50]	TEST 1 0	
+	11	[50]	JMP 2	
+	12	[50]	LOADI 1 10	
+	13	[50]	RETURN 1 2 1k	 ; 0 out
+	14	[52]	GETTABUP 1 0 0	 ; _ENV "print"
+	15	[55]	LOADK 2 3	 ; "testing large programs (>64k)"
+	16	[55]	CALL 1 2 1	 ; 1 in 0 out
+	17	[59]	LOADK 1 4	 ; "$\r\n\r\nlocal a,b\r\n\r\nb = {$1$\r\n  b30009 = 65534,\r\n  b30 ..."
+	18	[63]	CLOSURE 2 1	 ; function_1
+	19	[64]	NEWTABLE 3 0 3	
+	20	[64]	EXTRAARG 0	
+	21	[68]	CLOSURE 4 2	 ; function_2
+	22	[74]	CLOSURE 5 3	 ; function_3
+	23	[80]	CLOSURE 6 4	 ; function_4
+	24	[83]	SETLIST 3 3 0	
+	25	[83]	GETTABUP 4 0 5	 ; _ENV "os"
+	26	[83]	GETFIELD 4 4 6	 ; "tmpname"
+	27	[84]	CALL 4 1 2	 ; 0 in 1 out
+	28	[84]	GETTABUP 5 0 7	 ; _ENV "io"
+	29	[84]	GETFIELD 5 5 8	 ; "output"
+	30	[85]	MOVE 6 4	
+	31	[85]	CALL 5 2 1	 ; 1 in 0 out
+	32	[85]	GETTABUP 5 0 9	 ; _ENV "string"
+	33	[85]	GETFIELD 5 5 10	 ; "gmatch"
+	34	[85]	MOVE 6 1	
+	35	[85]	LOADK 7 11	 ; "$([^$]+)"
+	36	[85]	CALL 5 3 5	 ; 2 in 4 out
+	37	[86]	TFORPREP 5 12	
+	38	[86]	GETTABUP 10 0 12	 ; _ENV "tonumber"
+	39	[87]	MOVE 11 9	
+	40	[87]	CALL 10 2 2	 ; 1 in 1 out
+	41	[87]	TEST 10 1	
+	42	[87]	JMP 5	
+	43	[87]	GETTABUP 11 0 7	 ; _ENV "io"
+	44	[87]	GETFIELD 11 11 13	 ; "write"
+	45	[87]	MOVE 12 9	
+	46	[87]	CALL 11 2 1	 ; 1 in 0 out
+	47	[87]	JMP 2	
+	48	[87]	GETTABLE 11 3 10	
+	49	[87]	CALL 11 1 1	 ; 0 in 0 out
+	50	[87]	TFORCALL 5 1	
+	51	[88]	TFORLOOP 5 14	
+	52	[88]	CLOSE 5	
+	53	[89]	GETTABUP 5 0 7	 ; _ENV "io"
+	54	[89]	GETFIELD 5 5 14	 ; "close"
+	55	[89]	CALL 5 1 1	 ; 0 in 0 out
+	56	[90]	GETTABUP 5 0 15	 ; _ENV "dofile"
+	57	[90]	MOVE 6 4	
+	58	[91]	CALL 5 2 2	 ; 1 in 1 out
+	59	[91]	GETTABUP 6 0 16	 ; _ENV "assert"
+	60	[91]	GETTABUP 7 0 5	 ; _ENV "os"
+	61	[91]	GETFIELD 7 7 17	 ; "remove"
+	62	[91]	MOVE 8 4	
+	63	[91]	CALL 7 2 0	 ; 1 in all out
+	64	[91]	CALL 6 0 1	 ; all in 0 out
+	65	[92]	GETTABUP 6 0 0	 ; _ENV "print"
+	66	[92]	LOADK 7 18	 ; "OK"
+	67	[93]	CALL 6 2 1	 ; 1 in 0 out
+	68	[93]	RETURN 5 2 1k	 ; 0 out
+	69	[95]	RETURN 6 1 1k	 ; 0 out
+
+function <lua_tests\testes\verybig.lua:7,44> (314 instructions)
+0 params, 51 slots, 1 upvalue, 2 locals, 10 constants, 2 functions
+	1	[10]	NEWTABLE 0 0 0	
+	2	[10]	EXTRAARG 1	
+	3	[10]	LOADI 1 1	
+	4	[10]	LOADI 2 2	
+	5	[10]	LOADI 3 3	
+	6	[10]	LOADI 4 4	
+	7	[10]	LOADI 5 5	
+	8	[10]	LOADI 6 6	
+	9	[10]	LOADI 7 7	
+	10	[10]	LOADI 8 8	
+	11	[10]	LOADI 9 9	
+	12	[10]	LOADI 10 10	
+	13	[10]	LOADI 11 11	
+	14	[10]	LOADI 12 12	
+	15	[10]	LOADI 13 13	
+	16	[10]	LOADI 14 14	
+	17	[10]	LOADI 15 15	
+	18	[11]	LOADI 16 16	
+	19	[11]	LOADI 17 17	
+	20	[11]	LOADI 18 18	
+	21	[11]	LOADI 19 19	
+	22	[11]	LOADI 20 20	
+	23	[11]	LOADI 21 21	
+	24	[11]	LOADI 22 22	
+	25	[11]	LOADI 23 23	
+	26	[11]	LOADI 24 24	
+	27	[11]	LOADI 25 25	
+	28	[11]	LOADI 26 26	
+	29	[11]	LOADI 27 27	
+	30	[11]	LOADI 28 28	
+	31	[11]	LOADI 29 29	
+	32	[11]	LOADI 30 30	
+	33	[11]	LOADI 31 31	
+	34	[12]	LOADI 32 32	
+	35	[12]	LOADI 33 33	
+	36	[12]	LOADI 34 34	
+	37	[12]	LOADI 35 35	
+	38	[12]	LOADI 36 36	
+	39	[12]	LOADI 37 37	
+	40	[12]	LOADI 38 38	
+	41	[12]	LOADI 39 39	
+	42	[12]	LOADI 40 40	
+	43	[12]	LOADI 41 41	
+	44	[12]	LOADI 42 42	
+	45	[12]	LOADI 43 43	
+	46	[12]	LOADI 44 44	
+	47	[12]	LOADI 45 45	
+	48	[12]	LOADI 46 46	
+	49	[12]	LOADI 47 47	
+	50	[13]	LOADI 48 48	
+	51	[13]	LOADI 49 49	
+	52	[13]	LOADI 50 50	
+	53	[13]	SETLIST 0 50 0	
+	54	[13]	LOADI 1 51	
+	55	[13]	LOADI 2 52	
+	56	[13]	LOADI 3 53	
+	57	[13]	LOADI 4 54	
+	58	[13]	LOADI 5 55	
+	59	[13]	LOADI 6 56	
+	60	[13]	LOADI 7 57	
+	61	[13]	LOADI 8 58	
+	62	[13]	LOADI 9 59	
+	63	[13]	LOADI 10 60	
+	64	[13]	LOADI 11 61	
+	65	[13]	LOADI 12 62	
+	66	[13]	LOADI 13 63	
+	67	[14]	LOADI 14 64	
+	68	[14]	LOADI 15 65	
+	69	[14]	LOADI 16 66	
+	70	[14]	LOADI 17 67	
+	71	[14]	LOADI 18 68	
+	72	[14]	LOADI 19 69	
+	73	[14]	LOADI 20 70	
+	74	[14]	LOADI 21 71	
+	75	[14]	LOADI 22 72	
+	76	[14]	LOADI 23 73	
+	77	[14]	LOADI 24 74	
+	78	[14]	LOADI 25 75	
+	79	[14]	LOADI 26 76	
+	80	[14]	LOADI 27 77	
+	81	[14]	LOADI 28 78	
+	82	[14]	LOADI 29 79	
+	83	[15]	LOADI 30 80	
+	84	[15]	LOADI 31 81	
+	85	[15]	LOADI 32 82	
+	86	[15]	LOADI 33 83	
+	87	[15]	LOADI 34 84	
+	88	[15]	LOADI 35 85	
+	89	[15]	LOADI 36 86	
+	90	[15]	LOADI 37 87	
+	91	[15]	LOADI 38 88	
+	92	[15]	LOADI 39 89	
+	93	[15]	LOADI 40 90	
+	94	[15]	LOADI 41 91	
+	95	[15]	LOADI 42 92	
+	96	[15]	LOADI 43 93	
+	97	[15]	LOADI 44 94	
+	98	[15]	LOADI 45 95	
+	99	[16]	LOADI 46 96	
+	100	[16]	LOADI 47 97	
+	101	[16]	LOADI 48 98	
+	102	[16]	LOADI 49 99	
+	103	[16]	LOADI 50 100	
+	104	[16]	SETLIST 0 50 50	
+	105	[16]	LOADI 1 101	
+	106	[16]	LOADI 2 102	
+	107	[16]	LOADI 3 103	
+	108	[17]	LOADI 4 104	
+	109	[17]	LOADI 5 105	
+	110	[17]	LOADI 6 106	
+	111	[17]	LOADI 7 107	
+	112	[17]	LOADI 8 108	
+	113	[17]	LOADI 9 109	
+	114	[17]	LOADI 10 110	
+	115	[17]	LOADI 11 111	
+	116	[18]	LOADI 12 112	
+	117	[18]	LOADI 13 113	
+	118	[18]	LOADI 14 114	
+	119	[18]	LOADI 15 115	
+	120	[18]	LOADI 16 116	
+	121	[18]	LOADI 17 117	
+	122	[18]	LOADI 18 118	
+	123	[18]	LOADI 19 119	
+	124	[19]	LOADI 20 120	
+	125	[19]	LOADI 21 121	
+	126	[19]	LOADI 22 122	
+	127	[19]	LOADI 23 123	
+	128	[19]	LOADI 24 124	
+	129	[19]	LOADI 25 125	
+	130	[19]	LOADI 26 126	
+	131	[19]	LOADI 27 127	
+	132	[20]	LOADI 28 128	
+	133	[20]	LOADI 29 129	
+	134	[20]	LOADI 30 130	
+	135	[20]	LOADI 31 131	
+	136	[20]	LOADI 32 132	
+	137	[20]	LOADI 33 133	
+	138	[20]	LOADI 34 134	
+	139	[20]	LOADI 35 135	
+	140	[21]	LOADI 36 136	
+	141	[21]	LOADI 37 137	
+	142	[21]	LOADI 38 138	
+	143	[21]	LOADI 39 139	
+	144	[21]	LOADI 40 140	
+	145	[21]	LOADI 41 141	
+	146	[21]	LOADI 42 142	
+	147	[21]	LOADI 43 143	
+	148	[22]	LOADI 44 144	
+	149	[22]	LOADI 45 145	
+	150	[22]	LOADI 46 146	
+	151	[22]	LOADI 47 147	
+	152	[22]	LOADI 48 148	
+	153	[22]	LOADI 49 149	
+	154	[22]	LOADI 50 150	
+	155	[22]	SETLIST 0 50 100	
+	156	[22]	LOADI 1 151	
+	157	[23]	LOADI 2 152	
+	158	[23]	LOADI 3 153	
+	159	[23]	LOADI 4 154	
+	160	[23]	LOADI 5 155	
+	161	[23]	LOADI 6 156	
+	162	[23]	LOADI 7 157	
+	163	[23]	LOADI 8 158	
+	164	[23]	LOADI 9 159	
+	165	[24]	LOADI 10 160	
+	166	[24]	LOADI 11 161	
+	167	[24]	LOADI 12 162	
+	168	[24]	LOADI 13 163	
+	169	[24]	LOADI 14 164	
+	170	[24]	LOADI 15 165	
+	171	[24]	LOADI 16 166	
+	172	[24]	LOADI 17 167	
+	173	[25]	LOADI 18 168	
+	174	[25]	LOADI 19 169	
+	175	[25]	LOADI 20 170	
+	176	[25]	LOADI 21 171	
+	177	[25]	LOADI 22 172	
+	178	[25]	LOADI 23 173	
+	179	[25]	LOADI 24 174	
+	180	[25]	LOADI 25 175	
+	181	[26]	LOADI 26 176	
+	182	[26]	LOADI 27 177	
+	183	[26]	LOADI 28 178	
+	184	[26]	LOADI 29 179	
+	185	[26]	LOADI 30 180	
+	186	[26]	LOADI 31 181	
+	187	[26]	LOADI 32 182	
+	188	[26]	LOADI 33 183	
+	189	[27]	LOADI 34 184	
+	190	[27]	LOADI 35 185	
+	191	[27]	LOADI 36 186	
+	192	[27]	LOADI 37 187	
+	193	[27]	LOADI 38 188	
+	194	[27]	LOADI 39 189	
+	195	[27]	LOADI 40 190	
+	196	[27]	LOADI 41 191	
+	197	[28]	LOADI 42 192	
+	198	[28]	LOADI 43 193	
+	199	[28]	LOADI 44 194	
+	200	[28]	LOADI 45 195	
+	201	[28]	LOADI 46 196	
+	202	[28]	LOADI 47 197	
+	203	[28]	LOADI 48 198	
+	204	[28]	LOADI 49 199	
+	205	[29]	LOADI 50 200	
+	206	[29]	SETLIST 0 50 150	
+	207	[29]	LOADI 1 201	
+	208	[29]	LOADI 2 202	
+	209	[29]	LOADI 3 203	
+	210	[29]	LOADI 4 204	
+	211	[29]	LOADI 5 205	
+	212	[29]	LOADI 6 206	
+	213	[29]	LOADI 7 207	
+	214	[30]	LOADI 8 208	
+	215	[30]	LOADI 9 209	
+	216	[30]	LOADI 10 210	
+	217	[30]	LOADI 11 211	
+	218	[30]	LOADI 12 212	
+	219	[30]	LOADI 13 213	
+	220	[30]	LOADI 14 214	
+	221	[30]	LOADI 15 215	
+	222	[31]	LOADI 16 216	
+	223	[31]	LOADI 17 217	
+	224	[31]	LOADI 18 218	
+	225	[31]	LOADI 19 219	
+	226	[31]	LOADI 20 220	
+	227	[31]	LOADI 21 221	
+	228	[31]	LOADI 22 222	
+	229	[31]	LOADI 23 223	
+	230	[32]	LOADI 24 224	
+	231	[32]	LOADI 25 225	
+	232	[32]	LOADI 26 226	
+	233	[32]	LOADI 27 227	
+	234	[32]	LOADI 28 228	
+	235	[32]	LOADI 29 229	
+	236	[32]	LOADI 30 230	
+	237	[32]	LOADI 31 231	
+	238	[33]	LOADI 32 232	
+	239	[33]	LOADI 33 233	
+	240	[33]	LOADI 34 234	
+	241	[33]	LOADI 35 235	
+	242	[33]	LOADI 36 236	
+	243	[33]	LOADI 37 237	
+	244	[33]	LOADI 38 238	
+	245	[33]	LOADI 39 239	
+	246	[34]	LOADI 40 240	
+	247	[34]	LOADI 41 241	
+	248	[34]	LOADI 42 242	
+	249	[34]	LOADI 43 243	
+	250	[34]	LOADI 44 244	
+	251	[34]	LOADI 45 245	
+	252	[34]	LOADI 46 246	
+	253	[34]	LOADI 47 247	
+	254	[35]	LOADI 48 248	
+	255	[35]	LOADI 49 249	
+	256	[35]	LOADI 50 250	
+	257	[35]	SETLIST 0 50 200	
+	258	[35]	LOADI 1 251	
+	259	[35]	LOADI 2 252	
+	260	[35]	LOADI 3 253	
+	261	[35]	LOADI 4 254	
+	262	[35]	LOADI 5 255	
+	263	[37]	LOADI 6 256	
+	264	[37]	SETLIST 0 6 250	
+	265	[37]	GETTABUP 1 0 0	 ; _ENV "assert"
+	266	[37]	LOADK 2 1	 ; 25.1
+	267	[37]	EQK 2 1 1	
+	268	[37]	JMP 1	
+	269	[38]	LFALSESKIP 2	
+	270	[38]	LOADTRUE 2	
+	271	[38]	CALL 1 2 1	 ; 1 in 0 out
+	272	[38]	NEWTABLE 1 2 0	
+	273	[38]	EXTRAARG 0	
+	274	[38]	CLOSURE 2 0	 ; function_0
+	275	[38]	SETFIELD 1 2 2	 ; "foo"
+	276	[38]	LOADI 3 10	
+	277	[38]	SETFIELD 1 3 3	 ; "x"
+	278	[39]	MOVE 3 1	
+	279	[40]	SETFIELD 1 4 1	 ; 25.1
+	280	[40]	GETTABUP 2 0 0	 ; _ENV "assert"
+	281	[40]	SELF 3 1 2	
+	282	[40]	LOADK 5 5	 ; 1.5
+	283	[40]	CALL 3 3 2	 ; 2 in 1 out
+	284	[40]	EQK 26 6 1	
+	285	[40]	JMP 1	
+	286	[41]	LFALSESKIP 4	
+	287	[41]	LOADTRUE 4	
+	288	[41]	CALL 2 3 1	 ; 2 in 0 out
+	289	[41]	GETTABUP 2 0 0	 ; _ENV "assert"
+	290	[41]	GETFIELD 3 1 4	 ; "t"
+	291	[41]	SELF 3 3 2	
+	292	[41]	LOADK 5 7	 ; 0.5
+	293	[41]	CALL 3 3 2	 ; 2 in 1 out
+	294	[41]	EQK 36 8 1	
+	295	[41]	JMP 1	
+	296	[42]	LFALSESKIP 4	
+	297	[42]	LOADTRUE 4	
+	298	[42]	CALL 2 3 1	 ; 2 in 0 out
+	299	[42]	GETTABUP 2 0 0	 ; _ENV "assert"
+	300	[42]	LOADK 3 9	 ; 24.3
+	301	[42]	EQK 3 9 1	
+	302	[42]	JMP 1	
+	303	[43]	LFALSESKIP 3	
+	304	[43]	LOADTRUE 3	
+	305	[43]	CALL 2 2 1	 ; 1 in 0 out
+	306	[43]	GETTABUP 2 0 0	 ; _ENV "assert"
+	307	[43]	CLOSURE 3 1	 ; function_1
+	308	[43]	CALL 3 1 2	 ; 0 in 1 out
+	309	[43]	EQI 51 10 1	
+	310	[43]	JMP 1	
+	311	[44]	LFALSESKIP 4	
+	312	[44]	LOADTRUE 4	
+	313	[44]	CALL 2 3 1	 ; 2 in 0 out
+	314	[47]	RETURN0	
+
+function <lua_tests\testes\verybig.lua:38,38> (5 instructions)
+2 params, 3 slots, 0 upvalues, 2 locals, 1 constant, 0 functions
+	1	[38]	GETFIELD 2 0 0	 ; "x"
+	2	[38]	ADD 2 1 2	
+	3	[38]	MMBIN 1 2 6	
+	4	[38]	RETURN1 2	
+	5	[38]	RETURN0	
+
+
+function <lua_tests\testes\verybig.lua:43,43> (3 instructions)
+0 params, 1 slots, 1 upvalue, 0 locals, 1 constant, 0 functions
+	1	[43]	GETTABUP 0 0 0	 ; _ENV "x"
+	2	[43]	RETURN1 0	
+	3	[43]	RETURN0	
+
+
+
+function <lua_tests\testes\verybig.lua:59,61> (10 instructions)
+1 params, 2 slots, 0 upvalues, 1 local, 3 constants, 0 functions
+	1	[60]	ModK 1 0 0	
+	2	[60]	MMBINK 0 0 9 0	
+	3	[60]	EQI 1 0 0	
+	4	[60]	JMP 3	
+	5	[60]	LOADK 1 1	 ; ""
+	6	[60]	TEST 1 1	
+	7	[60]	JMP 1	
+	8	[61]	LOADK 1 2	 ; "-"
+	9	[61]	RETURN1 1	
+	10	[63]	RETURN0	
+
+
+function <lua_tests\testes\verybig.lua:64,68> (24 instructions)
+0 params, 12 slots, 2 upvalues, 4 locals, 7 constants, 0 functions
+	1	[65]	LOADI 0 10	
+	2	[65]	LOADI 1 50009	
+	3	[65]	LOADI 2 1	
+	4	[65]	FORPREP 18 65536	
+	5	[66]	GETTABUP 3 0 0	 ; _ENV "io"
+	6	[66]	GETFIELD 4 3 1	 ; "write"
+	7	[66]	LOADK 5 2	 ; "a"
+	8	[66]	MOVE 6 3	
+	9	[66]	LOADK 7 3	 ; " = "
+	10	[66]	GETUPVAL 8 1	
+	11	[66]	MOVE 9 3	
+	12	[66]	CALL 8 2 2	 ; 1 in 1 out
+	13	[66]	MOVE 9 11	
+	14	[66]	SUBK 10 3 4	
+	15	[66]	MMBINK 3 4 7 0	
+	16	[66]	DivK 10 10 5	
+	17	[66]	MMBINK 10 5 11 0	
+	18	[66]	LOADI 11 5	
+	19	[66]	ADD 10 11 10	
+	20	[66]	MMBIN 11 10 6	
+	21	[67]	LOADK 11 6	 ; ",\n"
+	22	[67]	CALL 4 8 1	 ; 7 in 0 out
+	23	[67]	FORLOOP 0 65516	
+	24	[68]	RETURN0	
+
+
+function <lua_tests\testes\verybig.lua:70,74> (24 instructions)
+0 params, 12 slots, 2 upvalues, 4 locals, 7 constants, 0 functions
+	1	[71]	LOADI 0 30026	
+	2	[71]	LOADI 1 50009	
+	3	[71]	LOADI 2 1	
+	4	[71]	FORPREP 18 65536	
+	5	[72]	GETTABUP 3 0 0	 ; _ENV "io"
+	6	[72]	GETFIELD 4 3 1	 ; "write"
+	7	[72]	LOADK 5 2	 ; "b"
+	8	[72]	MOVE 6 3	
+	9	[72]	LOADK 7 3	 ; " = "
+	10	[72]	GETUPVAL 8 1	
+	11	[72]	MOVE 9 3	
+	12	[72]	CALL 8 2 2	 ; 1 in 1 out
+	13	[72]	MOVE 9 11	
+	14	[72]	SUBK 10 3 4	
+	15	[72]	MMBINK 3 4 7 0	
+	16	[72]	DivK 10 10 5	
+	17	[72]	MMBINK 10 5 11 0	
+	18	[72]	LOADI 11 15013	
+	19	[72]	ADD 10 11 10	
+	20	[72]	MMBIN 11 10 6	
+	21	[73]	LOADK 11 6	 ; ",\n"
+	22	[73]	CALL 4 8 1	 ; 7 in 0 out
+	23	[73]	FORLOOP 0 65516	
+	24	[74]	RETURN0	
+
+
+function <lua_tests\testes\verybig.lua:76,80> (24 instructions)
+0 params, 12 slots, 2 upvalues, 4 locals, 7 constants, 0 functions
+	1	[77]	LOADI 0 10	
+	2	[77]	LOADI 1 50009	
+	3	[77]	LOADI 2 1	
+	4	[77]	FORPREP 18 65536	
+	5	[78]	GETTABUP 3 0 0	 ; _ENV "io"
+	6	[78]	GETFIELD 4 3 1	 ; "write"
+	7	[78]	LOADK 5 2	 ; "\"a"
+	8	[78]	MOVE 6 3	
+	9	[78]	LOADK 7 3	 ; "\", "
+	10	[78]	GETUPVAL 8 1	
+	11	[78]	MOVE 9 3	
+	12	[78]	CALL 8 2 2	 ; 1 in 1 out
+	13	[78]	MOVE 9 11	
+	14	[78]	SUBK 10 3 4	
+	15	[78]	MMBINK 3 4 7 0	
+	16	[78]	DivK 10 10 5	
+	17	[78]	MMBINK 10 5 11 0	
+	18	[78]	LOADI 11 5	
+	19	[78]	ADD 10 11 10	
+	20	[78]	MMBIN 11 10 6	
+	21	[79]	LOADK 11 6	 ; ",\n"
+	22	[79]	CALL 4 8 1	 ; 7 in 0 out
+	23	[79]	FORLOOP 0 65516	
+	24	[80]	RETURN0	
+
+

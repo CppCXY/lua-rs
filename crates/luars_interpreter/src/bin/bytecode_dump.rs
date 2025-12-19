@@ -288,8 +288,8 @@ fn dump_chunk(
             }
             OpCode::EqK => {
                 // EQK A B k: if ((R[A] == K[B]) ~= k) then pc++
-                let k_str = if k { "k" } else { "" };
-                format!("EQK {} {} {}{}", a, b, k as u32, k_str)
+                // Official luac.c:571 shows: printf("%d %d %d",a,b,isk) - no k suffix
+                format!("EQK {} {} {}", a, b, k as u32)
             }
             OpCode::SetList => {
                 // SETLIST A B C k: for i = 1, B do R[A][C+i] := R[A+i] end
