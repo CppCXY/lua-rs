@@ -658,9 +658,13 @@ pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
 // void luaK_setoneret (FuncState *fs, expdesc *e)
 pub fn setoneret(fs: &mut FuncState, e: &mut ExpDesc) {
     if e.kind == ExpKind::VCALL {
-        e.kind = ExpKind::VNONRELOC;
+        // VCALL: expression is an open function call
         let pc = unsafe { e.u.info as usize };
-        Instruction::set_c(&mut fs.chunk.code[pc], 2);
+        debug_assert_eq!(Instruction::get_c(fs.chunk.code[pc]), 0); // Should be open call
+        Instruction::set_c(&mut fs.chunk.code[pc], 2); // Set to return 1 value
+        e.kind = ExpKind::VNONRELOC;
+        // Set u.info to function base register (A parameter of CALL instruction)
+        e.u.info = Instruction::get_a(fs.chunk.code[pc]) as i32;
     } else if e.kind == ExpKind::VVARARG {
         let pc = unsafe { e.u.info as usize };
         Instruction::set_c(&mut fs.chunk.code[pc], 2);
@@ -1000,6 +1004,15 @@ fn codeconcat(fs: &mut FuncState, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     // New concat opcode
     code_abc(fs, OpCode::Concat, unsafe { e1.u.info as u32 }, 2, 0);
     free_exp(fs, e2);
+}
+
+// Port of codeABRK from lcode.c:1040-1044
+// Generate instruction with A, B, and RK operand (Register or K constant)
+// This allows SETFIELD/SETTABLE to use constant values directly
+pub fn code_abrk(fs: &mut FuncState, opcode: OpCode, a: u32, b: u32, ec: &mut ExpDesc) {
+    let k = exp2rk(fs, ec);
+    let c = unsafe { ec.u.info as u32 };
+    code_abck(fs, opcode, a, b, c, k);
 }
 
 // Port of codeeq from lcode.c:1585-1612

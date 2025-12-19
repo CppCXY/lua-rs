@@ -487,37 +487,19 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
         // Check if key is string constant for SetField optimization
         if key.kind == ExpKind::VKSTR {
             let key_idx = unsafe { key.u.info as u32 };
-            let val_reg = code::exp2anyreg(fs, &mut val);
-            code::code_abc(
-                fs,
-                OpCode::SetField,
-                cc.table_reg as u32,
-                key_idx,
-                val_reg as u32,
-            );
+            // Use code_abrk to allow constant value optimization (e.g., x = 10)
+            code::code_abrk(fs, OpCode::SetField, cc.table_reg as u32, key_idx, &mut val);
         }
         // Check if key is integer constant for SetI optimization
         else if key.kind == ExpKind::VKINT {
             let key_int = unsafe { key.u.ival as u32 };
-            let val_reg = code::exp2anyreg(fs, &mut val);
-            code::code_abc(
-                fs,
-                OpCode::SetI,
-                cc.table_reg as u32,
-                key_int,
-                val_reg as u32,
-            );
+            // Use code_abrk to allow constant value optimization (e.g., [1] = 10)
+            code::code_abrk(fs, OpCode::SetI, cc.table_reg as u32, key_int, &mut val);
         } else {
-            // General case: SetTable instruction
+            // General case: SetTable instruction with RK optimization
             let key_reg = code::exp2anyreg(fs, &mut key);
-            let val_reg = code::exp2anyreg(fs, &mut val);
-            code::code_abc(
-                fs,
-                OpCode::SetTable,
-                cc.table_reg as u32,
-                key_reg as u32,
-                val_reg as u32,
-            );
+            // Use code_abrk for value to allow constant optimization
+            code::code_abrk(fs, OpCode::SetTable, cc.table_reg as u32, key_reg as u32, &mut val);
         }
         cc.nh += 1;
     } else if fs.lexer.current_token() == LuaTokenKind::TkName {
@@ -533,15 +515,9 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             let mut val = ExpDesc::new_void();
             expr_internal(fs, &mut val)?;
 
-            // t[field] = val -> SetField instruction
-            let val_reg = code::exp2anyreg(fs, &mut val);
-            code::code_abc(
-                fs,
-                OpCode::SetField,
-                cc.table_reg as u32,
-                field_idx as u32,
-                val_reg as u32,
-            );
+            // t[field] = val -> SetField instruction with RK optimization
+            // Use code_abrk to allow constant value (e.g., x = 10 -> SETFIELD t "x" 10k)
+            code::code_abrk(fs, OpCode::SetField, cc.table_reg as u32, field_idx as u32, &mut val);
             cc.nh += 1;
         } else {
             // Just a list item
