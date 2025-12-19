@@ -1264,9 +1264,44 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
     }
 }
 
+// Port of codenot from lcode.c:1188-1214
+// static void codenot (FuncState *fs, expdesc *e)
+fn codenot(fs: &mut FuncState, e: &mut ExpDesc) {
+    discharge_vars(fs, e);
+    match e.kind {
+        ExpKind::VNIL | ExpKind::VFALSE => {
+            // true == not nil == not false (lcode.c:1190)
+            e.kind = ExpKind::VTRUE;
+        }
+        ExpKind::VK | ExpKind::VKFLT | ExpKind::VKINT | ExpKind::VKSTR | ExpKind::VTRUE => {
+            // false == not "x" == not 0.5 == not 1 == not true (lcode.c:1194)
+            e.kind = ExpKind::VFALSE;
+        }
+        ExpKind::VJMP => {
+            // Negate the condition (lcode.c:1197)
+            negatecondition(fs, e);
+        }
+        ExpKind::VRELOC | ExpKind::VNONRELOC => {
+            // Generate NOT instruction (lcode.c:1200-1206)
+            discharge2anyreg(fs, e);
+            free_exp(fs, e);
+            let pc = code_abc(fs, OpCode::Not, 0, unsafe { e.u.info as u32 }, 0);
+            e.u.info = pc as i32;
+            e.kind = ExpKind::VRELOC;
+        }
+        _ => {} // Should not happen
+    }
+}
+
 // Simplified implementation of luaK_prefix - generate unary operation
 pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
     discharge_vars(fs, e);
+
+    // Special handling for NOT (lcode.c:1627)
+    if op == OpCode::Not {
+        codenot(fs, e);
+        return;
+    }
 
     let o = exp2anyreg(fs, e);
     free_reg(fs, o);
@@ -1368,7 +1403,9 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key_idx: u8) {
 
 // Port of luaK_setmultret - set call/vararg to return multiple values
 pub fn setmultret(fs: &mut FuncState, e: &mut ExpDesc) {
-    setreturns(fs, e, 0); // 0 means LUA_MULTRET
+    // LUA_MULTRET = -1, which becomes 255 in u8
+    // setreturns will do nresults+1, so 255+1=0 in u8 (wrapping), meaning multret
+    setreturns(fs, e, 255);
 }
 
 // Port of luaK_fixline from lcode.c:1787-1790

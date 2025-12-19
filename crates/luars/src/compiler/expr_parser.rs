@@ -289,7 +289,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
 
     let base = unsafe { f.u.info as u8 };
     let nparams = if matches!(args.kind, ExpKind::VCALL | ExpKind::VVARARG) {
-        0 // LUA_MULTRET represented as 0 in our encoding (will be adjusted in code gen)
+        255 // LUA_MULTRET = -1, which is 255 in u8. nparams+1 will overflow to 0
     } else {
         if args.kind != ExpKind::VVOID {
             code::exp2nextreg(fs, &mut args);
@@ -297,7 +297,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
         fs.freereg - (base + 1)
     };
 
-    let pc = code::code_abc(fs, OpCode::Call, base as u32, (nparams + 1) as u32, 2);
+    let pc = code::code_abc(fs, OpCode::Call, base as u32, (nparams.wrapping_add(1)) as u32, 2);
     f.kind = ExpKind::VCALL;
     f.u.info = pc as i32;
     fs.freereg = base + 1; // Call resets freereg to base+1
