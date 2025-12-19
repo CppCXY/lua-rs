@@ -485,6 +485,10 @@ fn listfield(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
 fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
     if fs.lexer.current_token() == LuaTokenKind::TkLeftBracket {
         // [exp] = exp (general field)
+        // Port of recfield from lparser.c:917-935
+        // Save freereg to restore after processing field
+        let saved_freereg = fs.freereg;
+        
         fs.lexer.bump();
         let mut key = ExpDesc::new_void();
         expr_internal(fs, &mut key)?;
@@ -512,11 +516,18 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             code::code_abrk(fs, OpCode::SetTable, cc.table_reg as u32, key_reg as u32, &mut val);
         }
         cc.nh += 1;
+        
+        // Restore freereg - free temporary registers used for key/value
+        fs.freereg = saved_freereg;
     } else if fs.lexer.current_token() == LuaTokenKind::TkName {
         // Check if it's name = exp (record field) or just a list item
         let next = fs.lexer.peek_next_token();
         if next == LuaTokenKind::TkAssign {
             // name = exp (record field)
+            // Port of recfield from lparser.c:917-935
+            // Save freereg to restore after processing field
+            let saved_freereg = fs.freereg;
+            
             let field_name = fs.lexer.current_token_text().to_string();
             fs.lexer.bump();
             fs.lexer.bump(); // skip =
@@ -529,6 +540,9 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             // Use code_abrk to allow constant value (e.g., x = 10 -> SETFIELD t "x" 10k)
             code::code_abrk(fs, OpCode::SetField, cc.table_reg as u32, field_idx as u32, &mut val);
             cc.nh += 1;
+            
+            // Restore freereg - free temporary registers used for value
+            fs.freereg = saved_freereg;
         } else {
             // Just a list item
             listfield(fs, cc)?;

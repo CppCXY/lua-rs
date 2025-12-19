@@ -95,10 +95,32 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
 
     // Port of lparser.c:1912: Free registers after statement
     // "ls->fs->freereg = luaY_nvarstack(ls->fs);"
-    fs.freereg = fs.nactvar;
+    // luaY_nvarstack returns reglevel(fs, fs->nactvar)
+    fs.freereg = nvarstack(fs);
 
     // leavelevel(fs.lexer);
     Ok(())
+}
+
+// Port of reglevel from lparser.c (lines 323-330)
+// Returns the register level (number of registers used) for the first 'nvar' variables
+fn reglevel(fs: &FuncState, mut nvar: u8) -> u8 {
+    while nvar > 0 {
+        nvar -= 1;
+        if let Some(var) = fs.actvar.get(nvar as usize) {
+            if var.kind != VarKind::RDKCTC {
+                // Variable is in a register
+                return (var.ridx + 1) as u8;
+            }
+        }
+    }
+    0
+}
+
+// Port of luaY_nvarstack from lparser.c (line 332)
+// Returns the number of registers used by active variables
+fn nvarstack(fs: &FuncState) -> u8 {
+    reglevel(fs, fs.nactvar)
 }
 
 // Port of testnext from lparser.c

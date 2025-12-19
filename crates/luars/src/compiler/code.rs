@@ -1120,20 +1120,41 @@ fn foldbinop(op: BinaryOperator) -> bool {
 
 // Check if folding operation is valid and won't raise errors
 // Port of validop from lcode.c:1316-1330
-fn validop(op: BinaryOperator, _v1: f64, _i1: i64, is_int1: bool, v2: f64, i2: i64, is_int2: bool) -> bool {
+// Note: Official takes TValue pointers, but we already have extracted values
+fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
     use BinaryOperator::*;
+    use ExpKind::{VKFLT, VKINT};
+    
     match op {
         // Bitwise operations need integer-convertible operands
+        // Official: luaV_tointegerns checks if values can convert to integer
         OpBAnd | OpBOr | OpBXor | OpShl | OpShr => {
-            // Check both operands are integers or convertible to integers
-            is_int1 && is_int2
+            // Both operands must be integers or floats that can convert to integers
+            let ok1 = match e1.kind {
+                VKINT => true,
+                VKFLT => {
+                    let v = unsafe { e1.u.nval };
+                    v.is_finite() && v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64
+                }
+                _ => false,
+            };
+            let ok2 = match e2.kind {
+                VKINT => true,
+                VKFLT => {
+                    let v = unsafe { e2.u.nval };
+                    v.is_finite() && v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64
+                }
+                _ => false,
+            };
+            ok1 && ok2
         }
         // Division operations cannot have 0 divisor
+        // Official: nvalue(v2) != 0
         OpDiv | OpIDiv | OpMod => {
-            if is_int2 {
-                i2 != 0
-            } else {
-                v2 != 0.0
+            match e2.kind {
+                VKINT => unsafe { e2.u.ival != 0 },
+                VKFLT => unsafe { e2.u.nval != 0.0 },
+                _ => false,
             }
         }
         _ => true, // everything else is valid
@@ -1171,7 +1192,8 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
     };
     
     // Check if operation is valid (no division by zero, etc.)
-    if !validop(op, v1, i1, is_int1, v2, i2, is_int2) {
+    // Pass ExpDesc directly to validop for checking
+    if !validop(op, e1, e2) {
         return false;
     }
     

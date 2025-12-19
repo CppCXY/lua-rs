@@ -172,7 +172,9 @@ impl ExpDesc {
     }
 
     pub fn has_jumps(&self) -> bool {
-        self.t != -1 || self.f != -1
+        // Port of hasjumps macro from lcode.c:58
+        // #define hasjumps(e) ((e)->t != (e)->f)
+        self.t != self.f
     }
 
     pub fn is_const(&self) -> bool {

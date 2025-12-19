@@ -31,7 +31,14 @@ fn main() {
 
     match vm.compile_with_name(&source, &chunk_name) {
         Ok(chunk) => {
-            dump_chunk(&chunk, &filename, chunk.linedefined, chunk.lastlinedefined, true, &vm);
+            dump_chunk(
+                &chunk,
+                &filename,
+                chunk.linedefined,
+                chunk.lastlinedefined,
+                true,
+                &vm,
+            );
         }
         Err(_) => {
             let err_msg = vm.get_error_message();
@@ -420,7 +427,14 @@ fn dump_chunk(
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
         for (_i, child) in chunk.child_protos.iter().enumerate() {
-            dump_chunk(child, filename, child.linedefined, child.lastlinedefined, false, vm);
+            dump_chunk(
+                child,
+                filename,
+                child.linedefined,
+                child.lastlinedefined,
+                false,
+                vm,
+            );
         }
     }
     println!("") // for debug
