@@ -76,13 +76,23 @@ fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
             // 获取实际字符串内容（对齐luac）
             if let Some(s) = vm.get_string(val) {
                 let content = s.as_str();
-                // Escape special characters like official luac
-                let escaped = content
-                    .replace("\\", "\\\\")
-                    .replace("\n", "\\n")
-                    .replace("\r", "\\r")
-                    .replace("\t", "\\t")
-                    .replace("\"", "\\\"");
+                // Escape special characters like official luac (including all control characters)
+                let mut escaped = String::new();
+                for ch in content.chars() {
+                    match ch {
+                        '\\' => escaped.push_str("\\\\"),
+                        '\n' => escaped.push_str("\\n"),
+                        '\r' => escaped.push_str("\\r"),
+                        '\t' => escaped.push_str("\\t"),
+                        '"' => escaped.push_str("\\\""),
+                        '\0' => escaped.push_str("\\000"),
+                        // Escape other control characters as \ddd
+                        c if c.is_control() => {
+                            escaped.push_str(&format!("\\{:03}", c as u8));
+                        }
+                        c => escaped.push(c),
+                    }
+                }
                 let char_count = escaped.chars().count();
                 // 如果字符串超过64个字符，截断并添加 ...
                 if char_count > 64 {
@@ -161,6 +171,13 @@ fn dump_chunk(
         let ax = Instruction::get_ax(instr);
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
+
+        // Debug: check instruction 227 (pc=227, shown as instruction 228)
+        if pc == 227 {
+            eprintln!("DEBUG instr 228 (pc=227): raw=0x{:08X}, opcode={:?} ({}), a={}, b={}, c={}", 
+                      instr, opcode, opcode as u8, a, b, c);
+            eprintln!("  Expected: CALL (opcode=24) 3 2 1");
+        }
 
         // Get line number for this instruction (luac format)
         let line = if pc < chunk.line_info.len() {
