@@ -248,7 +248,8 @@ fn block(fs: &mut FuncState) -> Result<(), String> {
 // stat -> RETURN [explist] [';']
 fn retstat(fs: &mut FuncState) -> Result<(), String> {
     use ExpKind;
-    let mut first = fs.freereg;
+    // Port of lparser.c:1816: int first = luaY_nvarstack(fs);
+    let mut first = nvarstack(fs);
     let mut nret: i32;
     let mut e = ExpDesc::new_void();
 

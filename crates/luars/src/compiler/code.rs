@@ -1358,6 +1358,47 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
         }
         // All other arithmetic/bitwise operators
         _ => {
+            // Port of codecommutative logic from lcode.c:1666-1676
+            // For commutative operators (ADD, MUL, bitwise), if first operand is constant,
+            // swap them to enable immediate/K optimizations on the second operand
+            let mut flip = false;
+            if matches!(op, BinaryOperator::OpAdd | BinaryOperator::OpMul | 
+                           BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor) {
+                // Check if e1 is a numeric constant (tonumeral check in lcode.c:1669)
+                if matches!(e1.kind, ExpKind::VKINT | ExpKind::VKFLT | ExpKind::VK) {
+                    // Swap operands to put constant on right side
+                    swapexps(e1, e2);
+                    flip = true;
+                }
+            }
+            
+            // Port of codebini from lcode.c:1572-1598 - try ADDI/SUBI optimization
+            // Check if this is ADD and e2 is a small integer constant (isSCint check)
+            if op == BinaryOperator::OpAdd {
+                if let ExpKind::VKINT = e2.kind {
+                    let imm_val = unsafe { e2.u.ival };
+                    // Check if value fits in signed 9-bit immediate [-256, 255]
+                    if imm_val >= -256 && imm_val <= 255 {
+                        // Use ADDI instruction
+                        let r1 = exp2anyreg(fs, e1);
+                        let enc_imm = ((imm_val + 127) & 0xff) as u32;  // Encode for ADDI
+                        let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
+                        
+                        free_exp(fs, e1);
+                        free_exp(fs, e2);
+                        
+                        e1.kind = ExpKind::VRELOC;
+                        e1.u.info = pc as i32;
+                        
+                        // Generate MMBINI for metamethod fallback
+                        let mm_imm = ((imm_val + 128) & 0xff) as u32;  // Encode for MMBINI
+                        let flip_k = if flip { 1 } else { 0 };
+                        code_abc(fs, OpCode::MmBinI, r1 as u32, mm_imm, (TmKind::Add as u32) | (flip_k << 7));
+                        return;
+                    }
+                }
+            }
+            
             // Try to use K operand optimization (codearith behavior)
             if exp2k(fs, e2) {
                 // e2 is a K operand, generate K-series instruction

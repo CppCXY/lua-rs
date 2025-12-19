@@ -213,6 +213,12 @@ impl<'a> FuncState<'a> {
         0  // no variables in registers
     }
 
+    // Port of luaY_nvarstack from lparser.c:332-334
+    // Returns the number of registers used by active variables
+    pub fn nvarstack(&self) -> u8 {
+        self.reglevel(self.nactvar)
+    }
+
     // Port of removevars from lparser.c
     pub fn remove_vars(&mut self, tolevel: u8) {
         while self.nactvar > tolevel {

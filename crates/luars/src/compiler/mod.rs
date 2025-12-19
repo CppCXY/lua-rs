@@ -104,8 +104,8 @@ pub fn compile_code_with_name(
     }
 
     // Generate final RETURN (return with 0 values)
-    // Use freereg as starting register (like official lparser.c)
-    let first_reg = fs.freereg;
+    // Port of lparser.c:765: luaK_ret(fs, luaY_nvarstack(fs), 0);
+    let first_reg = fs.nvarstack();
     code::ret(&mut fs, first_reg, 0);
 
     // Port of close_func from lparser.c:763 - finish code generation
