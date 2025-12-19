@@ -1453,23 +1453,38 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
             }
             
             // Try to use K operand optimization (codearith behavior)
-            if exp2k(fs, e2) {
-                // e2 is a K operand, generate K-series instruction
-                let k_idx = unsafe { e2.u.info };
-                let r1 = exp2anyreg(fs, e1);
+            // Port of lcode.c:1636-1674 - codearith function
+            let mut use_k_instruction = exp2k(fs, e2);
+            
+            // For bitwise operations, verify the constant is actually numeric
+            // Bitwise K instructions (BANDK, BORK, BXORK) only work with numeric constants
+            // String constants need runtime coercion, so must use register-based instructions
+            if use_k_instruction && matches!(op, BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor) {
+                // Check if e2 is VK (generic constant, could be string)
+                // For bitwise ops, only VKINT/VKFLT are valid for K instructions
+                if e2.kind == ExpKind::VK {
+                    // Could be string constant - don't use K instruction
+                    use_k_instruction = false;
+                }
+            }
+            
+            if use_k_instruction {
+                    // e2 is a valid K operand, generate K-series instruction
+                    let k_idx = unsafe { e2.u.info };
+                    let r1 = exp2anyreg(fs, e1);
 
-                // Determine the K-series opcode
-                let opcode = match op {
-                    BinaryOperator::OpAdd => OpCode::AddK,
-                    BinaryOperator::OpSub => OpCode::SubK,
-                    BinaryOperator::OpMul => OpCode::MulK,
-                    BinaryOperator::OpDiv => OpCode::DivK,
-                    BinaryOperator::OpIDiv => OpCode::IDivK,
-                    BinaryOperator::OpMod => OpCode::ModK,
-                    BinaryOperator::OpPow => OpCode::PowK,
-                    BinaryOperator::OpBAnd => OpCode::BAndK,
-                    BinaryOperator::OpBOr => OpCode::BOrK,
-                    BinaryOperator::OpBXor => OpCode::BXorK,
+                    // Determine the K-series opcode
+                    let opcode = match op {
+                        BinaryOperator::OpAdd => OpCode::AddK,
+                        BinaryOperator::OpSub => OpCode::SubK,
+                        BinaryOperator::OpMul => OpCode::MulK,
+                        BinaryOperator::OpDiv => OpCode::DivK,
+                        BinaryOperator::OpIDiv => OpCode::IDivK,
+                        BinaryOperator::OpMod => OpCode::ModK,
+                        BinaryOperator::OpPow => OpCode::PowK,
+                        BinaryOperator::OpBAnd => OpCode::BAndK,
+                        BinaryOperator::OpBOr => OpCode::BOrK,
+                        BinaryOperator::OpBXor => OpCode::BXorK,
                     _ => {
                         // No K version, fall back to normal instruction
                         let o2 = exp2anyreg(fs, e2);
