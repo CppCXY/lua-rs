@@ -564,11 +564,28 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
             code_abx(fs, OpCode::LoadK, reg as u32, unsafe { e.u.info as u32 });
         }
         ExpKind::VKFLT => {
-            // lcode.c:844: luaK_float(fs, reg, e->u.nval);
-            // Use LoadF for floats
+            // lcode.c:680-687: luaK_float(fs, reg, e->u.nval);
+            // Try to use LOADF if float can be exactly represented as integer in sBx range
             let val = unsafe { e.u.nval };
-            let k_idx = number_k(fs, val);
-            code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
+            
+            // Check if float can be exactly converted to integer (no fractional part)
+            if val.fract() == 0.0 && val.is_finite() {
+                let int_val = val as i64;
+                // Check if integer fits in sBx range: -65536 to 65535
+                // (MAXARG_Bx is typically 2^17-1 = 131071, OFFSET_sBx = 65536)
+                if int_val >= -65536 && int_val <= 65535 {
+                    // Use LOADF: encodes integer in sBx, loads as float at runtime
+                    code_asbx(fs, OpCode::LoadF, reg as u32, int_val as i32);
+                } else {
+                    // Value too large, use LOADK
+                    let k_idx = number_k(fs, val);
+                    code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
+                }
+            } else {
+                // Float has fractional part, use LOADK
+                let k_idx = number_k(fs, val);
+                code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
+            }
         }
         ExpKind::VKINT => {
             // Check if value fits in sBx field (typically 16-bit signed: -2^15 to 2^15-1)
@@ -657,11 +674,37 @@ pub fn reserve_regs(fs: &mut FuncState, n: u8) {
 
 // Port of luaK_nil from lcode.c:136-155
 // void luaK_nil (FuncState *fs, int from, int n)
-// NOTE: Simplified version without OP_LOADNIL optimization
 pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
-    if n > 0 {
-        code_abc(fs, OpCode::LoadNil, from as u32, (n - 1) as u32, 0);
+    if n == 0 {
+        return;
     }
+    
+    let pc = fs.pc;
+    
+    // Optimization: merge with previous LOADNIL if registers are contiguous
+    if pc > 0 {
+        let prev_pc = pc - 1;
+        let prev_instr = fs.chunk.code[prev_pc];
+        
+        if Instruction::get_opcode(prev_instr) == OpCode::LoadNil {
+            let prev_a = Instruction::get_a(prev_instr) as u8;
+            let prev_b = Instruction::get_b(prev_instr) as u8;
+            let prev_last = prev_a + prev_b; // Last register in previous LOADNIL
+            
+            // If registers are contiguous, extend the previous LOADNIL
+            if from == prev_last + 1 {
+                // Check if merging would overflow u8
+                if let Some(new_b) = prev_b.checked_add(n) {
+                    // Merge: update previous instruction's B field
+                    Instruction::set_b(&mut fs.chunk.code[prev_pc], new_b as u32);
+                    return;
+                }
+            }
+        }
+    }
+    
+    // Cannot merge, emit a new LOADNIL instruction
+    code_abc(fs, OpCode::LoadNil, from as u32, (n - 1) as u32, 0);
 }
 
 // Port of luaK_setoneret from lcode.c:755-765
@@ -1179,148 +1222,157 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
 
 // Try to constant-fold a binary operation
 // Port of constfolding from lcode.c:1337-1356
+// Mimics luaO_rawarith: if both operands are INTEGER type, result is INTEGER; otherwise FLOAT
 fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
     use BinaryOperator::*;
     use ExpKind::{VKFLT, VKINT};
     
-    // Check if both operands are numeric constants
-    let (v1, i1, is_int1) = match e1.kind {
-        VKINT => (unsafe { e1.u.ival } as f64, unsafe { e1.u.ival }, true),
+    // Check original types (not whether values can be represented as integers)
+    let e1_is_int_type = matches!(e1.kind, VKINT);
+    let e2_is_int_type = matches!(e2.kind, VKINT);
+    
+    // Check if both operands are numeric constants and extract values
+    let (v1, i1) = match e1.kind {
+        VKINT => {
+            let iv = unsafe { e1.u.ival };
+            (iv as f64, iv)
+        }
         VKFLT => {
             let f = unsafe { e1.u.nval };
-            // Try to convert float to integer for bitwise ops
             let as_int = f as i64;
-            let is_int = (as_int as f64) == f;
-            (f, as_int, is_int)
+            (f, as_int)
         }
         _ => return false,
     };
     
-    let (v2, i2, is_int2) = match e2.kind {
-        VKINT => (unsafe { e2.u.ival } as f64, unsafe { e2.u.ival }, true),
+    let (v2, i2) = match e2.kind {
+        VKINT => {
+            let iv = unsafe { e2.u.ival };
+            (iv as f64, iv)
+        }
         VKFLT => {
             let f = unsafe { e2.u.nval };
             let as_int = f as i64;
-            let is_int = (as_int as f64) == f;
-            (f, as_int, is_int)
+            (f, as_int)
         }
         _ => return false,
     };
     
     // Check if operation is valid (no division by zero, etc.)
-    // Pass ExpDesc directly to validop for checking
     if !validop(op, e1, e2) {
         return false;
     }
     
-    // Perform the operation
-    let result = match op {
-        OpAdd => {
-            if is_int1 && is_int2 {
-                // Integer addition
-                if let Some(res) = i1.checked_add(i2) {
-                    e1.kind = VKINT;
-                    e1.u.ival = res;
-                    return true;
-                } else {
-                    // Overflow, fallback to float
-                    v1 + v2
-                }
-            } else {
-                v1 + v2
+    // Bitwise operations: require both operands to be representable as integers
+    match op {
+        OpBAnd | OpBOr | OpBXor => {
+            // Check if float values can be exactly converted to integers
+            let v1_can_be_int = if e1_is_int_type { true } else { (i1 as f64) == v1 };
+            let v2_can_be_int = if e2_is_int_type { true } else { (i2 as f64) == v2 };
+            
+            if !v1_can_be_int || !v2_can_be_int {
+                return false;
             }
-        }
-        OpSub => {
-            if is_int1 && is_int2 {
-                if let Some(res) = i1.checked_sub(i2) {
-                    e1.kind = VKINT;
-                    e1.u.ival = res;
-                    return true;
-                } else {
-                    v1 - v2
-                }
-            } else {
-                v1 - v2
-            }
-        }
-        OpMul => {
-            if is_int1 && is_int2 {
-                if let Some(res) = i1.checked_mul(i2) {
-                    e1.kind = VKINT;
-                    e1.u.ival = res;
-                    return true;
-                } else {
-                    v1 * v2
-                }
-            } else {
-                v1 * v2
-            }
-        }
-        OpDiv => v1 / v2,
-        OpIDiv => {
-            if is_int1 && is_int2 {
-                if let Some(res) = i1.checked_div(i2) {
-                    e1.kind = VKINT;
-                    e1.u.ival = res;
-                    return true;
-                }
-            }
-            (v1 / v2).floor()
-        }
-        OpMod => {
-            if is_int1 && is_int2 {
-                e1.kind = VKINT;
-                e1.u.ival = i1.rem_euclid(i2);
-                return true;
-            } else {
-                v1 - (v1 / v2).floor() * v2
-            }
-        }
-        OpPow => v1.powf(v2),
-        OpBAnd => {
+            
             e1.kind = VKINT;
-            e1.u.ival = i1 & i2;
-            return true;
-        }
-        OpBOr => {
-            e1.kind = VKINT;
-            e1.u.ival = i1 | i2;
-            return true;
-        }
-        OpBXor => {
-            e1.kind = VKINT;
-            e1.u.ival = i1 ^ i2;
-            return true;
-        }
-        OpShl => {
-            e1.kind = VKINT;
-            e1.u.ival = if i2 >= 0 {
-                i1.wrapping_shl(i2 as u32)
-            } else {
-                i1.wrapping_shr((-i2) as u32)
+            e1.u.ival = match op {
+                OpBAnd => i1 & i2,
+                OpBOr => i1 | i2,
+                OpBXor => i1 ^ i2,
+                _ => unreachable!(),
             };
             return true;
         }
-        OpShr => {
+        OpShl | OpShr => {
+            let v1_can_be_int = if e1_is_int_type { true } else { (i1 as f64) == v1 };
+            let v2_can_be_int = if e2_is_int_type { true } else { (i2 as f64) == v2 };
+            
+            if !v1_can_be_int || !v2_can_be_int {
+                return false;
+            }
+            
             e1.kind = VKINT;
-            e1.u.ival = if i2 >= 0 {
-                i1.wrapping_shr(i2 as u32)
-            } else {
-                i1.wrapping_shl((-i2) as u32)
+            e1.u.ival = match op {
+                OpShl => {
+                    if i2 >= 0 {
+                        i1.wrapping_shl(i2 as u32)
+                    } else {
+                        i1.wrapping_shr((-i2) as u32)
+                    }
+                }
+                OpShr => {
+                    if i2 >= 0 {
+                        i1.wrapping_shr(i2 as u32)
+                    } else {
+                        i1.wrapping_shl((-i2) as u32)
+                    }
+                }
+                _ => unreachable!(),
             };
+            return true;
+        }
+        _ => {}
+    }
+    
+    // Arithmetic operations follow luaO_rawarith logic:
+    // If both operands have INTEGER type, try integer arithmetic; otherwise use float
+    match op {
+        OpDiv | OpPow => {
+            // These operations always produce float results
+            let result = match op {
+                OpDiv => v1 / v2,
+                OpPow => v1.powf(v2),
+                _ => unreachable!(),
+            };
+            
+            if result.is_nan() || (result == 0.0 && result.is_sign_negative()) {
+                return false;
+            }
+            
+            e1.kind = VKFLT;
+            e1.u.nval = result;
+            return true;
+        }
+        OpAdd | OpSub | OpMul | OpIDiv | OpMod => {
+            // If both operands are INTEGER type, try integer operation
+            if e1_is_int_type && e2_is_int_type {
+                let int_result = match op {
+                    OpAdd => i1.checked_add(i2),
+                    OpSub => i1.checked_sub(i2),
+                    OpMul => i1.checked_mul(i2),
+                    OpIDiv => i1.checked_div(i2),
+                    OpMod => Some(i1.rem_euclid(i2)),
+                    _ => unreachable!(),
+                };
+                
+                if let Some(res) = int_result {
+                    e1.kind = VKINT;
+                    e1.u.ival = res;
+                    return true;
+                }
+                // Integer operation failed (overflow), fall through to float
+            }
+            
+            // At least one operand is FLOAT type, or integer operation overflowed
+            let result = match op {
+                OpAdd => v1 + v2,
+                OpSub => v1 - v2,
+                OpMul => v1 * v2,
+                OpIDiv => (v1 / v2).floor(),
+                OpMod => v1 - (v1 / v2).floor() * v2,
+                _ => unreachable!(),
+            };
+            
+            if result.is_nan() || (result == 0.0 && result.is_sign_negative()) {
+                return false;
+            }
+            
+            e1.kind = VKFLT;
+            e1.u.nval = result;
             return true;
         }
         _ => return false,
-    };
-    
-    // For float results, check for NaN and -0.0
-    if result.is_nan() || result == 0.0 && result.is_sign_negative() {
-        return false;
     }
-    
-    e1.kind = VKFLT;
-    e1.u.nval = result;
-    true
 }
 
 // Port of luaK_posfix from lcode.c:1706-1783
@@ -1459,6 +1511,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
             // For bitwise operations, verify the constant is actually numeric
             // Bitwise K instructions (BANDK, BORK, BXORK) only work with numeric constants
             // String constants need runtime coercion, so must use register-based instructions
+            // Note: Arithmetic operations (ADD, SUB, MUL, etc.) support string coercion in K instructions
             if use_k_instruction && matches!(op, BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor) {
                 // Check if e2 is VK (generic constant, could be string)
                 // For bitwise ops, only VKINT/VKFLT are valid for K instructions
