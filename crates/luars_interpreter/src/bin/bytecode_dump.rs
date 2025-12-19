@@ -151,6 +151,7 @@ fn dump_chunk(
         let b = Instruction::get_b(instr);
         let c = Instruction::get_c(instr);
         let bx = Instruction::get_bx(instr);
+        let ax = Instruction::get_ax(instr);
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
 
@@ -186,8 +187,8 @@ fn dump_chunk(
             OpCode::GetTable => format!("GETTABLE {} {} {}", a, b, c),
             OpCode::SetTable => format!("SETTABLE {} {} {}", a, b, c),
             OpCode::NewTable => {
-                let k_str = if k { "k" } else { "" };
-                format!("NEWTABLE {} {} {}{}", a, b, c, k_str)
+                // NEWTABLE never shows k flag (per luac.c:430)
+                format!("NEWTABLE {} {} {}", a, b, c)
             }
             OpCode::Self_ => {
                 let k_str = if k { "k" } else { "" };
@@ -295,7 +296,7 @@ fn dump_chunk(
                 let k_str = if k { "k" } else { "" };
                 format!("SETLIST {} {} {}{}", a, b, c, k_str)
             }
-            OpCode::ExtraArg => format!("EXTRAARG {}", bx),
+            OpCode::ExtraArg => format!("EXTRAARG {}", ax),
             OpCode::Tbc => format!("TBC {}", a),
             OpCode::Close => format!("CLOSE {}", a),
 

@@ -1092,12 +1092,191 @@ fn codeorder(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut 
     e1.kind = ExpKind::VJMP;
 }
 
+// Check if operator is foldable (arithmetic or bitwise)
+// Port of foldbinop macro from lcode.h:45
+fn foldbinop(op: BinaryOperator) -> bool {
+    use BinaryOperator::*;
+    matches!(op, OpAdd | OpSub | OpMul | OpDiv | OpIDiv | OpMod | OpPow | OpBAnd | OpBOr | OpBXor | OpShl | OpShr)
+}
+
+// Check if folding operation is valid and won't raise errors
+// Port of validop from lcode.c:1316-1330
+fn validop(op: BinaryOperator, v1: f64, i1: i64, is_int1: bool, v2: f64, i2: i64, is_int2: bool) -> bool {
+    use BinaryOperator::*;
+    match op {
+        // Bitwise operations need integer-convertible operands
+        OpBAnd | OpBOr | OpBXor | OpShl | OpShr => {
+            // Check both operands are integers or convertible to integers
+            is_int1 && is_int2
+        }
+        // Division operations cannot have 0 divisor
+        OpDiv | OpIDiv | OpMod => {
+            if is_int2 {
+                i2 != 0
+            } else {
+                v2 != 0.0
+            }
+        }
+        _ => true, // everything else is valid
+    }
+}
+
+// Try to constant-fold a binary operation
+// Port of constfolding from lcode.c:1337-1356
+fn constfolding(fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
+    use BinaryOperator::*;
+    use ExpKind::{VKFLT, VKINT};
+    
+    // Check if both operands are numeric constants
+    let (v1, i1, is_int1) = match e1.kind {
+        VKINT => (unsafe { e1.u.ival } as f64, unsafe { e1.u.ival }, true),
+        VKFLT => {
+            let f = unsafe { e1.u.nval };
+            // Try to convert float to integer for bitwise ops
+            let as_int = f as i64;
+            let is_int = (as_int as f64) == f;
+            (f, as_int, is_int)
+        }
+        _ => return false,
+    };
+    
+    let (v2, i2, is_int2) = match e2.kind {
+        VKINT => (unsafe { e2.u.ival } as f64, unsafe { e2.u.ival }, true),
+        VKFLT => {
+            let f = unsafe { e2.u.nval };
+            let as_int = f as i64;
+            let is_int = (as_int as f64) == f;
+            (f, as_int, is_int)
+        }
+        _ => return false,
+    };
+    
+    // Check if operation is valid (no division by zero, etc.)
+    if !validop(op, v1, i1, is_int1, v2, i2, is_int2) {
+        return false;
+    }
+    
+    // Perform the operation
+    let result = match op {
+        OpAdd => {
+            if is_int1 && is_int2 {
+                // Integer addition
+                if let Some(res) = i1.checked_add(i2) {
+                    e1.kind = VKINT;
+                    e1.u.ival = res;
+                    return true;
+                } else {
+                    // Overflow, fallback to float
+                    v1 + v2
+                }
+            } else {
+                v1 + v2
+            }
+        }
+        OpSub => {
+            if is_int1 && is_int2 {
+                if let Some(res) = i1.checked_sub(i2) {
+                    e1.kind = VKINT;
+                    e1.u.ival = res;
+                    return true;
+                } else {
+                    v1 - v2
+                }
+            } else {
+                v1 - v2
+            }
+        }
+        OpMul => {
+            if is_int1 && is_int2 {
+                if let Some(res) = i1.checked_mul(i2) {
+                    e1.kind = VKINT;
+                    e1.u.ival = res;
+                    return true;
+                } else {
+                    v1 * v2
+                }
+            } else {
+                v1 * v2
+            }
+        }
+        OpDiv => v1 / v2,
+        OpIDiv => {
+            if is_int1 && is_int2 {
+                if let Some(res) = i1.checked_div(i2) {
+                    e1.kind = VKINT;
+                    e1.u.ival = res;
+                    return true;
+                }
+            }
+            (v1 / v2).floor()
+        }
+        OpMod => {
+            if is_int1 && is_int2 {
+                e1.kind = VKINT;
+                e1.u.ival = i1.rem_euclid(i2);
+                return true;
+            } else {
+                v1 - (v1 / v2).floor() * v2
+            }
+        }
+        OpPow => v1.powf(v2),
+        OpBAnd => {
+            e1.kind = VKINT;
+            e1.u.ival = i1 & i2;
+            return true;
+        }
+        OpBOr => {
+            e1.kind = VKINT;
+            e1.u.ival = i1 | i2;
+            return true;
+        }
+        OpBXor => {
+            e1.kind = VKINT;
+            e1.u.ival = i1 ^ i2;
+            return true;
+        }
+        OpShl => {
+            e1.kind = VKINT;
+            e1.u.ival = if i2 >= 0 {
+                i1.wrapping_shl(i2 as u32)
+            } else {
+                i1.wrapping_shr((-i2) as u32)
+            };
+            return true;
+        }
+        OpShr => {
+            e1.kind = VKINT;
+            e1.u.ival = if i2 >= 0 {
+                i1.wrapping_shr(i2 as u32)
+            } else {
+                i1.wrapping_shl((-i2) as u32)
+            };
+            return true;
+        }
+        _ => return false,
+    };
+    
+    // For float results, check for NaN and -0.0
+    if result.is_nan() || result == 0.0 && result.is_sign_negative() {
+        return false;
+    }
+    
+    e1.kind = VKFLT;
+    e1.u.nval = result;
+    true
+}
+
 // Port of luaK_posfix from lcode.c:1706-1783
 // void luaK_posfix (FuncState *fs, BinOpr opr, expdesc *e1, expdesc *e2, int line)
 pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     use BinaryOperator;
 
     discharge_vars(fs, e2);
+    
+    // Try constant folding first (lcode.c:1709)
+    if foldbinop(op) && constfolding(fs, op, e1, e2) {
+        return; // done by folding
+    }
 
     match op {
         // lcode.c:1711-1715: OPR_AND
