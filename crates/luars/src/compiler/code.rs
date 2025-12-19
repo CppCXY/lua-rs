@@ -1388,7 +1388,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 }
             }
             
-            // Port of codebini from lcode.c:1572-1598 - try ADDI/SUBI optimization
+            // Port of codebini from lcode.c:1572-1598 - try ADDI/SUBI/SHLI/SHRI optimization
             // Check if this is ADD and e2 is a small integer constant (isSCint check)
             if op == BinaryOperator::OpAdd {
                 if let ExpKind::VKINT = e2.kind {
@@ -1410,6 +1410,43 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;  // Encode for MMBINI
                         let flip_k = if flip { 1 } else { 0 };
                         code_abc(fs, OpCode::MmBinI, r1 as u32, mm_imm, (TmKind::Add as u32) | (flip_k << 7));
+                        return;
+                    }
+                }
+            }
+            
+            // Port of codebini for SHLI/SHRI - shift with immediate (lcode.c:1581-1596)
+            if matches!(op, BinaryOperator::OpShl | BinaryOperator::OpShr) {
+                if let ExpKind::VKINT = e2.kind {
+                    let imm_val = unsafe { e2.u.ival };
+                    // Check if value fits in signed 9-bit immediate [-256, 255]
+                    if imm_val >= -256 && imm_val <= 255 {
+                        let r1 = exp2anyreg(fs, e1);
+                        let enc_imm = ((imm_val + 127) & 0xff) as u32;  // Encode immediate
+                        
+                        // Use SHLI or SHRI instruction
+                        let opcode = match op {
+                            BinaryOperator::OpShl => OpCode::ShlI,
+                            BinaryOperator::OpShr => OpCode::ShrI,
+                            _ => unreachable!(),
+                        };
+                        let pc = code_abc(fs, opcode, 0, r1 as u32, enc_imm);
+                        
+                        free_exp(fs, e1);
+                        free_exp(fs, e2);
+                        
+                        e1.kind = ExpKind::VRELOC;
+                        e1.u.info = pc as i32;
+                        
+                        // Generate MMBINI for metamethod fallback
+                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        let tm_event = match op {
+                            BinaryOperator::OpShl => TmKind::Shl,
+                            BinaryOperator::OpShr => TmKind::Shr,
+                            _ => unreachable!(),
+                        };
+                        let flip_k = if flip { 1u32 } else { 0u32 };
+                        code_abc(fs, OpCode::MmBinI, r1 as u32, mm_imm, (tm_event as u32) | (flip_k << 7));
                         return;
                     }
                 }
@@ -1575,6 +1612,33 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
     // Special handling for NOT (lcode.c:1627)
     if op == OpCode::Not {
         codenot(fs, e);
+        return;
+    }
+
+    // Port of luaK_prefix from lcode.c:1625-1635
+    // Constant folding for unary minus on numeric constants
+    if op == OpCode::Unm {
+        match e.kind {
+            ExpKind::VKINT => {
+                // Negate integer constant in place
+                let val = unsafe { e.u.ival };
+                e.u.ival = val.wrapping_neg();
+                return;
+            }
+            ExpKind::VKFLT => {
+                // Negate float constant in place
+                let val = unsafe { e.u.nval };
+                e.u.nval = -val;
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // For BNOT, also fold constants (lcode.c:1633)
+    if op == OpCode::BNot && e.kind == ExpKind::VKINT {
+        let val = unsafe { e.u.ival };
+        e.u.ival = !val;
         return;
     }
 
