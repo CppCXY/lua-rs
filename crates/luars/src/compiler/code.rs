@@ -571,7 +571,17 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
             code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
         }
         ExpKind::VKINT => {
-            code_asbx(fs, OpCode::LoadI, reg as u32, unsafe { e.u.ival as i32 });
+            // Check if value fits in sBx field (typically 16-bit signed: -2^15 to 2^15-1)
+            // Port of luaK_int from lcode.c:717-724
+            let ival = unsafe { e.u.ival };
+            // sBx range check: -32768 to 32767 (or -OFFSET_sBx to MAXARG_sBx - OFFSET_sBx)
+            if ival >= i16::MIN as i64 && ival <= i16::MAX as i64 {
+                code_asbx(fs, OpCode::LoadI, reg as u32, ival as i32);
+            } else {
+                // Value too large for LOADI, must use LOADK
+                let k_idx = integer_k(fs, ival);
+                code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
+            }
         }
         ExpKind::VNONRELOC => {
             if unsafe { e.u.info } != reg as i32 {
@@ -727,6 +737,12 @@ fn int_k(fs: &mut FuncState, i: i64) -> usize {
 // Add number to constants
 fn number_k(fs: &mut FuncState, n: f64) -> usize {
     add_constant(fs, LuaValue::float(n))
+}
+
+// Add an integer constant to the constant table
+// Port of luaK_int from lcode.c:717 (constant table part)
+fn integer_k(fs: &mut FuncState, i: i64) -> usize {
+    add_constant(fs, LuaValue::integer(i))
 }
 
 // Port of stringK from lcode.c:576-580
@@ -1443,9 +1459,8 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // Generate K-series instruction with A=0, will be fixed by discharge2reg
                 let pc = code_abc(fs, opcode, 0, r1 as u32, k_idx as u32);
                 
-                // Free both operands (freeexps)
-                free_exp(fs, e1);
-                free_exp(fs, e2);
+                // Free both operands (freeexps) - must use free_exps to maintain proper order
+                free_exps(fs, e1, e2);
                 
                 // Mark as relocatable - target register will be decided later
                 e1.kind = ExpKind::VRELOC;
@@ -1494,9 +1509,8 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 let o1 = exp2anyreg(fs, e1);
                 let pc = code_abc(fs, opcode, 0, o1 as u32, o2 as u32);
                 
-                // Free both operands (freeexps)
-                free_exp(fs, e1);
-                free_exp(fs, e2);
+                // Free both operands (freeexps) - must use free_exps to maintain proper order
+                free_exps(fs, e1, e2);
                 
                 // Mark as relocatable
                 e1.kind = ExpKind::VRELOC;

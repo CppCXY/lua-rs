@@ -245,6 +245,9 @@ impl LuaVM {
 
     /// Execute a chunk directly (convenience method)
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<LuaValue> {
+        if true {
+            return Err(LuaError::RuntimeError)
+        }
         // Register all constants in the chunk with GC
         self.register_chunk_constants(&chunk);
 
