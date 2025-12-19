@@ -69,13 +69,20 @@ fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
             // 获取实际字符串内容（对齐luac）
             if let Some(s) = vm.get_string(val) {
                 let content = s.as_str();
-                let char_count = content.chars().count();
+                // Escape special characters like official luac
+                let escaped = content
+                    .replace("\\", "\\\\")
+                    .replace("\n", "\\n")
+                    .replace("\r", "\\r")
+                    .replace("\t", "\\t")
+                    .replace("\"", "\\\"");
+                let char_count = escaped.chars().count();
                 // 如果字符串超过64个字符，截断并添加 ...
                 if char_count > 64 {
-                    let truncated: String = content.chars().take(64).collect();
+                    let truncated: String = escaped.chars().take(64).collect();
                     format!("\"{} ...\"", truncated)
                 } else {
-                    format!("\"{}\"", content)
+                    format!("\"{}\"", escaped)
                 }
             } else {
                 format!("string({})", idx)
@@ -209,9 +216,11 @@ fn dump_chunk(
                 let k_suffix = if k { "k" } else { "" };
                 format!("RETURN {} {} {}{}", a, b, c, k_suffix)
             }
-            // Return0/Return1 are shown with their own opcode names like official luac
-            OpCode::Return0 => format!("RETURN0  \t{}", a),
-            OpCode::Return1 => format!("RETURN1  \t{}", a),
+            // Return0/Return1 format per luac.c:610-613
+            // RETURN0: no operands
+            // RETURN1: only A field
+            OpCode::Return0 => format!("RETURN0"),
+            OpCode::Return1 => format!("RETURN1 {}", a),
             OpCode::Closure => format!("CLOSURE {} {}", a, bx),
             OpCode::Jmp => format!("JMP {}", Instruction::get_sj(instr)),
             OpCode::Eq => format!("EQ {} {} {}", a, b, k as u32),
@@ -338,6 +347,14 @@ fn dump_chunk(
                     String::new()
                 }
             }
+            OpCode::GetField | OpCode::SetField => {
+                // Show field name from constant table
+                if c < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, c, vm))
+                } else {
+                    String::new()
+                }
+            }
             OpCode::GetUpval => {
                 // Show upvalue name
                 if b < chunk.upvalue_descs.len() as u32 {
@@ -358,6 +375,27 @@ fn dump_chunk(
                     String::new()
                 }
             }
+            OpCode::LoadNil => {
+                // Show number of nils loaded
+                let count = b + 1;
+                format!(" ; {} out", count)
+            }
+            OpCode::Call | OpCode::TailCall => {
+                // Show parameter and return counts
+                // B = num params + 1 (or 0 for all in)
+                // C = num returns + 1 (or 0 for all out)
+                let params = if b == 0 {
+                    "all in"
+                } else {
+                    &format!("{} in", b - 1)
+                };
+                let returns = if c == 0 {
+                    "all out"
+                } else {
+                    &format!("{} out", c - 1)
+                };
+                format!(" ; {} {}", params, returns)
+            }
             OpCode::Return => {
                 // Show return count
                 let nret = if c == 0 {
@@ -371,7 +409,7 @@ fn dump_chunk(
         };
 
         // Print instruction in luac format: [line] OPCODE args ; comment
-        println!("\t{}\t[{}]\t{}{}", pc + 1, line, detail, comment);
+        println!("\t{}\t[{}]\t{}\t{}", pc + 1, line, detail, comment);
     }
 
     // Flush stdout to ensure all output is written

@@ -669,7 +669,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     expect(&mut child_fs, LuaTokenKind::TkEnd)?;
 
     // Generate final RETURN instruction
-    code::ret(&mut child_fs, 0, 0);
+    // Use freereg as starting register (like official lparser.c)
+    let first_reg = child_fs.freereg;
+    code::ret(&mut child_fs, first_reg, 0);
 
     // Port of close_func from lparser.c:763 - finish code generation
     code::finish(&mut child_fs);

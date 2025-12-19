@@ -92,6 +92,7 @@ pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize
     Instruction::set_c(&mut instr, c);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
+    fs.chunk.line_info.push(fs.lexer.line as u32);
     fs.pc += 1;
     pc
 }
@@ -104,6 +105,7 @@ pub fn code_abx(fs: &mut FuncState, op: OpCode, a: u32, bx: u32) -> usize {
     Instruction::set_bx(&mut instr, bx);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
+    fs.chunk.line_info.push(fs.lexer.line as u32);
     fs.pc += 1;
     pc
 }
@@ -117,6 +119,7 @@ pub fn code_asbx(fs: &mut FuncState, op: OpCode, a: u32, sbx: i32) -> usize {
     Instruction::set_bx(&mut instr, bx);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
+    fs.chunk.line_info.push(fs.lexer.line as u32);
     fs.pc += 1;
     pc
 }
@@ -131,6 +134,7 @@ pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool
     Instruction::set_k(&mut instr, k);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
+    fs.chunk.line_info.push(fs.lexer.line as u32);
     fs.pc += 1;
     pc
 }
@@ -140,6 +144,7 @@ pub fn code_asj(fs: &mut FuncState, op: OpCode, sj: i32) -> usize {
     let instr = Instruction::create_sj(op, sj);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
+    fs.chunk.line_info.push(fs.lexer.line as u32);
     fs.pc += 1;
     pc
 }
@@ -531,8 +536,8 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
     discharge_vars(fs, e);
     match e.kind {
         ExpKind::VNIL => {
-            // lcode.c:829
-            code_abc(fs, OpCode::LoadNil, reg as u32, 1, 0); // n=1 for single nil
+            // lcode.c:831: luaK_nil(fs, reg, 1)
+            nil(fs, reg, 1); // 1 register
         }
         ExpKind::VFALSE => {
             // lcode.c:832
@@ -1450,40 +1455,44 @@ pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
     fs.freereg = base + 1; // free registers with list values
 }
 
-// Port of luaK_settablesize from lcode.c:1827-1854
+// Port of luaK_settablesize from lcode.c:1793-1801
+// void luaK_settablesize (FuncState *fs, int pc, int ra, int asize, int hsize)
 pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u32) {
-    // Compute the array size code (B argument)
-    let b = if asize > 0 {
-        let mut temp = asize;
-        let mut extra = 0;
-        while temp >= 16 {
-            extra += 1;
-            temp = (temp + 1) >> 1;
-        }
-        (extra << 4) | (temp - 1)
+    const MAXARG_C: u32 = 0xFF; // Maximum value for C field
+    
+    // B field: hash size (lcode.c:1795)
+    // rb = (hsize != 0) ? luaO_ceillog2(hsize) + 1 : 0
+    let rb = if hsize != 0 {
+        // Ceiling of log2(hsize) + 1
+        let bits = 32 - (hsize - 1).leading_zeros();
+        bits + 1
     } else {
         0
     };
 
-    // Compute the hash size code (C argument)
-    let c = if hsize > 0 {
-        let mut temp = hsize;
-        let mut extra = 0;
-        while temp >= 16 {
-            extra += 1;
-            temp = (temp + 1) >> 1;
-        }
-        (extra << 4) | (temp - 1)
-    } else {
-        0
-    };
+    // C field: lower bits of array size (lcode.c:1797)
+    // rc = asize % (MAXARG_C + 1)
+    let rc = asize % (MAXARG_C + 1);
+    
+    // EXTRAARG: higher bits of array size (lcode.c:1796)
+    // extra = asize / (MAXARG_C + 1)
+    let extra = asize / (MAXARG_C + 1);
+    
+    // k flag: true if needs EXTRAARG (lcode.c:1798)
+    let k = extra > 0;
 
-    // Update the NEWTABLE instruction
+    // Update the NEWTABLE instruction (lcode.c:1799)
     let inst = &mut fs.chunk.code[pc];
     let opcode = Instruction::get_opcode(*inst);
     debug_assert_eq!(opcode, OpCode::NewTable);
 
-    *inst = Instruction::create_abc(OpCode::NewTable, ra as u32, b, c);
+    *inst = Instruction::create_abck(OpCode::NewTable, ra as u32, rb, rc, k);
+    
+    // Update EXTRAARG instruction (lcode.c:1800)
+    // *(inst + 1) = CREATE_Ax(OP_EXTRAARG, extra);
+    if pc + 1 < fs.chunk.code.len() {
+        fs.chunk.code[pc + 1] = Instruction::create_ax(OpCode::ExtraArg, extra);
+    }
 }
 
 // Port of luaK_codeextraarg from lcode.c:415-419

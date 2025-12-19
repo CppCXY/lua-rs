@@ -62,8 +62,12 @@ pub fn compile_code_with_name(
     // main function is always vararg
 
     // Generate VARARGPREP if function is vararg
+    // Reset line to 1 for first instruction (VARARGPREP), regardless of comments before
     if fs.is_vararg {
+        let saved_line = fs.lexer.line;
+        fs.lexer.line = 1;
         code::code_abc(&mut fs, OpCode::VarargPrep, 0, 0, 0);
+        fs.lexer.line = saved_line;
     }
 
     // Main function in Lua 5.4 has _ENV as first upvalue (lparser.c:1928-1931)
@@ -100,7 +104,9 @@ pub fn compile_code_with_name(
     }
 
     // Generate final RETURN (return with 0 values)
-    code::ret(&mut fs, 0, 0);
+    // Use freereg as starting register (like official lparser.c)
+    let first_reg = fs.freereg;
+    code::ret(&mut fs, first_reg, 0);
 
     // Port of close_func from lparser.c:763 - finish code generation
     code::finish(&mut fs);
