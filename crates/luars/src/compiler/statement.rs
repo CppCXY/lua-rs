@@ -176,7 +176,8 @@ fn enterblock(fs: &mut FuncState, bl: &mut BlockCnt, isloop: bool) {
 // Port of leaveblock from lparser.c:672-692
 fn leaveblock(fs: &mut FuncState) {
     if let Some(bl) = fs.block_list.take() {
-        let stklevel = bl.nactvar as usize; // level outside the block
+        // Port of lparser.c:675: int stklevel = reglevel(fs, bl->nactvar);
+        let stklevel = fs.reglevel(bl.nactvar);
 
         // Remove block locals
         fs.remove_vars(bl.nactvar);
@@ -192,8 +193,8 @@ fn leaveblock(fs: &mut FuncState) {
             fs.needclose = true;
         }
 
-        // Free registers
-        fs.freereg = stklevel as u8;
+        // Free registers - port of lparser.c:684: fs->freereg = stklevel;
+        fs.freereg = stklevel;
 
         // Remove labels and gotos from this block
         fs.labels.truncate(bl.first_label);
@@ -685,7 +686,7 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1563: fixforjump(fs, endfor, prep + 1, 1);
     // Fix TFORLOOP to jump back to prep+1 (back jump)
     fix_for_jump(fs, endfor_pc, prep_pc + 1, true);
-
+    
     // Don't remove variables here - the outer forstat's leaveblock will handle it
     // fs.remove_vars(fs.nactvar - nvars as u8);
 

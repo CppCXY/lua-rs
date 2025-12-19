@@ -198,11 +198,26 @@ impl<'a> FuncState<'a> {
         // Official Lua does NOT modify freereg here
     }
 
+    // Port of reglevel from lparser.c:229-237
+    // Returns the register level for variables outside the block
+    pub fn reglevel(&self, nvar: u8) -> u8 {
+        let mut n = nvar as i32 - 1;
+        while n >= 0 {
+            if let Some(vd) = self.actvar.get(n as usize) {
+                if vd.kind != VarKind::RDKCTC {
+                    return (vd.ridx + 1) as u8;
+                }
+            }
+            n -= 1;
+        }
+        0  // no variables in registers
+    }
+
     // Port of removevars from lparser.c
     pub fn remove_vars(&mut self, tolevel: u8) {
         while self.nactvar > tolevel {
             self.nactvar -= 1;
-            self.freereg -= 1;
+            // Note: freereg is NOT decremented here, it's set in leaveblock via reglevel
             // Also remove from actvar array to avoid "holes"
             if (self.nactvar as usize) < self.actvar.len() {
                 self.actvar.remove(self.nactvar as usize);

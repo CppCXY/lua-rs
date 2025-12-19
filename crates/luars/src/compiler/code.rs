@@ -1489,7 +1489,9 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
 // Port of luaK_codeextraarg from lcode.c:415-419
 pub fn code_extraarg(fs: &mut FuncState, a: u32) -> usize {
     let inst = Instruction::create_ax(OpCode::ExtraArg, a);
+    let pc = fs.pc;
     fs.chunk.code.push(inst);
     fs.chunk.line_info.push(fs.lexer.line as u32);
-    fs.chunk.code.len() - 1
+    fs.pc += 1;
+    pc
 }
