@@ -92,7 +92,7 @@ pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize
     Instruction::set_c(&mut instr, c);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.line as u32);
+    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline (lcode.c:389)
     fs.pc += 1;
     pc
 }
@@ -119,7 +119,7 @@ pub fn code_asbx(fs: &mut FuncState, op: OpCode, a: u32, sbx: i32) -> usize {
     Instruction::set_bx(&mut instr, bx);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.line as u32);
+    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
     fs.pc += 1;
     pc
 }
@@ -134,7 +134,7 @@ pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool
     Instruction::set_k(&mut instr, k);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.line as u32);
+    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
     fs.pc += 1;
     pc
 }
@@ -144,7 +144,7 @@ pub fn code_asj(fs: &mut FuncState, op: OpCode, sj: i32) -> usize {
     let instr = Instruction::create_sj(op, sj);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.line as u32);
+    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
     fs.pc += 1;
     pc
 }
@@ -1426,30 +1426,41 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
         }
         // All other arithmetic/bitwise operators
         _ => {
-            // Port of codecommutative logic from lcode.c:1666-1676
-            // For commutative operators (ADD, MUL, bitwise), if first operand is constant,
+            // Port of codecommutative logic from lcode.c:1517-1527
+            // For commutative operators, if first operand is numeric constant (tonumeral check),
             // swap them to enable immediate/K optimizations on the second operand
             let mut flip = false;
-            if matches!(op, BinaryOperator::OpAdd | BinaryOperator::OpMul | 
-                           BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor) {
-                // Check if e1 is a numeric constant (tonumeral check in lcode.c:1669)
-                if matches!(e1.kind, ExpKind::VKINT | ExpKind::VKFLT | ExpKind::VK) {
+            if matches!(op, BinaryOperator::OpAdd | BinaryOperator::OpMul) {
+                // Check if e1 is a numeric constant (tonumeral check in lcode.c:1520)
+                // tonumeral only accepts VKINT and VKFLT, NOT VK (which might be string)
+                if matches!(e1.kind, ExpKind::VKINT | ExpKind::VKFLT) {
                     // Swap operands to put constant on right side
+                    swapexps(e1, e2);
+                    flip = true;
+                }
+            } else if matches!(op, BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor) {
+                // For bitwise operations, use codebitwise logic (lcode.c:1533-1549)
+                // Only check for VKINT (not VKFLT), swap to put it on right
+                if matches!(e1.kind, ExpKind::VKINT) {
                     swapexps(e1, e2);
                     flip = true;
                 }
             }
             
-            // Port of codebini from lcode.c:1572-1598 - try ADDI/SUBI/SHLI/SHRI optimization
-            // Check if this is ADD and e2 is a small integer constant (isSCint check)
-            if op == BinaryOperator::OpAdd {
+            // Port of codebini from lcode.c:1572-1598 - try ADDI/SHLI/SHRI optimization
+            // Check if this is ADD/SUB and e2 is a small integer constant (isSCint check)
+            if matches!(op, BinaryOperator::OpAdd | BinaryOperator::OpSub) {
                 if let ExpKind::VKINT = e2.kind {
                     let imm_val = unsafe { e2.u.ival };
-                    // Check if value fits in signed 9-bit immediate [-256, 255]
-                    if imm_val >= -256 && imm_val <= 255 {
-                        // Use ADDI instruction
+                    // For SUB: convert to ADD with negated immediate (a - b => a + (-b))
+                    let final_imm = if op == BinaryOperator::OpSub { -imm_val } else { imm_val };
+                    
+                    // Check if value fits in signed 8-bit immediate after negation
+                    // lcode.c uses fits_in_SC which checks for -128 to 127 range
+                    if final_imm >= -128 && final_imm <= 127 {
+                        // Use ADDI instruction (even for SUB)
                         let r1 = exp2anyreg(fs, e1);
-                        let enc_imm = ((imm_val + 127) & 0xff) as u32;  // Encode for ADDI
+                        let enc_imm = ((final_imm + 127) & 0xff) as u32;  // Encode for ADDI
                         let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
                         
                         free_exp(fs, e1);
@@ -1459,29 +1470,49 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         e1.u.info = pc as i32;
                         
                         // Generate MMBINI for metamethod fallback
-                        let mm_imm = ((imm_val + 128) & 0xff) as u32;  // Encode for MMBINI
-                        let flip_k = if flip { 1 } else { 0 };
-                        code_abc(fs, OpCode::MmBinI, r1 as u32, mm_imm, (TmKind::Add as u32) | (flip_k << 7));
+                        let mm_imm = ((imm_val + 128) & 0xff) as u32;  // Use ORIGINAL imm_val
+                        let tm_event = if op == BinaryOperator::OpSub { TmKind::Sub } else { TmKind::Add };
+                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, tm_event as u32, flip);
                         return;
                     }
                 }
             }
             
             // Port of codebini for SHLI/SHRI - shift with immediate (lcode.c:1581-1596)
+            // Note: SHLI is 'immediate << register', SHRI is 'register >> immediate'
             if matches!(op, BinaryOperator::OpShl | BinaryOperator::OpShr) {
-                if let ExpKind::VKINT = e2.kind {
-                    let imm_val = unsafe { e2.u.ival };
-                    // Check if value fits in signed 9-bit immediate [-256, 255]
-                    if imm_val >= -256 && imm_val <= 255 {
-                        let r1 = exp2anyreg(fs, e1);
-                        let enc_imm = ((imm_val + 127) & 0xff) as u32;  // Encode immediate
-                        
-                        // Use SHLI or SHRI instruction
-                        let opcode = match op {
-                            BinaryOperator::OpShl => OpCode::ShlI,
-                            BinaryOperator::OpShr => OpCode::ShrI,
-                            _ => unreachable!(),
+                // For SHL: check if LEFT operand (e1) is small constant -> SHLI
+                // For SHR: check if RIGHT operand (e2) is small constant -> SHRI
+                let is_shl = op == BinaryOperator::OpShl;
+                let check_imm = if is_shl {
+                    if let ExpKind::VKINT = e1.kind {
+                        Some(unsafe { e1.u.ival })
+                    } else {
+                        None
+                    }
+                } else {
+                    if let ExpKind::VKINT = e2.kind {
+                        Some(unsafe { e2.u.ival })
+                    } else {
+                        None
+                    }
+                };
+                
+                if let Some(imm_val) = check_imm {
+                    // Check if value fits in signed 8-bit immediate (after encoding)
+                    // lcode.c uses fits_in_SC which checks for -128 to 127 range
+                    if imm_val >= -128 && imm_val <= 127 {
+                        // Get register for the non-immediate operand
+                        let r1 = if is_shl {
+                            exp2anyreg(fs, e2)  // For SHLI: immediate << register
+                        } else {
+                            exp2anyreg(fs, e1)  // For SHRI: register >> immediate
                         };
+                        
+                        // Encode immediate: sC = (imm_val + 127) & 0xFF
+                        let enc_imm = ((imm_val + 127) & 0xff) as u32;
+                        
+                        let opcode = if is_shl { OpCode::ShlI } else { OpCode::ShrI };
                         let pc = code_abc(fs, opcode, 0, r1 as u32, enc_imm);
                         
                         free_exp(fs, e1);
@@ -1492,34 +1523,31 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         
                         // Generate MMBINI for metamethod fallback
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;
-                        let tm_event = match op {
-                            BinaryOperator::OpShl => TmKind::Shl,
-                            BinaryOperator::OpShr => TmKind::Shr,
-                            _ => unreachable!(),
-                        };
-                        let flip_k = if flip { 1u32 } else { 0u32 };
-                        code_abc(fs, OpCode::MmBinI, r1 as u32, mm_imm, (tm_event as u32) | (flip_k << 7));
+                        let tm_event = if is_shl { TmKind::Shl } else { TmKind::Shr };
+                        // For SHLI, flip bit should be true since immediate is on left
+                        let flip = is_shl;
+                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, tm_event as u32, flip);
                         return;
                     }
                 }
             }
             
-            // Try to use K operand optimization (codearith behavior)
-            // Port of lcode.c:1636-1674 - codearith function
-            let mut use_k_instruction = exp2k(fs, e2);
-            
-            // For bitwise operations, verify the constant is actually numeric
-            // Bitwise K instructions (BANDK, BORK, BXORK) only work with numeric constants
-            // String constants need runtime coercion, so must use register-based instructions
-            // Note: Arithmetic operations (ADD, SUB, MUL, etc.) support string coercion in K instructions
-            if use_k_instruction && matches!(op, BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor) {
-                // Check if e2 is VK (generic constant, could be string)
-                // For bitwise ops, only VKINT/VKFLT are valid for K instructions
-                if e2.kind == ExpKind::VK {
-                    // Could be string constant - don't use K instruction
-                    use_k_instruction = false;
+            // Try to use K operand optimization
+            // For bitwise operations, only use K instructions if e2 is VKINT (lcode.c:1540)
+            // For arithmetic operations, use K if tonumeral(e2) succeeds (lcode.c:1505)
+            let use_k_instruction = match op {
+                // Bitwise operations: only VKINT can use K instructions
+                BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor => {
+                    matches!(e2.kind, ExpKind::VKINT) && exp2k(fs, e2)
                 }
-            }
+                // Arithmetic operations: VKINT or VKFLT can use K instructions
+                BinaryOperator::OpAdd | BinaryOperator::OpSub | BinaryOperator::OpMul 
+                | BinaryOperator::OpDiv | BinaryOperator::OpIDiv | BinaryOperator::OpMod 
+                | BinaryOperator::OpPow => {
+                    matches!(e2.kind, ExpKind::VKINT | ExpKind::VKFLT) && exp2k(fs, e2)
+                }
+                _ => false,
+            };
             
             if use_k_instruction {
                     // e2 is a valid K operand, generate K-series instruction
@@ -1947,7 +1975,7 @@ pub fn code_extraarg(fs: &mut FuncState, a: u32) -> usize {
     let inst = Instruction::create_ax(OpCode::ExtraArg, a);
     let pc = fs.pc;
     fs.chunk.code.push(inst);
-    fs.chunk.line_info.push(fs.lexer.line as u32);
+    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
     fs.pc += 1;
     pc
 }

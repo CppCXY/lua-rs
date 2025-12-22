@@ -260,6 +260,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
     use crate::compiler::expression::ExpKind;
 
     let mut args = ExpDesc::new_void();
+    let line = fs.lexer.line; // Save line number before processing arguments (lparser.c:1028)
 
     match fs.lexer.current_token() {
         LuaTokenKind::TkLeftParen => {
@@ -308,6 +309,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
     };
 
     let pc = code::code_abc(fs, OpCode::Call, base as u32, (nparams.wrapping_add(1)) as u32, 2);
+    code::fixline(fs, line); // Fix line number for CALL instruction (lparser.c:1063)
     f.kind = ExpKind::VCALL;
     f.u.info = pc as i32;
     fs.freereg = base + 1; // Call resets freereg to base+1

@@ -378,10 +378,18 @@ fn dump_chunk(
                     String::new()
                 }
             }
-            OpCode::GetField | OpCode::SetField => {
-                // Show field name from constant table
+            OpCode::GetField => {
+                // GETFIELD A B C: table in B, field name in C
                 if c < chunk.constants.len() as u32 {
                     format!(" ; {}", format_constant(chunk, c, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::SetField => {
+                // SETFIELD A B C: table in A, field name in B, value in C
+                if b < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, b, vm))
                 } else {
                     String::new()
                 }
@@ -435,6 +443,38 @@ fn dump_chunk(
                     &format!("{} out", c - 1)
                 };
                 format!(" ; {}", nret)
+            }
+            OpCode::Jmp => {
+                // Show jump target: "to X" where X is the target instruction (1-based)
+                let sj = Instruction::get_sj(instr);
+                let target = (pc as isize + sj as isize + 1) as usize + 1; // +1 for 1-based indexing
+                format!(" ; to {}", target)
+            }
+            OpCode::ForPrep => {
+                // Show exit target: "exit to X" where X is instruction after exit
+                // VM executes: pc += Bx + 1, then continues at pc (which becomes pc+1 in next iteration)
+                // So target = current_pc + Bx + 1 + 1 (one for VM jump, one for next instruction)
+                let target = pc + 1 + bx as usize + 1 + 1; // pc is 0-based, +1 for 1-based, +Bx+1 for jump, +1 for next instr
+                format!(" ; exit to {}", target)
+            }
+            OpCode::ForLoop => {
+                // Show loop target: "to X" where X is the loop body start
+                // VM executes: pc -= Bx, then continues at pc+1 in next iteration
+                // target = current_pc - Bx + 1 (for next instruction after VM decrements pc)
+                let target = pc + 1 - bx as usize + 1; // pc is 0-based, +1 for 1-based, -Bx for backward, +1 for next
+                format!(" ; to {}", target)
+            }
+            OpCode::TForPrep => {
+                // Show target after iterator setup
+                // VM executes: pc += Bx, then continues at pc
+                let target = pc + 1 + bx as usize + 1; // +1 for 1-based, +Bx for jump, +1 for next instr
+                format!(" ; to {}", target)
+            }
+            OpCode::TForLoop => {
+                // Show loop target
+                // VM executes: pc -= Bx, then continues at pc
+                let target = pc + 1 - bx as usize; // +1 for 1-based, -Bx for backward jump
+                format!(" ; to {}", target)
             }
             _ => String::new(),
         };

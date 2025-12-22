@@ -132,8 +132,8 @@ pub enum OpCode {
     Return1, // return R[A]
 
     // For loops
-    ForLoop, // update counters; if loop continues then pc-=Bx
-    ForPrep, // <check values and prepare counters>; if not to run then pc+=Bx+1
+    ForLoop, // update counters; if loop continues then pc-=Bx;
+    ForPrep, // <check values and prepare counters>; if not to run then pc+=Bx+1;
 
     // Generic for loops
     TForPrep, // create upvalue for R[A + 3]; pc+=Bx

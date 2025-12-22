@@ -20,7 +20,8 @@ pub struct LuaParser<'a> {
     token_index: usize,
     current_token: LuaTokenKind,
     pub parse_config: ParserConfig,
-    pub line: usize,
+    pub line: usize,       // current line number (linenumber in Lua)
+    pub lastline: usize,   // line of last token consumed (lastline in Lua)
 }
 
 impl<'a> LuaParser<'a> {
@@ -34,6 +35,7 @@ impl<'a> LuaParser<'a> {
             current_token: LuaTokenKind::None,
             parse_config: config,
             line: 1,
+            lastline: 1,  // Initialize lastline to 1 (llex.c:176)
         };
 
         parser.init();
@@ -115,6 +117,10 @@ impl<'a> LuaParser<'a> {
     }
 
     pub fn bump(&mut self) {
+        // Port of luaX_next from llex.c:565-573
+        // Save current line before consuming next token
+        self.lastline = self.line;
+        
         let mut next_index = self.token_index + 1;
         self.skip_trivia_and_update_line(&mut next_index);
         self.token_index = next_index;
