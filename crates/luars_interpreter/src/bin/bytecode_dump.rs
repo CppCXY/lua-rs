@@ -336,7 +336,6 @@ fn dump_chunk(
             OpCode::BXor => format!("BXOR {} {} {}", a, b, c),
             OpCode::Shl => format!("SHL {} {} {}", a, b, c),
             OpCode::Shr => format!("SHR {} {} {}", a, b, c),
-            OpCode::BNot => format!("BNOT {} {}", a, b),
 
             // Bitwise with constant
             OpCode::BAndK => format!("BANDK {} {} {}", a, b, c),
@@ -350,6 +349,20 @@ fn dump_chunk(
                 let sc = Instruction::get_sc(instr);
                 format!("SHLI {} {} {}", a, b, sc)
             }
+
+            // Unary operations (only A and B parameters)
+            OpCode::Unm => format!("UNM {} {}", a, b),
+            OpCode::BNot => format!("BNOT {} {}", a, b),
+            OpCode::Not => format!("NOT {} {}", a, b),
+
+            // Additional arithmetic operations
+            OpCode::Mod => format!("MOD {} {} {}", a, b, c),
+            OpCode::Pow => format!("POW {} {} {}", a, b, c),
+            OpCode::IDiv => format!("IDIV {} {} {}", a, b, c),
+            OpCode::DivK => format!("DIVK {} {} {}", a, b, c),
+            OpCode::IDivK => format!("IDIVK {} {} {}", a, b, c),
+            OpCode::ModK => format!("MODK {} {} {}", a, b, c),
+            OpCode::PowK => format!("POWK {} {} {}", a, b, c),
 
             // Load float/boolean
             OpCode::LoadF => {
