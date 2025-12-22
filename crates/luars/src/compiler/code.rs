@@ -1447,20 +1447,17 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 }
             }
             
-            // Port of codebini from lcode.c:1572-1598 - try ADDI/SHLI/SHRI optimization
-            // Check if this is ADD/SUB and e2 is a small integer constant (isSCint check)
-            if matches!(op, BinaryOperator::OpAdd | BinaryOperator::OpSub) {
+            // Port of codebini from lcode.c:1572-1598 and finishbinexpneg:1464-1480
+            // For ADD: Check if e2 is a small integer constant (isSCint check) - lcode.c:1523
+            // For SUB: Check if can negate second operand (finishbinexpneg) - lcode.c:1733-1737
+            if op == BinaryOperator::OpAdd {
                 if let ExpKind::VKINT = e2.kind {
                     let imm_val = unsafe { e2.u.ival };
-                    // For SUB: convert to ADD with negated immediate (a - b => a + (-b))
-                    let final_imm = if op == BinaryOperator::OpSub { -imm_val } else { imm_val };
-                    
-                    // Check if value fits in signed 8-bit immediate after negation
-                    // lcode.c uses fits_in_SC which checks for -128 to 127 range
-                    if final_imm >= -128 && final_imm <= 127 {
-                        // Use ADDI instruction (even for SUB)
+                    // For ADD: only check if the value fits in signed 8-bit after encoding
+                    if imm_val >= -128 && imm_val <= 127 {
+                        // Use ADDI instruction
                         let r1 = exp2anyreg(fs, e1);
-                        let enc_imm = ((final_imm + 127) & 0xff) as u32;  // Encode for ADDI
+                        let enc_imm = ((imm_val + 127) & 0xff) as u32;
                         let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
                         
                         free_exp(fs, e1);
@@ -1470,50 +1467,23 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         e1.u.info = pc as i32;
                         
                         // Generate MMBINI for metamethod fallback
-                        let mm_imm = ((imm_val + 128) & 0xff) as u32;  // Use ORIGINAL imm_val
-                        let tm_event = if op == BinaryOperator::OpSub { TmKind::Sub } else { TmKind::Add };
-                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, tm_event as u32, flip);
+                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Add as u32, flip);
                         return;
                     }
                 }
-            }
-            
-            // Port of codebini for SHLI/SHRI - shift with immediate (lcode.c:1581-1596)
-            // Note: SHLI is 'immediate << register', SHRI is 'register >> immediate'
-            if matches!(op, BinaryOperator::OpShl | BinaryOperator::OpShr) {
-                // For SHL: check if LEFT operand (e1) is small constant -> SHLI
-                // For SHR: check if RIGHT operand (e2) is small constant -> SHRI
-                let is_shl = op == BinaryOperator::OpShl;
-                let check_imm = if is_shl {
-                    if let ExpKind::VKINT = e1.kind {
-                        Some(unsafe { e1.u.ival })
-                    } else {
-                        None
-                    }
-                } else {
-                    if let ExpKind::VKINT = e2.kind {
-                        Some(unsafe { e2.u.ival })
-                    } else {
-                        None
-                    }
-                };
-                
-                if let Some(imm_val) = check_imm {
-                    // Check if value fits in signed 8-bit immediate (after encoding)
-                    // lcode.c uses fits_in_SC which checks for -128 to 127 range
-                    if imm_val >= -128 && imm_val <= 127 {
-                        // Get register for the non-immediate operand
-                        let r1 = if is_shl {
-                            exp2anyreg(fs, e2)  // For SHLI: immediate << register
-                        } else {
-                            exp2anyreg(fs, e1)  // For SHRI: register >> immediate
-                        };
-                        
-                        // Encode immediate: sC = (imm_val + 127) & 0xFF
-                        let enc_imm = ((imm_val + 127) & 0xff) as u32;
-                        
-                        let opcode = if is_shl { OpCode::ShlI } else { OpCode::ShrI };
-                        let pc = code_abc(fs, opcode, 0, r1 as u32, enc_imm);
+            } else if op == BinaryOperator::OpSub {
+                // SUB can be converted to ADDI with negated immediate (finishbinexpneg)
+                // But BOTH original and negated values must fit in range!
+                if let ExpKind::VKINT = e2.kind {
+                    let imm_val = unsafe { e2.u.ival };
+                    let neg_imm = -imm_val;
+                    // Both values must fit in -128..127 range (fitsC check in lcode.c:1469)
+                    if imm_val >= -128 && imm_val <= 127 && neg_imm >= -128 && neg_imm <= 127 {
+                        // Use ADDI with negated immediate
+                        let r1 = exp2anyreg(fs, e1);
+                        let enc_imm = ((neg_imm + 127) & 0xff) as u32;  // Encode negated value for ADDI
+                        let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
                         
                         free_exp(fs, e1);
                         free_exp(fs, e2);
@@ -1521,15 +1491,85 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         e1.kind = ExpKind::VRELOC;
                         e1.u.info = pc as i32;
                         
-                        // Generate MMBINI for metamethod fallback
+                        // Generate MMBINI with ORIGINAL value for metamethod
+                        // (finishbinexpneg corrects the metamethod argument - lcode.c:1476)
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;
-                        let tm_event = if is_shl { TmKind::Shl } else { TmKind::Shr };
-                        // For SHLI, flip bit should be true since immediate is on left
-                        let flip = is_shl;
-                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, tm_event as u32, flip);
+                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Sub as u32, flip);
                         return;
                     }
                 }
+            }
+            
+            // Handle shift operations (lcode.c:1745-1760)
+            if op == BinaryOperator::OpShl {
+                // OPR_SHL has three cases:
+                // 1. e1 is small int -> SHLI (immediate << register)
+                // 2. e2 can be negated -> SHRI (a << b = a >> -b)
+                // 3. else -> regular SHL
+                if let ExpKind::VKINT = e1.kind {
+                    let imm_val = unsafe { e1.u.ival };
+                    if imm_val >= -128 && imm_val <= 127 {
+                        // Case 1: SHLI (immediate << register)
+                        swapexps(e1, e2);  // Put immediate on right for processing
+                        let r1 = exp2anyreg(fs, e1);
+                        let enc_imm = ((imm_val + 127) & 0xff) as u32;
+                        let pc = code_abc(fs, OpCode::ShlI, 0, r1 as u32, enc_imm);
+                        
+                        free_exp(fs, e1);
+                        free_exp(fs, e2);
+                        
+                        e1.kind = ExpKind::VRELOC;
+                        e1.u.info = pc as i32;
+                        
+                        // MMBINI with flip=1 since immediate was on left
+                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Shl as u32, true);
+                        return;
+                    }
+                } else if let ExpKind::VKINT = e2.kind {
+                    // Case 2: Check if e2 can be negated -> use SHRI
+                    let imm_val = unsafe { e2.u.ival };
+                    let neg_imm = -imm_val;
+                    if imm_val >= -128 && imm_val <= 127 && neg_imm >= -128 && neg_imm <= 127 {
+                        // Use SHRI with negated immediate (a << b = a >> -b)
+                        let r1 = exp2anyreg(fs, e1);
+                        let enc_imm = ((neg_imm + 127) & 0xff) as u32;
+                        let pc = code_abc(fs, OpCode::ShrI, 0, r1 as u32, enc_imm);
+                        
+                        free_exp(fs, e1);
+                        free_exp(fs, e2);
+                        
+                        e1.kind = ExpKind::VRELOC;
+                        e1.u.info = pc as i32;
+                        
+                        // MMBINI with ORIGINAL value for TM_SHL
+                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Shl as u32, flip);
+                        return;
+                    }
+                }
+                // Case 3: Fall through to regular codebinexpval
+            } else if op == BinaryOperator::OpShr {
+                // OPR_SHR: if e2 is small int -> SHRI, else regular SHR
+                if let ExpKind::VKINT = e2.kind {
+                    let imm_val = unsafe { e2.u.ival };
+                    if imm_val >= -128 && imm_val <= 127 {
+                        let r1 = exp2anyreg(fs, e1);
+                        let enc_imm = ((imm_val + 127) & 0xff) as u32;
+                        let pc = code_abc(fs, OpCode::ShrI, 0, r1 as u32, enc_imm);
+                        
+                        free_exp(fs, e1);
+                        free_exp(fs, e2);
+                        
+                        e1.kind = ExpKind::VRELOC;
+                        e1.u.info = pc as i32;
+                        
+                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Shr as u32, flip);
+                        return;
+                    }
+                }
+                // Fall through to regular codebinexpval
             }
             
             // Try to use K operand optimization
