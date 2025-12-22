@@ -592,8 +592,8 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     // Adjust local variables (3 control variables)
     fs.adjust_local_vars(3);
 
-    // Generate FORPREP
-    let prep_jump = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
+    // Generate FORPREP with initial jump offset 0
+    let prep_pc = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
 
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
@@ -616,15 +616,18 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     leaveblock(fs);
 
-    // Generate FORLOOP
-    code::patchtohere(fs, prep_jump as isize);
-    let loop_pc = code::code_asbx(
-        fs,
-        OpCode::ForLoop,
-        base as u32,
-        (prep_jump as isize - fs.pc as isize) as i32,
-    );
-    code::fix_jump(fs, prep_jump, loop_pc + 1);
+    // Generate FORLOOP with initial Bx=0, will be fixed by fix_for_jump
+    let loop_pc = code::code_abx(fs, OpCode::ForLoop, base as u32, 0);
+    
+    // Fix FORPREP: jump forward to FORLOOP position (loop_pc)
+    // This matches lparser.c: fixforjump(fs, prep, luaK_getlabel(fs), 0)
+    // where luaK_getlabel(fs) returns the position where FORLOOP was just generated
+    fix_for_jump(fs, prep_pc, loop_pc, false);
+    
+    // Fix FORLOOP: jump back to after FORPREP (prep_pc + 1, loop body start)
+    // This matches lparser.c: fixforjump(fs, endfor, prep + 1, 1)
+    // back=true means the distance will be stored as positive (absolute value)
+    fix_for_jump(fs, loop_pc, prep_pc + 1, true);
 
     // Don't remove variables here - the outer forstat's leaveblock will handle it
     // fs.remove_vars(fs.nactvar - 1);
@@ -799,17 +802,32 @@ fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
 // Fix for instruction at position 'pc' to jump to 'dest'
 // back=true means a back jump (negative offset)
 fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) {
+    // Port of lparser.c:1529 fixforjump
+    // static void fixforjump (FuncState *fs, int pc, int dest, int back) {
+    //   Instruction *jmp = &fs->f->code[pc];
+    //   int offset = dest - (pc + 1);
+    //   if (back)
+    //     offset = -offset;
+    //   if (l_unlikely(offset > MAXARG_Bx))
+    //     luaX_syntaxerror(fs->ls, "control structure too long");
+    //   SETARG_Bx(*jmp, offset);
+    // }
+    
     let mut offset = (dest as isize) - (pc as isize) - 1;
     if back {
+        // For back jumps, negate to get positive distance
+        // This is stored in Bx, and VM will subtract it (pc -= Bx)
         offset = -offset;
     }
-    if offset > 0x3FFFF {
-        // MAXARG_Bx = 2^18 - 1
-        // Should report error, but for now just clamp
-        offset = 0x3FFFF;
+    // For forward jumps, offset is already positive
+    // VM will add it (pc += Bx + 1)
+    
+    // Validate range
+    if offset < 0 || offset > Instruction::MAX_BX as isize {
+        eprintln!("Warning: for-loop jump offset out of range: offset={}", offset);
     }
 
-    // Set Bx field of instruction at pc
+    // Set Bx field directly (unsigned distance)
     Instruction::set_bx(&mut fs.chunk.code[pc], offset as u32);
 }
 

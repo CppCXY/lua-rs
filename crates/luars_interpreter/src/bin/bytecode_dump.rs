@@ -273,15 +273,21 @@ fn dump_chunk(
                 format!("GEI {} {} {}", a, sb, k as u32)
             }
             OpCode::ForLoop => {
-                // FORLOOP uses unsigned Bx (backward jump distance)
+                // FORLOOP uses Bx as unsigned distance (no sBx conversion needed)
                 format!("FORLOOP {} {}", a, bx)
             }
             OpCode::ForPrep => {
-                // FORPREP uses unsigned Bx (forward jump distance to skip loop)
+                // FORPREP uses Bx as unsigned distance (no sBx conversion needed)
                 format!("FORPREP {} {}", a, bx)
             }
-            OpCode::TForPrep => format!("TFORPREP {} {}", a, bx),
-            OpCode::TForLoop => format!("TFORLOOP {} {}", a, bx),
+            OpCode::TForPrep => {
+                // TFORPREP uses Bx as unsigned distance
+                format!("TFORPREP {} {}", a, bx)
+            }
+            OpCode::TForLoop => {
+                // TFORLOOP uses Bx as unsigned distance
+                format!("TFORLOOP {} {}", a, bx)
+            }
             OpCode::TForCall => {
                 // TFORCALL A C: R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2])
                 // Lua 5.4 displays it as "TFORCALL A C" (no B parameter shown)
