@@ -107,6 +107,15 @@ impl ExpDesc {
         }
     }
 
+    pub fn new_vkstr(string_id: usize) -> Self {
+        ExpDesc {
+            kind: ExpKind::VKSTR,
+            u: ExpUnion { info: string_id as i32 },
+            t: -1,
+            f: -1,
+        }
+    }
+
     pub fn new_nonreloc(reg: u8) -> Self {
         ExpDesc {
             kind: ExpKind::VNONRELOC,
