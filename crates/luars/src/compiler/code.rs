@@ -1264,6 +1264,8 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
     }
     
     // Bitwise operations: require both operands to be representable as integers
+    // IMPORTANT: Lua treats integers as UNSIGNED for bitwise operations (see lvm.h intop macro)
+    // intop(op,v1,v2) = l_castU2S(l_castS2U(v1) op l_castS2U(v2))
     match op {
         OpBAnd | OpBOr | OpBXor => {
             // Check if float values can be exactly converted to integers
@@ -1275,10 +1277,13 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
             }
             
             e1.kind = VKINT;
+            // Cast to unsigned, perform operation, cast back to signed
+            let u1 = i1 as u64;
+            let u2 = i2 as u64;
             e1.u.ival = match op {
-                OpBAnd => i1 & i2,
-                OpBOr => i1 | i2,
-                OpBXor => i1 ^ i2,
+                OpBAnd => (u1 & u2) as i64,
+                OpBOr => (u1 | u2) as i64,
+                OpBXor => (u1 ^ u2) as i64,
                 _ => unreachable!(),
             };
             return true;
@@ -1292,19 +1297,46 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
             }
             
             e1.kind = VKINT;
+            // Port of luaV_shiftl from lvm.c:780-793
+            // Lua uses unsigned shift (logical shift, not arithmetic)
+            let u1 = i1 as u64;
             e1.u.ival = match op {
                 OpShl => {
-                    if i2 >= 0 {
-                        i1.wrapping_shl(i2 as u32)
+                    if i2 < 0 {
+                        // Shift right with negative y
+                        let shift_amount = -i2;
+                        if shift_amount >= 64 {
+                            0
+                        } else {
+                            (u1 >> shift_amount) as i64
+                        }
                     } else {
-                        i1.wrapping_shr((-i2) as u32)
+                        // Shift left with positive y
+                        if i2 >= 64 {
+                            0
+                        } else {
+                            (u1 << i2) as i64
+                        }
                     }
                 }
                 OpShr => {
-                    if i2 >= 0 {
-                        i1.wrapping_shr(i2 as u32)
+                    // luaV_shiftr(x,y) = luaV_shiftl(x, -y)
+                    let neg_i2 = -i2;
+                    if neg_i2 < 0 {
+                        // Shift right
+                        let shift_amount = -neg_i2;
+                        if shift_amount >= 64 {
+                            0
+                        } else {
+                            (u1 >> shift_amount) as i64
+                        }
                     } else {
-                        i1.wrapping_shl((-i2) as u32)
+                        // Shift left
+                        if neg_i2 >= 64 {
+                            0
+                        } else {
+                            (u1 << neg_i2) as i64
+                        }
                     }
                 }
                 _ => unreachable!(),

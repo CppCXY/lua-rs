@@ -27,13 +27,13 @@ fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {
 // Port of expr from lparser.c
 pub fn expr(fs: &mut FuncState) -> Result<ExpDesc, String> {
     let mut v = ExpDesc::new_void();
-    subexpr(fs, &mut v, 0)?;
+    subexpr(fs, &mut v, 0)?;  // Discard returned operator
     Ok(v)
 }
 
 // Internal version that uses mutable reference
 pub(crate) fn expr_internal(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
-    subexpr(fs, v, 0)?;
+    subexpr(fs, v, 0)?;  // Discard returned operator
     Ok(())
 }
 
@@ -48,19 +48,20 @@ fn get_unary_opcode(op: UnaryOperator) -> OpCode {
 }
 
 // Port of subexpr from lparser.c
-fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<(), String> {
+// Returns the first untreated operator (like Lua C implementation)
+fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<BinaryOperator, String> {
     let uop = to_unary_operator(fs.lexer.current_token());
     if uop != UnaryOperator::OpNop {
         let op = get_unary_opcode(uop);
         fs.lexer.bump();
-        subexpr(fs, v, UNARY_PRIORITY)?;
+        let _ = subexpr(fs, v, UNARY_PRIORITY)?;  // Discard returned op from recursive call
         code::prefix(fs, op, v);
     } else {
         simpleexp(fs, v)?;
     }
 
     // Expand while operators have priorities higher than limit
-    // Port of lparser.c:1274-1282
+    // Port of lparser.c:1273-1284
     let mut op = to_binary_operator(fs.lexer.current_token());
     while op != BinaryOperator::OpNop && op.get_priority().left > limit {
         fs.lexer.bump();
@@ -69,16 +70,17 @@ fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<(), String
         code::infix(fs, op, v);
 
         let mut v2 = ExpDesc::new_void();
-        subexpr(fs, &mut v2, op.get_priority().right)?;
+        // Recursive call returns next untreated operator (lparser.c:1283)
+        let nextop = subexpr(fs, &mut v2, op.get_priority().right)?;
 
         // lcode.c:1706-1783: luaK_posfix
         // 'and' and 'or' don't generate opcodes - they use control flow
         code::posfix(fs, op, v, &mut v2);
 
-        op = to_binary_operator(fs.lexer.current_token());
+        op = nextop;  // Use returned operator instead of re-checking token (lparser.c:1284)
     }
 
-    Ok(())
+    Ok(op)  // Return first untreated operator (lparser.c:1286)
 }
 
 // Port of simpleexp from lparser.c
