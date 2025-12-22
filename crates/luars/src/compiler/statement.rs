@@ -622,12 +622,12 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     // Fix FORPREP: jump forward to FORLOOP position (loop_pc)
     // This matches lparser.c: fixforjump(fs, prep, luaK_getlabel(fs), 0)
     // where luaK_getlabel(fs) returns the position where FORLOOP was just generated
-    fix_for_jump(fs, prep_pc, loop_pc, false);
+    fix_for_jump(fs, prep_pc, loop_pc, false)?;
     
     // Fix FORLOOP: jump back to after FORPREP (prep_pc + 1, loop body start)
     // This matches lparser.c: fixforjump(fs, endfor, prep + 1, 1)
     // back=true means the distance will be stored as positive (absolute value)
-    fix_for_jump(fs, loop_pc, prep_pc + 1, true);
+    fix_for_jump(fs, loop_pc, prep_pc + 1, true)?;
 
     // Don't remove variables here - the outer forstat's leaveblock will handle it
     // fs.remove_vars(fs.nactvar - 1);
@@ -701,7 +701,7 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1558: fixforjump(fs, prep, luaK_getlabel(fs), 0);
     // Fix TFORPREP to jump to current position (after leaveblock)
     let label_after_block = fs.pc;
-    fix_for_jump(fs, prep_pc, label_after_block, false);
+    fix_for_jump(fs, prep_pc, label_after_block, false)?;
 
     // lparser.c:1559-1561: Generate TFORCALL for generic for
     code::code_abc(fs, OpCode::TForCall, base as u32, 0, (nvars - 4) as u32);
@@ -711,7 +711,7 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
 
     // lparser.c:1563: fixforjump(fs, endfor, prep + 1, 1);
     // Fix TFORLOOP to jump back to prep+1 (back jump)
-    fix_for_jump(fs, endfor_pc, prep_pc + 1, true);
+    fix_for_jump(fs, endfor_pc, prep_pc + 1, true)?;
     
     // Don't remove variables here - the outer forstat's leaveblock will handle it
     // fs.remove_vars(fs.nactvar - nvars as u8);
@@ -801,7 +801,7 @@ fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
 // Port of fixforjump from lparser.c:1530-1538
 // Fix for instruction at position 'pc' to jump to 'dest'
 // back=true means a back jump (negative offset)
-fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) {
+fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) -> Result<(), String> {
     // Port of lparser.c:1529 fixforjump
     // static void fixforjump (FuncState *fs, int pc, int dest, int back) {
     //   Instruction *jmp = &fs->f->code[pc];
@@ -824,11 +824,12 @@ fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) {
     
     // Validate range
     if offset < 0 || offset > Instruction::MAX_BX as isize {
-        eprintln!("Warning: for-loop jump offset out of range: offset={}", offset);
+        return Err(format!("Warning: for-loop jump offset out of range: offset={}", offset));
     }
 
     // Set Bx field directly (unsigned distance)
     Instruction::set_bx(&mut fs.chunk.code[pc], offset as u32);
+    Ok(())
 }
 
 // Port of markupval from lparser.c:411-417
