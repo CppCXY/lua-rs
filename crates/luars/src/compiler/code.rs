@@ -857,13 +857,6 @@ fn exp2k(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
             ExpKind::VNIL => nil_k(fs),
             ExpKind::VKINT => int_k(fs, unsafe { e.u.ival }),
             ExpKind::VKFLT => number_k(fs, unsafe { e.u.nval }),
-            ExpKind::VKSTR => {
-                // Port of stringK call from lcode.c:1009
-                // info = stringK(fs, e->u.strval);
-                let string_id = StringId(unsafe { e.u.info as u32 });
-                let value = LuaValue::string(string_id);
-                add_constant(fs, value)
-            }
             ExpKind::VK => unsafe { e.u.info as usize },
             _ => return false,
         };

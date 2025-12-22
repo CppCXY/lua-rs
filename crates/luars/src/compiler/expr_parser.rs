@@ -123,16 +123,13 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             fs.lexer.bump();
         }
         LuaTokenKind::TkString | LuaTokenKind::TkLongString => {
-            // String constant - create VKSTR (defer constant table addition)
-            // Port of codestring from lparser.c:159-163
+            // String constant - remove quotes
             let text = fs.lexer.current_token_text();
             let string_content = parse_string_token_value(text, fs.lexer.current_token());
             match string_content {
                 Ok(s) => {
-                    // Add string to object pool and get StringId
-                    let (string_id, _) = fs.pool.create_string(&s);
-                    // Create VKSTR with StringId (stored in info field)
-                    *v = ExpDesc::new_vkstr(string_id.0 as usize);
+                    let idx = string_k(fs, s);
+                    *v = ExpDesc::new_k(idx);
                 }
                 Err(e) => {
                     return Err(fs.syntax_error(&format!("invalid string literal: {}", e)));
