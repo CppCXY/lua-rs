@@ -1,4 +1,3 @@
-
 // typedef enum {
 //   TM_INDEX,
 //   TM_NEWINDEX,
@@ -58,4 +57,3 @@ pub enum TmKind {
     Close = 24,
     N = 25, // number of elements in the enum
 }
-

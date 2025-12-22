@@ -2,18 +2,18 @@ use crate::compiler::parser::{
     lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind, reader::Reader,
 };
 
-use super::lexer_config::LexerConfig;
+use super::tokenize_config::TokensizeConfig;
 
-pub struct LuaLexer<'a> {
+pub struct LuaTokenize<'a> {
     reader: Reader<'a>,
-    lexer_config: LexerConfig,
+    lexer_config: TokensizeConfig,
     error: Option<String>,
     line: usize,
 }
 
-impl<'a> LuaLexer<'a> {
-    pub fn new(reader: Reader<'a>, lexer_config: LexerConfig) -> Self {
-        LuaLexer {
+impl<'a> LuaTokenize<'a> {
+    pub fn new(reader: Reader<'a>, lexer_config: TokensizeConfig) -> Self {
+        LuaTokenize {
             reader,
             lexer_config,
             error: None,

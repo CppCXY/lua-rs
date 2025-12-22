@@ -1,41 +1,47 @@
-mod lexer;
 mod lexer_config;
 mod lua_language_level;
 mod lua_operator_kind;
 mod lua_token_data;
 mod lua_token_kind;
-mod parser_config;
+mod lua_tokenize;
 mod reader;
 mod text_range;
+mod tokenize_config;
+
+use crate::lua_value::LuaValue;
+use std::collections::HashMap;
 
 pub use crate::compiler::parser::{
-    lexer::LuaLexer, lexer_config::LexerConfig, lua_language_level::LuaLanguageLevel,
-    lua_operator_kind::*, lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind,
-    parser_config::ParserConfig, reader::Reader, text_range::SourceRange,
+    lexer_config::ParserConfig, lua_language_level::LuaLanguageLevel, lua_operator_kind::*,
+    lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind, lua_tokenize::LuaTokenize,
+    reader::Reader, text_range::SourceRange, tokenize_config::TokensizeConfig,
 };
 
-pub struct LuaParser<'a> {
+pub struct LuaLexer<'a> {
     text: &'a str,
     tokens: Vec<LuaTokenData>,
     token_index: usize,
     current_token: LuaTokenKind,
     pub parse_config: ParserConfig,
-    pub line: usize,       // current line number (linenumber in Lua)
-    pub lastline: usize,   // line of last token consumed (lastline in Lua)
+    pub line: usize,     // current line number (linenumber in Lua)
+    pub lastline: usize, // line of last token consumed (lastline in Lua)
+    // Global scanner table for constant deduplication (corresponds to LexState.h in Lua C)
+    pub scanner_table: HashMap<LuaValue, usize>,
 }
 
-impl<'a> LuaParser<'a> {
-    pub fn new(text: &'a str, tokens: Vec<LuaTokenData>, level: LuaLanguageLevel) -> LuaParser<'a> {
+impl<'a> LuaLexer<'a> {
+    pub fn new(text: &'a str, tokens: Vec<LuaTokenData>, level: LuaLanguageLevel) -> LuaLexer<'a> {
         let config = ParserConfig::new(level);
 
-        let mut parser = LuaParser {
+        let mut parser = LuaLexer {
             text,
             tokens,
             token_index: 0,
             current_token: LuaTokenKind::None,
             parse_config: config,
             line: 1,
-            lastline: 1,  // Initialize lastline to 1 (llex.c:176)
+            lastline: 1, // Initialize lastline to 1 (llex.c:176)
+            scanner_table: HashMap::new(),
         };
 
         parser.init();
@@ -120,7 +126,7 @@ impl<'a> LuaParser<'a> {
         // Port of luaX_next from llex.c:565-573
         // Save current line before consuming next token
         self.lastline = self.line;
-        
+
         let mut next_index = self.token_index + 1;
         self.skip_trivia_and_update_line(&mut next_index);
         self.token_index = next_index;

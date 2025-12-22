@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::Chunk;
 // Port of FuncState and related structures from lparser.h
 use crate::gc::ObjectPool;
-use crate::{LuaValue, compiler::parser::LuaParser};
+use crate::{LuaValue, compiler::parser::LuaLexer};
 
 // Upvalue descriptor
 #[derive(Clone)]
@@ -18,23 +18,23 @@ pub struct Upvaldesc {
 pub struct FuncState<'a> {
     pub chunk: Chunk,
     pub prev: Option<&'a mut FuncState<'a>>, // parent function state
-    pub lexer: &'a mut LuaParser<'a>,
+    pub lexer: &'a mut LuaLexer<'a>,
     pub pool: &'a mut ObjectPool,
     pub block_list: Option<Box<BlockCnt>>,
-    pub pc: usize,                           // next position to code (equivalent to pc)
-    pub last_target: usize,                  // label of last 'jump label'
-    pub pending_gotos: Vec<LabelDesc>,       // list of pending gotos
-    pub labels: Vec<LabelDesc>,              // list of active labels
-    pub actvar: Vec<VarDesc>,                // list of active local variables
-    pub upvalues: Vec<Upvaldesc>,            // upvalue descriptors
-    pub nactvar: u8,                         // number of active local variables
-    pub nups: u8,                            // number of upvalues
-    pub freereg: u8,                         // first free register
-    pub iwthabs: u8,                         // instructions issued since last absolute line info
-    pub needclose: bool, // true if function needs to close upvalues when returning
-    pub is_vararg: bool, // true if function is vararg
-    pub first_local: usize, // index of first local variable in prev
-    pub source_name: String, // source file name for error messages
+    pub pc: usize,                     // next position to code (equivalent to pc)
+    pub last_target: usize,            // label of last 'jump label'
+    pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
+    pub labels: Vec<LabelDesc>,        // list of active labels
+    pub actvar: Vec<VarDesc>,          // list of active local variables
+    pub upvalues: Vec<Upvaldesc>,      // upvalue descriptors
+    pub nactvar: u8,                   // number of active local variables
+    pub nups: u8,                      // number of upvalues
+    pub freereg: u8,                   // first free register
+    pub iwthabs: u8,                   // instructions issued since last absolute line info
+    pub needclose: bool,               // true if function needs to close upvalues when returning
+    pub is_vararg: bool,               // true if function is vararg
+    pub first_local: usize,            // index of first local variable in prev
+    pub source_name: String,           // source file name for error messages
     pub chunk_constants_map: HashMap<LuaValue, usize>, // constant to index mapping for chunk
 }
 
@@ -85,7 +85,7 @@ pub struct VarDesc {
 
 impl<'a> FuncState<'a> {
     pub fn new(
-        lexer: &'a mut LuaParser<'a>,
+        lexer: &'a mut LuaLexer<'a>,
         pool: &'a mut ObjectPool,
         is_vararg: bool,
         source_name: String,
@@ -133,7 +133,7 @@ impl<'a> FuncState<'a> {
     // Create child function state
     pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
         // Get references from parent - we'll need unsafe here due to borrow checker
-        let lexer_ptr = parent.lexer as *mut LuaParser<'a>;
+        let lexer_ptr = parent.lexer as *mut LuaLexer<'a>;
         let pool_ptr = parent.pool as *mut ObjectPool;
 
         FuncState {
@@ -210,7 +210,7 @@ impl<'a> FuncState<'a> {
             }
             n -= 1;
         }
-        0  // no variables in registers
+        0 // no variables in registers
     }
 
     // Port of luaY_nvarstack from lparser.c:332-334

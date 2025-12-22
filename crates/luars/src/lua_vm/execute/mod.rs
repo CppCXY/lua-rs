@@ -1,826 +1,826 @@
-/// Instruction dispatcher module
-///
-/// This module handles the execution of Lua VM instructions.
-/// All instructions are inlined to eliminate function call overhead.
-mod arithmetic_instructions;
-mod control_instructions;
-mod load_instructions;
-mod loop_instructions;
-mod table_instructions;
-mod upvalue_instructions;
+// /// Instruction dispatcher module
+// ///
+// /// This module handles the execution of Lua VM instructions.
+// /// All instructions are inlined to eliminate function call overhead.
+// mod arithmetic_instructions;
+// mod control_instructions;
+// mod load_instructions;
+// mod loop_instructions;
+// mod table_instructions;
+// mod upvalue_instructions;
 
-pub use arithmetic_instructions::*;
-pub use control_instructions::*;
-pub use load_instructions::*;
-pub use loop_instructions::*;
-pub use table_instructions::*;
-pub use upvalue_instructions::*;
+// pub use arithmetic_instructions::*;
+// pub use control_instructions::*;
+// pub use load_instructions::*;
+// pub use loop_instructions::*;
+// pub use table_instructions::*;
+// pub use upvalue_instructions::*;
 
-use super::{LuaError, LuaResult, LuaVM, OpCode};
-use crate::lua_value::{TAG_FALSE, TAG_FLOAT, TAG_INTEGER, TAG_NIL, TAG_TRUE, TYPE_MASK};
-use crate::lua_vm::LuaCallFrame;
-use crate::{LuaValue, get_a, get_ax, get_b, get_bx, get_k, get_op, get_sbx, get_sj};
+// use super::{LuaError, LuaResult, LuaVM, OpCode};
+// use crate::lua_value::{TAG_FALSE, TAG_FLOAT, TAG_INTEGER, TAG_NIL, TAG_TRUE, TYPE_MASK};
+// use crate::lua_vm::LuaCallFrame;
+// use crate::{LuaValue, get_a, get_ax, get_b, get_bx, get_k, get_op, get_sbx, get_sj};
 
-/// Save current pc to frame (like Lua C's savepc macro)
-/// Called before operations that may call Lua functions (CALL, metamethods, etc.)
-macro_rules! savepc {
-    ($frame_ptr:expr, $pc:expr) => {
-        unsafe {
-            (*$frame_ptr).pc = $pc as u32;
-        }
-    };
-}
+// /// Save current pc to frame (like Lua C's savepc macro)
+// /// Called before operations that may call Lua functions (CALL, metamethods, etc.)
+// macro_rules! savepc {
+//     ($frame_ptr:expr, $pc:expr) => {
+//         unsafe {
+//             (*$frame_ptr).pc = $pc as u32;
+//         }
+//     };
+// }
 
-/// Update pc, code_ptr, base_ptr from frame (like Lua C's updatestate)
-/// Used after CALL/RETURN instructions when frame changes
-#[inline(always)]
-unsafe fn updatestate(
-    frame_ptr: *mut LuaCallFrame,
-    pc: &mut usize,
-    code_ptr: &mut *const u32,
-    base_ptr: &mut usize,
-) {
-    unsafe {
-        *pc = (*frame_ptr).pc as usize;
-        *code_ptr = (*frame_ptr).code_ptr;
-        *base_ptr = (*frame_ptr).base_ptr as usize;
-    }
-}
+// /// Update pc, code_ptr, base_ptr from frame (like Lua C's updatestate)
+// /// Used after CALL/RETURN instructions when frame changes
+// #[inline(always)]
+// unsafe fn updatestate(
+//     frame_ptr: *mut LuaCallFrame,
+//     pc: &mut usize,
+//     code_ptr: &mut *const u32,
+//     base_ptr: &mut usize,
+// ) {
+//     unsafe {
+//         *pc = (*frame_ptr).pc as usize;
+//         *code_ptr = (*frame_ptr).code_ptr;
+//         *base_ptr = (*frame_ptr).base_ptr as usize;
+//     }
+// }
 
-/// Ultra-optimized main execution loop
-///
-/// Key optimizations (like Lua C):
-/// 1. Local variables: pc, code_ptr, base_ptr cached locally (like Lua C's luaV_execute)
-/// 2. Hot path instructions inlined directly in match
-/// 3. State reload only when frame changes (CALL/RETURN)
-/// 4. Pass mutable references to avoid frequent frame_ptr writes
-///
-/// Returns: Ok(LuaValue) on success, Err on runtime error
-#[inline(never)] // Don't inline this - it's the main loop, let it stay in cache
-pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
-    // Safety check: must have at least one frame to execute
-    if vm.frame_count == 0 {
-        return Err(LuaError::Exit);
-    }
+// /// Ultra-optimized main execution loop
+// ///
+// /// Key optimizations (like Lua C):
+// /// 1. Local variables: pc, code_ptr, base_ptr cached locally (like Lua C's luaV_execute)
+// /// 2. Hot path instructions inlined directly in match
+// /// 3. State reload only when frame changes (CALL/RETURN)
+// /// 4. Pass mutable references to avoid frequent frame_ptr writes
+// ///
+// /// Returns: Ok(LuaValue) on success, Err on runtime error
+// #[inline(never)] // Don't inline this - it's the main loop, let it stay in cache
+// pub fn luavm_execute(vm: &mut LuaVM) -> LuaResult<LuaValue> {
+//     // Safety check: must have at least one frame to execute
+//     if vm.frame_count == 0 {
+//         return Err(LuaError::Exit);
+//     }
 
-    // Initialize frame pointer - Box ensures pointer stability across Vec reallocs
-    let mut frame_ptr = vm.current_frame_ptr();
+//     // Initialize frame pointer - Box ensures pointer stability across Vec reallocs
+//     let mut frame_ptr = vm.current_frame_ptr();
 
-    // Like Lua C: cache hot variables as locals (register allocated)
-    // This avoids dereferencing frame_ptr on each instruction
-    let mut pc: usize;
-    let mut code_ptr: *const u32;
-    let mut base_ptr: usize;
+//     // Like Lua C: cache hot variables as locals (register allocated)
+//     // This avoids dereferencing frame_ptr on each instruction
+//     let mut pc: usize;
+//     let mut code_ptr: *const u32;
+//     let mut base_ptr: usize;
 
-    // Initial load from frame
-    unsafe {
-        pc = (*frame_ptr).pc as usize;
-        code_ptr = (*frame_ptr).code_ptr;
-        base_ptr = (*frame_ptr).base_ptr as usize;
-    }
+//     // Initial load from frame
+//     unsafe {
+//         pc = (*frame_ptr).pc as usize;
+//         code_ptr = (*frame_ptr).code_ptr;
+//         base_ptr = (*frame_ptr).base_ptr as usize;
+//     }
 
-    'mainloop: loop {
-        // Fetch instruction using local pc (like Lua C's vmfetch)
-        let instr = unsafe { *code_ptr.add(pc) };
-        pc += 1;
+//     'mainloop: loop {
+//         // Fetch instruction using local pc (like Lua C's vmfetch)
+//         let instr = unsafe { *code_ptr.add(pc) };
+//         pc += 1;
 
-        let opcode = get_op!(instr);
+//         let opcode = get_op!(instr);
 
-        // CRITICAL: Implement Lua 5.4's top management (lvm.c line 1183)
-        // lua_assert(isIT(i) || (cast_void(L->top.p = base), 1));
-        // For non-IT instructions, reset top to base to prevent temporary values
-        // from being kept alive by GC.
-        // In Lua 5.4: base = ci->func.p + 1 (first register of current function)
-        // In our VM: base_ptr is already the first register position
-        // So we set top = 0 (relative to base_ptr), meaning no registers are "active"
-        // for GC purposes. IT instructions will set top correctly when needed.
-        unsafe {
-            if !opcode.uses_top() {
-                (*frame_ptr).top = 0;
-            }
-        }
+//         // CRITICAL: Implement Lua 5.4's top management (lvm.c line 1183)
+//         // lua_assert(isIT(i) || (cast_void(L->top.p = base), 1));
+//         // For non-IT instructions, reset top to base to prevent temporary values
+//         // from being kept alive by GC.
+//         // In Lua 5.4: base = ci->func.p + 1 (first register of current function)
+//         // In our VM: base_ptr is already the first register position
+//         // So we set top = 0 (relative to base_ptr), meaning no registers are "active"
+//         // for GC purposes. IT instructions will set top correctly when needed.
+//         unsafe {
+//             if !opcode.uses_top() {
+//                 (*frame_ptr).top = 0;
+//             }
+//         }
 
-        match opcode {
-            // ============ HOT PATH: Inline simple instructions (< 10 lines) ============
+//         match opcode {
+//             // ============ HOT PATH: Inline simple instructions (< 10 lines) ============
 
-            // MOVE - R[A] := R[B]
-            OpCode::Move => {
-                let a = get_a!(instr);
-                let b = get_b!(instr);
-                unsafe {
-                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
-                    *reg_base.add(a) = *reg_base.add(b);
-                }
-                continue 'mainloop;
-            }
+//             // MOVE - R[A] := R[B]
+//             OpCode::Move => {
+//                 let a = get_a!(instr);
+//                 let b = get_b!(instr);
+//                 unsafe {
+//                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr);
+//                     *reg_base.add(a) = *reg_base.add(b);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // LOADI - R[A] := sBx
-            OpCode::LoadI => {
-                let a = get_a!(instr);
-                let sbx = get_sbx!(instr);
-                unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    (*dst).primary = TAG_INTEGER;
-                    (*dst).secondary = sbx as i64 as u64;
-                }
-                continue 'mainloop;
-            }
+//             // LOADI - R[A] := sBx
+//             OpCode::LoadI => {
+//                 let a = get_a!(instr);
+//                 let sbx = get_sbx!(instr);
+//                 unsafe {
+//                     let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     (*dst).primary = TAG_INTEGER;
+//                     (*dst).secondary = sbx as i64 as u64;
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // LOADF - R[A] := (float)sBx
-            OpCode::LoadF => {
-                let a = get_a!(instr);
-                let sbx = get_sbx!(instr);
-                unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    (*dst).primary = TAG_FLOAT;
-                    (*dst).secondary = (sbx as f64).to_bits();
-                }
-                continue 'mainloop;
-            }
+//             // LOADF - R[A] := (float)sBx
+//             OpCode::LoadF => {
+//                 let a = get_a!(instr);
+//                 let sbx = get_sbx!(instr);
+//                 unsafe {
+//                     let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     (*dst).primary = TAG_FLOAT;
+//                     (*dst).secondary = (sbx as f64).to_bits();
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // LOADTRUE - R[A] := true
-            OpCode::LoadTrue => {
-                let a = get_a!(instr);
-                unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    (*dst).primary = TAG_TRUE;
-                }
-                continue 'mainloop;
-            }
+//             // LOADTRUE - R[A] := true
+//             OpCode::LoadTrue => {
+//                 let a = get_a!(instr);
+//                 unsafe {
+//                     let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     (*dst).primary = TAG_TRUE;
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // LOADFALSE - R[A] := false
-            OpCode::LoadFalse => {
-                let a = get_a!(instr);
-                unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    (*dst).primary = TAG_FALSE;
-                }
-                continue 'mainloop;
-            }
+//             // LOADFALSE - R[A] := false
+//             OpCode::LoadFalse => {
+//                 let a = get_a!(instr);
+//                 unsafe {
+//                     let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     (*dst).primary = TAG_FALSE;
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // LFALSESKIP - R[A] := false; pc++
-            OpCode::LFalseSkip => {
-                let a = get_a!(instr);
-                unsafe {
-                    let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    (*dst).primary = TAG_FALSE;
-                }
-                pc += 1;
-                continue 'mainloop;
-            }
+//             // LFALSESKIP - R[A] := false; pc++
+//             OpCode::LFalseSkip => {
+//                 let a = get_a!(instr);
+//                 unsafe {
+//                     let dst = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     (*dst).primary = TAG_FALSE;
+//                 }
+//                 pc += 1;
+//                 continue 'mainloop;
+//             }
 
-            // LOADNIL - R[A], ..., R[A+B] := nil
-            OpCode::LoadNil => {
-                let a = get_a!(instr);
-                let b = get_b!(instr);
-                unsafe {
-                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    for i in 0..=b {
-                        (*reg_base.add(i)).primary = TAG_NIL;
-                    }
-                }
-                continue 'mainloop;
-            }
+//             // LOADNIL - R[A], ..., R[A+B] := nil
+//             OpCode::LoadNil => {
+//                 let a = get_a!(instr);
+//                 let b = get_b!(instr);
+//                 unsafe {
+//                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     for i in 0..=b {
+//                         (*reg_base.add(i)).primary = TAG_NIL;
+//                     }
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // LOADK - R[A] := K[Bx]
-            OpCode::LoadK => {
-                let a = get_a!(instr);
-                let bx = get_bx!(instr);
-                unsafe {
-                    let constant = *(*frame_ptr).constants_ptr.add(bx);
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
-                }
-                continue 'mainloop;
-            }
+//             // LOADK - R[A] := K[Bx]
+//             OpCode::LoadK => {
+//                 let a = get_a!(instr);
+//                 let bx = get_bx!(instr);
+//                 unsafe {
+//                     let constant = *(*frame_ptr).constants_ptr.add(bx);
+//                     *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // LOADKX - R[A] := K[extra arg]; pc++
-            OpCode::LoadKX => {
-                let a = get_a!(instr);
-                unsafe {
-                    let extra_instr = *code_ptr.add(pc);
-                    pc += 1;
-                    let ax = get_ax!(extra_instr);
-                    let constant = *(*frame_ptr).constants_ptr.add(ax);
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
-                }
-                continue 'mainloop;
-            }
+//             // LOADKX - R[A] := K[extra arg]; pc++
+//             OpCode::LoadKX => {
+//                 let a = get_a!(instr);
+//                 unsafe {
+//                     let extra_instr = *code_ptr.add(pc);
+//                     pc += 1;
+//                     let ax = get_ax!(extra_instr);
+//                     let constant = *(*frame_ptr).constants_ptr.add(ax);
+//                     *vm.register_stack.as_mut_ptr().add(base_ptr + a) = constant;
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // VARARGPREP - complex, call function
-            OpCode::VarargPrep => {
-                exec_varargprep(vm, instr, frame_ptr, &mut base_ptr);
-                continue 'mainloop;
-            }
+//             // VARARGPREP - complex, call function
+//             OpCode::VarargPrep => {
+//                 exec_varargprep(vm, instr, frame_ptr, &mut base_ptr);
+//                 continue 'mainloop;
+//             }
 
-            // ============ Arithmetic operations ============
-            OpCode::Add => {
-                exec_add(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Sub => {
-                exec_sub(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Mul => {
-                exec_mul(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::AddI => {
-                exec_addi(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Div => {
-                exec_div(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::IDiv => {
-                exec_idiv(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Mod => {
-                exec_mod(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Pow => {
-                exec_pow(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
+//             // ============ Arithmetic operations ============
+//             OpCode::Add => {
+//                 exec_add(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Sub => {
+//                 exec_sub(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Mul => {
+//                 exec_mul(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::AddI => {
+//                 exec_addi(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Div => {
+//                 exec_div(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::IDiv => {
+//                 exec_idiv(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Mod => {
+//                 exec_mod(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Pow => {
+//                 exec_pow(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
 
-            // Arithmetic with constants
-            OpCode::AddK => {
-                exec_addk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::SubK => {
-                exec_subk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::MulK => {
-                exec_mulk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::ModK => {
-                exec_modk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::PowK => {
-                exec_powk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::DivK => {
-                exec_divk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::IDivK => {
-                exec_idivk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
+//             // Arithmetic with constants
+//             OpCode::AddK => {
+//                 exec_addk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::SubK => {
+//                 exec_subk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::MulK => {
+//                 exec_mulk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::ModK => {
+//                 exec_modk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::PowK => {
+//                 exec_powk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::DivK => {
+//                 exec_divk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::IDivK => {
+//                 exec_idivk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
 
-            // ============ Bitwise operations ============
-            OpCode::BAnd => {
-                exec_band(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::BOr => {
-                exec_bor(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::BXor => {
-                exec_bxor(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Shl => {
-                exec_shl(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Shr => {
-                exec_shr(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::BAndK => {
-                exec_bandk(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::BOrK => {
-                exec_bork(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::BXorK => {
-                exec_bxork(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::ShrI => {
-                exec_shri(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::ShlI => {
-                exec_shli(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::BNot => {
-                if let Err(e) = exec_bnot(vm, instr, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
+//             // ============ Bitwise operations ============
+//             OpCode::BAnd => {
+//                 exec_band(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::BOr => {
+//                 exec_bor(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::BXor => {
+//                 exec_bxor(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Shl => {
+//                 exec_shl(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Shr => {
+//                 exec_shr(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::BAndK => {
+//                 exec_bandk(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::BOrK => {
+//                 exec_bork(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::BXorK => {
+//                 exec_bxork(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::ShrI => {
+//                 exec_shri(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::ShlI => {
+//                 exec_shli(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::BNot => {
+//                 if let Err(e) = exec_bnot(vm, instr, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ Unary operations (inline NOT) ============
-            OpCode::Not => {
-                let a = get_a!(instr);
-                let b = get_b!(instr);
-                unsafe {
-                    let value = *vm.register_stack.as_ptr().add(base_ptr + b);
-                    let is_falsy = !value.is_truthy();
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
-                }
-                continue 'mainloop;
-            }
+//             // ============ Unary operations (inline NOT) ============
+//             OpCode::Not => {
+//                 let a = get_a!(instr);
+//                 let b = get_b!(instr);
+//                 unsafe {
+//                     let value = *vm.register_stack.as_ptr().add(base_ptr + b);
+//                     let is_falsy = !value.is_truthy();
+//                     *vm.register_stack.as_mut_ptr().add(base_ptr + a) = LuaValue::boolean(is_falsy);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ Metamethod stubs (save pc before calling) ============
-            OpCode::MmBin => {
-                savepc!(frame_ptr, pc);
-                if let Err(e) = exec_mmbin(vm, instr, code_ptr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::MmBinI => {
-                savepc!(frame_ptr, pc);
-                if let Err(e) = exec_mmbini(vm, instr, code_ptr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::MmBinK => {
-                savepc!(frame_ptr, pc);
-                let constants_ptr = unsafe { (*frame_ptr).constants_ptr };
-                if let Err(e) = exec_mmbink(vm, instr, code_ptr, constants_ptr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
+//             // ============ Metamethod stubs (save pc before calling) ============
+//             OpCode::MmBin => {
+//                 savepc!(frame_ptr, pc);
+//                 if let Err(e) = exec_mmbin(vm, instr, code_ptr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::MmBinI => {
+//                 savepc!(frame_ptr, pc);
+//                 if let Err(e) = exec_mmbini(vm, instr, code_ptr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::MmBinK => {
+//                 savepc!(frame_ptr, pc);
+//                 let constants_ptr = unsafe { (*frame_ptr).constants_ptr };
+//                 if let Err(e) = exec_mmbink(vm, instr, code_ptr, constants_ptr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ Comparisons (inline simple ones) ============
-            OpCode::LtI => {
-                if let Err(e) = exec_lti(vm, instr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::LeI => {
-                if let Err(e) = exec_lei(vm, instr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::GtI => {
-                if let Err(e) = exec_gti(vm, instr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::GeI => {
-                if let Err(e) = exec_gei(vm, instr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::EqI => {
-                exec_eqi(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::EqK => {
-                if let Err(e) = exec_eqk(vm, instr, frame_ptr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
+//             // ============ Comparisons (inline simple ones) ============
+//             OpCode::LtI => {
+//                 if let Err(e) = exec_lti(vm, instr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::LeI => {
+//                 if let Err(e) = exec_lei(vm, instr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::GtI => {
+//                 if let Err(e) = exec_gti(vm, instr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::GeI => {
+//                 if let Err(e) = exec_gei(vm, instr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::EqI => {
+//                 exec_eqi(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::EqK => {
+//                 if let Err(e) = exec_eqk(vm, instr, frame_ptr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ Control Flow (inline JMP and TEST) ============
-            OpCode::Jmp => {
-                let sj = get_sj!(instr);
-                pc = (pc as i32 + sj) as usize;
-                continue 'mainloop;
-            }
-            OpCode::Test => {
-                let a = get_a!(instr);
-                let k = get_k!(instr);
-                unsafe {
-                    let val = *vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    let is_truthy = val.is_truthy();
-                    if !is_truthy == k {
-                        pc += 1;
-                    }
-                }
-                continue 'mainloop;
-            }
-            OpCode::TestSet => {
-                exec_testset(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
+//             // ============ Control Flow (inline JMP and TEST) ============
+//             OpCode::Jmp => {
+//                 let sj = get_sj!(instr);
+//                 pc = (pc as i32 + sj) as usize;
+//                 continue 'mainloop;
+//             }
+//             OpCode::Test => {
+//                 let a = get_a!(instr);
+//                 let k = get_k!(instr);
+//                 unsafe {
+//                     let val = *vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     let is_truthy = val.is_truthy();
+//                     if !is_truthy == k {
+//                         pc += 1;
+//                     }
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::TestSet => {
+//                 exec_testset(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
 
-            // ============ Loop Instructions (inline FORLOOP) ============
-            OpCode::ForPrep => {
-                if let Err(e) = exec_forprep(vm, instr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::ForLoop => {
-                let a = get_a!(instr);
-                let bx = get_bx!(instr);
-                unsafe {
-                    let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
-                    let idx = *reg_base;
+//             // ============ Loop Instructions (inline FORLOOP) ============
+//             OpCode::ForPrep => {
+//                 if let Err(e) = exec_forprep(vm, instr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::ForLoop => {
+//                 let a = get_a!(instr);
+//                 let bx = get_bx!(instr);
+//                 unsafe {
+//                     let reg_base = vm.register_stack.as_mut_ptr().add(base_ptr + a);
+//                     let idx = *reg_base;
 
-                    // Integer loop: check if idx is integer (FORPREP sets this correctly)
-                    if (idx.primary & TYPE_MASK) == TAG_INTEGER {
-                        let count = (*reg_base.add(1)).secondary;
-                        if count > 0 {
-                            let idx_i = idx.secondary as i64;
-                            let step_i = (*reg_base.add(2)).secondary as i64;
-                            let new_idx = idx_i.wrapping_add(step_i);
-                            (*reg_base.add(1)).secondary = count - 1;
-                            (*reg_base).secondary = new_idx as u64;
-                            (*reg_base.add(3)).secondary = new_idx as u64;
-                            pc -= bx;
-                        }
-                        continue 'mainloop;
-                    }
-                    // Float loop
-                    if let Err(e) = exec_forloop_float(vm, reg_base, bx, &mut pc) {
-                        return Err(e);
-                    }
-                }
-                continue 'mainloop;
-            }
-            OpCode::TForPrep => {
-                exec_tforprep(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::TForLoop => {
-                exec_tforloop(vm, instr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
+//                     // Integer loop: check if idx is integer (FORPREP sets this correctly)
+//                     if (idx.primary & TYPE_MASK) == TAG_INTEGER {
+//                         let count = (*reg_base.add(1)).secondary;
+//                         if count > 0 {
+//                             let idx_i = idx.secondary as i64;
+//                             let step_i = (*reg_base.add(2)).secondary as i64;
+//                             let new_idx = idx_i.wrapping_add(step_i);
+//                             (*reg_base.add(1)).secondary = count - 1;
+//                             (*reg_base).secondary = new_idx as u64;
+//                             (*reg_base.add(3)).secondary = new_idx as u64;
+//                             pc -= bx;
+//                         }
+//                         continue 'mainloop;
+//                     }
+//                     // Float loop
+//                     if let Err(e) = exec_forloop_float(vm, reg_base, bx, &mut pc) {
+//                         return Err(e);
+//                     }
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::TForPrep => {
+//                 exec_tforprep(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::TForLoop => {
+//                 exec_tforloop(vm, instr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
 
-            // ============ Upvalue operations (inline for performance) ============
-            OpCode::GetUpval => {
-                // INLINED GETUPVAL: R[A] := UpValue[B]
-                // OPTIMIZED: Direct field access with branch prediction
-                let a = get_a!(instr);
-                let b = get_b!(instr);
+//             // ============ Upvalue operations (inline for performance) ============
+//             OpCode::GetUpval => {
+//                 // INLINED GETUPVAL: R[A] := UpValue[B]
+//                 // OPTIMIZED: Direct field access with branch prediction
+//                 let a = get_a!(instr);
+//                 let b = get_b!(instr);
 
-                unsafe {
-                    let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
+//                 unsafe {
+//                     let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
 
-                    // Read upvalue value directly
-                    let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
-                    let value = if uv.is_open {
-                        *vm.register_stack.get_unchecked(uv.stack_index)
-                    } else {
-                        uv.closed_value
-                    };
+//                     // Read upvalue value directly
+//                     let uv = vm.object_pool.get_upvalue_unchecked(upvalue_id);
+//                     let value = if uv.is_open {
+//                         *vm.register_stack.get_unchecked(uv.stack_index)
+//                     } else {
+//                         uv.closed_value
+//                     };
 
-                    *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
-                }
-                continue 'mainloop;
-            }
-            OpCode::SetUpval => {
-                // INLINED SETUPVAL: UpValue[B] := R[A]
-                // OPTIMIZED: Direct field access with branch prediction
-                let a = get_a!(instr);
-                let b = get_b!(instr);
+//                     *vm.register_stack.as_mut_ptr().add(base_ptr + a) = value;
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::SetUpval => {
+//                 // INLINED SETUPVAL: UpValue[B] := R[A]
+//                 // OPTIMIZED: Direct field access with branch prediction
+//                 let a = get_a!(instr);
+//                 let b = get_b!(instr);
 
-                unsafe {
-                    // Get the value to write
-                    let value = *vm.register_stack.as_ptr().add(base_ptr + a);
+//                 unsafe {
+//                     // Get the value to write
+//                     let value = *vm.register_stack.as_ptr().add(base_ptr + a);
 
-                    // Get upvalue
-                    let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
+//                     // Get upvalue
+//                     let upvalue_id = *(*frame_ptr).upvalues_ptr.add(b);
 
-                    // Write upvalue value directly
-                    let uv = vm.object_pool.get_upvalue_mut_unchecked(upvalue_id);
-                    if uv.is_open {
-                        *vm.register_stack.get_unchecked_mut(uv.stack_index) = value;
-                    } else {
-                        uv.closed_value = value;
-                    }
+//                     // Write upvalue value directly
+//                     let uv = vm.object_pool.get_upvalue_mut_unchecked(upvalue_id);
+//                     if uv.is_open {
+//                         *vm.register_stack.get_unchecked_mut(uv.stack_index) = value;
+//                     } else {
+//                         uv.closed_value = value;
+//                     }
 
-                    // GC write barrier for upvalue
-                    vm.gc_barrier_upvalue(upvalue_id, &value);
-                }
-                continue 'mainloop;
-            }
+//                     // GC write barrier for upvalue
+//                     vm.gc_barrier_upvalue(upvalue_id, &value);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ Extra arg (no-op) ============
-            OpCode::ExtraArg => {
-                continue 'mainloop;
-            }
+//             // ============ Extra arg (no-op) ============
+//             OpCode::ExtraArg => {
+//                 continue 'mainloop;
+//             }
 
-            // ============ Return Instructions (update state after frame change) ============
-            OpCode::Return0 => {
-                // OPTIMIZED RETURN0
-                // Close upvalues if any are open
-                if !vm.open_upvalues.is_empty() {
-                    vm.close_upvalues_from(base_ptr);
-                }
+//             // ============ Return Instructions (update state after frame change) ============
+//             OpCode::Return0 => {
+//                 // OPTIMIZED RETURN0
+//                 // Close upvalues if any are open
+//                 if !vm.open_upvalues.is_empty() {
+//                     vm.close_upvalues_from(base_ptr);
+//                 }
 
-                if vm.frame_count > 1 {
-                    // Get result info BEFORE decrementing frame_count
-                    let result_reg = unsafe { (*frame_ptr).get_result_reg() };
-                    let num_results = unsafe { (*frame_ptr).get_num_results() };
-                    let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+//                 if vm.frame_count > 1 {
+//                     // Get result info BEFORE decrementing frame_count
+//                     let result_reg = unsafe { (*frame_ptr).get_result_reg() };
+//                     let num_results = unsafe { (*frame_ptr).get_num_results() };
+//                     let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
 
-                    // Pop frame
-                    vm.frame_count -= 1;
+//                     // Pop frame
+//                     vm.frame_count -= 1;
 
-                    // Check if caller is Lua function
-                    if unsafe { (*caller_ptr).is_lua() } {
-                        // Read caller's state
-                        let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
+//                     // Check if caller is Lua function
+//                     if unsafe { (*caller_ptr).is_lua() } {
+//                         // Read caller's state
+//                         let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
 
-                        // CRITICAL FIX: When caller expects variable returns (C=0, num_results=usize::MAX),
-                        // we must set top to indicate 0 values were returned.
-                        if num_results == usize::MAX {
-                            unsafe {
-                                (*caller_ptr).top = result_reg as u32;
-                            }
-                        } else if num_results > 0 {
-                            // Only fill nil if caller expects fixed results (rare case)
-                            unsafe {
-                                let reg_ptr = vm.register_stack.as_mut_ptr();
-                                let nil_val = LuaValue::nil();
-                                for i in 0..num_results {
-                                    *reg_ptr.add(caller_base + result_reg + i) = nil_val;
-                                }
-                            }
-                        }
+//                         // CRITICAL FIX: When caller expects variable returns (C=0, num_results=usize::MAX),
+//                         // we must set top to indicate 0 values were returned.
+//                         if num_results == usize::MAX {
+//                             unsafe {
+//                                 (*caller_ptr).top = result_reg as u32;
+//                             }
+//                         } else if num_results > 0 {
+//                             // Only fill nil if caller expects fixed results (rare case)
+//                             unsafe {
+//                                 let reg_ptr = vm.register_stack.as_mut_ptr();
+//                                 let nil_val = LuaValue::nil();
+//                                 for i in 0..num_results {
+//                                     *reg_ptr.add(caller_base + result_reg + i) = nil_val;
+//                                 }
+//                             }
+//                         }
 
-                        // Update frame_ptr and local state
-                        frame_ptr = caller_ptr;
-                        unsafe {
-                            pc = (*caller_ptr).pc as usize;
-                            code_ptr = (*caller_ptr).code_ptr;
-                            base_ptr = caller_base;
-                        }
-                        continue 'mainloop;
-                    } else {
-                        // C function caller - exit and return values
-                        vm.return_values.clear();
-                        return Err(LuaError::Exit);
-                    }
-                }
+//                         // Update frame_ptr and local state
+//                         frame_ptr = caller_ptr;
+//                         unsafe {
+//                             pc = (*caller_ptr).pc as usize;
+//                             code_ptr = (*caller_ptr).code_ptr;
+//                             base_ptr = caller_base;
+//                         }
+//                         continue 'mainloop;
+//                     } else {
+//                         // C function caller - exit and return values
+//                         vm.return_values.clear();
+//                         return Err(LuaError::Exit);
+//                     }
+//                 }
 
-                // No caller - exit VM
-                vm.frame_count -= 1;
-                vm.return_values.clear();
-                return Err(LuaError::Exit);
-            }
-            OpCode::Return1 => {
-                // OPTIMIZED RETURN1
-                // Close upvalues if any are open
-                if !vm.open_upvalues.is_empty() {
-                    vm.close_upvalues_from(base_ptr);
-                }
+//                 // No caller - exit VM
+//                 vm.frame_count -= 1;
+//                 vm.return_values.clear();
+//                 return Err(LuaError::Exit);
+//             }
+//             OpCode::Return1 => {
+//                 // OPTIMIZED RETURN1
+//                 // Close upvalues if any are open
+//                 if !vm.open_upvalues.is_empty() {
+//                     vm.close_upvalues_from(base_ptr);
+//                 }
 
-                let a = get_a!(instr);
+//                 let a = get_a!(instr);
 
-                // Get return value early
-                let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
+//                 // Get return value early
+//                 let return_value = unsafe { *vm.register_stack.get_unchecked(base_ptr + a) };
 
-                // Fast path: have Lua caller
-                if vm.frame_count > 1 {
-                    // Get caller info BEFORE decrementing frame_count
-                    let result_reg = unsafe { (*frame_ptr).get_result_reg() };
-                    let num_results = unsafe { (*frame_ptr).get_num_results() };
-                    let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
+//                 // Fast path: have Lua caller
+//                 if vm.frame_count > 1 {
+//                     // Get caller info BEFORE decrementing frame_count
+//                     let result_reg = unsafe { (*frame_ptr).get_result_reg() };
+//                     let num_results = unsafe { (*frame_ptr).get_num_results() };
+//                     let caller_ptr = unsafe { vm.frames.as_mut_ptr().add(vm.frame_count - 2) };
 
-                    // Pop frame
-                    vm.frame_count -= 1;
+//                     // Pop frame
+//                     vm.frame_count -= 1;
 
-                    // Check if caller is Lua function (most common)
-                    if unsafe { (*caller_ptr).is_lua() } {
-                        // Read caller's base
-                        let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
+//                     // Check if caller is Lua function (most common)
+//                     if unsafe { (*caller_ptr).is_lua() } {
+//                         // Read caller's base
+//                         let caller_base = unsafe { (*caller_ptr).base_ptr } as usize;
 
-                        // Always write return value (caller may or may not use it)
-                        unsafe {
-                            *vm.register_stack
-                                .get_unchecked_mut(caller_base + result_reg) = return_value;
-                        }
+//                         // Always write return value (caller may or may not use it)
+//                         unsafe {
+//                             *vm.register_stack
+//                                 .get_unchecked_mut(caller_base + result_reg) = return_value;
+//                         }
 
-                        // CRITICAL FIX: When caller expects variable returns (C=0, num_results=usize::MAX),
-                        // we must set top to indicate how many values were returned.
-                        // This is essential for nested calls like outer(1, inner(10))
-                        if num_results == usize::MAX {
-                            unsafe {
-                                (*caller_ptr).top = (result_reg + 1) as u32;
-                            }
-                        }
+//                         // CRITICAL FIX: When caller expects variable returns (C=0, num_results=usize::MAX),
+//                         // we must set top to indicate how many values were returned.
+//                         // This is essential for nested calls like outer(1, inner(10))
+//                         if num_results == usize::MAX {
+//                             unsafe {
+//                                 (*caller_ptr).top = (result_reg + 1) as u32;
+//                             }
+//                         }
 
-                        // Update frame_ptr and local state
-                        frame_ptr = caller_ptr;
-                        unsafe {
-                            pc = (*caller_ptr).pc as usize;
-                            code_ptr = (*caller_ptr).code_ptr;
-                            base_ptr = caller_base;
-                        }
-                        continue 'mainloop;
-                    } else {
-                        // C function caller
-                        vm.return_values.clear();
-                        vm.return_values.push(return_value);
-                        return Err(LuaError::Exit);
-                    }
-                }
+//                         // Update frame_ptr and local state
+//                         frame_ptr = caller_ptr;
+//                         unsafe {
+//                             pc = (*caller_ptr).pc as usize;
+//                             code_ptr = (*caller_ptr).code_ptr;
+//                             base_ptr = caller_base;
+//                         }
+//                         continue 'mainloop;
+//                     } else {
+//                         // C function caller
+//                         vm.return_values.clear();
+//                         vm.return_values.push(return_value);
+//                         return Err(LuaError::Exit);
+//                     }
+//                 }
 
-                // No caller - exit VM with return value
-                vm.frame_count -= 1;
-                vm.return_values.clear();
-                vm.return_values.push(return_value);
-                return Err(LuaError::Exit);
-            }
-            OpCode::Return => match exec_return(vm, instr, &mut frame_ptr) {
-                Ok(()) => {
-                    unsafe {
-                        updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
-                    }
-                    continue 'mainloop;
-                }
-                Err(LuaError::Exit) => return Err(LuaError::Exit),
-                Err(e) => return Err(e),
-            },
+//                 // No caller - exit VM with return value
+//                 vm.frame_count -= 1;
+//                 vm.return_values.clear();
+//                 vm.return_values.push(return_value);
+//                 return Err(LuaError::Exit);
+//             }
+//             OpCode::Return => match exec_return(vm, instr, &mut frame_ptr) {
+//                 Ok(()) => {
+//                     unsafe {
+//                         updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
+//                     }
+//                     continue 'mainloop;
+//                 }
+//                 Err(LuaError::Exit) => return Err(LuaError::Exit),
+//                 Err(e) => return Err(e),
+//             },
 
-            // ============ Function calls (update state after frame change) ============
-            OpCode::Call => {
-                // Save pc before call (for error messages and return)
-                savepc!(frame_ptr, pc);
+//             // ============ Function calls (update state after frame change) ============
+//             OpCode::Call => {
+//                 // Save pc before call (for error messages and return)
+//                 savepc!(frame_ptr, pc);
 
-                // Call exec_call which handles all cases
-                match exec_call(vm, instr, &mut frame_ptr, base_ptr) {
-                    Ok(_) => unsafe {
-                        updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
-                    },
-                    Err(e) => return Err(e),
-                }
-                continue 'mainloop;
-            }
-            OpCode::TailCall => {
-                // Save current pc before tail call
-                savepc!(frame_ptr, pc);
-                match exec_tailcall(vm, instr, &mut frame_ptr) {
-                    Ok(()) => {
-                        unsafe {
-                            updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
-                        }
-                        continue 'mainloop;
-                    }
-                    Err(LuaError::Exit) => return Err(LuaError::Exit),
-                    Err(e) => return Err(e),
-                }
-            }
+//                 // Call exec_call which handles all cases
+//                 match exec_call(vm, instr, &mut frame_ptr, base_ptr) {
+//                     Ok(_) => unsafe {
+//                         updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
+//                     },
+//                     Err(e) => return Err(e),
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::TailCall => {
+//                 // Save current pc before tail call
+//                 savepc!(frame_ptr, pc);
+//                 match exec_tailcall(vm, instr, &mut frame_ptr) {
+//                     Ok(()) => {
+//                         unsafe {
+//                             updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
+//                         }
+//                         continue 'mainloop;
+//                     }
+//                     Err(LuaError::Exit) => return Err(LuaError::Exit),
+//                     Err(e) => return Err(e),
+//                 }
+//             }
 
-            // ============ Table operations ============
-            OpCode::NewTable => {
-                exec_newtable(vm, instr, frame_ptr, &mut pc, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::GetTable => {
-                if let Err(e) = exec_gettable(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::SetTable => {
-                if let Err(e) = exec_settable(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::GetI => {
-                if let Err(e) = exec_geti(vm, instr, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::SetI => {
-                if let Err(e) = exec_seti(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::GetField => {
-                if let Err(e) = exec_getfield(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::SetField => {
-                if let Err(e) = exec_setfield(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::GetTabUp => {
-                if let Err(e) = exec_gettabup(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::SetTabUp => {
-                if let Err(e) = exec_settabup(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::Self_ => {
-                if let Err(e) = exec_self(vm, instr, frame_ptr, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
+//             // ============ Table operations ============
+//             OpCode::NewTable => {
+//                 exec_newtable(vm, instr, frame_ptr, &mut pc, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::GetTable => {
+//                 if let Err(e) = exec_gettable(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::SetTable => {
+//                 if let Err(e) = exec_settable(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::GetI => {
+//                 if let Err(e) = exec_geti(vm, instr, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::SetI => {
+//                 if let Err(e) = exec_seti(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::GetField => {
+//                 if let Err(e) = exec_getfield(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::SetField => {
+//                 if let Err(e) = exec_setfield(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::GetTabUp => {
+//                 if let Err(e) = exec_gettabup(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::SetTabUp => {
+//                 if let Err(e) = exec_settabup(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::Self_ => {
+//                 if let Err(e) = exec_self(vm, instr, frame_ptr, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ Operations that can trigger metamethods ============
-            OpCode::Unm => {
-                if let Err(e) = exec_unm(vm, instr, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::Len => {
-                if let Err(e) = exec_len(vm, instr, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::Concat => {
-                if let Err(e) = exec_concat(vm, instr, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::Eq => {
-                if let Err(e) = exec_eq(vm, instr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::Lt => {
-                if let Err(e) = exec_lt(vm, instr, &mut pc, &mut base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::Le => {
-                if let Err(e) = exec_le(vm, instr, &mut pc, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
+//             // ============ Operations that can trigger metamethods ============
+//             OpCode::Unm => {
+//                 if let Err(e) = exec_unm(vm, instr, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::Len => {
+//                 if let Err(e) = exec_len(vm, instr, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::Concat => {
+//                 if let Err(e) = exec_concat(vm, instr, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::Eq => {
+//                 if let Err(e) = exec_eq(vm, instr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::Lt => {
+//                 if let Err(e) = exec_lt(vm, instr, &mut pc, &mut base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::Le => {
+//                 if let Err(e) = exec_le(vm, instr, &mut pc, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ TForCall ============
-            OpCode::TForCall => {
-                savepc!(frame_ptr, pc);
-                match exec_tforcall(vm, instr, &mut frame_ptr, base_ptr) {
-                    Ok(true) => {
-                        // Lua function called, need to update state
-                        unsafe {
-                            updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
-                        }
-                    }
-                    Ok(false) => {
-                        // C function called, no state change needed
-                    }
-                    Err(e) => return Err(e),
-                }
-                continue 'mainloop;
-            }
+//             // ============ TForCall ============
+//             OpCode::TForCall => {
+//                 savepc!(frame_ptr, pc);
+//                 match exec_tforcall(vm, instr, &mut frame_ptr, base_ptr) {
+//                     Ok(true) => {
+//                         // Lua function called, need to update state
+//                         unsafe {
+//                             updatestate(frame_ptr, &mut pc, &mut code_ptr, &mut base_ptr);
+//                         }
+//                     }
+//                     Ok(false) => {
+//                         // C function called, no state change needed
+//                     }
+//                     Err(e) => return Err(e),
+//                 }
+//                 continue 'mainloop;
+//             }
 
-            // ============ Closure and special ============
-            OpCode::Closure => {
-                if let Err(e) = exec_closure(vm, instr, frame_ptr, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::Vararg => {
-                if let Err(e) = exec_vararg(vm, instr, frame_ptr, base_ptr) {
-                    return Err(e);
-                }
-                continue 'mainloop;
-            }
-            OpCode::SetList => {
-                exec_setlist(vm, instr, frame_ptr, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Close => {
-                exec_close(vm, instr, base_ptr);
-                continue 'mainloop;
-            }
-            OpCode::Tbc => {
-                exec_tbc(vm, instr, base_ptr);
-                continue 'mainloop;
-            }
-        }
-    }
-}
+//             // ============ Closure and special ============
+//             OpCode::Closure => {
+//                 if let Err(e) = exec_closure(vm, instr, frame_ptr, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::Vararg => {
+//                 if let Err(e) = exec_vararg(vm, instr, frame_ptr, base_ptr) {
+//                     return Err(e);
+//                 }
+//                 continue 'mainloop;
+//             }
+//             OpCode::SetList => {
+//                 exec_setlist(vm, instr, frame_ptr, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Close => {
+//                 exec_close(vm, instr, base_ptr);
+//                 continue 'mainloop;
+//             }
+//             OpCode::Tbc => {
+//                 exec_tbc(vm, instr, base_ptr);
+//                 continue 'mainloop;
+//             }
+//         }
+//     }
+// }

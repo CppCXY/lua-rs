@@ -92,7 +92,7 @@ pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize
     Instruction::set_c(&mut instr, c);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline (lcode.c:389)
+    fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline (lcode.c:389)
     fs.pc += 1;
     pc
 }
@@ -119,7 +119,7 @@ pub fn code_asbx(fs: &mut FuncState, op: OpCode, a: u32, sbx: i32) -> usize {
     Instruction::set_bx(&mut instr, bx);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
+    fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline
     fs.pc += 1;
     pc
 }
@@ -134,7 +134,7 @@ pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool
     Instruction::set_k(&mut instr, k);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
+    fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline
     fs.pc += 1;
     pc
 }
@@ -144,7 +144,7 @@ pub fn code_asj(fs: &mut FuncState, op: OpCode, sj: i32) -> usize {
     let instr = Instruction::create_sj(op, sj);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
-    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
+    fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline
     fs.pc += 1;
     pc
 }
@@ -169,11 +169,11 @@ pub fn finish(fs: &mut FuncState) {
     let needclose = fs.needclose;
     let is_vararg = fs.is_vararg;
     let num_params = fs.chunk.param_count;
-    
+
     for i in 0..fs.pc {
         let instr = &mut fs.chunk.code[i];
         let opcode = OpCode::from(Instruction::get_opcode(*instr));
-        
+
         match opcode {
             OpCode::Return0 | OpCode::Return1 => {
                 // lcode.c:1854-1859: Convert RETURN0/RETURN1 to RETURN if needed
@@ -182,7 +182,7 @@ pub fn finish(fs: &mut FuncState) {
                     let a = Instruction::get_a(*instr);
                     let b = Instruction::get_b(*instr);
                     let mut new_instr = Instruction::create_abck(OpCode::Return, a, b, 0, false);
-                    
+
                     // lcode.c:1861-1865: Set k and C fields
                     if needclose {
                         Instruction::set_k(&mut new_instr, true);
@@ -190,7 +190,7 @@ pub fn finish(fs: &mut FuncState) {
                     if is_vararg {
                         Instruction::set_c(&mut new_instr, (num_params + 1) as u32);
                     }
-                    
+
                     *instr = new_instr;
                 }
             }
@@ -216,7 +216,8 @@ pub fn finish(fs: &mut FuncState) {
 // Helper for finish: find final target of a jump chain
 fn finaltarget(code: &[u32], mut pc: usize) -> usize {
     let mut count = 0;
-    while count < 100 {  // Prevent infinite loops
+    while count < 100 {
+        // Prevent infinite loops
         if pc >= code.len() {
             break;
         }
@@ -244,7 +245,7 @@ fn fixjump_at(fs: &mut FuncState, pc: usize, target: usize) {
     if offset < i32::MIN as isize || offset > i32::MAX as isize {
         return;
     }
-    
+
     let instr = &mut fs.chunk.code[pc];
     Instruction::set_sj(instr, offset as i32);
 }
@@ -359,12 +360,12 @@ fn patchtestreg(fs: &mut FuncState, node: usize, reg: u8) -> bool {
     if pc >= fs.chunk.code.len() {
         return false;
     }
-    
+
     let instr = fs.chunk.code[pc];
     if OpCode::from(Instruction::get_opcode(instr)) != OpCode::TestSet {
-        return false;  // Not a TESTSET instruction
+        return false; // Not a TESTSET instruction
     }
-    
+
     let b = Instruction::get_b(instr);
     if reg != NO_REG as u8 && reg != b as u8 {
         // Set destination register
@@ -432,10 +433,14 @@ pub fn exp2anyreg(fs: &mut FuncState, e: &mut ExpDesc) -> u8 {
 pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
     // lcode.c:918: must check VJMP BEFORE discharge2reg, as it changes the kind!
     let was_vjmp = e.kind == ExpKind::VJMP;
-    let vjmp_info = if was_vjmp { unsafe { e.u.info as isize } } else { -1 };
-    
+    let vjmp_info = if was_vjmp {
+        unsafe { e.u.info as isize }
+    } else {
+        -1
+    };
+
     discharge2reg(fs, e, reg);
-    
+
     if was_vjmp {
         // expression itself is a test - put this jump in 't' list
         concat(fs, &mut e.t, vjmp_info);
@@ -448,11 +453,7 @@ pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
         if need_value(fs, e.t) || need_value(fs, e.f) {
             // lcode.c:922-926
             // Note: must use was_vjmp, not e.kind, because discharge2reg already changed it!
-            let fj = if was_vjmp {
-                -1
-            } else {
-                jump(fs) as isize
-            };
+            let fj = if was_vjmp { -1 } else { jump(fs) as isize };
             p_f = code_loadbool(fs, reg, OpCode::LFalseSkip) as isize;
             p_t = code_loadbool(fs, reg, OpCode::LoadTrue) as isize;
             patchtohere(fs, fj);
@@ -567,7 +568,7 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
             // lcode.c:680-687: luaK_float(fs, reg, e->u.nval);
             // Try to use LOADF if float can be exactly represented as integer in sBx range
             let val = unsafe { e.u.nval };
-            
+
             // Check if float can be exactly converted to integer (no fractional part)
             if val.fract() == 0.0 && val.is_finite() {
                 let int_val = val as i64;
@@ -678,19 +679,19 @@ pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
     if n == 0 {
         return;
     }
-    
+
     let pc = fs.pc;
-    
+
     // Optimization: merge with previous LOADNIL if registers are contiguous
     if pc > 0 {
         let prev_pc = pc - 1;
         let prev_instr = fs.chunk.code[prev_pc];
-        
+
         if Instruction::get_opcode(prev_instr) == OpCode::LoadNil {
             let prev_a = Instruction::get_a(prev_instr) as u8;
             let prev_b = Instruction::get_b(prev_instr) as u8;
             let prev_last = prev_a + prev_b; // Last register in previous LOADNIL
-            
+
             // If registers are contiguous, extend the previous LOADNIL
             if from == prev_last + 1 {
                 // Check if merging would overflow u8
@@ -702,7 +703,7 @@ pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
             }
         }
     }
-    
+
     // Cannot merge, emit a new LOADNIL instruction
     code_abc(fs, OpCode::LoadNil, from as u32, (n - 1) as u32, 0);
 }
@@ -752,8 +753,8 @@ fn tonumeral(e: &ExpDesc, _v: Option<&mut f64>) -> bool {
 }
 
 // Constant management functions
-use crate::lua_value::LuaValue;
 use crate::StringId;
+use crate::lua_value::LuaValue;
 
 const MAXINDEXRK: usize = 255; // Maximum index for R/K operands
 
@@ -819,15 +820,30 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 }
 
 // Helper to add constant to chunk
+// Port of addk from lcode.c:544-571
+// Uses global scanner table (in LexState/LuaParser) for constant deduplication
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
-    // Try to find existing constant
-    if let Some(idx) = fs.chunk_constants_map.get(&value) {
-        return *idx;
+    // Query global scanner table (lcode.c:548)
+    if let Some(&idx) = fs.lexer.scanner_table.get(&value) {
+        // Check if we can reuse this constant (lcode.c:550-553)
+        // Only reuse if:
+        // 1. Index is within current function's constant range
+        // 2. Value matches (should always match since we use value as key)
+        if idx < fs.chunk.constants.len() && fs.chunk.constants[idx] == value {
+            return idx;
+        }
     }
-    // Add new constant
-    fs.chunk.constants.push(value);
-    let idx = fs.chunk.constants.len() - 1;
+
+    // Constant not found or cannot be reused; create a new entry (lcode.c:555-569)
+    let idx = fs.chunk.constants.len();
+    fs.chunk.constants.push(value.clone());
+
+    // Update global scanner table with new index (lcode.c:562)
+    fs.lexer.scanner_table.insert(value.clone(), idx);
+
+    // Also update local map for backward compatibility
     fs.chunk_constants_map.insert(value, idx);
+
     idx
 }
 
@@ -1174,7 +1190,21 @@ fn codeorder(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut 
 // Port of foldbinop macro from lcode.h:45
 fn foldbinop(op: BinaryOperator) -> bool {
     use BinaryOperator::*;
-    matches!(op, OpAdd | OpSub | OpMul | OpDiv | OpIDiv | OpMod | OpPow | OpBAnd | OpBOr | OpBXor | OpShl | OpShr)
+    matches!(
+        op,
+        OpAdd
+            | OpSub
+            | OpMul
+            | OpDiv
+            | OpIDiv
+            | OpMod
+            | OpPow
+            | OpBAnd
+            | OpBOr
+            | OpBXor
+            | OpShl
+            | OpShr
+    )
 }
 
 // Check if folding operation is valid and won't raise errors
@@ -1183,7 +1213,7 @@ fn foldbinop(op: BinaryOperator) -> bool {
 fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
     use BinaryOperator::*;
     use ExpKind::{VKFLT, VKINT};
-    
+
     match op {
         // Bitwise operations need integer-convertible operands
         // Official: luaV_tointegerns checks if values can convert to integer
@@ -1193,7 +1223,10 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
                 VKINT => true,
                 VKFLT => {
                     let v = unsafe { e1.u.nval };
-                    v.is_finite() && v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64
+                    v.is_finite()
+                        && v.fract() == 0.0
+                        && v >= i64::MIN as f64
+                        && v <= i64::MAX as f64
                 }
                 _ => false,
             };
@@ -1201,7 +1234,10 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
                 VKINT => true,
                 VKFLT => {
                     let v = unsafe { e2.u.nval };
-                    v.is_finite() && v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64
+                    v.is_finite()
+                        && v.fract() == 0.0
+                        && v >= i64::MIN as f64
+                        && v <= i64::MAX as f64
                 }
                 _ => false,
             };
@@ -1209,13 +1245,11 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
         }
         // Division operations cannot have 0 divisor
         // Official: nvalue(v2) != 0
-        OpDiv | OpIDiv | OpMod => {
-            match e2.kind {
-                VKINT => unsafe { e2.u.ival != 0 },
-                VKFLT => unsafe { e2.u.nval != 0.0 },
-                _ => false,
-            }
-        }
+        OpDiv | OpIDiv | OpMod => match e2.kind {
+            VKINT => unsafe { e2.u.ival != 0 },
+            VKFLT => unsafe { e2.u.nval != 0.0 },
+            _ => false,
+        },
         _ => true, // everything else is valid
     }
 }
@@ -1226,11 +1260,11 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
 fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpDesc) -> bool {
     use BinaryOperator::*;
     use ExpKind::{VKFLT, VKINT};
-    
+
     // Check original types (not whether values can be represented as integers)
     let e1_is_int_type = matches!(e1.kind, VKINT);
     let e2_is_int_type = matches!(e2.kind, VKINT);
-    
+
     // Check if both operands are numeric constants and extract values
     let (v1, i1) = match e1.kind {
         VKINT => {
@@ -1244,7 +1278,7 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
         }
         _ => return false,
     };
-    
+
     let (v2, i2) = match e2.kind {
         VKINT => {
             let iv = unsafe { e2.u.ival };
@@ -1257,25 +1291,33 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
         }
         _ => return false,
     };
-    
+
     // Check if operation is valid (no division by zero, etc.)
     if !validop(op, e1, e2) {
         return false;
     }
-    
+
     // Bitwise operations: require both operands to be representable as integers
     // IMPORTANT: Lua treats integers as UNSIGNED for bitwise operations (see lvm.h intop macro)
     // intop(op,v1,v2) = l_castU2S(l_castS2U(v1) op l_castS2U(v2))
     match op {
         OpBAnd | OpBOr | OpBXor => {
             // Check if float values can be exactly converted to integers
-            let v1_can_be_int = if e1_is_int_type { true } else { (i1 as f64) == v1 };
-            let v2_can_be_int = if e2_is_int_type { true } else { (i2 as f64) == v2 };
-            
+            let v1_can_be_int = if e1_is_int_type {
+                true
+            } else {
+                (i1 as f64) == v1
+            };
+            let v2_can_be_int = if e2_is_int_type {
+                true
+            } else {
+                (i2 as f64) == v2
+            };
+
             if !v1_can_be_int || !v2_can_be_int {
                 return false;
             }
-            
+
             e1.kind = VKINT;
             // Cast to unsigned, perform operation, cast back to signed
             let u1 = i1 as u64;
@@ -1289,13 +1331,21 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
             return true;
         }
         OpShl | OpShr => {
-            let v1_can_be_int = if e1_is_int_type { true } else { (i1 as f64) == v1 };
-            let v2_can_be_int = if e2_is_int_type { true } else { (i2 as f64) == v2 };
-            
+            let v1_can_be_int = if e1_is_int_type {
+                true
+            } else {
+                (i1 as f64) == v1
+            };
+            let v2_can_be_int = if e2_is_int_type {
+                true
+            } else {
+                (i2 as f64) == v2
+            };
+
             if !v1_can_be_int || !v2_can_be_int {
                 return false;
             }
-            
+
             e1.kind = VKINT;
             // Port of luaV_shiftl from lvm.c:780-793
             // Lua uses unsigned shift (logical shift, not arithmetic)
@@ -1312,11 +1362,7 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
                         }
                     } else {
                         // Shift left with positive y
-                        if i2 >= 64 {
-                            0
-                        } else {
-                            (u1 << i2) as i64
-                        }
+                        if i2 >= 64 { 0 } else { (u1 << i2) as i64 }
                     }
                 }
                 OpShr => {
@@ -1345,7 +1391,7 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
         }
         _ => {}
     }
-    
+
     // Arithmetic operations follow luaO_rawarith logic:
     // If both operands have INTEGER type, try integer arithmetic; otherwise use float
     match op {
@@ -1356,11 +1402,11 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
                 OpPow => v1.powf(v2),
                 _ => unreachable!(),
             };
-            
+
             if result.is_nan() || (result == 0.0 && result.is_sign_negative()) {
                 return false;
             }
-            
+
             e1.kind = VKFLT;
             e1.u.nval = result;
             return true;
@@ -1376,7 +1422,7 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
                     OpMod => Some(i1.rem_euclid(i2)),
                     _ => unreachable!(),
                 };
-                
+
                 if let Some(res) = int_result {
                     e1.kind = VKINT;
                     e1.u.ival = res;
@@ -1384,7 +1430,7 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
                 }
                 // Integer operation failed (overflow), fall through to float
             }
-            
+
             // At least one operand is FLOAT type, or integer operation overflowed
             let result = match op {
                 OpAdd => v1 + v2,
@@ -1394,11 +1440,11 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
                 OpMod => v1 - (v1 / v2).floor() * v2,
                 _ => unreachable!(),
             };
-            
+
             if result.is_nan() || (result == 0.0 && result.is_sign_negative()) {
                 return false;
             }
-            
+
             e1.kind = VKFLT;
             e1.u.nval = result;
             return true;
@@ -1413,7 +1459,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
     use BinaryOperator;
 
     discharge_vars(fs, e2);
-    
+
     // Try constant folding first (lcode.c:1709)
     if foldbinop(op) && constfolding(fs, op, e1, e2) {
         return; // done by folding
@@ -1470,7 +1516,10 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     swapexps(e1, e2);
                     flip = true;
                 }
-            } else if matches!(op, BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor) {
+            } else if matches!(
+                op,
+                BinaryOperator::OpBAnd | BinaryOperator::OpBOr | BinaryOperator::OpBXor
+            ) {
                 // For bitwise operations, use codebitwise logic (lcode.c:1533-1549)
                 // Only check for VKINT (not VKFLT), swap to put it on right
                 if matches!(e1.kind, ExpKind::VKINT) {
@@ -1478,7 +1527,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     flip = true;
                 }
             }
-            
+
             // Port of codebini from lcode.c:1572-1598 and finishbinexpneg:1464-1480
             // For ADD: Check if e2 is a small integer constant (isSCint check) - lcode.c:1523
             // For SUB: Check if can negate second operand (finishbinexpneg) - lcode.c:1733-1737
@@ -1491,16 +1540,23 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((imm_val + 127) & 0xff) as u32;
                         let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
-                        
+
                         free_exp(fs, e1);
                         free_exp(fs, e2);
-                        
+
                         e1.kind = ExpKind::VRELOC;
                         e1.u.info = pc as i32;
-                        
+
                         // Generate MMBINI for metamethod fallback
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;
-                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Add as u32, flip);
+                        code_abck(
+                            fs,
+                            OpCode::MmBinI,
+                            r1 as u32,
+                            mm_imm,
+                            TmKind::Add as u32,
+                            flip,
+                        );
                         return;
                     }
                 }
@@ -1514,24 +1570,31 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     if imm_val >= -128 && imm_val <= 127 && neg_imm >= -128 && neg_imm <= 127 {
                         // Use ADDI with negated immediate
                         let r1 = exp2anyreg(fs, e1);
-                        let enc_imm = ((neg_imm + 127) & 0xff) as u32;  // Encode negated value for ADDI
+                        let enc_imm = ((neg_imm + 127) & 0xff) as u32; // Encode negated value for ADDI
                         let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
-                        
+
                         free_exp(fs, e1);
                         free_exp(fs, e2);
-                        
+
                         e1.kind = ExpKind::VRELOC;
                         e1.u.info = pc as i32;
-                        
+
                         // Generate MMBINI with ORIGINAL value for metamethod
                         // (finishbinexpneg corrects the metamethod argument - lcode.c:1476)
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;
-                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Sub as u32, flip);
+                        code_abck(
+                            fs,
+                            OpCode::MmBinI,
+                            r1 as u32,
+                            mm_imm,
+                            TmKind::Sub as u32,
+                            flip,
+                        );
                         return;
                     }
                 }
             }
-            
+
             // Handle shift operations (lcode.c:1745-1760)
             if op == BinaryOperator::OpShl {
                 // OPR_SHL has three cases:
@@ -1542,20 +1605,27 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     let imm_val = unsafe { e1.u.ival };
                     if imm_val >= -128 && imm_val <= 127 {
                         // Case 1: SHLI (immediate << register)
-                        swapexps(e1, e2);  // Put immediate on right for processing
+                        swapexps(e1, e2); // Put immediate on right for processing
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((imm_val + 127) & 0xff) as u32;
                         let pc = code_abc(fs, OpCode::ShlI, 0, r1 as u32, enc_imm);
-                        
+
                         free_exp(fs, e1);
                         free_exp(fs, e2);
-                        
+
                         e1.kind = ExpKind::VRELOC;
                         e1.u.info = pc as i32;
-                        
+
                         // MMBINI with flip=1 since immediate was on left
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;
-                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Shl as u32, true);
+                        code_abck(
+                            fs,
+                            OpCode::MmBinI,
+                            r1 as u32,
+                            mm_imm,
+                            TmKind::Shl as u32,
+                            true,
+                        );
                         return;
                     }
                 } else if let ExpKind::VKINT = e2.kind {
@@ -1567,16 +1637,23 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((neg_imm + 127) & 0xff) as u32;
                         let pc = code_abc(fs, OpCode::ShrI, 0, r1 as u32, enc_imm);
-                        
+
                         free_exp(fs, e1);
                         free_exp(fs, e2);
-                        
+
                         e1.kind = ExpKind::VRELOC;
                         e1.u.info = pc as i32;
-                        
+
                         // MMBINI with ORIGINAL value for TM_SHL
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;
-                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Shl as u32, flip);
+                        code_abck(
+                            fs,
+                            OpCode::MmBinI,
+                            r1 as u32,
+                            mm_imm,
+                            TmKind::Shl as u32,
+                            flip,
+                        );
                         return;
                     }
                 }
@@ -1589,21 +1666,28 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((imm_val + 127) & 0xff) as u32;
                         let pc = code_abc(fs, OpCode::ShrI, 0, r1 as u32, enc_imm);
-                        
+
                         free_exp(fs, e1);
                         free_exp(fs, e2);
-                        
+
                         e1.kind = ExpKind::VRELOC;
                         e1.u.info = pc as i32;
-                        
+
                         let mm_imm = ((imm_val + 128) & 0xff) as u32;
-                        code_abck(fs, OpCode::MmBinI, r1 as u32, mm_imm, TmKind::Shr as u32, flip);
+                        code_abck(
+                            fs,
+                            OpCode::MmBinI,
+                            r1 as u32,
+                            mm_imm,
+                            TmKind::Shr as u32,
+                            flip,
+                        );
                         return;
                     }
                 }
                 // Fall through to regular codebinexpval
             }
-            
+
             // Try to use K operand optimization
             // For bitwise operations, only use K instructions if e2 is VKINT (lcode.c:1540)
             // For arithmetic operations, use K if tonumeral(e2) succeeds (lcode.c:1505)
@@ -1613,31 +1697,35 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     matches!(e2.kind, ExpKind::VKINT) && exp2k(fs, e2)
                 }
                 // Arithmetic operations: VKINT or VKFLT can use K instructions
-                BinaryOperator::OpAdd | BinaryOperator::OpSub | BinaryOperator::OpMul 
-                | BinaryOperator::OpDiv | BinaryOperator::OpIDiv | BinaryOperator::OpMod 
+                BinaryOperator::OpAdd
+                | BinaryOperator::OpSub
+                | BinaryOperator::OpMul
+                | BinaryOperator::OpDiv
+                | BinaryOperator::OpIDiv
+                | BinaryOperator::OpMod
                 | BinaryOperator::OpPow => {
                     matches!(e2.kind, ExpKind::VKINT | ExpKind::VKFLT) && exp2k(fs, e2)
                 }
                 _ => false,
             };
-            
-            if use_k_instruction {
-                    // e2 is a valid K operand, generate K-series instruction
-                    let k_idx = unsafe { e2.u.info };
-                    let r1 = exp2anyreg(fs, e1);
 
-                    // Determine the K-series opcode
-                    let opcode = match op {
-                        BinaryOperator::OpAdd => OpCode::AddK,
-                        BinaryOperator::OpSub => OpCode::SubK,
-                        BinaryOperator::OpMul => OpCode::MulK,
-                        BinaryOperator::OpDiv => OpCode::DivK,
-                        BinaryOperator::OpIDiv => OpCode::IDivK,
-                        BinaryOperator::OpMod => OpCode::ModK,
-                        BinaryOperator::OpPow => OpCode::PowK,
-                        BinaryOperator::OpBAnd => OpCode::BAndK,
-                        BinaryOperator::OpBOr => OpCode::BOrK,
-                        BinaryOperator::OpBXor => OpCode::BXorK,
+            if use_k_instruction {
+                // e2 is a valid K operand, generate K-series instruction
+                let k_idx = unsafe { e2.u.info };
+                let r1 = exp2anyreg(fs, e1);
+
+                // Determine the K-series opcode
+                let opcode = match op {
+                    BinaryOperator::OpAdd => OpCode::AddK,
+                    BinaryOperator::OpSub => OpCode::SubK,
+                    BinaryOperator::OpMul => OpCode::MulK,
+                    BinaryOperator::OpDiv => OpCode::DivK,
+                    BinaryOperator::OpIDiv => OpCode::IDivK,
+                    BinaryOperator::OpMod => OpCode::ModK,
+                    BinaryOperator::OpPow => OpCode::PowK,
+                    BinaryOperator::OpBAnd => OpCode::BAndK,
+                    BinaryOperator::OpBOr => OpCode::BOrK,
+                    BinaryOperator::OpBXor => OpCode::BXorK,
                     _ => {
                         // No K version, fall back to normal instruction
                         let o2 = exp2anyreg(fs, e2);
@@ -1663,36 +1751,43 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // Port of finishbinexpval from lcode.c:1407-1418
                 // Generate K-series instruction with A=0, will be fixed by discharge2reg
                 let pc = code_abc(fs, opcode, 0, r1 as u32, k_idx as u32);
-                
+
                 // Free both operands (freeexps) - must use free_exps to maintain proper order
                 free_exps(fs, e1, e2);
-                
+
                 // Mark as relocatable - target register will be decided later
                 e1.kind = ExpKind::VRELOC;
                 e1.u.info = pc as i32;
-                
+
                 // Generate metamethod fallback instruction (MMBINK)
                 // Like finishbinexpval in lcode.c:1416
                 // TM events from ltm.h (TM_ADD=6, TM_SUB=7, etc.)
                 let tm_event = match op {
-                    BinaryOperator::OpAdd => TmKind::Add, // TM_ADD
+                    BinaryOperator::OpAdd => TmKind::Add,   // TM_ADD
                     BinaryOperator::OpSub => TmKind::Sub,   // TM_SUB
                     BinaryOperator::OpMul => TmKind::Mul,   // TM_MUL
                     BinaryOperator::OpMod => TmKind::Mod,   // TM_MOD
-                    BinaryOperator::OpPow => TmKind::Pow,  // TM_POW
-                    BinaryOperator::OpDiv => TmKind::Div,  // TM_DIV
+                    BinaryOperator::OpPow => TmKind::Pow,   // TM_POW
+                    BinaryOperator::OpDiv => TmKind::Div,   // TM_DIV
                     BinaryOperator::OpIDiv => TmKind::IDiv, // TM_IDIV
                     BinaryOperator::OpBAnd => TmKind::Band, // TM_BAND
-                    BinaryOperator::OpBOr => TmKind::Bor,  // TM_BOR
+                    BinaryOperator::OpBOr => TmKind::Bor,   // TM_BOR
                     BinaryOperator::OpBXor => TmKind::Bxor, // TM_BXOR
-                    _ => TmKind::N, // Invalid for other ops
+                    _ => TmKind::N,                         // Invalid for other ops
                 };
                 // Use code_abck to include flip bit (k-flag) like in MMBINI
-                code_abck(fs, OpCode::MmBinK, r1 as u32, k_idx as u32, tm_event as u32, flip);
+                code_abck(
+                    fs,
+                    OpCode::MmBinK,
+                    r1 as u32,
+                    k_idx as u32,
+                    tm_event as u32,
+                    flip,
+                );
             } else {
                 // Both operands in registers - port of codebinexpval (lcode.c:1425-1434)
                 let o2 = exp2anyreg(fs, e2);
-                
+
                 // Determine instruction opcode
                 let opcode = match op {
                     BinaryOperator::OpAdd => OpCode::Add,
@@ -1714,14 +1809,14 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // Generate instruction with A=0, will be fixed by discharge2reg
                 let o1 = exp2anyreg(fs, e1);
                 let pc = code_abc(fs, opcode, 0, o1 as u32, o2 as u32);
-                
+
                 // Free both operands (freeexps) - must use free_exps to maintain proper order
                 free_exps(fs, e1, e2);
-                
+
                 // Mark as relocatable
                 e1.kind = ExpKind::VRELOC;
                 e1.u.info = pc as i32;
-                
+
                 // Generate metamethod fallback instruction (MMBIN)
                 // Like finishbinexpval in lcode.c:1416
                 let tm_event = match op {
@@ -2007,7 +2102,7 @@ pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
 // void luaK_settablesize (FuncState *fs, int pc, int ra, int asize, int hsize)
 pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u32) {
     const MAXARG_C: u32 = 0xFF; // Maximum value for C field
-    
+
     // B field: hash size (lcode.c:1795)
     // rb = (hsize != 0) ? luaO_ceillog2(hsize) + 1 : 0
     let rb = if hsize != 0 {
@@ -2021,11 +2116,11 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
     // C field: lower bits of array size (lcode.c:1797)
     // rc = asize % (MAXARG_C + 1)
     let rc = asize % (MAXARG_C + 1);
-    
+
     // EXTRAARG: higher bits of array size (lcode.c:1796)
     // extra = asize / (MAXARG_C + 1)
     let extra = asize / (MAXARG_C + 1);
-    
+
     // k flag: true if needs EXTRAARG (lcode.c:1798)
     let k = extra > 0;
 
@@ -2035,7 +2130,7 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
     debug_assert_eq!(opcode, OpCode::NewTable);
 
     *inst = Instruction::create_abck(OpCode::NewTable, ra as u32, rb, rc, k);
-    
+
     // Update EXTRAARG instruction (lcode.c:1800)
     // *(inst + 1) = CREATE_Ax(OP_EXTRAARG, extra);
     if pc + 1 < fs.chunk.code.len() {
@@ -2048,7 +2143,7 @@ pub fn code_extraarg(fs: &mut FuncState, a: u32) -> usize {
     let inst = Instruction::create_ax(OpCode::ExtraArg, a);
     let pc = fs.pc;
     fs.chunk.code.push(inst);
-    fs.chunk.line_info.push(fs.lexer.lastline as u32);  // Use lastline
+    fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline
     fs.pc += 1;
     pc
 }

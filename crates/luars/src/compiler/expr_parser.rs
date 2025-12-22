@@ -27,13 +27,13 @@ fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {
 // Port of expr from lparser.c
 pub fn expr(fs: &mut FuncState) -> Result<ExpDesc, String> {
     let mut v = ExpDesc::new_void();
-    subexpr(fs, &mut v, 0)?;  // Discard returned operator
+    subexpr(fs, &mut v, 0)?; // Discard returned operator
     Ok(v)
 }
 
 // Internal version that uses mutable reference
 pub(crate) fn expr_internal(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
-    subexpr(fs, v, 0)?;  // Discard returned operator
+    subexpr(fs, v, 0)?; // Discard returned operator
     Ok(())
 }
 
@@ -54,7 +54,7 @@ fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<BinaryOper
     if uop != UnaryOperator::OpNop {
         let op = get_unary_opcode(uop);
         fs.lexer.bump();
-        let _ = subexpr(fs, v, UNARY_PRIORITY)?;  // Discard returned op from recursive call
+        let _ = subexpr(fs, v, UNARY_PRIORITY)?; // Discard returned op from recursive call
         code::prefix(fs, op, v);
     } else {
         simpleexp(fs, v)?;
@@ -77,10 +77,10 @@ fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<BinaryOper
         // 'and' and 'or' don't generate opcodes - they use control flow
         code::posfix(fs, op, v, &mut v2);
 
-        op = nextop;  // Use returned operator instead of re-checking token (lparser.c:1284)
+        op = nextop; // Use returned operator instead of re-checking token (lparser.c:1284)
     }
 
-    Ok(op)  // Return first untreated operator (lparser.c:1286)
+    Ok(op) // Return first untreated operator (lparser.c:1286)
 }
 
 // Port of simpleexp from lparser.c
@@ -310,7 +310,13 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
         fs.freereg - (base + 1)
     };
 
-    let pc = code::code_abc(fs, OpCode::Call, base as u32, (nparams.wrapping_add(1)) as u32, 2);
+    let pc = code::code_abc(
+        fs,
+        OpCode::Call,
+        base as u32,
+        (nparams.wrapping_add(1)) as u32,
+        2,
+    );
     code::fixline(fs, line); // Fix line number for CALL instruction (lparser.c:1063)
     f.kind = ExpKind::VCALL;
     f.u.info = pc as i32;
@@ -418,7 +424,7 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     let mut key = ExpDesc::new_void();
     key.kind = ExpKind::VK;
     key.u.info = idx as i32;
-    
+
     // Call indexed to determine correct index type (VINDEXSTR vs VINDEXED)
     code::indexed(fs, v, &mut key);
 
@@ -427,11 +433,11 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
 // Port of ConsControl from lparser.c
 struct ConsControl {
-    v: ExpDesc,      // last list item read
-    table_reg: u8,   // table register
-    na: u32,         // number of array elements already stored
-    nh: u32,         // total number of record elements
-    tostore: u32,    // number of array elements pending to be stored
+    v: ExpDesc,    // last list item read
+    table_reg: u8, // table register
+    na: u32,       // number of array elements already stored
+    nh: u32,       // total number of record elements
+    tostore: u32,  // number of array elements pending to be stored
 }
 
 impl ConsControl {
@@ -492,7 +498,7 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
         // Port of recfield from lparser.c:917-935
         // Save freereg to restore after processing field
         let saved_freereg = fs.freereg;
-        
+
         fs.lexer.bump();
         let mut key = ExpDesc::new_void();
         expr_internal(fs, &mut key)?;
@@ -517,10 +523,16 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             // General case: SetTable instruction with RK optimization
             let key_reg = code::exp2anyreg(fs, &mut key);
             // Use code_abrk for value to allow constant optimization
-            code::code_abrk(fs, OpCode::SetTable, cc.table_reg as u32, key_reg as u32, &mut val);
+            code::code_abrk(
+                fs,
+                OpCode::SetTable,
+                cc.table_reg as u32,
+                key_reg as u32,
+                &mut val,
+            );
         }
         cc.nh += 1;
-        
+
         // Restore freereg - free temporary registers used for key/value
         fs.freereg = saved_freereg;
     } else if fs.lexer.current_token() == LuaTokenKind::TkName {
@@ -531,7 +543,7 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             // Port of recfield from lparser.c:917-935
             // Save freereg to restore after processing field
             let saved_freereg = fs.freereg;
-            
+
             let field_name = fs.lexer.current_token_text().to_string();
             fs.lexer.bump();
             fs.lexer.bump(); // skip =
@@ -542,9 +554,15 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
 
             // t[field] = val -> SetField instruction with RK optimization
             // Use code_abrk to allow constant value (e.g., x = 10 -> SETFIELD t "x" 10k)
-            code::code_abrk(fs, OpCode::SetField, cc.table_reg as u32, field_idx as u32, &mut val);
+            code::code_abrk(
+                fs,
+                OpCode::SetField,
+                cc.table_reg as u32,
+                field_idx as u32,
+                &mut val,
+            );
             cc.nh += 1;
-            
+
             // Restore freereg - free temporary registers used for value
             fs.freereg = saved_freereg;
         } else {
@@ -652,11 +670,11 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
         child_fs.new_localvar(param, VarKind::VDKREG);
     }
     child_fs.adjust_local_vars(child_fs.actvar.len() as u8);
-    
+
     // lparser.c:982: Set numparams after adjustlocalvars
     // f->numparams = cast_byte(fs->nactvar);
     let param_count = child_fs.nactvar as usize;
-    
+
     // lparser.c:1001: luaK_reserveregs(fs, fs->nactvar);
     // Reserve registers for parameters
     let nactvar = child_fs.nactvar;

@@ -3,7 +3,7 @@
 
 use crate::lua_value::{CFunction, LuaValue};
 use crate::lua_vm::{LuaResult, LuaVM};
-use crate::stdlib;
+// use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
 pub type ValueInitializer = fn(&mut LuaVM) -> LuaValue;
@@ -140,7 +140,7 @@ impl LibraryRegistry {
             if module.name == "string" {
                 // In Lua, all strings share a metatable where __index points to the string library
                 // This allows using string methods with : syntax (e.g., str:upper())
-                vm.set_string_metatable(lib_table.clone());
+                // vm.set_string_metatable(lib_table.clone());
             }
 
             // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)
@@ -178,74 +178,77 @@ impl Default for LibraryRegistry {
 
 /// Create a standard Lua 5.4 library registry with all standard libraries
 pub fn create_standard_registry() -> LibraryRegistry {
-    let mut registry = LibraryRegistry::new();
+    let registry = LibraryRegistry::new();
 
-    // Register package library FIRST so package.loaded exists
-    // before other libraries try to register themselves
-    registry.register(stdlib::package::create_package_lib());
+    // // Register package library FIRST so package.loaded exists
+    // // before other libraries try to register themselves
+    // registry.register(stdlib::package::create_package_lib());
 
-    // Register all other standard libraries
-    registry.register(stdlib::basic::create_basic_lib());
-    registry.register(stdlib::string::create_string_lib());
-    registry.register(stdlib::table::create_table_lib());
-    registry.register(stdlib::math::create_math_lib());
-    registry.register(stdlib::io::create_io_lib());
-    registry.register(stdlib::os::create_os_lib());
-    registry.register(stdlib::utf8::create_utf8_lib());
-    registry.register(stdlib::coroutine::create_coroutine_lib());
-    registry.register(stdlib::debug::create_debug_lib());
-    #[cfg(feature = "loadlib")]
-    registry.register(stdlib::ffi::create_ffi_lib());
-    #[cfg(feature = "async")]
-    registry.register(stdlib::async_lib::create_async_lib());
+    // // Register all other standard libraries
+    // registry.register(stdlib::basic::create_basic_lib());
+    // registry.register(stdlib::string::create_string_lib());
+    // registry.register(stdlib::table::create_table_lib());
+    // registry.register(stdlib::math::create_math_lib());
+    // registry.register(stdlib::io::create_io_lib());
+    // registry.register(stdlib::os::create_os_lib());
+    // registry.register(stdlib::utf8::create_utf8_lib());
+    // registry.register(stdlib::coroutine::create_coroutine_lib());
+    // registry.register(stdlib::debug::create_debug_lib());
+    // #[cfg(feature = "loadlib")]
+    // registry.register(stdlib::ffi::create_ffi_lib());
+    // #[cfg(feature = "async")]
+    // registry.register(stdlib::async_lib::create_async_lib());
 
     registry
 }
 
 /// Helper to get function arguments from VM registers
-pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
+pub fn get_args(_vm: &LuaVM) -> Vec<LuaValue> {
+    // let frame = vm.current_frame();
+    // let base_ptr = frame.base_ptr as usize;
+    // let top = frame.top as usize;
 
-    // Skip register 0 (the function itself), collect from 1 to top
-    (1..top).map(|i| vm.register_stack[base_ptr + i]).collect()
+    // // Skip register 0 (the function itself), collect from 1 to top
+    // (1..top).map(|i| vm.register_stack[base_ptr + i]).collect()
+    todo!()
 }
 
 /// Iterate over all arguments without allocation
 /// Returns an iterator that yields (1-based index, value) pairs
 #[inline(always)]
-pub fn args_iter(vm: &LuaVM) -> impl Iterator<Item = (usize, LuaValue)> + '_ {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
+pub fn args_iter(_vm: &LuaVM) {
+    // let frame = vm.current_frame();
+    // let base_ptr = frame.base_ptr as usize;
+    // let top = frame.top as usize;
 
-    (1..top).map(move |i| (i, vm.register_stack[base_ptr + i]))
+    // (1..top).map(move |i| (i, vm.register_stack[base_ptr + i]))
+    todo!()
 }
 
 /// Helper to get a specific argument
 /// 1 based index
 #[inline(always)]
-pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
+pub fn get_arg(_vm: &LuaVM, _index: usize) -> Option<LuaValue> {
+    // let frame = vm.current_frame();
+    // let base_ptr = frame.base_ptr as usize;
+    // let top = frame.top as usize;
 
-    // Arguments use 1-based indexing (Lua convention)
-    // Register 0 is the function itself
-    // get_arg(1) returns register[base_ptr + 1] (first argument)
-    // get_arg(2) returns register[base_ptr + 2] (second argument)
-    let reg_offset = index;
-    if reg_offset < top {
-        let reg_index = base_ptr + reg_offset;
-        if reg_index < vm.register_stack.len() {
-            Some(vm.register_stack[reg_index])
-        } else {
-            None
-        }
-    } else {
-        None
-    }
+    // // Arguments use 1-based indexing (Lua convention)
+    // // Register 0 is the function itself
+    // // get_arg(1) returns register[base_ptr + 1] (first argument)
+    // // get_arg(2) returns register[base_ptr + 2] (second argument)
+    // let reg_offset = index;
+    // if reg_offset < top {
+    //     let reg_index = base_ptr + reg_offset;
+    //     if reg_index < vm.register_stack.len() {
+    //         Some(vm.register_stack[reg_index])
+    //     } else {
+    //         None
+    //     }
+    // } else {
+    //     None
+    // }
+    todo!()
 }
 
 /// Helper to require an argument
@@ -260,8 +263,9 @@ pub fn require_arg(vm: &mut LuaVM, index: usize, func_name: &str) -> LuaResult<L
 
 /// Helper to get argument count
 #[inline(always)]
-pub fn arg_count(vm: &LuaVM) -> usize {
-    let frame = vm.current_frame();
-    // Subtract 1 for the function itself
-    frame.top.saturating_sub(1) as usize
+pub fn arg_count(_vm: &LuaVM) -> usize {
+    // let frame = vm.current_frame();
+    // // Subtract 1 for the function itself
+    // frame.top.saturating_sub(1) as usize
+    todo!()
 }

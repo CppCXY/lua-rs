@@ -608,7 +608,7 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
         in_scope: true,
     };
     enterblock(fs, &mut bl, true);
-    
+
     // Activate the loop variable (4th variable)
     fs.adjust_local_vars(1);
 
@@ -618,12 +618,12 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     // Generate FORLOOP with initial Bx=0, will be fixed by fix_for_jump
     let loop_pc = code::code_abx(fs, OpCode::ForLoop, base as u32, 0);
-    
+
     // Fix FORPREP: jump forward to FORLOOP position (loop_pc)
     // This matches lparser.c: fixforjump(fs, prep, luaK_getlabel(fs), 0)
     // where luaK_getlabel(fs) returns the position where FORLOOP was just generated
     fix_for_jump(fs, prep_pc, loop_pc, false)?;
-    
+
     // Fix FORLOOP: jump back to after FORPREP (prep_pc + 1, loop body start)
     // This matches lparser.c: fixforjump(fs, endfor, prep + 1, 1)
     // back=true means the distance will be stored as positive (absolute value)
@@ -712,7 +712,7 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1563: fixforjump(fs, endfor, prep + 1, 1);
     // Fix TFORLOOP to jump back to prep+1 (back jump)
     fix_for_jump(fs, endfor_pc, prep_pc + 1, true)?;
-    
+
     // Don't remove variables here - the outer forstat's leaveblock will handle it
     // fs.remove_vars(fs.nactvar - nvars as u8);
 
@@ -812,7 +812,7 @@ fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) -> Resul
     //     luaX_syntaxerror(fs->ls, "control structure too long");
     //   SETARG_Bx(*jmp, offset);
     // }
-    
+
     let mut offset = (dest as isize) - (pc as isize) - 1;
     if back {
         // For back jumps, negate to get positive distance
@@ -821,10 +821,13 @@ fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) -> Resul
     }
     // For forward jumps, offset is already positive
     // VM will add it (pc += Bx + 1)
-    
+
     // Validate range
     if offset < 0 || offset > Instruction::MAX_BX as isize {
-        return Err(format!("Warning: for-loop jump offset out of range: offset={}", offset));
+        return Err(format!(
+            "Warning: for-loop jump offset out of range: offset={}",
+            offset
+        ));
     }
 
     // Set Bx field directly (unsigned distance)

@@ -17,7 +17,7 @@ pub use expression::*;
 pub use func_state::*;
 
 use crate::compiler::parser::{
-    LexerConfig, LuaLanguageLevel, LuaLexer, LuaParser, LuaTokenKind, Reader,
+    LuaLanguageLevel, LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig,
 };
 use crate::gc::ObjectPool;
 use crate::lua_value::Chunk;
@@ -37,9 +37,9 @@ pub fn compile_code_with_name(
 ) -> Result<Chunk, String> {
     let level = LuaLanguageLevel::Lua54;
     let tokenize_result = {
-        let mut lexer = LuaLexer::new(
+        let mut lexer = LuaTokenize::new(
             Reader::new(source),
-            LexerConfig {
+            TokensizeConfig {
                 language_level: level,
             },
         );
@@ -53,7 +53,7 @@ pub fn compile_code_with_name(
         }
     };
 
-    let mut parser = LuaParser::new(source, tokens, level);
+    let mut parser = LuaLexer::new(source, tokens, level);
     // Check for lexer errors before parsing
 
     let mut fs = FuncState::new(&mut parser, pool, true, chunk_name.to_string());
@@ -113,14 +113,14 @@ pub fn compile_code_with_name(
 
     // Set vararg flag on chunk
     fs.chunk.is_vararg = fs.is_vararg;
-    
+
     // Set upvalue count
     fs.chunk.upvalue_count = fs.upvalues.len();
-    
+
     // Set source name and line info for main chunk
     fs.chunk.source_name = Some(chunk_name.to_string());
-    fs.chunk.linedefined = 0;  // Main function starts at line 0
-    fs.chunk.lastlinedefined = 0;  // Main function ends at line 0 (convention)
+    fs.chunk.linedefined = 0; // Main function starts at line 0
+    fs.chunk.lastlinedefined = 0; // Main function ends at line 0 (convention)
 
     Ok(fs.chunk)
 }

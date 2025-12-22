@@ -174,8 +174,10 @@ fn dump_chunk(
 
         // Debug: check instruction 227 (pc=227, shown as instruction 228)
         if pc == 227 {
-            eprintln!("DEBUG instr 228 (pc=227): raw=0x{:08X}, opcode={:?} ({}), a={}, b={}, c={}", 
-                      instr, opcode, opcode as u8, a, b, c);
+            eprintln!(
+                "DEBUG instr 228 (pc=227): raw=0x{:08X}, opcode={:?} ({}), a={}, b={}, c={}",
+                instr, opcode, opcode as u8, a, b, c
+            );
             eprintln!("  Expected: CALL (opcode=24) 3 2 1");
         }
 
