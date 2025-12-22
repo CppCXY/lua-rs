@@ -211,7 +211,10 @@ fn dump_chunk(
                 format!("SETFIELD {} {} {}{}", a, b, c, k_str)
             }
             OpCode::GetTable => format!("GETTABLE {} {} {}", a, b, c),
-            OpCode::SetTable => format!("SETTABLE {} {} {}", a, b, c),
+            OpCode::SetTable => {
+                let k_str = if k { "k" } else { "" };
+                format!("SETTABLE {} {} {}{}", a, b, c, k_str)
+            }
             OpCode::NewTable => {
                 // NEWTABLE never shows k flag (per luac.c:430)
                 format!("NEWTABLE {} {} {}", a, b, c)

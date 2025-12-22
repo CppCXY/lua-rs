@@ -610,7 +610,9 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     enterblock(fs, &mut bl, true);
 
     // Activate the loop variable (4th variable)
+    // lparser.c:1553-1554: adjustlocalvars + luaK_reserveregs
     fs.adjust_local_vars(1);
+    code::reserve_regs(fs, 1);
 
     block(fs)?;
 
