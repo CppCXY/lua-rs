@@ -1415,7 +1415,16 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
                     OpSub => i1.checked_sub(i2),
                     OpMul => i1.checked_mul(i2),
                     OpIDiv => i1.checked_div(i2),
-                    OpMod => Some(i1.rem_euclid(i2)),
+                    OpMod => {
+                        // Use Lua's modulo definition: a % b = a - floor(a/b) * b
+                        // NOT Rust's rem_euclid which differs for negative divisors
+                        let quot = (i1 as f64) / (i2 as f64);
+                        let floor_quot = quot.floor() as i64;
+                        match floor_quot.checked_mul(i2) {
+                            Some(prod) => i1.checked_sub(prod),
+                            None => None,
+                        }
+                    }
                     _ => unreachable!(),
                 };
 
@@ -1990,9 +1999,15 @@ fn is_kstr(e: &ExpDesc) -> bool {
     e.kind == ExpKind::VK || e.kind == ExpKind::VKSTR
 }
 
-// Check if expression is a constant integer in valid range
+// Check if expression is a constant integer in valid range for SETI
+// SETI's B field is only 8 bits (0-255), matching Lua C's isCint check
 fn is_cint(e: &ExpDesc) -> bool {
-    e.kind == ExpKind::VKINT
+    if e.kind == ExpKind::VKINT {
+        let val = unsafe { e.u.ival };
+        val >= 0 && val <= 255
+    } else {
+        false
+    }
 }
 
 // Port of luaK_self from lcode.c:1087-1097

@@ -172,15 +172,6 @@ fn dump_chunk(
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
 
-        // Debug: check instruction 227 (pc=227, shown as instruction 228)
-        if pc == 227 {
-            eprintln!(
-                "DEBUG instr 228 (pc=227): raw=0x{:08X}, opcode={:?} ({}), a={}, b={}, c={}",
-                instr, opcode, opcode as u8, a, b, c
-            );
-            eprintln!("  Expected: CALL (opcode=24) 3 2 1");
-        }
-
         // Get line number for this instruction (luac format)
         let line = if pc < chunk.line_info.len() {
             chunk.line_info[pc]

@@ -506,10 +506,24 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             code::code_abrk(fs, OpCode::SetField, cc.table_reg as u32, key_idx, &mut val);
         }
         // Check if key is integer constant for SetI optimization
+        // IMPORTANT: SETI's B field is only 8 bits (0-255), so we must check the range
         else if key.kind == ExpKind::VKINT {
-            let key_int = unsafe { key.u.ival as u32 };
-            // Use code_abrk to allow constant value optimization (e.g., [1] = 10)
-            code::code_abrk(fs, OpCode::SetI, cc.table_reg as u32, key_int, &mut val);
+            let key_int = unsafe { key.u.ival };
+            // Only use SETI if key fits in 8 bits (matches Lua's isCint check)
+            if key_int >= 0 && key_int <= 255 {
+                // Use code_abrk to allow constant value optimization (e.g., [1] = 10)
+                code::code_abrk(fs, OpCode::SetI, cc.table_reg as u32, key_int as u32, &mut val);
+            } else {
+                // Key too large for SETI, use SETTABLE instead
+                let key_reg = code::exp2anyreg(fs, &mut key);
+                code::code_abrk(
+                    fs,
+                    OpCode::SetTable,
+                    cc.table_reg as u32,
+                    key_reg as u32,
+                    &mut val,
+                );
+            }
         } else {
             // General case: SetTable instruction with RK optimization
             let key_reg = code::exp2anyreg(fs, &mut key);

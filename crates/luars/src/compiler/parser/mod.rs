@@ -52,6 +52,9 @@ impl<'a> LuaLexer<'a> {
         if self.tokens.is_empty() {
             self.current_token = LuaTokenKind::TkEof;
         } else {
+            // Initialize line from first token
+            self.line = self.tokens[0].line;
+            self.lastline = 1; // lastline starts at 1
             self.current_token = self.tokens[0].kind;
         }
 
@@ -128,7 +131,8 @@ impl<'a> LuaLexer<'a> {
         self.lastline = self.line;
 
         let mut next_index = self.token_index + 1;
-        self.skip_trivia_and_update_line(&mut next_index);
+        // Skip trivia tokens to find next real token
+        self.skip_trivia(&mut next_index);
         self.token_index = next_index;
 
         if self.token_index >= self.tokens.len() {
@@ -136,6 +140,10 @@ impl<'a> LuaLexer<'a> {
             return;
         }
 
+        // CRITICAL FIX: Update line from token's ending line number
+        // This ensures multi-line tokens (long strings, multi-line comments)  
+        // correctly update linenumber (matches Lua C's behavior in llex)
+        self.line = self.tokens[self.token_index].line;
         self.current_token = self.tokens[self.token_index].kind;
     }
 
@@ -157,24 +165,6 @@ impl<'a> LuaLexer<'a> {
 
         let mut kind = self.tokens[*index].kind;
         while is_trivia_kind(kind) {
-            *index += 1;
-            if *index >= self.tokens.len() {
-                break;
-            }
-            kind = self.tokens[*index].kind;
-        }
-    }
-
-    fn skip_trivia_and_update_line(&mut self, index: &mut usize) {
-        if index >= &mut self.tokens.len() {
-            return;
-        }
-
-        let mut kind = self.tokens[*index].kind;
-        while is_trivia_kind(kind) {
-            if kind == LuaTokenKind::TkEndOfLine {
-                self.line += 1;
-            }
             *index += 1;
             if *index >= self.tokens.len() {
                 break;
