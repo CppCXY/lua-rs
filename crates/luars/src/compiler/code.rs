@@ -1870,51 +1870,61 @@ fn codenot(fs: &mut FuncState, e: &mut ExpDesc) {
 }
 
 // Simplified implementation of luaK_prefix - generate unary operation
+// Port of codeunexpval from lcode.c:1392-1398
+// Generate code for unary operation that produces a value
+fn codeunexpval(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
+    let r = exp2anyreg(fs, e);  // opcodes operate only on registers
+    free_exp(fs, e);
+    let pc = code_abc(fs, op, 0, r as u32, 0);  // result register is 0 (will be relocated)
+    e.u.info = pc as i32;
+    e.kind = ExpKind::VRELOC;  // all those operations are relocatable
+}
+
 pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
     discharge_vars(fs, e);
 
-    // Special handling for NOT (lcode.c:1627)
-    if op == OpCode::Not {
-        codenot(fs, e);
-        return;
-    }
-
-    // Port of luaK_prefix from lcode.c:1625-1635
-    // Constant folding for unary minus on numeric constants
-    if op == OpCode::Unm {
-        match e.kind {
-            ExpKind::VKINT => {
-                // Negate integer constant in place
-                let val = unsafe { e.u.ival };
-                e.u.ival = val.wrapping_neg();
-                return;
+    // Port of luaK_prefix from lcode.c:1616-1631
+    match op {
+        OpCode::Unm => {
+            // Try constant folding for unary minus (lcode.c:1620-1622)
+            match e.kind {
+                ExpKind::VKINT => {
+                    // Negate integer constant in place
+                    let val = unsafe { e.u.ival };
+                    e.u.ival = val.wrapping_neg();
+                    return;
+                }
+                ExpKind::VKFLT => {
+                    // Negate float constant in place
+                    let val = unsafe { e.u.nval };
+                    e.u.nval = -val;
+                    return;
+                }
+                _ => {}
             }
-            ExpKind::VKFLT => {
-                // Negate float constant in place
-                let val = unsafe { e.u.nval };
-                e.u.nval = -val;
-                return;
-            }
-            _ => {}
+            // Otherwise fall through to codeunexpval
+            codeunexpval(fs, op, e);
         }
+        OpCode::BNot => {
+            // Try constant folding for bitwise not (lcode.c:1620-1622)
+            if e.kind == ExpKind::VKINT {
+                let val = unsafe { e.u.ival };
+                e.u.ival = !val;
+                return;
+            }
+            // Otherwise fall through to codeunexpval
+            codeunexpval(fs, op, e);
+        }
+        OpCode::Len => {
+            // LEN operation (lcode.c:1625)
+            codeunexpval(fs, op, e);
+        }
+        OpCode::Not => {
+            // NOT operation (lcode.c:1627)
+            codenot(fs, e);
+        }
+        _ => unreachable!()
     }
-
-    // For BNOT, also fold constants (lcode.c:1633)
-    if op == OpCode::BNot && e.kind == ExpKind::VKINT {
-        let val = unsafe { e.u.ival };
-        e.u.ival = !val;
-        return;
-    }
-
-    let o = exp2anyreg(fs, e);
-    free_reg(fs, o);
-
-    let res = fs.freereg;
-    reserve_regs(fs, 1);
-    code_abc(fs, op, res as u32, o as u32, 0);
-
-    e.kind = ExpKind::VNONRELOC;
-    e.u.info = res as i32;
 }
 
 // Port of luaK_exp2anyregup from lcode.c:978-981

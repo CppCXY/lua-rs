@@ -339,18 +339,16 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     let name = fs.lexer.current_token_text().to_string();
     fs.lexer.bump();
 
-    let fs_ptr = fs as *mut FuncState;
-
     // Call singlevaraux with base=1
-    singlevaraux(fs_ptr, &name, v, true);
+    singlevaraux(fs, &name, v, true);
 
     // If global name (VVOID), access through _ENV
-    if v.kind == crate::compiler::expression::ExpKind::VVOID {
+    if v.kind == ExpKind::VVOID {
         // Get environment variable (_ENV)
-        singlevaraux(fs_ptr, "_ENV", v, true);
+        singlevaraux(fs, "_ENV", v, true);
 
         // _ENV must exist
-        if v.kind == crate::compiler::expression::ExpKind::VVOID {
+        if v.kind == ExpKind::VVOID {
             return Err("_ENV not found".to_string());
         }
 
@@ -368,32 +366,25 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 }
 
 // Port of singlevaraux from lparser.c (lines 435-456)
-fn singlevaraux(fs: *mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
-    if fs.is_null() {
-        init_exp(var, ExpKind::VVOID, 0);
-        return;
-    }
-
-    let fs_ref = unsafe { &mut *fs };
-    let vkind = fs_ref.searchvar(name, var);
+fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
+    let vkind = fs.searchvar(name, var);
     if vkind >= 0 {
         if vkind == ExpKind::VLOCAL as i32 && !base {
             // lparser.c:442: markupval(fs, var->u.var.vidx); /* local will be used as an upval */
             let vidx = unsafe { var.u.var.vidx };
-            mark_upval(fs_ref, vidx as u8);
+            mark_upval(fs, vidx as u8);
         }
     } else {
-        let vidx = fs_ref.searchupvalue(name);
+        let vidx = fs.searchupvalue(name);
         if vidx < 0 {
-            let prev = fs_ref
-                .prev
-                .as_ref()
-                .map(|p| *p as *const _ as *mut FuncState)
-                .unwrap_or(std::ptr::null_mut());
-            singlevaraux(prev, name, var, false);
-            if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL {
-                let idx = fs_ref.newupvalue(name, var) as u8;
-                init_exp(var, ExpKind::VUPVAL, idx as i32);
+            if let Some(prev) = &mut fs.prev {
+                singlevaraux(prev, name, var, false);
+                if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL {
+                    let idx = fs.newupvalue(name, var) as u8;
+                    init_exp(var, ExpKind::VUPVAL, idx as i32);
+                }
+            } else {
+                init_exp(var, ExpKind::VVOID, 0);
             }
         } else {
             init_exp(var, ExpKind::VUPVAL, vidx as i32);
