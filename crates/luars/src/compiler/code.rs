@@ -1687,7 +1687,8 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     BinaryOperator::OpBXor => TmKind::Bxor, // TM_BXOR
                     _ => TmKind::N, // Invalid for other ops
                 };
-                code_abc(fs, OpCode::MmBinK, r1 as u32, k_idx as u32, tm_event as u32);
+                // Use code_abck to include flip bit (k-flag) like in MMBINI
+                code_abck(fs, OpCode::MmBinK, r1 as u32, k_idx as u32, tm_event as u32, flip);
             } else {
                 // Both operands in registers - port of codebinexpval (lcode.c:1425-1434)
                 let o2 = exp2anyreg(fs, e2);
