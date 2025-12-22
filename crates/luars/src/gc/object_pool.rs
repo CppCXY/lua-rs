@@ -598,7 +598,7 @@ impl ObjectPool {
             userdata: Pool::new(),
             threads: BoxPool::with_capacity(8),
             string_intern: StringInternTable::with_capacity(256),
-            max_intern_length: 64, // Strings <= 64 bytes are interned
+            max_intern_length: 40, // Strings <= 40 bytes are interned
             // Placeholder values - will be initialized below
             tm_index: StringId(0),
             tm_newindex: StringId(0),
@@ -872,6 +872,14 @@ impl ObjectPool {
     #[inline(always)]
     pub fn get_string_str(&self, id: StringId) -> Option<&str> {
         self.strings.get(id.0).map(|gs| gs.data.as_str())
+    }
+
+    pub fn is_short_string(&self, id: StringId) -> bool {
+        if let Some(gs) = self.strings.get(id.0) {
+            gs.data.as_str().len() <= self.max_intern_length
+        } else {
+            false
+        }
     }
 
     /// Create a substring from an existing string (optimized for string.sub)

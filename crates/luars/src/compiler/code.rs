@@ -1878,11 +1878,11 @@ fn codenot(fs: &mut FuncState, e: &mut ExpDesc) {
 // Port of codeunexpval from lcode.c:1392-1398
 // Generate code for unary operation that produces a value
 fn codeunexpval(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
-    let r = exp2anyreg(fs, e);  // opcodes operate only on registers
+    let r = exp2anyreg(fs, e); // opcodes operate only on registers
     free_exp(fs, e);
-    let pc = code_abc(fs, op, 0, r as u32, 0);  // result register is 0 (will be relocated)
+    let pc = code_abc(fs, op, 0, r as u32, 0); // result register is 0 (will be relocated)
     e.u.info = pc as i32;
-    e.kind = ExpKind::VRELOC;  // all those operations are relocatable
+    e.kind = ExpKind::VRELOC; // all those operations are relocatable
 }
 
 pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
@@ -1928,7 +1928,7 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
             // NOT operation (lcode.c:1627)
             codenot(fs, e);
         }
-        _ => unreachable!()
+        _ => unreachable!(),
     }
 }
 
@@ -1953,18 +1953,14 @@ pub fn exp2val(fs: &mut FuncState, e: &mut ExpDesc) {
 // Port of luaK_indexed from lcode.c:1280-1310
 // void luaK_indexed (FuncState *fs, expdesc *t, expdesc *k)
 pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
-    use crate::compiler::expression::ExpKind;
-
     // Convert string to constant if needed
     if k.kind == ExpKind::VKSTR {
         // str2K - convert to constant
-        let k_idx = unsafe { k.u.info as usize };
-        k.kind = ExpKind::VK;
-        k.u.info = k_idx as i32;
+        str2k(fs, k);
     }
 
     // Table must be in local/nonreloc/upval
-    if t.kind == ExpKind::VUPVAL && !is_kstr(k) {
+    if t.kind == ExpKind::VUPVAL && !is_kstr(fs, k) {
         exp2anyreg(fs, t);
     }
 
@@ -1981,7 +1977,7 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
             unsafe { t.u.info as i16 }
         };
 
-        if is_kstr(k) {
+        if is_kstr(fs, k) {
             t.u.ind.idx = unsafe { k.u.info as i16 };
             t.kind = ExpKind::VINDEXSTR;
         } else if is_cint(k) {
@@ -1994,20 +1990,43 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
     }
 }
 
+#[inline]
+fn hasjumps(e: &ExpDesc) -> bool {
+    e.t != e.f
+}
+
 // Check if expression is a constant string
-fn is_kstr(e: &ExpDesc) -> bool {
-    e.kind == ExpKind::VK || e.kind == ExpKind::VKSTR
+fn is_kstr(fs: &FuncState, e: &ExpDesc) -> bool {
+    unsafe {
+        let ok1 = e.kind == ExpKind::VK
+            && !hasjumps(e)
+            && e.u.info <= Instruction::MAX_B as i32;
+        if !ok1 {
+            return false;
+        }
+
+        let k_idx = e.u.info as usize;
+        if k_idx >= fs.chunk.constants.len() {
+            return false;
+        }
+
+        let const_val = &fs.chunk.constants[k_idx];
+        if let Some(string_id) = const_val.as_string_id() {
+            return fs.pool.is_short_string(string_id);
+        }
+
+        false
+    }
+}
+
+fn is_kint(e: &ExpDesc) -> bool {
+    e.kind == ExpKind::VKINT && !hasjumps(e)
 }
 
 // Check if expression is a constant integer in valid range for SETI
 // SETI's B field is only 8 bits (0-255), matching Lua C's isCint check
 fn is_cint(e: &ExpDesc) -> bool {
-    if e.kind == ExpKind::VKINT {
-        let val = unsafe { e.u.ival };
-        val >= 0 && val <= 255
-    } else {
-        false
-    }
+    is_kint(e) && unsafe { e.u.ival as u64 <= Instruction::MAX_C as u64 }
 }
 
 // Port of luaK_self from lcode.c:1087-1097
