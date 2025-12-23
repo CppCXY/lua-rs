@@ -773,34 +773,49 @@ fn tonumeral(e: &ExpDesc, _v: Option<&mut f64>) -> bool {
 const MAXINDEXRK: usize = 255; // Maximum index for R/K operands
 
 // Add boolean true to constants
+// Port of boolT from lcode.c:636-640
 fn bool_t(fs: &mut FuncState) -> usize {
-    add_constant(fs, LuaValue::boolean(true))
+    // Use boolean value itself as both key and value (lcode.c:639)
+    let val = LuaValue::boolean(true);
+    add_constant(fs, val)
 }
 
 // Add boolean false to constants
+// Port of boolF from lcode.c:626-630
 fn bool_f(fs: &mut FuncState) -> usize {
-    add_constant(fs, LuaValue::boolean(false))
+    // Use boolean value itself as both key and value (lcode.c:629)
+    let val = LuaValue::boolean(false);
+    add_constant(fs, val)
 }
 
 // Add nil to constants
+// Port of nilK from lcode.c:646-652
 fn nil_k(fs: &mut FuncState) -> usize {
-    add_constant(fs, LuaValue::nil())
+    // Cannot use nil as key; use a special sentinel instead
+    // In Lua C, they use the hash table itself as key (lcode.c:650)
+
+    // but we are rust! So we can just use LuaValue::nil() as both key and value
+    let val = LuaValue::nil();
+    add_constant(fs, val)
 }
 
 // Add integer to constants
 fn int_k(fs: &mut FuncState, i: i64) -> usize {
-    add_constant(fs, LuaValue::integer(i))
+    let val = LuaValue::integer(i);
+    add_constant(fs, val)
 }
 
 // Add number to constants
 fn number_k(fs: &mut FuncState, n: f64) -> usize {
-    add_constant(fs, LuaValue::float(n))
+    let val = LuaValue::float(n);
+    add_constant(fs, val)
 }
 
 // Add an integer constant to the constant table
 // Port of luaK_int from lcode.c:717 (constant table part)
 fn integer_k(fs: &mut FuncState, i: i64) -> usize {
-    add_constant(fs, LuaValue::integer(i))
+    let val = LuaValue::integer(i);
+    add_constant(fs, val)
 }
 
 // Port of stringK from lcode.c:576-580
@@ -810,6 +825,7 @@ pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     let (string_id, _) = fs.pool.create_string(&s);
 
     // Add LuaValue with StringId to constants (check for duplicates)
+    // For strings, key == value (strings are deduplicated globally)
     let value = LuaValue::string(string_id);
     add_constant(fs, value)
 }
@@ -828,6 +844,7 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
         e.kind = ExpKind::VK;
         let string_id = StringId(unsafe { e.u.info as u32 });
         let value = LuaValue::string(string_id);
+        // For strings, key == value
         let const_idx = add_constant(fs, value);
         e.u.info = const_idx as i32;
     }
@@ -835,40 +852,37 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 
 // Helper to add constant to chunk
 // Port of addk from lcode.c:544-571
-// Uses global scanner table (in LexState/LuaParser) for constant deduplication
+// key: The key used for lookup in scanner table (for deduplication)
+// value: The actual value to store in the constant table
+//
+// For nil/false/true, key should be a special sentinel value to ensure global deduplication
+// For strings, key == value (strings are deduplicated globally)
+// For other types (numbers), key == value (numbers are deduplicated per-function)
+// but we use rust's HashMap to handle that, so we just pass the same value for both key and value.
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
-    // DEBUG: Print value type and content
-    eprintln!(
-        "[DEBUG] add_constant: type={:?} value={:?}",
-        value.kind(),
-        value
-    );
-
-    // Query global scanner table (lcode.c:548)
+    // Query scanner table with key (lcode.c:548)
     if let Some(&idx) = fs.compiler_state.scanner_table.get(&value) {
-        // Check if we can reuse this constant (lcode.c:550-553)
-        // Only reuse if:
-        // 1. Index is within current function's constant range
-        // 2. Value matches (should always match since we use value as key)
-        if idx < fs.chunk.constants.len() && fs.chunk.constants[idx] == value {
-            eprintln!(
-                "[DEBUG] add_constant: REUSING existing constant at idx={}",
-                idx
-            );
-            return idx;
+        // Check if we can reuse this constant (lcode.c:550-555)
+        // Must check: within bounds, same type tag, and equal value
+        if idx < fs.chunk.constants.len()
+            && let Some(existing) = fs.chunk.constants.get(idx)
+        {
+            // Must match both type and value (distinguishes float from integer)
+            if existing.kind() == value.kind() && *existing == value {
+                return idx;
+            }
         }
     }
 
-    // Constant not found or cannot be reused; create a new entry (lcode.c:555-569)
+    // Constant not found or cannot be reused; create a new entry (lcode.c:558-569)
     let idx = fs.chunk.constants.len();
     fs.chunk.constants.push(value.clone());
-    eprintln!("[DEBUG] add_constant: NEW constant at idx={}", idx);
 
-    // Update global scanner table with new index (lcode.c:562)
+    // Store key->index mapping in scanner table (lcode.c:562-563)
     fs.compiler_state.scanner_table.insert(value.clone(), idx);
 
     // Also update local map for backward compatibility
-    fs.chunk_constants_map.insert(value, idx);
+    fs.chunk_constants_map.insert(value.clone(), idx);
 
     idx
 }
