@@ -726,20 +726,27 @@ pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
     code_abc(fs, OpCode::LoadNil, from as u32, (n - 1) as u32, 0);
 }
 
-// Port of luaK_setoneret from lcode.c:755-765
+// Port of luaK_setoneret from lcode.c:755-766
 // void luaK_setoneret (FuncState *fs, expdesc *e)
+// Adjust a call/vararg expression to produce exactly one result.
+// Calls are created returning one result (C=2), so they don't need fixing.
+// For VCALL, just changes the expression type to VNONRELOC with fixed position.
+// For VVARARG, sets C=2 (one result) and changes to VRELOC.
 pub fn setoneret(fs: &mut FuncState, e: &mut ExpDesc) {
     if e.kind == ExpKind::VCALL {
-        // VCALL: expression is an open function call
+        // lcode.c:758: already returns 1 value
+        // lcode.c:759: lua_assert(GETARG_C(getinstruction(fs, e)) == 2);
         let pc = unsafe { e.u.info as usize };
-        debug_assert_eq!(Instruction::get_c(fs.chunk.code[pc]), 0); // Should be open call
-        Instruction::set_c(&mut fs.chunk.code[pc], 2); // Set to return 1 value
+        debug_assert_eq!(Instruction::get_c(fs.chunk.code[pc]), 2); // Should already be 2
+        
+        // lcode.c:760-761: e->k = VNONRELOC; e->u.info = GETARG_A(...)
         e.kind = ExpKind::VNONRELOC;
-        // Set u.info to function base register (A parameter of CALL instruction)
         e.u.info = Instruction::get_a(fs.chunk.code[pc]) as i32;
     } else if e.kind == ExpKind::VVARARG {
+        // lcode.c:763: SETARG_C(getinstruction(fs, e), 2);
         let pc = unsafe { e.u.info as usize };
         Instruction::set_c(&mut fs.chunk.code[pc], 2);
+        // lcode.c:764: e->k = VRELOC;
         e.kind = ExpKind::VRELOC;
     }
 }
@@ -749,10 +756,10 @@ pub fn setoneret(fs: &mut FuncState, e: &mut ExpDesc) {
 pub fn setreturns(fs: &mut FuncState, e: &mut ExpDesc, nresults: u8) {
     let pc = unsafe { e.u.info as usize };
     if e.kind == ExpKind::VCALL {
-        Instruction::set_c(&mut fs.chunk.code[pc], (nresults + 1) as u32);
+        Instruction::set_c(&mut fs.chunk.code[pc], (nresults as u32) + 1);
     } else {
         // Must be VVARARG
-        Instruction::set_c(&mut fs.chunk.code[pc], (nresults + 1) as u32);
+        Instruction::set_c(&mut fs.chunk.code[pc], (nresults as u32) + 1);
         Instruction::set_a(&mut fs.chunk.code[pc], fs.freereg as u32);
         reserve_regs(fs, 1);
     }

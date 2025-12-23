@@ -178,6 +178,16 @@ fn str_checkname(fs: &mut FuncState) -> Result<String, String> {
 // Creates a new block and pushes it onto the block stack
 pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
     let prev_id = fs.block_cnt_id.take();
+    
+    // Port of lparser.c:656-664: inherit insidetbc from previous block
+    let parent_in_scope = if let Some(prev_id) = prev_id {
+        fs.compiler_state.get_blockcnt_mut(prev_id)
+            .map(|bl| bl.in_scope)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    
     if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
         bl.previous = prev_id;
         bl.first_label = fs.labels.len();
@@ -185,7 +195,7 @@ pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
         bl.nactvar = fs.nactvar;
         bl.upval = false;
         bl.is_loop = isloop;
-        bl.in_scope = true;
+        bl.in_scope = parent_in_scope;  // Inherit from parent
     }
 
     // Create a clone and put it in fs.block_list
@@ -303,21 +313,33 @@ fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
 
 // Port of leaveblock from lparser.c:673-695
 pub fn leaveblock(fs: &mut FuncState) {
-    if let Some(bl) = fs.take_block_cnt() {
+    // Don't take the block - just read it!
+    if let Some(bl_id) = fs.block_cnt_id {
+        // Get immutable reference first to read values
+        let (nactvar, is_loop, first_label, first_goto, has_previous, previous_id, upval) = {
+            if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
+                (bl.nactvar, bl.is_loop, bl.first_label, bl.first_goto, 
+                 bl.previous.is_some(), bl.previous, bl.upval)
+            } else {
+                eprintln!("[ERROR leaveblock] Block {:?} not found!", bl_id);
+                return;
+            }
+        };
+        
         // Port of lparser.c:675-677
         let mut hasclose = false;
-        let stklevel = fs.reglevel(bl.nactvar);
+        let stklevel = fs.reglevel(nactvar);
 
         // Remove block locals
-        fs.remove_vars(bl.nactvar);
+        fs.remove_vars(nactvar);
 
         // Port of lparser.c:678-679: handle loop break labels
-        if bl.is_loop {
+        if is_loop {
             hasclose = createlabel(fs, "break", 0, false);
         }
 
         // Port of lparser.c:680: still need a 'close'?
-        if !hasclose && bl.previous.is_some() && bl.upval {
+        if !hasclose && has_previous && upval {
             code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
         }
 
@@ -325,29 +347,28 @@ pub fn leaveblock(fs: &mut FuncState) {
         fs.freereg = stklevel;
 
         // Port of lparser.c:682: remove local labels
-        fs.labels.truncate(bl.first_label);
-
-        // Save values needed after moving bl.previous
-        let first_label = bl.first_label;
-        let first_goto = bl.first_goto;
-        let has_previous = bl.previous.is_some();
+        fs.labels.truncate(first_label);
 
         // Port of lparser.c:683: current block now is previous one
-        fs.block_cnt_id = bl.previous;
+        // Just update the pointer, don't take the block!
+        fs.block_cnt_id = previous_id;
 
         // Port of lparser.c:684-689: move gotos out or check for undefined gotos
         if has_previous {
             // Need to reconstruct bl info for movegotosout
-            let bl_info = BlockCnt {
-                previous: None, // not used in movegotosout
-                first_label,
-                first_goto,
-                nactvar: bl.nactvar,
-                upval: bl.upval,
-                is_loop: bl.is_loop,
-                in_scope: bl.in_scope,
-            };
-            movegotosout(fs, &bl_info);
+            // Read the block again to get all fields
+            if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
+                let bl_info = BlockCnt {
+                    previous: None, // not used in movegotosout
+                    first_label: bl.first_label,
+                    first_goto: bl.first_goto,
+                    nactvar: bl.nactvar,
+                    upval: bl.upval,
+                    is_loop: bl.is_loop,
+                    in_scope: bl.in_scope,
+                };
+                movegotosout(fs, &bl_info);
+            }
         } else {
             // At function level, check for undefined gotos
             if first_goto < fs.pending_gotos.len() {
@@ -1004,16 +1025,18 @@ pub fn mark_upval(fs: &mut FuncState, level: u8) {
 fn mark_to_be_closed(fs: &mut FuncState) {
     if let Some(bl) = fs.current_block_cnt() {
         bl.upval = true;
+        bl.in_scope = true;  // Port of lparser.c:610: bl->insidetbc = 1;
     }
     fs.needclose = true;
 }
 
 // Port of checktoclose from lparser.c
+// Port of checktoclose from lparser.c:1717-1722
 fn check_to_close(fs: &mut FuncState, level: isize) {
     if level != -1 {
-        // Mark that this function has to-be-closed variables
-        fs.needclose = true;
-        // Generate TBC instruction
+        // lparser.c:1719: marktobeclosed(fs);
+        mark_to_be_closed(fs);
+        // lparser.c:1720: luaK_codeABC(fs, OP_TBC, reglevel(fs, level), 0, 0);
         code::code_abc(fs, OpCode::Tbc, level as u32, 0, 0);
     }
 }
@@ -1207,7 +1230,7 @@ fn check_conflict(fs: &mut FuncState, lh: &LhsAssign, v: &ExpDesc) {
     }
 }
 
-// Port of adjust_assign from lparser.c
+// Port of adjust_assign from lparser.c:482-498
 fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc) {
     use ExpKind;
 
@@ -1215,27 +1238,29 @@ fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc
 
     // Check if last expression has multiple returns
     if matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG) {
-        let extra = needed + 1;
+        let mut extra = needed + 1;
+        // lparser.c:488-489: if (extra < 0) extra = 0;
         if extra < 0 {
-            // Too many expressions, adjust call to return fewer
-            code::setoneret(fs, e);
-        } else {
-            // Adjust to return the right number
-            code::setreturns(fs, e, extra as u8);
+            extra = 0;
         }
+        // lparser.c:489: luaK_setreturns(fs, e, extra);
+        code::setreturns(fs, e, extra as u8);
     } else {
+        // lparser.c:492-493: if (e->k != VVOID) luaK_exp2nextreg(fs, e);
         if e.kind != ExpKind::VVOID {
             code::exp2nextreg(fs, e);
         }
+        // lparser.c:494-495: if (needed > 0) luaK_nil(fs, fs->freereg, needed);
         if needed > 0 {
             code::nil(fs, fs.freereg, needed as u8);
         }
     }
 
+    // lparser.c:496-500: Adjust freereg
     if needed > 0 {
         code::reserve_regs(fs, needed as u8);
     } else {
-        // Remove extra registers
+        // lparser.c:500: adding 'needed' is actually a subtraction
         fs.freereg = (fs.freereg as isize + needed) as u8;
     }
 }

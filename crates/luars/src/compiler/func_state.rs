@@ -41,8 +41,8 @@ pub struct FuncState<'a> {
 }
 
 pub struct CompilerState {
-    // pool of BlockCnt structures
-    pub block_cnt_pool: Vec<BlockCnt>,
+    // pool of BlockCnt structures (Option to allow safe take without invalidating indices)
+    pub block_cnt_pool: Vec<Option<BlockCnt>>,
     // Global scanner table for constant deduplication (corresponds to LexState.h in Lua C)
     pub scanner_table: HashMap<LuaValue, usize>,
 }
@@ -57,20 +57,17 @@ impl CompilerState {
 
     pub fn alloc_blockcnt(&mut self, block: BlockCnt) -> BlockCntId {
         let id = BlockCntId(self.block_cnt_pool.len());
-        self.block_cnt_pool.push(block);
+        self.block_cnt_pool.push(Some(block));
         id
     }
 
     pub fn get_blockcnt_mut(&mut self, id: BlockCntId) -> Option<&mut BlockCnt> {
-        self.block_cnt_pool.get_mut(id.0)
+        self.block_cnt_pool.get_mut(id.0).and_then(|opt| opt.as_mut())
     }
 
     pub fn take_blockcnt(&mut self, id: BlockCntId) -> Option<BlockCnt> {
-        if id.0 < self.block_cnt_pool.len() {
-            Some(self.block_cnt_pool.remove(id.0))
-        } else {
-            None
-        }
+        // Use take() instead of remove() to avoid invalidating subsequent BlockCntIds
+        self.block_cnt_pool.get_mut(id.0).and_then(|opt| opt.take())
     }
 }
 

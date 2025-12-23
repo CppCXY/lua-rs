@@ -480,7 +480,9 @@ fn lastlistfield(fs: &mut FuncState, cc: &mut ConsControl) {
     if code::hasmultret(&cc.v) {
         code::setmultret(fs, &mut cc.v);
         code::setlist(fs, cc.table_reg, cc.na, code::LUA_MULTRET);
-        cc.na -= 1; // do not count last expression (unknown number of elements)
+        // lparser.c:884: cc->na--; do not count last expression (unknown number of elements)
+        // Note: na should be > 0 here, but use saturating_sub to avoid panic
+        cc.na = cc.na.saturating_sub(1);
     } else {
         if cc.v.kind != ExpKind::VVOID {
             code::exp2nextreg(fs, &mut cc.v);
