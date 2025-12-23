@@ -83,6 +83,11 @@ fn const_to_exp(value: crate::lua_value::LuaValue, e: &mut ExpDesc) {
     }
 }
 
+// Public wrapper for const_to_exp
+pub fn const_to_exp_pub(value: crate::lua_value::LuaValue, e: &mut ExpDesc) {
+    const_to_exp(value, e);
+}
+
 // Port of luaK_codeABC from lcode.c:397-402
 // int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize {
@@ -658,9 +663,16 @@ fn free_exps(fs: &mut FuncState, e1: &ExpDesc, e2: &ExpDesc) {
 
 // Port of freereg from lcode.c:527-531
 // static void freereg (FuncState *fs, int reg)
+// Port of freereg from lcode.c:492-498
+// static void freereg (FuncState *fs, int reg)
 pub fn free_reg(fs: &mut FuncState, reg: u8) {
-    if reg >= fs.nactvar && reg < fs.freereg {
+    // lcode.c:493: if (reg >= luaY_nvarstack(fs))
+    // Use nvarstack() which skips const variables, not nactvar
+    let nvars = fs.nvarstack();
+    if reg >= nvars && reg < fs.freereg {
         fs.freereg -= 1;
+        // lcode.c:495: lua_assert(reg == fs->freereg);
+        debug_assert_eq!(reg, fs.freereg, "freereg mismatch: expected reg {} to equal freereg {}", reg, fs.freereg);
     }
 }
 
@@ -830,6 +842,9 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 // Port of addk from lcode.c:544-571
 // Uses global scanner table (in LexState/LuaParser) for constant deduplication
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
+    // DEBUG: Print value type and content
+    eprintln!("[DEBUG] add_constant: type={:?} value={:?}", value.kind(), value);
+    
     // Query global scanner table (lcode.c:548)
     if let Some(&idx) = fs.compiler_state.scanner_table.get(&value) {
         // Check if we can reuse this constant (lcode.c:550-553)
@@ -837,6 +852,7 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
         // 1. Index is within current function's constant range
         // 2. Value matches (should always match since we use value as key)
         if idx < fs.chunk.constants.len() && fs.chunk.constants[idx] == value {
+            eprintln!("[DEBUG] add_constant: REUSING existing constant at idx={}", idx);
             return idx;
         }
     }
@@ -844,6 +860,7 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     // Constant not found or cannot be reused; create a new entry (lcode.c:555-569)
     let idx = fs.chunk.constants.len();
     fs.chunk.constants.push(value.clone());
+    eprintln!("[DEBUG] add_constant: NEW constant at idx={}", idx);
 
     // Update global scanner table with new index (lcode.c:562)
     fs.compiler_state.scanner_table.insert(value.clone(), idx);

@@ -374,12 +374,26 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
             let vidx = unsafe { var.u.var.vidx };
             mark_upval(fs, vidx as u8);
         }
+        // If it's VCONST, it stays VCONST - no change needed
     } else {
         let vidx = fs.searchupvalue(name);
         if vidx < 0 {
             if let Some(prev) = &mut fs.prev {
                 singlevaraux(prev, name, var, false);
-                if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL {
+                
+                // Port of lparser.c:451-453: don't create upvalue for compile-time constants
+                // If the variable is a compile-time constant (VCONST), convert it to value immediately
+                // This enables constant folding in nested functions
+                if var.kind == ExpKind::VCONST {
+                    // Convert VCONST to actual constant value (VKINT/VKFLT/etc)
+                    // Port of const2exp from lcode.c:693-720
+                    let vidx = unsafe { var.u.info } as usize;
+                    if let Some(prev_var) = prev.actvar.get(vidx) {
+                        if let Some(value) = prev_var.const_value {
+                            code::const_to_exp_pub(value, var);
+                        }
+                    }
+                } else if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL {
                     let idx = fs.newupvalue(name, var) as u8;
                     init_exp(var, ExpKind::VUPVAL, idx as i32);
                 }

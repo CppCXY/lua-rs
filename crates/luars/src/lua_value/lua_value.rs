@@ -48,7 +48,7 @@ pub const VALUE_FALSE: u64 = TAG_FALSE;
 pub const NAN_BASE: u64 = TAG_INTEGER; // Not really used in new design
 
 /// LuaValue - no pointer caching, all GC objects accessed via ID
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct LuaValue {
     pub(crate) primary: u64, // tag: type tag (high 16 bits) + object ID (low 32 bits)
@@ -528,54 +528,11 @@ impl std::fmt::Display for LuaValue {
     }
 }
 
-impl PartialEq for LuaValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.raw_equal(other)
-    }
-}
-
-impl Eq for LuaValue {}
-
 impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Hash both tag and data
         self.primary.hash(state);
         self.secondary.hash(state);
-    }
-}
-
-impl PartialOrd for LuaValue {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        use std::cmp::Ordering;
-        let kind_a = self.kind();
-        let kind_b = other.kind();
-
-        match kind_a.cmp(&kind_b) {
-            Ordering::Equal => match kind_a {
-                LuaValueKind::Nil => Some(Ordering::Equal),
-                LuaValueKind::Boolean => self.as_boolean().partial_cmp(&other.as_boolean()),
-                LuaValueKind::Integer => self.as_integer().partial_cmp(&other.as_integer()),
-                LuaValueKind::Float => self.as_float().partial_cmp(&other.as_float()),
-                LuaValueKind::String => {
-                    // Compare by ID for now (proper string comparison needs ObjectPool)
-                    let id_a = (self.primary & ID_MASK) as u32;
-                    let id_b = (other.primary & ID_MASK) as u32;
-                    id_a.partial_cmp(&id_b)
-                }
-                _ => {
-                    let id_a = (self.primary & ID_MASK) as u32;
-                    let id_b = (other.primary & ID_MASK) as u32;
-                    id_a.partial_cmp(&id_b)
-                }
-            },
-            ord => Some(ord),
-        }
-    }
-}
-
-impl Ord for LuaValue {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap()
     }
 }
 

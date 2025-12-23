@@ -581,12 +581,13 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     fs.lexer.bump(); // skip WHILE
     let whileinit = fs.pc;
 
-    // Parse condition
+    // Parse condition - Port of lparser.c:1474: condexit = cond(ls);
     let mut v = expr(fs)?;
-    code::exp2nextreg(fs, &mut v);
-
-    // Jump out if condition is false
-    let condexit = code::jump(fs);
+    if v.kind == ExpKind::VNIL {
+        v.kind = ExpKind::VFALSE; // 'falses' are all equal here
+    }
+    code::goiftrue(fs, &mut v);
+    let condexit = v.f; // false list
 
     let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
@@ -613,8 +614,8 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkWhile, line)?;
     leaveblock(fs);
 
-    // Patch exit jump
-    code::patchtohere(fs, condexit as isize);
+    // Patch exit jump - false conditions finish the loop
+    code::patchtohere(fs, condexit);
 
     Ok(())
 }
@@ -1100,12 +1101,18 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     // Check for compile-time constant optimization
     // Get last variable
     let last_vidx = (fs.nactvar + nvars - 1) as u16;
-    let const_value = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
-        if nvars as usize == nexps && var_desc.kind == VarKind::RDKCONST {
-            code::exp2const(fs, &e)
-        } else {
-            None
-        }
+    
+    // First check if optimization is possible and get variable info for debugging
+    let (can_optimize, var_name, var_kind) = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
+        (nvars as usize == nexps && var_desc.kind == VarKind::RDKCONST, 
+         var_desc.name.clone(), 
+         var_desc.kind)
+    } else {
+        (false, String::new(), VarKind::VDKREG)
+    };
+    
+    let const_value = if can_optimize {
+        code::exp2const(fs, &e)
     } else {
         None
     };

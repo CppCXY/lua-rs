@@ -80,12 +80,12 @@ pub struct BlockCntId(pub usize);
 #[derive(Clone, Default)]
 pub struct BlockCnt {
     pub previous: Option<BlockCntId>, // link to the enclosing block
-    pub first_label: usize, // index of first label in this block
-    pub first_goto: usize,  // index of first pending goto in this block
-    pub nactvar: u8,        // number of active variables outside the block
-    pub upval: bool,        // true if some variable in block is an upvalue
-    pub is_loop: bool,      // true if 'block' is a loop
-    pub in_scope: bool,     // true if 'block' is still in scope
+    pub first_label: usize,           // index of first label in this block
+    pub first_goto: usize,            // index of first pending goto in this block
+    pub nactvar: u8,                  // number of active variables outside the block
+    pub upval: bool,                  // true if some variable in block is an upvalue
+    pub is_loop: bool,                // true if 'block' is a loop
+    pub in_scope: bool,               // true if 'block' is still in scope
 }
 
 // Port of LabelDesc from lparser.c
@@ -233,24 +233,29 @@ impl<'a> FuncState<'a> {
         self.actvar.get_mut(vidx as usize)
     }
 
-    // Port of adjustlocalvars from lparser.c
     // Port of adjustlocalvars from lparser.c:311-321
     pub fn adjust_local_vars(&mut self, nvars: u8) {
         // Get current register level (where new variables start)
-        let reglevel = self.nactvar;
+        // This skips const variables (RDKCTC) and returns the next available register
+        let mut reglevel = self.nvarstack();
 
-        for i in 0..nvars {
+        for _ in 0..nvars {
             let vidx = self.nactvar as usize;
             self.nactvar += 1;
 
             if let Some(var) = self.actvar.get_mut(vidx) {
-                var.ridx = (reglevel + i) as i16;
+                // All variables (including const) get a ridx assigned
+                // Const variables' ridx is not actually used for register allocation
+                var.ridx = reglevel as i16;
+                reglevel += 1; // Always increment, even for const variables
+
                 // Add variable name to chunk's locals for debugging
                 self.chunk.locals.push(var.name.clone());
             }
         }
 
-        // Official Lua does NOT modify freereg here
+        // Note: freereg is NOT updated here - it's updated after each statement
+        // See lparser.c:1912: ls->fs->freereg = luaY_nvarstack(ls->fs);
     }
 
     // Port of reglevel from lparser.c:229-237
