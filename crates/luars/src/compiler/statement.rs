@@ -549,25 +549,57 @@ fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), Str
     check(fs, LuaTokenKind::TkThen)?;
     fs.lexer.bump(); // consume THEN
 
-    // Regular case (not a break)
-    // lparser.c:1657: luaK_goiftrue(ls->fs, &v); /* skip over block if condition is false */
-    code::goiftrue(fs, &mut v);
+    let jf: isize; // instruction to skip 'then' code (if condition is false)
 
-    // lparser.c:1659: jf = v.f;
-    let jf = v.f;
+    // lparser.c:1647-1660: Optimization for 'if x then break'
+    if fs.lexer.current_token() == LuaTokenKind::TkBreak {
+        let line = fs.lexer.line;
+        // lparser.c:1649: luaK_goiffalse(ls->fs, &v); /* will jump if condition is true */
+        code::goiffalse(fs, &mut v);
+        // lparser.c:1650: luaX_next(ls); /* skip 'break' */
+        fs.lexer.bump(); // skip 'break'
+        // lparser.c:1651: enterblock(fs, &bl, 0); /* must enter block before 'goto' */
+        let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
+        enterblock(fs, bl_id, false);
+        // lparser.c:1652: newgotoentry(ls, luaS_newliteral(ls->L, "break"), line, v.t);
+        newgotoentry(fs, "break".to_string(), line, v.t as usize);
+        // lparser.c:1653: while (testnext(ls, ';')) {} /* skip semicolons */
+        while testnext(fs, LuaTokenKind::TkSemicolon) {}
+        // lparser.c:1654: if (block_follow(ls, 0)) { /* jump is the entire block? */
+        if block_follow(fs, false) {
+            // lparser.c:1655-1656: leaveblock(fs); return; /* and that is it */
+            leaveblock(fs);
+            return Ok(());
+        } else {
+            // lparser.c:1658-1659: /* must skip over 'then' part if condition is false */
+            jf = code::jump(fs) as isize;
+        }
+    } else {
+        // lparser.c:1661-1664: regular case (not a break)
+        // lparser.c:1662: luaK_goiftrue(ls->fs, &v); /* skip over block if condition is false */
+        code::goiftrue(fs, &mut v);
+        // lparser.c:1663: enterblock(fs, &bl, 0);
+        let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
+        enterblock(fs, bl_id, false);
+        // lparser.c:1664: jf = v.f;
+        jf = v.f;
+    }
 
-    // lparser.c:1661: statlist(ls); /* 'then' part */
+    // lparser.c:1666: statlist(ls); /* 'then' part */
     block(fs)?;
+    // lparser.c:1667: leaveblock(fs);
+    leaveblock(fs);
 
-    // lparser.c:1663-1665: Jump to end after then block if followed by else/elseif
+    // lparser.c:1668-1670: Jump to end after then block if followed by else/elseif
     if fs.lexer.current_token() == LuaTokenKind::TkElseIf
         || fs.lexer.current_token() == LuaTokenKind::TkElse
     {
+        // lparser.c:1670: luaK_concat(fs, escapelist, luaK_jump(fs));
         let jmp = code::jump(fs) as isize;
         code::concat(fs, escapelist, jmp);
     }
 
-    // lparser.c:1666: luaK_patchtohere(fs, jf);
+    // lparser.c:1671: luaK_patchtohere(fs, jf);
     code::patchtohere(fs, jf);
 
     Ok(())
