@@ -1,7 +1,7 @@
 // Expression parsing - Port from lparser.c (Lua 5.4.8)
 // This file corresponds to expression parsing parts of lua-5.4.8/src/lparser.c
 use crate::compiler::expression::{ExpDesc, ExpKind, ExpUnion};
-use crate::compiler::func_state::FuncState;
+use crate::compiler::func_state::{BlockCnt, FuncState};
 use crate::compiler::parse_literal::{
     NumberResult, parse_float_token_value, parse_int_token_value, parse_string_token_value,
 };
@@ -685,6 +685,19 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     let nactvar = child_fs.nactvar;
     code::reserve_regs(&mut child_fs, nactvar as u8);
 
+    // lparser.c:753: open_func calls enterblock(fs, bl, 0) - create function body block
+    // This is critical - every function body needs an outer block!
+    let func_bl_id = child_fs.compiler_state.alloc_blockcnt(BlockCnt {
+        previous: None,
+        first_label: 0,
+        first_goto: 0,
+        nactvar: child_fs.nactvar,
+        upval: false,
+        is_loop: false,
+        in_scope: true,
+    });
+    statement::enterblock(&mut child_fs, func_bl_id, false);
+
     // lparser.c:1002: Parse function body statements
     // statlist(ls);
     statement::statlist(&mut child_fs)?;
@@ -699,6 +712,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // Port of lparser.c:765: luaK_ret(fs, luaY_nvarstack(fs), 0);
     let first_reg = child_fs.nvarstack();
     code::ret(&mut child_fs, first_reg, 0);
+
+    // lparser.c:760: close_func calls leaveblock(fs) - close function body block
+    statement::leaveblock(&mut child_fs);
 
     // Port of close_func from lparser.c:763 - finish code generation
     code::finish(&mut child_fs);

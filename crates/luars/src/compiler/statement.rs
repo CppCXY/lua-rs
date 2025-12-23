@@ -176,7 +176,7 @@ fn str_checkname(fs: &mut FuncState) -> Result<String, String> {
 
 // Port of enterblock from lparser.c:640-651
 // Creates a new block and pushes it onto the block stack
-fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
+pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
     let prev_id = fs.block_cnt_id.take();
     if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
         bl.previous = prev_id;
@@ -302,8 +302,9 @@ fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
 }
 
 // Port of leaveblock from lparser.c:673-695
-fn leaveblock(fs: &mut FuncState) {
+pub fn leaveblock(fs: &mut FuncState) {
     if let Some(bl) = fs.take_block_cnt() {
+        
         // Port of lparser.c:675-677
         let mut hasclose = false;
         let stklevel = fs.reglevel(bl.nactvar);
@@ -434,53 +435,68 @@ pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
     Ok(n)
 }
 
-// Port of breakstat from lparser.c
-fn breakstat(fs: &mut FuncState) -> Result<(), String> {
-    // Check if we're inside a loop
-    let mut bl_id = fs.block_cnt_id;
-    let mut _upval = false;
-
-    while let Some(block_id) = bl_id {
-        if let Some(block) = fs.compiler_state.get_blockcnt_mut(block_id) {
-            if block.is_loop {
-                break;
-            }
-            _upval = _upval || block.upval;
-            bl_id = block.previous;
-        }
-    }
-
-    if bl_id.is_none() {
-        return Err(fs.syntax_error("no loop to break"));
-    }
-
-    // Generate break jump - will be patched later
-    let jmp = code::jump(fs);
-
-    // Add to pending breaks list
+// Port of newgotoentry from lparser.c:575-577
+// Adds a new goto entry to the pending gotos list
+fn newgotoentry(fs: &mut FuncState, name: String, line: usize, pc: usize) {
     let label = LabelDesc {
-        name: "break".to_string(),
-        pc: jmp,
-        line: fs.lexer.line,
+        name,
+        pc,
+        line,
         nactvar: fs.nactvar,
         close: false,
     };
     fs.pending_gotos.push(label);
+}
 
+// Port of findlabel from lparser.c:540-548
+// Find a label with the given name in the current function
+// Returns the label info (pc, nactvar) if found
+fn findlabel(fs: &FuncState, name: &str) -> Option<(usize, u8)> {
+    // Search backwards to find most recent label
+    fs.labels
+        .iter()
+        .rev()
+        .find(|lb| lb.name == name)
+        .map(|lb| (lb.pc, lb.nactvar))
+}
+
+// Port of breakstat from lparser.c:1437-1440
+// Break statement. Semantically equivalent to "goto break"
+fn breakstat(fs: &mut FuncState) -> Result<(), String> {
+    let line = fs.lexer.line;
+    // breakstat is simply a goto to a label named "break"
+    // The actual loop checking is done by createlabel when the break label is created
+    let jmp = code::jump(fs);
+    newgotoentry(fs, "break".to_string(), line, jmp);
     Ok(())
 }
 
-// Port of gotostat from lparser.c
+// Port of gotostat from lparser.c:1415-1433
+// Goto statement. Either creates a forward jump or resolves a backward jump
 fn gotostat(fs: &mut FuncState) -> Result<(), String> {
+    let line = fs.lexer.line;
     let name = str_checkname(fs)?;
-    let label = LabelDesc {
-        name,
-        pc: fs.pc,
-        line: fs.lexer.line,
-        nactvar: fs.nactvar,
-        close: false,
-    };
-    fs.pending_gotos.push(label);
+    
+    // Check if label already exists (backward jump)
+    if let Some((lb_pc, lb_nactvar)) = findlabel(fs, &name) {
+        // Backward jump - resolve immediately
+        let lblevel = fs.reglevel(lb_nactvar);
+        let current_level = nvarstack(fs);
+        
+        // If leaving scope of variables, need CLOSE instruction
+        if current_level > lblevel {
+            code::code_abc(fs, OpCode::Close, lblevel as u32, 0, 0);
+        }
+        
+        // Create jump and patch to label
+        let jmp = code::jump(fs);
+        code::patchlist(fs, jmp as isize, lb_pc as isize);
+    } else {
+        // Forward jump - will be resolved when label is declared
+        let jmp = code::jump(fs);
+        newgotoentry(fs, name, line, jmp);
+    }
+    
     Ok(())
 }
 
@@ -988,8 +1004,8 @@ pub fn mark_upval(fs: &mut FuncState, level: u8) {
 fn mark_to_be_closed(fs: &mut FuncState) {
     if let Some(bl) = fs.current_block_cnt() {
         bl.upval = true;
-        fs.needclose = true;
     }
+    fs.needclose = true;
 }
 
 // Port of checktoclose from lparser.c
