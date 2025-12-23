@@ -20,7 +20,8 @@ pub struct FuncState<'a> {
     pub prev: Option<&'a mut FuncState<'a>>, // parent function state
     pub lexer: &'a mut LuaLexer<'a>,
     pub pool: &'a mut ObjectPool,
-    pub block_list: Option<Box<BlockCnt>>,
+    pub compiler_state: &'a mut CompilerState,
+    pub block_cnt_id: Option<BlockCntId>,
     pub pc: usize,                     // next position to code (equivalent to pc)
     pub last_target: usize,            // label of last 'jump label'
     pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
@@ -38,9 +39,47 @@ pub struct FuncState<'a> {
     pub chunk_constants_map: HashMap<LuaValue, usize>, // constant to index mapping for chunk
 }
 
+pub struct CompilerState {
+    // pool of BlockCnt structures
+    pub block_cnt_pool: Vec<BlockCnt>,
+    // Global scanner table for constant deduplication (corresponds to LexState.h in Lua C)
+    pub scanner_table: HashMap<LuaValue, usize>,
+}
+
+impl CompilerState {
+    pub fn new() -> Self {
+        CompilerState {
+            block_cnt_pool: Vec::new(),
+            scanner_table: HashMap::new(),
+        }
+    }
+
+    pub fn alloc_blockcnt(&mut self, block: BlockCnt) -> BlockCntId {
+        let id = BlockCntId(self.block_cnt_pool.len());
+        self.block_cnt_pool.push(block);
+        id
+    }
+
+    pub fn get_blockcnt_mut(&mut self, id: BlockCntId) -> Option<&mut BlockCnt> {
+        self.block_cnt_pool.get_mut(id.0)
+    }
+
+    pub fn take_blockcnt(&mut self, id: BlockCntId) -> Option<BlockCnt> {
+        if id.0 < self.block_cnt_pool.len() {
+            Some(self.block_cnt_pool.remove(id.0))
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockCntId(pub usize);
+
 // Port of BlockCnt from lparser.c
+#[derive(Clone, Default)]
 pub struct BlockCnt {
-    pub previous: Option<Box<BlockCnt>>,
+    pub previous: Option<BlockCntId>, // link to the enclosing block
     pub first_label: usize, // index of first label in this block
     pub first_goto: usize,  // index of first pending goto in this block
     pub nactvar: u8,        // number of active variables outside the block
@@ -50,6 +89,7 @@ pub struct BlockCnt {
 }
 
 // Port of LabelDesc from lparser.c
+#[derive(Clone)]
 pub struct LabelDesc {
     pub name: String,
     pub pc: usize,
@@ -87,6 +127,7 @@ impl<'a> FuncState<'a> {
     pub fn new(
         lexer: &'a mut LuaLexer<'a>,
         pool: &'a mut ObjectPool,
+        compiler_state: &'a mut CompilerState,
         is_vararg: bool,
         source_name: String,
     ) -> Self {
@@ -95,7 +136,8 @@ impl<'a> FuncState<'a> {
             prev: None,
             lexer,
             pool,
-            block_list: None,
+            compiler_state,
+            block_cnt_id: None,
             pc: 0,
             last_target: 0,
             pending_gotos: Vec::new(),
@@ -130,18 +172,31 @@ impl<'a> FuncState<'a> {
         )
     }
 
+    pub fn current_block_cnt(&mut self) -> Option<&mut BlockCnt> {
+        if let Some(bl_id) = &self.block_cnt_id {
+            self.compiler_state.get_blockcnt_mut(*bl_id)
+        } else {
+            None
+        }
+    }
+
+    pub fn take_block_cnt(&mut self) -> Option<BlockCnt> {
+        if let Some(bl_id) = self.block_cnt_id.take() {
+            self.compiler_state.take_blockcnt(bl_id)
+        } else {
+            None
+        }
+    }
+
     // Create child function state
     pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
-        // Get references from parent - we'll need unsafe here due to borrow checker
-        let lexer_ptr = parent.lexer as *mut LuaLexer<'a>;
-        let pool_ptr = parent.pool as *mut ObjectPool;
-
         FuncState {
             chunk: Chunk::new(),
             prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
-            lexer: unsafe { &mut *lexer_ptr },
-            pool: unsafe { &mut *pool_ptr },
-            block_list: None,
+            lexer: parent.lexer,
+            pool: parent.pool,
+            compiler_state: parent.compiler_state,
+            block_cnt_id: None,
             pc: 0,
             last_target: 0,
             pending_gotos: Vec::new(),

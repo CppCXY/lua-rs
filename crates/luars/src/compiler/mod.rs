@@ -23,9 +23,6 @@ use crate::gc::ObjectPool;
 use crate::lua_value::Chunk;
 use crate::lua_vm::OpCode;
 
-
-
-
 // Structures are now in separate files (func_state.rs, expression.rs)
 
 // Port of luaY_parser from lparser.c
@@ -58,8 +55,14 @@ pub fn compile_code_with_name(
 
     let mut parser = LuaLexer::new(source, tokens, level);
     // Check for lexer errors before parsing
-
-    let mut fs = FuncState::new(&mut parser, pool, true, chunk_name.to_string());
+    let mut compiler_state = CompilerState::new();
+    let mut fs = FuncState::new(
+        &mut parser,
+        pool,
+        &mut compiler_state,
+        true,
+        chunk_name.to_string(),
+    );
 
     // Port of mainfunc from lparser.c
     // main function is always vararg
@@ -96,7 +99,8 @@ pub fn compile_code_with_name(
         is_loop: false,
         in_scope: true,
     };
-    fs.block_list = Some(Box::new(bl));
+    let block_id = fs.compiler_state.alloc_blockcnt(bl);
+    fs.block_cnt_id = Some(block_id);
 
     // Parse statements (statlist)
     statement::statlist(&mut fs)?;

@@ -8,9 +8,6 @@ mod reader;
 mod text_range;
 mod tokenize_config;
 
-use crate::lua_value::LuaValue;
-use std::collections::HashMap;
-
 pub use crate::compiler::parser::{
     lexer_config::ParserConfig, lua_language_level::LuaLanguageLevel, lua_operator_kind::*,
     lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind, lua_tokenize::LuaTokenize,
@@ -25,8 +22,6 @@ pub struct LuaLexer<'a> {
     pub parse_config: ParserConfig,
     pub line: usize,     // current line number (linenumber in Lua)
     pub lastline: usize, // line of last token consumed (lastline in Lua)
-    // Global scanner table for constant deduplication (corresponds to LexState.h in Lua C)
-    pub scanner_table: HashMap<LuaValue, usize>,
 }
 
 impl<'a> LuaLexer<'a> {
@@ -41,7 +36,6 @@ impl<'a> LuaLexer<'a> {
             parse_config: config,
             line: 1,
             lastline: 1, // Initialize lastline to 1 (llex.c:176)
-            scanner_table: HashMap::new(),
         };
 
         parser.init();

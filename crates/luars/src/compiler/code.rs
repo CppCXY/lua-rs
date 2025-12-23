@@ -683,28 +683,35 @@ pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
     let pc = fs.pc;
 
     // Optimization: merge with previous LOADNIL if registers are contiguous
+    // Port of lcode.c:136-151 optimization logic
     if pc > 0 {
         let prev_pc = pc - 1;
         let prev_instr = fs.chunk.code[prev_pc];
 
         if Instruction::get_opcode(prev_instr) == OpCode::LoadNil {
-            let prev_a = Instruction::get_a(prev_instr) as u8;
-            let prev_b = Instruction::get_b(prev_instr) as u8;
-            let prev_last = prev_a + prev_b; // Last register in previous LOADNIL
+            let pfrom = Instruction::get_a(prev_instr) as u8;
+            let pl = pfrom + Instruction::get_b(prev_instr) as u8; // Last register in previous LOADNIL
+            let l = from + n - 1; // Last register in new LOADNIL
 
-            // If registers are contiguous, extend the previous LOADNIL
-            if from == prev_last + 1 {
-                // Check if merging would overflow u8
-                if let Some(new_b) = prev_b.checked_add(n) {
-                    // Merge: update previous instruction's B field
-                    Instruction::set_b(&mut fs.chunk.code[prev_pc], new_b as u32);
-                    return;
-                }
+            // Check if ranges can be connected (lcode.c:139-140)
+            // Two cases:
+            // 1. New range is to the right: pfrom <= from && from <= pl + 1
+            // 2. New range is to the left: from <= pfrom && pfrom <= l + 1
+            if (pfrom <= from && from <= pl + 1) || (from <= pfrom && pfrom <= l + 1) {
+                // Merge: compute union of both ranges (lcode.c:141-143)
+                let new_from = pfrom.min(from);
+                let new_l = pl.max(l);
+                let new_b = new_l - new_from;
+
+                // Update previous instruction (lcode.c:144-145)
+                Instruction::set_a(&mut fs.chunk.code[prev_pc], new_from as u32);
+                Instruction::set_b(&mut fs.chunk.code[prev_pc], new_b as u32);
+                return;
             }
         }
     }
 
-    // Cannot merge, emit a new LOADNIL instruction
+    // Cannot merge, emit a new LOADNIL instruction (lcode.c:149)
     code_abc(fs, OpCode::LoadNil, from as u32, (n - 1) as u32, 0);
 }
 
@@ -824,7 +831,7 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 // Uses global scanner table (in LexState/LuaParser) for constant deduplication
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     // Query global scanner table (lcode.c:548)
-    if let Some(&idx) = fs.lexer.scanner_table.get(&value) {
+    if let Some(&idx) = fs.compiler_state.scanner_table.get(&value) {
         // Check if we can reuse this constant (lcode.c:550-553)
         // Only reuse if:
         // 1. Index is within current function's constant range
@@ -839,7 +846,7 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     fs.chunk.constants.push(value.clone());
 
     // Update global scanner table with new index (lcode.c:562)
-    fs.lexer.scanner_table.insert(value.clone(), idx);
+    fs.compiler_state.scanner_table.insert(value.clone(), idx);
 
     // Also update local map for backward compatibility
     fs.chunk_constants_map.insert(value, idx);

@@ -4,7 +4,7 @@ use crate::compiler::expr_parser::{body, expr, suffixedexp};
 use crate::Instruction;
 use crate::compiler::func_state::{BlockCnt, FuncState, LabelDesc};
 use crate::compiler::parser::LuaTokenKind;
-use crate::compiler::{ExpDesc, ExpKind, VarKind, code};
+use crate::compiler::{BlockCntId, ExpDesc, ExpKind, VarKind, code};
 use crate::lua_vm::OpCode;
 
 // Port of statlist from lparser.c:1529-1536
@@ -174,70 +174,194 @@ fn str_checkname(fs: &mut FuncState) -> Result<String, String> {
     Ok(name)
 }
 
-// Port of enterblock from lparser.c
-fn enterblock(fs: &mut FuncState, bl: &mut BlockCnt, isloop: bool) {
-    bl.nactvar = fs.nactvar;
-    bl.first_label = fs.labels.len();
-    bl.first_goto = fs.pending_gotos.len();
-    bl.upval = false;
-    bl.is_loop = isloop;
-    bl.in_scope = true;
-    bl.previous = fs.block_list.take();
-    fs.block_list = Some(Box::new(BlockCnt {
-        previous: bl.previous.take(),
-        first_label: bl.first_label,
-        first_goto: bl.first_goto,
-        nactvar: bl.nactvar,
-        upval: bl.upval,
-        is_loop: bl.is_loop,
-        in_scope: bl.in_scope,
-    }));
+// Port of enterblock from lparser.c:640-651
+// Creates a new block and pushes it onto the block stack
+fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
+    let prev_id = fs.block_cnt_id.take();
+    if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
+        bl.previous = prev_id;
+        bl.first_label = fs.labels.len();
+        bl.first_goto = fs.pending_gotos.len();
+        bl.nactvar = fs.nactvar;
+        bl.upval = false;
+        bl.is_loop = isloop;
+        bl.in_scope = true;
+    }
+
+    // Create a clone and put it in fs.block_list
+    fs.block_cnt_id = Some(bl_id);
 }
 
 // Port of leaveblock from lparser.c
 // Port of leaveblock from lparser.c:672-692
+// Port of solvegoto from lparser.c:525-539
+// Solves the goto at index 'g' to given 'label' and removes it from the list
+fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc) {
+    let gt = &fs.pending_gotos[g];
+
+    // Check if goto jumps into scope (would be an error in full implementation)
+    // For now we skip the scope check
+
+    // Patch the jump
+    code::patchlist(fs, gt.pc as isize, label.pc as isize);
+
+    // Remove goto from pending list
+    fs.pending_gotos.remove(g);
+}
+
+// Port of solvegotos from lparser.c:582-596
+// Solves forward jumps. Check whether new label matches any pending gotos
+// in current block and solves them. Return true if any of the gotos need to close upvalues.
+fn solvegotos(fs: &mut FuncState, lb: &LabelDesc) -> bool {
+    let first_goto = if let Some(bl) = &fs.current_block_cnt() {
+        bl.first_goto
+    } else {
+        0
+    };
+
+    let mut i = first_goto;
+    let mut needsclose = false;
+
+    while i < fs.pending_gotos.len() {
+        if fs.pending_gotos[i].name == lb.name {
+            needsclose |= fs.pending_gotos[i].close;
+            solvegoto(fs, i, lb);
+            // solvegoto removes item at i, so don't increment
+        } else {
+            i += 1;
+        }
+    }
+
+    needsclose
+}
+
+// Port of createlabel from lparser.c:608-621
+// Create a new label with the given 'name' at the given 'line'.
+// Solves all pending gotos to this new label and adds a close instruction if necessary.
+// Returns true iff it added a close instruction.
+fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool {
+    let pc = code::get_label(fs);
+
+    // Create label descriptor
+    let mut label = LabelDesc {
+        name: name.to_string(),
+        pc,
+        line,
+        nactvar: fs.nactvar,
+        close: false,
+    };
+
+    if last {
+        // Label is last no-op statement in the block
+        // Assume that locals are already out of scope
+        if let Some(bl) = &fs.current_block_cnt() {
+            label.nactvar = bl.nactvar;
+        }
+    }
+
+    // Add to label list before solving gotos
+    let label_for_list = label.clone();
+
+    // Solve pending gotos
+    let needsclose = solvegotos(fs, &label);
+
+    // Now add to label list
+    fs.labels.push(label_for_list);
+
+    if needsclose {
+        // Need a close instruction
+        let stklevel = fs.reglevel(fs.nactvar);
+        code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
+        return true;
+    }
+
+    false
+}
+
+// Port of movegotosout from lparser.c:627-637
+// Adjust pending gotos to outer level of a block
+fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
+    let bl_nactvar = bl.nactvar;
+    let bl_upval = bl.upval;
+    let first_goto = bl.first_goto;
+
+    for i in first_goto..fs.pending_gotos.len() {
+        let gt_nactvar = fs.pending_gotos[i].nactvar;
+
+        // Check if leaving a variable scope
+        let gt_stklevel = fs.reglevel(gt_nactvar);
+        let bl_stklevel = fs.reglevel(bl_nactvar);
+
+        // Now we can modify the goto
+        let gt = &mut fs.pending_gotos[i];
+        if gt_stklevel > bl_stklevel {
+            gt.close |= bl_upval; // Jump may need a close
+        }
+        gt.nactvar = bl_nactvar; // Update goto level
+    }
+}
+
+// Port of leaveblock from lparser.c:673-695
 fn leaveblock(fs: &mut FuncState) {
-    if let Some(bl) = fs.block_list.take() {
-        // Port of lparser.c:675: int stklevel = reglevel(fs, bl->nactvar);
+    if let Some(bl) = fs.take_block_cnt() {
+        // Port of lparser.c:675-677
+        let mut hasclose = false;
         let stklevel = fs.reglevel(bl.nactvar);
 
         // Remove block locals
         fs.remove_vars(bl.nactvar);
 
-        // Check if needs close instruction
-        // lparser.c:682: if (!hasclose && bl->previous && bl->upval)
-        let needs_close = bl.previous.is_some() && bl.upval;
-
-        if needs_close {
-            // Generate CLOSE instruction
-            code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
-            // Mark that this function needs close handling
-            fs.needclose = true;
+        // Port of lparser.c:678-679: handle loop break labels
+        if bl.is_loop {
+            hasclose = createlabel(fs, "break", 0, false);
         }
 
-        // Free registers - port of lparser.c:684: fs->freereg = stklevel;
+        // Port of lparser.c:680: still need a 'close'?
+        if !hasclose && bl.previous.is_some() && bl.upval {
+            code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
+        }
+
+        // Port of lparser.c:681: free registers
         fs.freereg = stklevel;
 
-        // Remove labels and gotos from this block
+        // Port of lparser.c:682: remove local labels
         fs.labels.truncate(bl.first_label);
 
-        // Restore previous block
-        fs.block_list = bl.previous;
+        // Save values needed after moving bl.previous
+        let first_label = bl.first_label;
+        let first_goto = bl.first_goto;
+        let has_previous = bl.previous.is_some();
+
+        // Port of lparser.c:683: current block now is previous one
+        fs.block_cnt_id = bl.previous;
+
+        // Port of lparser.c:684-689: move gotos out or check for undefined gotos
+        if has_previous {
+            // Need to reconstruct bl info for movegotosout
+            let bl_info = BlockCnt {
+                previous: None, // not used in movegotosout
+                first_label,
+                first_goto,
+                nactvar: bl.nactvar,
+                upval: bl.upval,
+                is_loop: bl.is_loop,
+                in_scope: bl.in_scope,
+            };
+            movegotosout(fs, &bl_info);
+        } else {
+            // At function level, check for undefined gotos
+            if first_goto < fs.pending_gotos.len() {
+                // In full implementation, this would raise an error
+                // For now, we'll just leave them (they'll be caught later or ignored)
+            }
+        }
     }
 }
 
 // Port of block from lparser.c
 fn block(fs: &mut FuncState) -> Result<(), String> {
-    let mut bl = BlockCnt {
-        previous: None,
-        first_label: 0,
-        first_goto: 0,
-        nactvar: 0,
-        upval: false,
-        is_loop: false,
-        in_scope: true,
-    };
-    enterblock(fs, &mut bl, false);
+    let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
+    enterblock(fs, bl_id, false);
     statlist(fs)?;
     leaveblock(fs);
     Ok(())
@@ -313,18 +437,20 @@ pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
 // Port of breakstat from lparser.c
 fn breakstat(fs: &mut FuncState) -> Result<(), String> {
     // Check if we're inside a loop
-    let mut bl = fs.block_list.as_ref();
+    let mut bl_id = fs.block_cnt_id;
     let mut _upval = false;
 
-    while let Some(block) = bl {
-        if block.is_loop {
-            break;
+    while let Some(block_id) = bl_id {
+        if let Some(block) = fs.compiler_state.get_blockcnt_mut(block_id) {
+            if block.is_loop {
+                break;
+            }
+            _upval = _upval || block.upval;
+            bl_id = block.previous;
         }
-        _upval = _upval || block.upval;
-        bl = block.previous.as_ref();
     }
 
-    if bl.is_none() {
+    if bl_id.is_none() {
         return Err(fs.syntax_error("no loop to break"));
     }
 
@@ -446,7 +572,7 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // Jump out if condition is false
     let condexit = code::jump(fs);
 
-    let mut bl = BlockCnt {
+    let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
         first_label: 0,
         first_goto: 0,
@@ -454,8 +580,8 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         upval: false,
         is_loop: true,
         in_scope: true,
-    };
-    enterblock(fs, &mut bl, true);
+    });
+    enterblock(fs, bl_id, true);
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
     block(fs)?;
@@ -483,7 +609,7 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     fs.lexer.bump(); // skip REPEAT
     let repeat_init = fs.pc;
 
-    let mut bl = BlockCnt {
+    let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
         first_label: 0,
         first_goto: 0,
@@ -491,8 +617,8 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         upval: false,
         is_loop: true,
         in_scope: true,
-    };
-    enterblock(fs, &mut bl, true);
+    });
+    enterblock(fs, bl_id, true);
     block(fs)?;
     check_match(fs, LuaTokenKind::TkUntil, LuaTokenKind::TkRepeat, line)?;
 
@@ -517,7 +643,7 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
 fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // forstat -> FOR (fornum | forlist) END
     // lparser.c:1623: enterblock(fs, &bl, 1);  /* scope for loop and control variables */
-    let mut bl = BlockCnt {
+    let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
         first_label: 0,
         first_goto: 0,
@@ -525,8 +651,8 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         upval: false,
         is_loop: true,
         in_scope: true,
-    };
-    enterblock(fs, &mut bl, true);
+    });
+    enterblock(fs, bl_id, true);
 
     fs.lexer.bump(); // skip FOR
     let varname = str_checkname(fs)?;
@@ -598,16 +724,19 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
 
-    let mut bl = BlockCnt {
+    // Port of forbody from lparser.c:1552
+    // Note: enterblock is called with isloop=0 (not a loop block)
+    // The loop control is handled by FORPREP/FORLOOP, not by break labels
+    let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
         first_label: 0,
         first_goto: 0,
         nactvar: fs.nactvar,
         upval: false,
-        is_loop: true,
+        is_loop: false, // Important: inner block is NOT a loop block
         in_scope: true,
-    };
-    enterblock(fs, &mut bl, true);
+    });
+    enterblock(fs, bl_id, false); // isloop = false
 
     // Activate the loop variable (4th variable)
     // lparser.c:1553-1554: adjustlocalvars + luaK_reserveregs
@@ -681,16 +810,17 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1552: Generate TFORPREP with Bx=0, will be fixed later
     let prep_pc = code::code_abx(fs, OpCode::TForPrep, base as u32, 0);
 
-    let mut bl = BlockCnt {
+    // lparser.c:1552: enterblock(fs, &bl, 0) - NOT a loop block (for scope of declared vars)
+    let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
         first_label: 0,
         first_goto: 0,
         nactvar: fs.nactvar,
         upval: false,
-        is_loop: true,
+        is_loop: false, // NOT a loop block - this is just for variable scope
         in_scope: true,
-    };
-    enterblock(fs, &mut bl, true);
+    });
+    enterblock(fs, bl_id, false); // false = not a loop
 
     // lparser.c:1554: adjustlocalvars(ls, nvars); /* activate declared variables */
     fs.adjust_local_vars((nvars - 4) as u8);
@@ -840,21 +970,23 @@ fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) -> Resul
 // Port of markupval from lparser.c:411-417
 // Mark block where variable at given level was defined (to emit close instructions later)
 pub fn mark_upval(fs: &mut FuncState, level: u8) {
-    let mut bl_opt = fs.block_list.as_mut();
-    while let Some(bl) = bl_opt {
-        if bl.nactvar <= level {
-            bl.upval = true;
-            fs.needclose = true;
-            break;
+    let mut bl_id_opt = fs.block_cnt_id;
+    while let Some(bl_id) = bl_id_opt {
+        if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
+            if bl.nactvar <= level {
+                bl.upval = true;
+                fs.needclose = true;
+                break;
+            }
+            bl_id_opt = bl.previous;
         }
-        bl_opt = bl.previous.as_mut();
     }
 }
 
 // Port of marktobeclosed from lparser.c:423-429
 // Mark that current block has a to-be-closed variable
 fn mark_to_be_closed(fs: &mut FuncState) {
-    if let Some(ref mut bl) = fs.block_list {
+    if let Some(bl) = fs.current_block_cnt() {
         bl.upval = true;
         fs.needclose = true;
     }
