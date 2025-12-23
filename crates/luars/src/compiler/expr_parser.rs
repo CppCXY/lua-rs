@@ -516,48 +516,51 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
         let mut val = ExpDesc::new_void();
         expr_internal(fs, &mut val)?;
 
-        // Check if key is string constant for SetField optimization
-        if key.kind == ExpKind::VKSTR {
-            let key_idx = unsafe { key.u.info as u32 };
-            // Use code_abrk to allow constant value optimization (e.g., x = 10)
-            code::code_abrk(fs, OpCode::SetField, cc.table_reg as u32, key_idx, &mut val);
+        // Port of recfield logic from lparser.c:847-867
+        // Use indexed to determine VINDEXSTR vs VINDEXED based on key
+        let mut tab = ExpDesc::new_void();
+        tab.kind = ExpKind::VNONRELOC;
+        unsafe {
+            tab.u.info = cc.table_reg as i32;
         }
-        // Check if key is integer constant for SetI optimization
-        // IMPORTANT: SETI's B field is only 8 bits (0-255), so we must check the range
-        else if key.kind == ExpKind::VKINT {
-            let key_int = unsafe { key.u.ival };
-            // Only use SETI if key fits in 8 bits (matches Lua's isCint check)
-            if key_int >= 0 && key_int <= 255 {
-                // Use code_abrk to allow constant value optimization (e.g., [1] = 10)
+        
+        code::indexed(fs, &mut tab, &mut key);
+
+        // Generate appropriate store instruction based on tab.kind
+        match tab.kind {
+            ExpKind::VINDEXSTR => {
+                // String key with index <= 255, use SETFIELD
                 code::code_abrk(
                     fs,
-                    OpCode::SetI,
-                    cc.table_reg as u32,
-                    key_int as u32,
-                    &mut val,
-                );
-            } else {
-                // Key too large for SETI, use SETTABLE instead
-                let key_reg = code::exp2anyreg(fs, &mut key);
-                code::code_abrk(
-                    fs,
-                    OpCode::SetTable,
-                    cc.table_reg as u32,
-                    key_reg as u32,
+                    OpCode::SetField,
+                    unsafe { tab.u.ind.t as u32 },
+                    unsafe { tab.u.ind.idx as u32 },
                     &mut val,
                 );
             }
-        } else {
-            // General case: SetTable instruction with RK optimization
-            let key_reg = code::exp2anyreg(fs, &mut key);
-            // Use code_abrk for value to allow constant optimization
-            code::code_abrk(
-                fs,
-                OpCode::SetTable,
-                cc.table_reg as u32,
-                key_reg as u32,
-                &mut val,
-            );
+            ExpKind::VINDEXI => {
+                // Integer key in range 0-255, use SETI
+                code::code_abrk(
+                    fs,
+                    OpCode::SetI,
+                    unsafe { tab.u.ind.t as u32 },
+                    unsafe { tab.u.ind.idx as u32 },
+                    &mut val,
+                );
+            }
+            ExpKind::VINDEXED => {
+                // General case (string index > 255 or non-constant key), use SETTABLE
+                code::code_abrk(
+                    fs,
+                    OpCode::SetTable,
+                    unsafe { tab.u.ind.t as u32 },
+                    unsafe { tab.u.ind.idx as u32 },
+                    &mut val,
+                );
+            }
+            _ => {
+                panic!("Unexpected expression kind in table constructor [key]=value");
+            }
         }
         cc.nh += 1;
 
@@ -568,30 +571,66 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
         let next = fs.lexer.peek_next_token();
         if next == LuaTokenKind::TkAssign {
             // name = exp (record field)
-            // Port of recfield from lparser.c:917-935
-            // Save freereg to restore after processing field
+            // Port of recfield from lparser.c:847-867
             let saved_freereg = fs.freereg;
 
             let field_name = fs.lexer.current_token_text().to_string();
             fs.lexer.bump();
             fs.lexer.bump(); // skip =
 
+            // Create key expression (string constant)
             let field_idx = string_k(fs, field_name);
+            let mut key = ExpDesc::new_void();
+            key.kind = ExpKind::VK;
+            unsafe {
+                key.u.info = field_idx as i32;
+            }
+
+            // Create table expression
+            let mut tab = ExpDesc::new_void();
+            tab.kind = ExpKind::VNONRELOC;
+            unsafe {
+                tab.u.info = cc.table_reg as i32;
+            }
+
+            // indexed will handle VINDEXSTR vs VINDEXED based on constant index size
+            // If field_idx > 255, it will set tab.kind = VINDEXED
+            // Otherwise, it will set tab.kind = VINDEXSTR
+            code::indexed(fs, &mut tab, &mut key);
+
+            // Parse value expression
             let mut val = ExpDesc::new_void();
             expr_internal(fs, &mut val)?;
 
-            // t[field] = val -> SetField instruction with RK optimization
-            // Use code_abrk to allow constant value (e.g., x = 10 -> SETFIELD t "x" 10k)
-            code::code_abrk(
-                fs,
-                OpCode::SetField,
-                cc.table_reg as u32,
-                field_idx as u32,
-                &mut val,
-            );
+            // Generate the appropriate store instruction based on tab.kind
+            match tab.kind {
+                ExpKind::VINDEXSTR => {
+                    // Field index fits in B operand, use SETFIELD
+                    code::code_abrk(
+                        fs,
+                        OpCode::SetField,
+                        unsafe { tab.u.ind.t as u32 },
+                        unsafe { tab.u.ind.idx as u32 },
+                        &mut val,
+                    );
+                }
+                ExpKind::VINDEXED => {
+                    // Field index too large, use SETTABLE
+                    code::code_abrk(
+                        fs,
+                        OpCode::SetTable,
+                        unsafe { tab.u.ind.t as u32 },
+                        unsafe { tab.u.ind.idx as u32 },
+                        &mut val,
+                    );
+                }
+                _ => {
+                    // Should not happen in table constructor
+                    panic!("Unexpected expression kind in table constructor");
+                }
+            }
+            
             cc.nh += 1;
-
-            // Restore freereg - free temporary registers used for value
             fs.freereg = saved_freereg;
         } else {
             // Just a list item
