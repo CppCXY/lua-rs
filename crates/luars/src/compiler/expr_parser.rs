@@ -11,6 +11,7 @@ use crate::compiler::parser::{
 };
 use crate::compiler::statement::{self, mark_upval};
 use crate::compiler::{VarKind, code, string_k};
+use crate::lua_value::UpvalueDesc;
 use crate::lua_vm::OpCode;
 
 // From lopcodes.h - maximum list items per flush
@@ -380,7 +381,7 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
         if vidx < 0 {
             if let Some(prev) = &mut fs.prev {
                 singlevaraux(prev, name, var, false);
-                
+
                 // Port of lparser.c:451-453: don't create upvalue for compile-time constants
                 // If the variable is a compile-time constant (VCONST), convert it to value immediately
                 // This enables constant folding in nested functions
@@ -390,7 +391,7 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
                     let vidx = unsafe { var.u.info } as usize;
                     if let Some(prev_var) = prev.actvar.get(vidx) {
                         if let Some(value) = prev_var.const_value {
-                            code::const_to_exp_pub(value, var);
+                            code::const_to_exp(value, var);
                         }
                     }
                 } else if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL {
@@ -526,7 +527,13 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             // Only use SETI if key fits in 8 bits (matches Lua's isCint check)
             if key_int >= 0 && key_int <= 255 {
                 // Use code_abrk to allow constant value optimization (e.g., [1] = 10)
-                code::code_abrk(fs, OpCode::SetI, cc.table_reg as u32, key_int as u32, &mut val);
+                code::code_abrk(
+                    fs,
+                    OpCode::SetI,
+                    cc.table_reg as u32,
+                    key_int as u32,
+                    &mut val,
+                );
             } else {
                 // Key too large for SETI, use SETTABLE instead
                 let key_reg = code::exp2anyreg(fs, &mut key);
@@ -747,12 +754,10 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // In Lua 5.4, upvalue information is stored in Proto.upvalues[], NOT as pseudo-instructions
     // This is different from Lua 5.1 which used pseudo-instructions after OP_CLOSURE
     for upval in &child_upvalues {
-        child_chunk
-            .upvalue_descs
-            .push(crate::lua_value::UpvalueDesc {
-                is_local: upval.in_stack, // true if captures parent local
-                index: upval.idx as u32,  // index in parent's register or upvalue array
-            });
+        child_chunk.upvalue_descs.push(UpvalueDesc {
+            is_local: upval.in_stack, // true if captures parent local
+            index: upval.idx as u32,  // index in parent's register or upvalue array
+        });
     }
     child_chunk.upvalue_count = child_upvalues.len();
 

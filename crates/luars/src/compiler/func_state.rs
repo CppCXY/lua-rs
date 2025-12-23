@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::Chunk;
+use crate::compiler::{ExpDesc, ExpKind};
 // Port of FuncState and related structures from lparser.h
 use crate::gc::ObjectPool;
 use crate::{LuaValue, compiler::parser::LuaLexer};
@@ -292,22 +293,20 @@ impl<'a> FuncState<'a> {
     }
 
     // Port of searchvar from lparser.c (lines 390-404)
-    pub fn searchvar(&self, name: &str, var: &mut crate::compiler::expression::ExpDesc) -> i32 {
-        use crate::compiler::expression::ExpKind;
-
+    pub fn searchvar(&self, name: &str, var: &mut ExpDesc) -> i32 {
         for i in (0..self.nactvar as usize).rev() {
             if let Some(vd) = self.actvar.get(i) {
                 if vd.name == name {
                     if vd.kind == VarKind::RDKCTC {
                         // VCONST: store variable index in u.info for check_readonly
-                        *var = crate::compiler::expression::ExpDesc::new_void();
+                        *var = ExpDesc::new_void();
                         var.kind = ExpKind::VCONST;
                         var.u.info = i as i32;
                         return ExpKind::VCONST as i32;
                     } else {
                         // Get register index from variable descriptor
                         let ridx = vd.ridx as u8;
-                        *var = crate::compiler::expression::ExpDesc::new_local(ridx, i as u16);
+                        *var = ExpDesc::new_local(ridx, i as u16);
                         return ExpKind::VLOCAL as i32;
                     }
                 }
@@ -327,8 +326,8 @@ impl<'a> FuncState<'a> {
     }
 
     // Port of newupvalue from lparser.c (lines 364-382)
-    pub fn newupvalue(&mut self, name: &str, v: &crate::compiler::expression::ExpDesc) -> i32 {
-        use crate::compiler::expression::ExpKind;
+    pub fn newupvalue(&mut self, name: &str, v: &ExpDesc) -> i32 {
+        use ExpKind;
 
         let prev_ptr = match &self.prev {
             Some(p) => *p as *const _ as *mut FuncState,

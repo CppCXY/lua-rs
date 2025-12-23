@@ -3,6 +3,7 @@
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::compiler::tm_kind::TmKind;
+use crate::lua_value::LuaValueKind;
 use crate::lua_vm::{Instruction, OpCode};
 
 // Port of int2sC from lcode.c (macro)
@@ -50,9 +51,7 @@ fn is_scnumber(e: &ExpDesc, pi: &mut i32, isfloat: &mut bool) -> bool {
 
 // Port of const2exp from lcode.c:693-720
 // Convert a constant value to an expression
-fn const_to_exp(value: crate::lua_value::LuaValue, e: &mut ExpDesc) {
-    use crate::lua_value::LuaValueKind;
-
+pub fn const_to_exp(value: LuaValue, e: &mut ExpDesc) {
     match value.kind() {
         LuaValueKind::Integer => {
             e.kind = ExpKind::VKINT;
@@ -81,11 +80,6 @@ fn const_to_exp(value: crate::lua_value::LuaValue, e: &mut ExpDesc) {
             e.kind = ExpKind::VNIL;
         }
     }
-}
-
-// Public wrapper for const_to_exp
-pub fn const_to_exp_pub(value: crate::lua_value::LuaValue, e: &mut ExpDesc) {
-    const_to_exp(value, e);
 }
 
 // Port of luaK_codeABC from lcode.c:397-402
@@ -155,6 +149,7 @@ pub fn code_asj(fs: &mut FuncState, op: OpCode, sj: i32) -> usize {
 }
 
 use crate::compiler::expression::{ExpDesc, ExpKind};
+use crate::{LuaValue, StringId};
 
 // Port of luaK_ret from lcode.c:207-214
 // void luaK_ret (FuncState *fs, int first, int nret)
@@ -672,7 +667,11 @@ pub fn free_reg(fs: &mut FuncState, reg: u8) {
     if reg >= nvars && reg < fs.freereg {
         fs.freereg -= 1;
         // lcode.c:495: lua_assert(reg == fs->freereg);
-        debug_assert_eq!(reg, fs.freereg, "freereg mismatch: expected reg {} to equal freereg {}", reg, fs.freereg);
+        debug_assert_eq!(
+            reg, fs.freereg,
+            "freereg mismatch: expected reg {} to equal freereg {}",
+            reg, fs.freereg
+        );
     }
 }
 
@@ -771,10 +770,6 @@ fn tonumeral(e: &ExpDesc, _v: Option<&mut f64>) -> bool {
     }
 }
 
-// Constant management functions
-use crate::StringId;
-use crate::lua_value::LuaValue;
-
 const MAXINDEXRK: usize = 255; // Maximum index for R/K operands
 
 // Add boolean true to constants
@@ -843,8 +838,12 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 // Uses global scanner table (in LexState/LuaParser) for constant deduplication
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     // DEBUG: Print value type and content
-    eprintln!("[DEBUG] add_constant: type={:?} value={:?}", value.kind(), value);
-    
+    eprintln!(
+        "[DEBUG] add_constant: type={:?} value={:?}",
+        value.kind(),
+        value
+    );
+
     // Query global scanner table (lcode.c:548)
     if let Some(&idx) = fs.compiler_state.scanner_table.get(&value) {
         // Check if we can reuse this constant (lcode.c:550-553)
@@ -852,7 +851,10 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
         // 1. Index is within current function's constant range
         // 2. Value matches (should always match since we use value as key)
         if idx < fs.chunk.constants.len() && fs.chunk.constants[idx] == value {
-            eprintln!("[DEBUG] add_constant: REUSING existing constant at idx={}", idx);
+            eprintln!(
+                "[DEBUG] add_constant: REUSING existing constant at idx={}",
+                idx
+            );
             return idx;
         }
     }
@@ -2022,9 +2024,7 @@ fn hasjumps(e: &ExpDesc) -> bool {
 // Check if expression is a constant string
 fn is_kstr(fs: &FuncState, e: &ExpDesc) -> bool {
     unsafe {
-        let ok1 = e.kind == ExpKind::VK
-            && !hasjumps(e)
-            && e.u.info <= Instruction::MAX_B as i32;
+        let ok1 = e.kind == ExpKind::VK && !hasjumps(e) && e.u.info <= Instruction::MAX_B as i32;
         if !ok1 {
             return false;
         }
@@ -2091,7 +2091,7 @@ pub fn fixline(fs: &mut FuncState, line: usize) {
 
 // Port of luaK_exp2const from lcode.c:85-108
 // int luaK_exp2const (FuncState *fs, const expdesc *e, TValue *v)
-pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<crate::lua_value::LuaValue> {
+pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
     if e.has_jumps() {
         return None;
     }
@@ -2165,8 +2165,6 @@ pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
 // Port of luaK_settablesize from lcode.c:1793-1801
 // void luaK_settablesize (FuncState *fs, int pc, int ra, int asize, int hsize)
 pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u32) {
-    const MAXARG_C: u32 = 0xFF; // Maximum value for C field
-
     // B field: hash size (lcode.c:1795)
     // rb = (hsize != 0) ? luaO_ceillog2(hsize) + 1 : 0
     let rb = if hsize != 0 {
@@ -2179,12 +2177,11 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
 
     // C field: lower bits of array size (lcode.c:1797)
     // rc = asize % (MAXARG_C + 1)
-    let rc = asize % (MAXARG_C + 1);
+    let rc = asize % (Instruction::MAX_C + 1);
 
     // EXTRAARG: higher bits of array size (lcode.c:1796)
     // extra = asize / (MAXARG_C + 1)
-    let extra = asize / (MAXARG_C + 1);
-
+    let extra = asize / (Instruction::MAX_C + 1);
     // k flag: true if needs EXTRAARG (lcode.c:1798)
     let k = extra > 0;
 

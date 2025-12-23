@@ -304,7 +304,6 @@ fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
 // Port of leaveblock from lparser.c:673-695
 pub fn leaveblock(fs: &mut FuncState) {
     if let Some(bl) = fs.take_block_cnt() {
-        
         // Port of lparser.c:675-677
         let mut hasclose = false;
         let stklevel = fs.reglevel(bl.nactvar);
@@ -476,18 +475,18 @@ fn breakstat(fs: &mut FuncState) -> Result<(), String> {
 fn gotostat(fs: &mut FuncState) -> Result<(), String> {
     let line = fs.lexer.line;
     let name = str_checkname(fs)?;
-    
+
     // Check if label already exists (backward jump)
     if let Some((lb_pc, lb_nactvar)) = findlabel(fs, &name) {
         // Backward jump - resolve immediately
         let lblevel = fs.reglevel(lb_nactvar);
         let current_level = nvarstack(fs);
-        
+
         // If leaving scope of variables, need CLOSE instruction
         if current_level > lblevel {
             code::code_abc(fs, OpCode::Close, lblevel as u32, 0, 0);
         }
-        
+
         // Create jump and patch to label
         let jmp = code::jump(fs);
         code::patchlist(fs, jmp as isize, lb_pc as isize);
@@ -496,7 +495,7 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
         let jmp = code::jump(fs);
         newgotoentry(fs, name, line, jmp);
     }
-    
+
     Ok(())
 }
 
@@ -1101,16 +1100,14 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     // Check for compile-time constant optimization
     // Get last variable
     let last_vidx = (fs.nactvar + nvars - 1) as u16;
-    
+
     // First check if optimization is possible and get variable info for debugging
-    let (can_optimize, var_name, var_kind) = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
-        (nvars as usize == nexps && var_desc.kind == VarKind::RDKCONST, 
-         var_desc.name.clone(), 
-         var_desc.kind)
+    let can_optimize = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
+        nvars as usize == nexps && var_desc.kind == VarKind::RDKCONST
     } else {
-        (false, String::new(), VarKind::VDKREG)
+        false
     };
-    
+
     let const_value = if can_optimize {
         code::exp2const(fs, &e)
     } else {
