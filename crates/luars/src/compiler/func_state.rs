@@ -93,6 +93,7 @@ pub struct LabelDesc {
     pub pc: usize,
     pub line: usize,
     pub nactvar: u8,
+    pub stklevel: u8,  // NEW: saved stack level at goto/label creation
     pub close: bool,
 }
 

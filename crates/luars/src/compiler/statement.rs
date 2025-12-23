@@ -245,6 +245,24 @@ fn solvegotos(fs: &mut FuncState, lb: &LabelDesc) -> bool {
     needsclose
 }
 
+// Port of findlabel from lparser.c:544-557
+// Search for an active label with the given name
+fn findlabel<'a>(fs: &'a FuncState, name: &str) -> Option<&'a LabelDesc> {
+    fs.labels.iter().find(|lb| lb.name == name)
+}
+
+// Port of checkrepeated from lparser.c:1445-1454
+// Check whether there is already a label with the given 'name'
+fn checkrepeated(fs: &FuncState, name: &str) -> Result<(), String> {
+    if let Some(lb) = findlabel(fs, name) {
+        return Err(format!(
+            "label '{}' already defined on line {}",
+            name, lb.line
+        ));
+    }
+    Ok(())
+}
+
 // Port of createlabel from lparser.c:608-621
 // Create a new label with the given 'name' at the given 'line'.
 // Solves all pending gotos to this new label and adds a close instruction if necessary.
@@ -258,6 +276,7 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
         pc,
         line,
         nactvar: fs.nactvar,
+        stklevel: fs.reglevel(fs.nactvar),  // Save stklevel
         close: false,
     };
 
@@ -297,9 +316,9 @@ fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
 
     for i in first_goto..fs.pending_gotos.len() {
         let gt_nactvar = fs.pending_gotos[i].nactvar;
+        let gt_stklevel = fs.pending_gotos[i].stklevel;  // Use saved stklevel
 
         // Check if leaving a variable scope
-        let gt_stklevel = fs.reglevel(gt_nactvar);
         let bl_stklevel = fs.reglevel(bl_nactvar);
 
         // Now we can modify the goto
@@ -458,26 +477,16 @@ pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
 // Port of newgotoentry from lparser.c:575-577
 // Adds a new goto entry to the pending gotos list
 fn newgotoentry(fs: &mut FuncState, name: String, line: usize, pc: usize) {
+    let stklevel = fs.reglevel(fs.nactvar);  // Save stklevel at creation time
     let label = LabelDesc {
         name,
         pc,
         line,
         nactvar: fs.nactvar,
+        stklevel,  // Save the stklevel
         close: false,
     };
     fs.pending_gotos.push(label);
-}
-
-// Port of findlabel from lparser.c:540-548
-// Find a label with the given name in the current function
-// Returns the label info (pc, nactvar) if found
-fn findlabel(fs: &FuncState, name: &str) -> Option<(usize, u8)> {
-    // Search backwards to find most recent label
-    fs.labels
-        .iter()
-        .rev()
-        .find(|lb| lb.name == name)
-        .map(|lb| (lb.pc, lb.nactvar))
 }
 
 // Port of breakstat from lparser.c:1437-1440
@@ -498,8 +507,10 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
     let name = str_checkname(fs)?;
 
     // Check if label already exists (backward jump)
-    if let Some((lb_pc, lb_nactvar)) = findlabel(fs, &name) {
+    if let Some(lb) = findlabel(fs, &name) {
         // Backward jump - resolve immediately
+        let lb_pc = lb.pc;
+        let lb_nactvar = lb.nactvar;
         let lblevel = fs.reglevel(lb_nactvar);
         let current_level = nvarstack(fs);
 
@@ -520,20 +531,27 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of labelstat from lparser.c
+// Port of labelstat from lparser.c:1457-1466
+// labelstat -> '::' NAME '::' {no-op-stat}
 fn labelstat(fs: &mut FuncState) -> Result<(), String> {
+    let line = fs.lexer.line;
     let name = str_checkname(fs)?;
     check(fs, LuaTokenKind::TkDbColon)?;
-    fs.lexer.bump(); // skip '::'
-
-    let label = LabelDesc {
-        name,
-        pc: fs.pc,
-        line: fs.lexer.line,
-        nactvar: fs.nactvar,
-        close: false,
-    };
-    fs.labels.push(label);
+    fs.lexer.bump(); // skip second '::'
+    
+    // Skip other no-op statements (lparser.c:1461-1462)
+    while fs.lexer.current_token() == LuaTokenKind::TkSemicolon 
+       || fs.lexer.current_token() == LuaTokenKind::TkDbColon {
+        statement(fs)?;
+    }
+    
+    // Check for repeated labels (lparser.c:1463)
+    checkrepeated(fs, &name)?;
+    
+    // Create label and solve pending gotos (lparser.c:1464)
+    let is_last = block_follow(fs, false);
+    createlabel(fs, &name, line, is_last);
+    
     Ok(())
 }
 
@@ -586,7 +604,8 @@ fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), Str
     }
 
     // lparser.c:1666: statlist(ls); /* 'then' part */
-    block(fs)?;
+    // Official code calls statlist directly because enterblock was already called above
+    statlist(fs)?;
     // lparser.c:1667: leaveblock(fs);
     leaveblock(fs);
 
@@ -688,7 +707,8 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         in_scope: true,
     });
     enterblock(fs, bl_id, true);
-    block(fs)?;
+    // lparser.c:1495: statlist(ls); /* repeat body */
+    statlist(fs)?;
     check_match(fs, LuaTokenKind::TkUntil, LuaTokenKind::TkRepeat, line)?;
 
     // Parse until condition

@@ -258,7 +258,9 @@ pub fn jump(fs: &mut FuncState) -> usize {
 
 // Port of luaK_getlabel from lcode.c:234-237
 // int luaK_getlabel (FuncState *fs)
-pub fn get_label(fs: &FuncState) -> usize {
+// Port of lcode.c:233-236
+pub fn get_label(fs: &mut FuncState) -> usize {
+    fs.last_target = fs.pc;
     fs.pc
 }
 
@@ -695,7 +697,8 @@ pub fn nil(fs: &mut FuncState, from: u8, n: u8) {
 
     // Optimization: merge with previous LOADNIL if registers are contiguous
     // Port of lcode.c:136-151 optimization logic
-    if pc > 0 {
+    // Check if previous instruction exists and is not a jump target (lcode.c:117-123)
+    if pc > 0 && pc > fs.last_target {
         let prev_pc = pc - 1;
         let prev_instr = fs.chunk.code[prev_pc];
 
