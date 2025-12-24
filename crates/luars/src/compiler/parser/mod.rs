@@ -135,7 +135,7 @@ impl<'a> LuaLexer<'a> {
         }
 
         // CRITICAL FIX: Update line from token's ending line number
-        // This ensures multi-line tokens (long strings, multi-line comments)  
+        // This ensures multi-line tokens (long strings, multi-line comments)
         // correctly update linenumber (matches Lua C's behavior in llex)
         self.line = self.tokens[self.token_index].line;
         self.current_token = self.tokens[self.token_index].kind;

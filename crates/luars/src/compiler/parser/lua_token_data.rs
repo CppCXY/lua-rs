@@ -9,7 +9,11 @@ pub struct LuaTokenData {
 
 impl LuaTokenData {
     pub fn new(kind: LuaTokenKind, range: SourceRange) -> Self {
-        LuaTokenData { kind, range, line: 1 }
+        LuaTokenData {
+            kind,
+            range,
+            line: 1,
+        }
     }
 
     pub fn with_line(kind: LuaTokenKind, range: SourceRange, line: usize) -> Self {

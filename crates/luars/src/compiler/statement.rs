@@ -1,10 +1,10 @@
-use crate::compiler::expr_parser::{body, expr, suffixedexp};
+use expr_parser::{body, expr, suffixedexp};
 // Statement parsing - Port from lparser.c (Lua 5.4.8)
 // This file corresponds to statement parsing parts of lua-5.4.8/src/lparser.c
 use crate::Instruction;
-use crate::compiler::func_state::{BlockCnt, FuncState, LabelDesc};
+use crate::compiler::func_state::{BlockCnt, FuncState, LabelDesc, LhsAssign, LhsAssignId};
 use crate::compiler::parser::LuaTokenKind;
-use crate::compiler::{BlockCntId, ExpDesc, ExpKind, VarKind, code};
+use crate::compiler::{BlockCntId, ExpDesc, ExpKind, ExpUnion, VarKind, code, expr_parser};
 use crate::lua_vm::OpCode;
 
 // Port of statlist from lparser.c:1529-1536
@@ -178,16 +178,17 @@ fn str_checkname(fs: &mut FuncState) -> Result<String, String> {
 // Creates a new block and pushes it onto the block stack
 pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
     let prev_id = fs.block_cnt_id.take();
-    
+
     // Port of lparser.c:656-664: inherit insidetbc from previous block
     let parent_in_scope = if let Some(prev_id) = prev_id {
-        fs.compiler_state.get_blockcnt_mut(prev_id)
+        fs.compiler_state
+            .get_blockcnt_mut(prev_id)
             .map(|bl| bl.in_scope)
             .unwrap_or(false)
     } else {
         false
     };
-    
+
     if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
         bl.previous = prev_id;
         bl.first_label = fs.labels.len();
@@ -195,7 +196,7 @@ pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
         bl.nactvar = fs.nactvar;
         bl.upval = false;
         bl.is_loop = isloop;
-        bl.in_scope = parent_in_scope;  // Inherit from parent
+        bl.in_scope = parent_in_scope; // Inherit from parent
     }
 
     // Create a clone and put it in fs.block_list
@@ -276,7 +277,7 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
         pc,
         line,
         nactvar: fs.nactvar,
-        stklevel: fs.reglevel(fs.nactvar),  // Save stklevel
+        stklevel: fs.reglevel(fs.nactvar), // Save stklevel
         close: false,
     };
 
@@ -316,7 +317,7 @@ fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
 
     for i in first_goto..fs.pending_gotos.len() {
         let gt_nactvar = fs.pending_gotos[i].nactvar;
-        let gt_stklevel = fs.pending_gotos[i].stklevel;  // Use saved stklevel
+        let gt_stklevel = fs.reglevel(gt_nactvar);
 
         // Check if leaving a variable scope
         let bl_stklevel = fs.reglevel(bl_nactvar);
@@ -337,14 +338,21 @@ pub fn leaveblock(fs: &mut FuncState) {
         // Get immutable reference first to read values
         let (nactvar, is_loop, first_label, first_goto, has_previous, previous_id, upval) = {
             if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
-                (bl.nactvar, bl.is_loop, bl.first_label, bl.first_goto, 
-                 bl.previous.is_some(), bl.previous, bl.upval)
+                (
+                    bl.nactvar,
+                    bl.is_loop,
+                    bl.first_label,
+                    bl.first_goto,
+                    bl.previous.is_some(),
+                    bl.previous,
+                    bl.upval,
+                )
             } else {
                 eprintln!("[ERROR leaveblock] Block {:?} not found!", bl_id);
                 return;
             }
         };
-        
+
         // Port of lparser.c:675-677
         let mut hasclose = false;
         let stklevel = fs.reglevel(nactvar);
@@ -427,7 +435,7 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
             code::setmultret(fs, &mut e);
             if e.kind == ExpKind::VCALL && nret == 1 {
                 // Tail call optimization
-                let pc = unsafe { e.u.info as usize };
+                let pc = e.u.info() as usize;
                 if pc < fs.chunk.code.len() {
                     let instr = &mut fs.chunk.code[pc];
                     *instr = (*instr & !0x7F) | (OpCode::TailCall as u32);
@@ -463,31 +471,31 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
 //   return n;
 // }
 pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
-    use crate::compiler::expr_parser::expr_internal;
-    
+    use expr_parser::expr_internal;
+
     let mut n = 1;
     expr_internal(fs, e)?;
-    
+
     while testnext(fs, LuaTokenKind::TkComma) {
         code::exp2nextreg(fs, e);
-        *e = ExpDesc::new_void();  // Reset ExpDesc for next expression
+        *e = ExpDesc::new_void(); // Reset ExpDesc for next expression
         expr_internal(fs, e)?;
         n += 1;
     }
-    
+
     Ok(n)
 }
 
 // Port of newgotoentry from lparser.c:575-577
 // Adds a new goto entry to the pending gotos list
 fn newgotoentry(fs: &mut FuncState, name: String, line: usize, pc: usize) {
-    let stklevel = fs.reglevel(fs.nactvar);  // Save stklevel at creation time
+    let stklevel = fs.reglevel(fs.nactvar); // Save stklevel at creation time
     let label = LabelDesc {
         name,
         pc,
         line,
         nactvar: fs.nactvar,
-        stklevel,  // Save the stklevel
+        stklevel, // Save the stklevel
         close: false,
     };
     fs.pending_gotos.push(label);
@@ -542,20 +550,21 @@ fn labelstat(fs: &mut FuncState) -> Result<(), String> {
     let name = str_checkname(fs)?;
     check(fs, LuaTokenKind::TkDbColon)?;
     fs.lexer.bump(); // skip second '::'
-    
+
     // Skip other no-op statements (lparser.c:1461-1462)
-    while fs.lexer.current_token() == LuaTokenKind::TkSemicolon 
-       || fs.lexer.current_token() == LuaTokenKind::TkDbColon {
+    while fs.lexer.current_token() == LuaTokenKind::TkSemicolon
+        || fs.lexer.current_token() == LuaTokenKind::TkDbColon
+    {
         statement(fs)?;
     }
-    
+
     // Check for repeated labels (lparser.c:1463)
     checkrepeated(fs, &name)?;
-    
+
     // Create label and solve pending gotos (lparser.c:1464)
     let is_last = block_follow(fs, false);
     createlabel(fs, &name, line, is_last);
-    
+
     Ok(())
 }
 
@@ -650,19 +659,24 @@ fn ifstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     Ok(())
 }
 
-// Port of whilestat from lparser.c
-fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
-    // whilestat -> WHILE cond DO block END
-    fs.lexer.bump(); // skip WHILE
-    let whileinit = fs.pc;
-
-    // Parse condition - Port of lparser.c:1474: condexit = cond(ls);
+// Port of cond from lparser.c:1405-1412
+// static int cond (LexState *ls)
+// cond -> exp
+fn cond(fs: &mut FuncState) -> Result<isize, String> {
     let mut v = expr(fs)?;
     if v.kind == ExpKind::VNIL {
         v.kind = ExpKind::VFALSE; // 'falses' are all equal here
     }
     code::goiftrue(fs, &mut v);
-    let condexit = v.f; // false list
+    Ok(v.f)
+}
+
+// Port of whilestat from lparser.c:1467-1483
+fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
+    // whilestat -> WHILE cond DO block END
+    fs.lexer.bump(); // skip WHILE
+    let whileinit = code::getlabel(fs);
+    let condexit = cond(fs)?;
 
     let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
@@ -676,17 +690,8 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     enterblock(fs, bl_id, true);
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
-    block(fs)?;
-
-    // Jump back to condition
-    let jmp_offset = (whileinit as isize - fs.pc as isize - 1) as i32;
-    
-    let jmp_pc = code::code_asj(
-        fs,
-        OpCode::Jmp,
-        jmp_offset,
-    );
-
+    statlist(fs)?; // Use statlist directly, not block (which would create another enterblock)
+    code::jumpto(fs, whileinit);
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkWhile, line)?;
     leaveblock(fs);
 
@@ -696,43 +701,70 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     Ok(())
 }
 
-// Port of repeatstat from lparser.c
+// Port of repeatstat from lparser.c:1486-1507
 fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // repeatstat -> REPEAT block UNTIL cond
-    fs.lexer.bump(); // skip REPEAT
-    // lparser.c:1490: int repeat_init = luaK_getlabel(fs);
-    // Mark loop start as jump target to prevent instruction merging
     let repeat_init = code::getlabel(fs);
 
-    let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
+    // lparser.c:1491-1492: enterblock(fs, &bl1, 1); enterblock(fs, &bl2, 0);
+    let bl1_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
         first_label: 0,
         first_goto: 0,
         nactvar: 0,
         upval: false,
-        is_loop: true,
+        is_loop: true, // loop block
         in_scope: true,
     });
-    enterblock(fs, bl_id, true);
-    // lparser.c:1495: statlist(ls); /* repeat body */
-    statlist(fs)?;
+    enterblock(fs, bl1_id, true);
+
+    let bl2_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
+        previous: None,
+        first_label: 0,
+        first_goto: 0,
+        nactvar: 0,
+        upval: false,
+        is_loop: false, // scope block
+        in_scope: true,
+    });
+    enterblock(fs, bl2_id, false);
+
+    fs.lexer.bump(); // skip REPEAT
+    statlist(fs)?; // repeat body
     check_match(fs, LuaTokenKind::TkUntil, LuaTokenKind::TkRepeat, line)?;
 
-    // Parse until condition (lparser.c:1497)
-    // cond() reads expression and generates jump-if-true
-    let mut v = expr(fs)?;
-    // Convert nil to false for condition testing (lparser.c:1409)
-    if v.kind == ExpKind::VNIL {
-        v.kind = ExpKind::VFALSE;
-    }
-    // Generate jump if condition is true (exit loop) (lparser.c:1410)
-    code::goiftrue(fs, &mut v);
-    let condexit = v.f; // List of jumps when condition is false
+    // Parse until condition (inside scope block)
+    let mut condexit = cond(fs)?;
 
+    // lparser.c:1498: leaveblock(fs); /* finish scope */
+    // Read bl2 upval before leaveblock
+    let bl2_upval = fs
+        .compiler_state
+        .get_blockcnt_mut(bl2_id)
+        .map(|bl| bl.upval)
+        .unwrap_or(false);
+    let bl2_nactvar = fs
+        .compiler_state
+        .get_blockcnt_mut(bl2_id)
+        .map(|bl| bl.nactvar)
+        .unwrap_or(0);
     leaveblock(fs);
 
-    // Patch all "false" jumps to loop back to repeat_init (lparser.c:1507)
+    // lparser.c:1499-1505: handle upvalues
+    if bl2_upval {
+        let exit = code::jump(fs); // normal exit must jump over fix
+        code::patchtohere(fs, condexit); // repetition must close upvalues
+        code::code_abc(fs, OpCode::Close, reglevel(fs, bl2_nactvar) as u32, 0, 0);
+        condexit = code::jump(fs) as isize; // repeat after closing upvalues
+        code::patchtohere(fs, exit as isize); // normal exit comes to here
+    }
+
+    // lparser.c:1506: luaK_patchlist(fs, condexit, repeat_init);
     code::patchlist(fs, condexit, repeat_init as isize);
+
+    // lparser.c:1507: leaveblock(fs); /* finish loop */
+    leaveblock(fs);
+
     Ok(())
 }
 
@@ -957,22 +989,22 @@ fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // funcname -> NAME {fieldsel} [':' NAME]
     // Parse first name (base variable)
     let mut base = ExpDesc::new_void();
-    crate::compiler::expr_parser::singlevar(fs, &mut base)?;
+    expr_parser::singlevar(fs, &mut base)?;
 
     // Handle field selections: t.a.b.c
     while fs.lexer.current_token() == LuaTokenKind::TkDot {
-        crate::compiler::expr_parser::fieldsel(fs, &mut base)?;
+        expr_parser::fieldsel(fs, &mut base)?;
     }
 
     // Handle method definition: function t:method()
     let is_method = fs.lexer.current_token() == LuaTokenKind::TkColon;
     if is_method {
-        crate::compiler::expr_parser::fieldsel(fs, &mut base)?;
+        expr_parser::fieldsel(fs, &mut base)?;
     }
 
     // Parse function body
     let mut func_val = ExpDesc::new_void();
-    crate::compiler::expr_parser::body(fs, &mut func_val, is_method)?;
+    expr_parser::body(fs, &mut func_val, is_method)?;
 
     // Check if variable is readonly
     check_readonly(fs, &base)?;
@@ -1086,7 +1118,7 @@ pub fn mark_upval(fs: &mut FuncState, level: u8) {
 fn mark_to_be_closed(fs: &mut FuncState) {
     if let Some(bl) = fs.current_block_cnt() {
         bl.upval = true;
-        bl.in_scope = true;  // Port of lparser.c:610: bl->insidetbc = 1;
+        bl.in_scope = true; // Port of lparser.c:610: bl->insidetbc = 1;
     }
     fs.needclose = true;
 }
@@ -1218,12 +1250,6 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of LHS_assign from lparser.c
-struct LhsAssign {
-    prev: Option<Box<LhsAssign>>,
-    v: ExpDesc,
-}
-
 // Port of vkisvar from lparser.c
 fn vkisvar(k: ExpKind) -> bool {
     use ExpKind;
@@ -1248,44 +1274,36 @@ fn vkisindexed(k: ExpKind) -> bool {
 }
 
 // Port of check_conflict from lparser.c
-fn check_conflict(fs: &mut FuncState, lh: &LhsAssign, v: &ExpDesc) {
+fn check_conflict(fs: &mut FuncState, lh_id: LhsAssignId, v: &ExpDesc) {
     use ExpKind;
 
     let mut conflict = false;
     let extra = fs.freereg;
 
     // Check all variables in the chain
-    let mut current = Some(lh);
-    while let Some(node) = current {
-        if vkisindexed(node.v.kind) {
-            // If this is indexed and new var is local/upvalue
-            if v.kind == ExpKind::VLOCAL || v.kind == ExpKind::VUPVAL {
-                // Check if they might conflict
-                conflict = true;
-                break;
+    let mut current = Some(lh_id);
+    while let Some(node_id) = current {
+        if let Some(node) = fs.compiler_state.get_lhs_assign(node_id) {
+            if vkisindexed(node.v.kind) {
+                // If this is indexed and new var is local/upvalue
+                if v.kind == ExpKind::VLOCAL || v.kind == ExpKind::VUPVAL {
+                    // Check if they might conflict
+                    conflict = true;
+                    break;
+                }
             }
+            current = node.prev;
+        } else {
+            break;
         }
-        current = node.prev.as_ref().map(|b| b.as_ref());
     }
 
     if conflict {
         // Copy local/upvalue to temporary
         if v.kind == ExpKind::VLOCAL {
-            code::code_abc(
-                fs,
-                OpCode::Move,
-                extra as u32,
-                unsafe { v.u.var.ridx as u32 },
-                0,
-            );
+            code::code_abc(fs, OpCode::Move, extra as u32, v.u.var().ridx as u32, 0);
         } else if v.kind == ExpKind::VUPVAL {
-            code::code_abc(
-                fs,
-                OpCode::GetUpval,
-                extra as u32,
-                unsafe { v.u.info as u32 },
-                0,
-            );
+            code::code_abc(fs, OpCode::GetUpval, extra as u32, v.u.info() as u32, 0);
         }
         code::reserve_regs(fs, 1);
     }
@@ -1333,25 +1351,19 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
     match var.kind {
         ExpKind::VLOCAL => {
             code::free_exp(fs, ex);
-            code::exp2reg(fs, ex, unsafe { var.u.var.ridx as u8 });
+            code::exp2reg(fs, ex, var.u.var().ridx as u8);
         }
         ExpKind::VUPVAL => {
             let e = code::exp2anyreg(fs, ex);
-            code::code_abc(
-                fs,
-                OpCode::SetUpval,
-                e as u32,
-                unsafe { var.u.info as u32 },
-                0,
-            );
+            code::code_abc(fs, OpCode::SetUpval, e as u32, var.u.info() as u32, 0);
         }
         ExpKind::VINDEXED => {
             // Use code_abrk to support RK operand (register or constant)
             code::code_abrk(
                 fs,
                 OpCode::SetTable,
-                unsafe { var.u.ind.t as u32 },
-                unsafe { var.u.ind.idx as u32 },
+                var.u.ind().t as u32,
+                var.u.ind().idx as u32,
                 ex,
             );
         }
@@ -1360,8 +1372,8 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
             code::code_abrk(
                 fs,
                 OpCode::SetTabUp,
-                unsafe { var.u.ind.t as u32 },
-                unsafe { var.u.ind.idx as u32 },
+                var.u.ind().t as u32,
+                var.u.ind().idx as u32,
                 ex,
             );
         }
@@ -1370,8 +1382,8 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
             code::code_abrk(
                 fs,
                 OpCode::SetI,
-                unsafe { var.u.ind.t as u32 },
-                unsafe { var.u.ind.idx as u32 },
+                var.u.ind().t as u32,
+                var.u.ind().idx as u32,
                 ex,
             );
         }
@@ -1380,8 +1392,8 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
             code::code_abrk(
                 fs,
                 OpCode::SetField,
-                unsafe { var.u.ind.t as u32 },
-                unsafe { var.u.ind.idx as u32 },
+                var.u.ind().t as u32,
+                var.u.ind().idx as u32,
                 ex,
             );
         }
@@ -1393,37 +1405,56 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
 }
 
 // Port of restassign from lparser.c
-fn restassign(fs: &mut FuncState, lh: &mut LhsAssign, nvars: usize) -> Result<(), String> {
+fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<(), String> {
     let mut e = ExpDesc::new_void();
 
-    if !vkisvar(lh.v.kind) {
+    // Get the LhsAssign data
+    let lh_v = {
+        let lh = fs
+            .compiler_state
+            .get_lhs_assign(lh_id)
+            .ok_or_else(|| "invalid LhsAssign id".to_string())?;
+        lh.v.clone()
+    };
+
+    if !vkisvar(lh_v.kind) {
         return Err("syntax error".to_string());
     }
 
     // Check if variable is readonly (const)
-    check_readonly(fs, &lh.v)?;
+    check_readonly(fs, &lh_v)?;
 
     if testnext(fs, LuaTokenKind::TkComma) {
         // restassign -> ',' suffixedexp restassign
-        let mut nv = LhsAssign {
-            prev: None,
-            v: ExpDesc::new_void(),
-        };
+        let mut nv_v = ExpDesc::new_void();
 
         // Parse next suffixed expression
-        crate::compiler::expr_parser::suffixedexp(fs, &mut nv.v)?;
+        expr_parser::suffixedexp(fs, &mut nv_v)?;
 
-        if !vkisindexed(nv.v.kind) {
-            check_conflict(fs, lh, &nv.v);
+        if !vkisindexed(nv_v.kind) {
+            check_conflict(fs, lh_id, &nv_v);
         }
 
-        // Build chain
-        nv.prev = Some(Box::new(LhsAssign {
-            prev: lh.prev.take(),
-            v: lh.v.clone(),
-        }));
+        // Get the prev id from current lh before creating new one
+        let prev_id = fs
+            .compiler_state
+            .get_lhs_assign(lh_id)
+            .map(|lh| lh.prev)
+            .flatten();
 
-        restassign(fs, &mut nv, nvars + 1)?;
+        // Build chain: new node points to a copy of current lh
+        let new_prev_id = fs.compiler_state.alloc_lhs_assign(LhsAssign {
+            prev: prev_id,
+            v: lh_v.clone(),
+        });
+
+        // Create new LhsAssign with the chain
+        let nv_id = fs.compiler_state.alloc_lhs_assign(LhsAssign {
+            prev: Some(new_prev_id),
+            v: nv_v,
+        });
+
+        restassign(fs, nv_id, nvars + 1)?;
     } else {
         // restassign -> '=' explist
         check(fs, LuaTokenKind::TkAssign)?;
@@ -1434,15 +1465,15 @@ fn restassign(fs: &mut FuncState, lh: &mut LhsAssign, nvars: usize) -> Result<()
             adjust_assign(fs, nvars, nexps, &mut e);
         } else {
             code::setoneret(fs, &mut e);
-            storevar(fs, &lh.v, &mut e);
+            storevar(fs, &lh_v, &mut e);
             return Ok(());
         }
     }
 
     // Default assignment
     e.kind = ExpKind::VNONRELOC;
-    e.u.info = (fs.freereg - 1) as i32;
-    storevar(fs, &lh.v, &mut e);
+    e.u = ExpUnion::Info((fs.freereg - 1) as i32);
+    storevar(fs, &lh_v, &mut e);
 
     Ok(())
 }
@@ -1450,25 +1481,26 @@ fn restassign(fs: &mut FuncState, lh: &mut LhsAssign, nvars: usize) -> Result<()
 // Port of exprstat from lparser.c
 fn exprstat(fs: &mut FuncState) -> Result<(), String> {
     // exprstat -> func | assignment
-    let mut lh = LhsAssign {
-        prev: None,
-        v: ExpDesc::new_void(),
-    };
+    let mut lh_v = ExpDesc::new_void();
 
-    suffixedexp(fs, &mut lh.v)?;
+    suffixedexp(fs, &mut lh_v)?;
 
     if fs.lexer.current_token() == LuaTokenKind::TkAssign
         || fs.lexer.current_token() == LuaTokenKind::TkComma
     {
-        // It's an assignment
-        restassign(fs, &mut lh, 1)?;
+        // It's an assignment - allocate LhsAssign in pool
+        let lh_id = fs.compiler_state.alloc_lhs_assign(LhsAssign {
+            prev: None,
+            v: lh_v,
+        });
+        restassign(fs, lh_id, 1)?;
     } else {
         // It's a function call
-        if lh.v.kind != ExpKind::VCALL {
+        if lh_v.kind != ExpKind::VCALL {
             return Err("syntax error".to_string());
         }
         // Set to use no results
-        let pc = unsafe { lh.v.u.info as usize };
+        let pc = lh_v.u.info() as usize;
         if pc < fs.chunk.code.len() {
             Instruction::set_c(&mut fs.chunk.code[pc], 1);
         }
@@ -1484,7 +1516,7 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
     let varname: Option<String> = match e.kind {
         ExpKind::VCONST => {
             // Get variable name from actvar array
-            let vidx = unsafe { e.u.info } as usize;
+            let vidx = e.u.info() as usize;
             if let Some(var_desc) = fs.actvar.get(vidx) {
                 Some(var_desc.name.clone())
             } else {
@@ -1494,7 +1526,7 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
         ExpKind::VLOCAL => {
             // Check if local variable is const or compile-time const
             // Note: RDKTOCLOSE variables are NOT readonly!
-            let vidx = unsafe { e.u.var.vidx } as u16;
+            let vidx = e.u.var().vidx as u16;
             if let Some(var_desc) = fs.get_local_var_desc(vidx) {
                 // Only RDKCONST and RDKCTC are truly readonly
                 match var_desc.kind {
@@ -1508,7 +1540,7 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
         ExpKind::VUPVAL => {
             // Check if upvalue is const or compile-time const
             // Note: RDKTOCLOSE upvalues are NOT readonly!
-            let upval_idx = unsafe { e.u.info } as usize;
+            let upval_idx = e.u.info() as usize;
             if upval_idx < fs.upvalues.len() {
                 let upval = &fs.upvalues[upval_idx];
                 // Only RDKCONST and RDKCTC are truly readonly

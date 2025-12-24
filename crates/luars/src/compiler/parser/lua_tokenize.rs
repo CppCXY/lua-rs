@@ -31,7 +31,11 @@ impl<'a> LuaTokenize<'a> {
             }
 
             // Save token with its ending line number (matches Lua's linenumber)
-            tokens.push(LuaTokenData::with_line(kind, self.reader.current_range(), self.line));
+            tokens.push(LuaTokenData::with_line(
+                kind,
+                self.reader.current_range(),
+                self.line,
+            ));
         }
 
         if let Some(err) = &self.error {

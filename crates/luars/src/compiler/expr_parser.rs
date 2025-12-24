@@ -20,7 +20,7 @@ const LFIELDS_PER_FLUSH: u32 = 50;
 // Port of init_exp from lparser.c
 fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {
     e.kind = kind;
-    e.u.info = info;
+    e.u = ExpUnion::Info(info);
     e.t = -1;
     e.f = -1;
 }
@@ -160,7 +160,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             let pc = code::code_abc(fs, OpCode::Vararg, 0, 0, 1);
             *v = ExpDesc::new_void();
             v.kind = ExpKind::VVARARG;
-            v.u.info = pc as i32;
+            v.u = ExpUnion::Info(pc as i32);
             fs.lexer.bump();
         }
         LuaTokenKind::TkLeftBrace => {
@@ -235,7 +235,7 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                 let k_idx = string_k(fs, method_name);
                 let mut key = ExpDesc {
                     kind: ExpKind::VK,
-                    u: ExpUnion { info: k_idx as i32 },
+                    u: ExpUnion::Info(k_idx as i32),
                     t: -1,
                     f: -1,
                 };
@@ -301,7 +301,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
         return Err("function must be in register".to_string());
     }
 
-    let base = unsafe { f.u.info as u8 };
+    let base = f.u.info() as u8;
     let nparams = if matches!(args.kind, ExpKind::VCALL | ExpKind::VVARARG) {
         255 // LUA_MULTRET = -1, which is 255 in u8. nparams+1 will overflow to 0
     } else {
@@ -321,7 +321,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
 
     code::fixline(fs, line); // Fix line number for CALL instruction (lparser.c:1063)
     f.kind = ExpKind::VCALL;
-    f.u.info = pc as i32;
+    f.u = ExpUnion::Info(pc as i32);
     fs.freereg = base + 1; // Call resets freereg to base+1
 
     Ok(())
@@ -373,7 +373,7 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
     if vkind >= 0 {
         if vkind == ExpKind::VLOCAL as i32 && !base {
             // lparser.c:442: markupval(fs, var->u.var.vidx); /* local will be used as an upval */
-            let vidx = unsafe { var.u.var.vidx };
+            let vidx = var.u.var().vidx;
             mark_upval(fs, vidx as u8);
         }
         // If it's VCONST, it stays VCONST - no change needed
@@ -389,7 +389,7 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
                 if var.kind == ExpKind::VCONST {
                     // Convert VCONST to actual constant value (VKINT/VKFLT/etc)
                     // Port of const2exp from lcode.c:693-720
-                    let vidx = unsafe { var.u.info } as usize;
+                    let vidx = var.u.info() as usize;
                     if let Some(prev_var) = prev.actvar.get(vidx) {
                         if let Some(value) = prev_var.const_value {
                             code::const_to_exp(value, var);
@@ -430,7 +430,7 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     let idx = string_k(fs, field);
     let mut key = ExpDesc::new_void();
     key.kind = ExpKind::VK;
-    key.u.info = idx as i32;
+    key.u = ExpUnion::Info(idx as i32);
 
     // Call indexed to determine correct index type (VINDEXSTR vs VINDEXED)
     code::indexed(fs, v, &mut key);
@@ -521,7 +521,7 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
         // Use indexed to determine VINDEXSTR vs VINDEXED based on key
         let mut tab = ExpDesc::new_void();
         tab.kind = ExpKind::VNONRELOC;
-        tab.u.info = cc.table_reg as i32;
+        tab.u = ExpUnion::Info(cc.table_reg as i32);
 
         code::indexed(fs, &mut tab, &mut key);
 
@@ -532,8 +532,8 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
                 code::code_abrk(
                     fs,
                     OpCode::SetField,
-                    unsafe { tab.u.ind.t as u32 },
-                    unsafe { tab.u.ind.idx as u32 },
+                    tab.u.ind().t as u32,
+                    tab.u.ind().idx as u32,
                     &mut val,
                 );
             }
@@ -542,8 +542,8 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
                 code::code_abrk(
                     fs,
                     OpCode::SetI,
-                    unsafe { tab.u.ind.t as u32 },
-                    unsafe { tab.u.ind.idx as u32 },
+                    tab.u.ind().t as u32,
+                    tab.u.ind().idx as u32,
                     &mut val,
                 );
             }
@@ -552,8 +552,8 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
                 code::code_abrk(
                     fs,
                     OpCode::SetTable,
-                    unsafe { tab.u.ind.t as u32 },
-                    unsafe { tab.u.ind.idx as u32 },
+                    tab.u.ind().t as u32,
+                    tab.u.ind().idx as u32,
                     &mut val,
                 );
             }
@@ -582,13 +582,13 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             let mut key = ExpDesc::new_void();
             key.kind = ExpKind::VK;
 
-            key.u.info = field_idx as i32;
+            key.u = ExpUnion::Info(field_idx as i32);
 
             // Create table expression
             let mut tab = ExpDesc::new_void();
             tab.kind = ExpKind::VNONRELOC;
 
-            tab.u.info = cc.table_reg as i32;
+            tab.u = ExpUnion::Info(cc.table_reg as i32);
 
             // indexed will handle VINDEXSTR vs VINDEXED based on constant index size
             // If field_idx > 255, it will set tab.kind = VINDEXED
@@ -606,8 +606,8 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
                     code::code_abrk(
                         fs,
                         OpCode::SetField,
-                        unsafe { tab.u.ind.t as u32 },
-                        unsafe { tab.u.ind.idx as u32 },
+                        tab.u.ind().t as u32,
+                        tab.u.ind().idx as u32,
                         &mut val,
                     );
                 }
@@ -616,8 +616,8 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
                     code::code_abrk(
                         fs,
                         OpCode::SetTable,
-                        unsafe { tab.u.ind.t as u32 },
-                        unsafe { tab.u.ind.idx as u32 },
+                        tab.u.ind().t as u32,
+                        tab.u.ind().idx as u32,
                         &mut val,
                     );
                 }

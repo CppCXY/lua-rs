@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::Chunk;
-use crate::compiler::{ExpDesc, ExpKind};
+use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
 // Port of FuncState and related structures from lparser.h
 use crate::gc::ObjectPool;
 use crate::{LuaValue, compiler::parser::LuaLexer};
@@ -43,6 +43,8 @@ pub struct FuncState<'a> {
 pub struct CompilerState {
     // pool of BlockCnt structures (Option to allow safe take without invalidating indices)
     pub block_cnt_pool: Vec<Option<BlockCnt>>,
+    // pool of LhsAssign structures for assignment chain management
+    pub lhs_assign_pool: Vec<Option<LhsAssign>>,
     // Global scanner table for constant deduplication (corresponds to LexState.h in Lua C)
     pub scanner_table: HashMap<LuaValue, usize>,
 }
@@ -51,6 +53,7 @@ impl CompilerState {
     pub fn new() -> Self {
         CompilerState {
             block_cnt_pool: Vec::new(),
+            lhs_assign_pool: Vec::new(),
             scanner_table: HashMap::new(),
         }
     }
@@ -62,17 +65,45 @@ impl CompilerState {
     }
 
     pub fn get_blockcnt_mut(&mut self, id: BlockCntId) -> Option<&mut BlockCnt> {
-        self.block_cnt_pool.get_mut(id.0).and_then(|opt| opt.as_mut())
+        self.block_cnt_pool
+            .get_mut(id.0)
+            .and_then(|opt| opt.as_mut())
     }
 
     pub fn take_blockcnt(&mut self, id: BlockCntId) -> Option<BlockCnt> {
         // Use take() instead of remove() to avoid invalidating subsequent BlockCntIds
         self.block_cnt_pool.get_mut(id.0).and_then(|opt| opt.take())
     }
+
+    pub fn alloc_lhs_assign(&mut self, lhs: LhsAssign) -> LhsAssignId {
+        let id = LhsAssignId(self.lhs_assign_pool.len());
+        self.lhs_assign_pool.push(Some(lhs));
+        id
+    }
+
+    pub fn get_lhs_assign(&self, id: LhsAssignId) -> Option<&LhsAssign> {
+        self.lhs_assign_pool.get(id.0).and_then(|opt| opt.as_ref())
+    }
+
+    pub fn get_lhs_assign_mut(&mut self, id: LhsAssignId) -> Option<&mut LhsAssign> {
+        self.lhs_assign_pool
+            .get_mut(id.0)
+            .and_then(|opt| opt.as_mut())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BlockCntId(pub usize);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct LhsAssignId(pub usize);
+
+// Port of LHS_assign from lparser.c
+#[derive(Clone)]
+pub struct LhsAssign {
+    pub prev: Option<LhsAssignId>,
+    pub v: ExpDesc,
+}
 
 // Port of BlockCnt from lparser.c
 #[derive(Clone, Default)]
@@ -93,7 +124,7 @@ pub struct LabelDesc {
     pub pc: usize,
     pub line: usize,
     pub nactvar: u8,
-    pub stklevel: u8,  // NEW: saved stack level at goto/label creation
+    pub stklevel: u8, // NEW: saved stack level at goto/label creation
     pub close: bool,
 }
 
@@ -299,7 +330,7 @@ impl<'a> FuncState<'a> {
                         // VCONST: store variable index in u.info for check_readonly
                         *var = ExpDesc::new_void();
                         var.kind = ExpKind::VCONST;
-                        var.u.info = i as i32;
+                        var.u = ExpUnion::Info(i as i32);
                         return ExpKind::VCONST as i32;
                     } else {
                         // Get register index from variable descriptor
@@ -325,8 +356,6 @@ impl<'a> FuncState<'a> {
 
     // Port of newupvalue from lparser.c (lines 364-382)
     pub fn newupvalue(&mut self, name: &str, v: &ExpDesc) -> i32 {
-        use ExpKind;
-
         let prev_ptr = match &self.prev {
             Some(p) => *p as *const _ as *mut FuncState,
             None => std::ptr::null_mut(),
@@ -334,13 +363,13 @@ impl<'a> FuncState<'a> {
 
         let (in_stack, idx, kind) = unsafe {
             if v.kind == ExpKind::VLOCAL {
-                let vidx = v.u.var.vidx;
-                let ridx = v.u.var.ridx;
+                let vidx = v.u.var().vidx;
+                let ridx = v.u.var().ridx;
                 let prev = &*prev_ptr;
                 let vd = &prev.actvar[vidx as usize];
                 (true, ridx as u8, vd.kind)
             } else {
-                let info = v.u.info as usize;
+                let info = v.u.info() as usize;
                 let prev = &*prev_ptr;
                 let up = &prev.upvalues[info];
                 (false, info as u8, up.kind)

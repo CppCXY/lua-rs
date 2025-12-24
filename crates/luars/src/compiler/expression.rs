@@ -32,12 +32,68 @@ pub struct ExpDesc {
 }
 
 #[derive(Clone, Copy)]
-pub union ExpUnion {
-    pub info: i32,    // for generic use
-    pub ival: i64,    // for VKINT
-    pub nval: f64,    // for VKFLT
-    pub ind: IndVars, // for indexed variables
-    pub var: VarVals, // for local/upvalue variables
+pub enum ExpUnion {
+    // for generic use
+    Info(i32),
+    // for VKINT
+    IVal(i64),
+    // for VKFLT
+    NVal(f64),
+    // for indexed variables
+    Ind(IndVars),
+    // for local/upvalue variables
+    Var(VarVals),
+}
+
+impl ExpUnion {
+    pub fn info(&self) -> i32 {
+        match self {
+            ExpUnion::Info(info) => *info,
+            _ => panic!("ExpUnion does not contain info"),
+        }
+    }
+
+    pub fn ival(&self) -> i64 {
+        match self {
+            ExpUnion::IVal(ival) => *ival,
+            _ => panic!("ExpUnion does not contain ival"),
+        }
+    }
+
+    pub fn nval(&self) -> f64 {
+        match self {
+            ExpUnion::NVal(nval) => *nval,
+            _ => panic!("ExpUnion does not contain nval"),
+        }
+    }
+
+    pub fn ind(&self) -> IndVars {
+        match self {
+            ExpUnion::Ind(ind) => *ind,
+            _ => panic!("ExpUnion does not contain ind"),
+        }
+    }
+
+    pub fn ind_mut(&mut self) -> &mut IndVars {
+        match self {
+            ExpUnion::Ind(ind) => ind,
+            _ => {
+                *self = ExpUnion::Ind(IndVars { t: -1, idx: -1 });
+                if let ExpUnion::Ind(ind) = self {
+                    ind
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+    }
+
+    pub fn var(&self) -> VarVals {
+        match self {
+            ExpUnion::Var(var) => *var,
+            _ => panic!("ExpUnion does not contain var"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -56,7 +112,7 @@ impl ExpDesc {
     pub fn new_void() -> Self {
         ExpDesc {
             kind: ExpKind::VVOID,
-            u: ExpUnion { info: 0 },
+            u: ExpUnion::Info(0),
             t: -1,
             f: -1,
         }
@@ -65,7 +121,7 @@ impl ExpDesc {
     pub fn new_nil() -> Self {
         ExpDesc {
             kind: ExpKind::VNIL,
-            u: ExpUnion { info: 0 },
+            u: ExpUnion::Info(0),
             t: -1,
             f: -1,
         }
@@ -74,7 +130,7 @@ impl ExpDesc {
     pub fn new_int(val: i64) -> Self {
         ExpDesc {
             kind: ExpKind::VKINT,
-            u: ExpUnion { ival: val },
+            u: ExpUnion::IVal(val),
             t: -1,
             f: -1,
         }
@@ -83,7 +139,7 @@ impl ExpDesc {
     pub fn new_float(val: f64) -> Self {
         ExpDesc {
             kind: ExpKind::VKFLT,
-            u: ExpUnion { nval: val },
+            u: ExpUnion::NVal(val),
             t: -1,
             f: -1,
         }
@@ -92,7 +148,7 @@ impl ExpDesc {
     pub fn new_bool(val: bool) -> Self {
         ExpDesc {
             kind: if val { ExpKind::VTRUE } else { ExpKind::VFALSE },
-            u: ExpUnion { info: 0 },
+            u: ExpUnion::Info(0),
             t: -1,
             f: -1,
         }
@@ -101,7 +157,7 @@ impl ExpDesc {
     pub fn new_k(info: usize) -> Self {
         ExpDesc {
             kind: ExpKind::VK,
-            u: ExpUnion { info: info as i32 },
+            u: ExpUnion::Info(info as i32),
             t: -1,
             f: -1,
         }
@@ -110,7 +166,7 @@ impl ExpDesc {
     pub fn new_vkstr(string_id: usize) -> Self {
         ExpDesc {
             kind: ExpKind::VKSTR,
-            u: ExpUnion { info: string_id as i32 },
+            u: ExpUnion::Info(string_id as i32),
             t: -1,
             f: -1,
         }
@@ -119,7 +175,7 @@ impl ExpDesc {
     pub fn new_nonreloc(reg: u8) -> Self {
         ExpDesc {
             kind: ExpKind::VNONRELOC,
-            u: ExpUnion { info: reg as i32 },
+            u: ExpUnion::Info(reg as i32),
             t: -1,
             f: -1,
         }
@@ -128,12 +184,10 @@ impl ExpDesc {
     pub fn new_local(ridx: u8, vidx: u16) -> Self {
         ExpDesc {
             kind: ExpKind::VLOCAL,
-            u: ExpUnion {
-                var: VarVals {
-                    ridx: ridx as i16,
-                    vidx,
-                },
-            },
+            u: ExpUnion::Var(VarVals {
+                ridx: ridx as i16,
+                vidx,
+            }),
             t: -1,
             f: -1,
         }
@@ -142,7 +196,7 @@ impl ExpDesc {
     pub fn new_upval(idx: u8) -> Self {
         ExpDesc {
             kind: ExpKind::VUPVAL,
-            u: ExpUnion { info: idx as i32 },
+            u: ExpUnion::Info(idx as i32),
             t: -1,
             f: -1,
         }
@@ -151,12 +205,10 @@ impl ExpDesc {
     pub fn new_indexed(t: u8, idx: u8) -> Self {
         ExpDesc {
             kind: ExpKind::VINDEXED,
-            u: ExpUnion {
-                ind: IndVars {
-                    t: t as i16,
-                    idx: idx as i16,
-                },
-            },
+            u: ExpUnion::Ind(IndVars {
+                t: t as i16,
+                idx: idx as i16,
+            }),
             t: -1,
             f: -1,
         }
@@ -165,7 +217,7 @@ impl ExpDesc {
     pub fn new_reloc(pc: usize) -> Self {
         ExpDesc {
             kind: ExpKind::VRELOC,
-            u: ExpUnion { info: pc as i32 },
+            u: ExpUnion::Info(pc as i32),
             t: -1,
             f: -1,
         }
@@ -174,7 +226,7 @@ impl ExpDesc {
     pub fn new_call(pc: usize) -> Self {
         ExpDesc {
             kind: ExpKind::VCALL,
-            u: ExpUnion { info: pc as i32 },
+            u: ExpUnion::Info(pc as i32),
             t: -1,
             f: -1,
         }
