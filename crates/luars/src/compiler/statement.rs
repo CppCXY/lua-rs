@@ -706,12 +706,18 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     block(fs)?;
 
     // Jump back to condition
-    code::code_asbx(
+    let jmp_offset = (whileinit as isize - fs.pc as isize - 1) as i32;
+    
+    let jmp_pc = code::code_asj(
         fs,
         OpCode::Jmp,
-        0,
-        (whileinit as isize - fs.pc as isize - 1) as i32,
+        jmp_offset,
     );
+    
+    if line >= 15 && line <= 25 {
+        eprintln!("[DEBUG while] Line {}: Generated JMP at PC={}, whileinit={}, fs.pc_after={}, offset={}", 
+            line, jmp_pc, whileinit, fs.pc, jmp_offset);
+    }
 
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkWhile, line)?;
     leaveblock(fs);
@@ -747,10 +753,9 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     code::exp2nextreg(fs, &mut v);
 
     // Jump back if condition is false
-    code::code_asbx(
+    code::code_asj(
         fs,
         OpCode::Jmp,
-        0,
         (repeat_init as isize - fs.pc as isize - 1) as i32,
     );
 

@@ -272,11 +272,6 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
 
     let mut args = ExpDesc::new_void();
     let line = fs.lexer.line; // Save line number before processing arguments (lparser.c:1028)
-    
-    if line >= 1003 && line <= 1015 {
-        eprintln!("[DEBUG funcargs] ENTRY: current_token={:?}, line={}, lastline={}, PC={}", 
-            fs.lexer.current_token(), line, fs.lexer.lastline, fs.chunk.code.len());
-    }
 
     match fs.lexer.current_token() {
         LuaTokenKind::TkLeftParen => {
