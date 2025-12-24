@@ -85,13 +85,32 @@ pub fn const_to_exp(value: LuaValue, e: &mut ExpDesc) {
 // Port of luaK_codeABC from lcode.c:397-402
 // int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize {
+    // Check alignment
+    if fs.chunk.code.len() != fs.chunk.line_info.len() {
+        panic!("[code_abc] MISALIGNMENT! code.len={}, line_info.len={}, op={:?}, lastline={}", 
+            fs.chunk.code.len(), fs.chunk.line_info.len(), op, fs.lexer.lastline);
+    }
+    
     let mut instr = (op as u32) << Instruction::POS_OP;
     Instruction::set_a(&mut instr, a);
     Instruction::set_b(&mut instr, b);
     Instruction::set_c(&mut instr, c);
     let pc = fs.pc;
+    
+    let lastline = fs.lexer.lastline;
+    if lastline >= 1003 && lastline <= 1011 && matches!(op, OpCode::Move | OpCode::Call | OpCode::AddI | OpCode::MmBinI) {
+        eprintln!("[DEBUG code_abc] PC={}, op={:?}, lastline={}, line={}, code.len={}, line_info.len={}", 
+            pc, op, lastline, fs.lexer.line, fs.chunk.code.len(), fs.chunk.line_info.len());
+    }
+    
     fs.chunk.code.push(instr);
     fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline (lcode.c:389)
+    
+    if fs.chunk.code.len() <= 10 {
+        eprintln!("[code_abc] After push: PC={}, code.len={}, line_info.len={}, op={:?}, lastline={}", 
+            pc, fs.chunk.code.len(), fs.chunk.line_info.len(), op, fs.lexer.lastline);
+    }
+    
     fs.pc += 1;
     pc
 }
@@ -99,12 +118,23 @@ pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize
 // Port of luaK_codeABx from lcode.c:409-414
 // int luaK_codeABx (FuncState *fs, OpCode o, int a, unsigned int bc)
 pub fn code_abx(fs: &mut FuncState, op: OpCode, a: u32, bx: u32) -> usize {
+    if fs.chunk.code.len() != fs.chunk.line_info.len() {
+        panic!("[code_abx] MISALIGNMENT! code.len={}, line_info.len={}, op={:?}, lastline={}", 
+            fs.chunk.code.len(), fs.chunk.line_info.len(), op, fs.lexer.lastline);
+    }
+    
     let mut instr = (op as u32) << Instruction::POS_OP;
     Instruction::set_a(&mut instr, a);
     Instruction::set_bx(&mut instr, bx);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
     fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline (lcode.c:390)
+    
+    if fs.chunk.code.len() <= 10 {
+        eprintln!("[code_abx] After push: PC={}, code.len={}, line_info.len={}, op={:?}, lastline={}", 
+            pc, fs.chunk.code.len(), fs.chunk.line_info.len(), op, fs.lexer.lastline);
+    }
+    
     fs.pc += 1;
     pc
 }
@@ -473,6 +503,11 @@ pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
 // Port of luaK_dischargevars from lcode.c:766-817
 // void luaK_dischargevars (FuncState *fs, expdesc *e)
 pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
+    if fs.chunk.code.len() != fs.chunk.line_info.len() {
+        panic!("[discharge_vars ENTRY] MISALIGNMENT! code.len={}, line_info.len={}, kind={:?}, lastline={}", 
+            fs.chunk.code.len(), fs.chunk.line_info.len(), e.kind, fs.lexer.lastline);
+    }
+    
     match e.kind {
         ExpKind::VCONST => {
             // Convert const variable to its actual value
@@ -990,6 +1025,7 @@ fn remove_last_instruction(fs: &mut FuncState) {
     if fs.pc > 0 {
         fs.pc -= 1;
         fs.chunk.code.pop();
+        fs.chunk.line_info.pop(); // Must also remove line info!
     }
 }
 
@@ -2109,7 +2145,12 @@ pub fn fixline(fs: &mut FuncState, line: usize) {
     // For now, we just ensure line_info has correct size
     if fs.chunk.line_info.len() > 0 {
         let last_idx = fs.chunk.line_info.len() - 1;
+        let old_line = fs.chunk.line_info[last_idx];
         fs.chunk.line_info[last_idx] = line as u32;
+        
+        if line >= 1003 && line <= 1011 {
+            eprintln!("[DEBUG fixline] PC={}, changed line {} -> {}", last_idx, old_line, line);
+        }
     }
 }
 

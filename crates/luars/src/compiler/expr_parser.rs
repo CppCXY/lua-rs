@@ -34,7 +34,15 @@ pub fn expr(fs: &mut FuncState) -> Result<ExpDesc, String> {
 
 // Internal version that uses mutable reference
 pub(crate) fn expr_internal(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    let line = fs.lexer.line;
+    let token = fs.lexer.current_token();
+    if line >= 1009 && line <= 1015 {
+        eprintln!("[DEBUG expr_internal] Line {}: token={:?}", line, token);
+    }
     subexpr(fs, v, 0)?; // Discard returned operator
+    if line >= 1009 && line <= 1015 {
+        eprintln!("[DEBUG expr_internal] Line {}: result kind={:?}, current_line={}", line, v.kind, fs.lexer.line);
+    }
     Ok(())
 }
 
@@ -264,6 +272,11 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
 
     let mut args = ExpDesc::new_void();
     let line = fs.lexer.line; // Save line number before processing arguments (lparser.c:1028)
+    
+    if line >= 1003 && line <= 1015 {
+        eprintln!("[DEBUG funcargs] ENTRY: current_token={:?}, line={}, lastline={}, PC={}", 
+            fs.lexer.current_token(), line, fs.lexer.lastline, fs.chunk.code.len());
+    }
 
     match fs.lexer.current_token() {
         LuaTokenKind::TkLeftParen => {
@@ -318,6 +331,11 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
         (nparams.wrapping_add(1)) as u32,
         2,
     );
+    
+    if line >= 1005 && line <= 1015 {
+        eprintln!("[DEBUG funcargs] Line {}: generated CALL at PC={}, fixing line to {}", line, pc, line);
+    }
+    
     code::fixline(fs, line); // Fix line number for CALL instruction (lparser.c:1063)
     f.kind = ExpKind::VCALL;
     f.u.info = pc as i32;

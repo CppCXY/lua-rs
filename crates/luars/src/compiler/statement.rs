@@ -12,11 +12,23 @@ use crate::lua_vm::OpCode;
 pub fn statlist(fs: &mut FuncState) -> Result<(), String> {
     // statlist -> { stat [';'] }
     while !block_follow(fs, true) {
+        let line = fs.lexer.line;
+        let pc_before = fs.chunk.code.len();
+        if line >= 1003 && line <= 1015 {
+            eprintln!("[DEBUG statlist] Line {}: processing statement, token: {:?}, PC={}", line, fs.lexer.current_token(), pc_before);
+        }
+        
         if fs.lexer.current_token() == LuaTokenKind::TkReturn {
             statement(fs)?;
             return Ok(()); // 'return' must be last statement
         }
         statement(fs)?;
+        
+        let pc_after = fs.chunk.code.len();
+        if line >= 1003 && line <= 1015 {
+            eprintln!("[DEBUG statlist] Line {}: statement completed, next token: {:?}, PC={}, generated {} instructions, current_line={}", 
+                line, fs.lexer.current_token(), pc_after, pc_after - pc_before, fs.lexer.line);
+        }
     }
     Ok(())
 }
@@ -464,13 +476,32 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
 // }
 pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
     use crate::compiler::expr_parser::expr_internal;
+    let line = fs.lexer.line;
+    if line >= 1009 && line <= 1015 {
+        eprintln!("[DEBUG explist] Line {}: starting explist", line);
+    }
+    
     let mut n = 1;
     expr_internal(fs, e)?;
+    
+    if line >= 1009 && line <= 1015 {
+        eprintln!("[DEBUG explist] Line {}: parsed first expr, kind: {:?}", line, e.kind);
+    }
+    
     while testnext(fs, LuaTokenKind::TkComma) {
         code::exp2nextreg(fs, e);
+        *e = ExpDesc::new_void();  // Reset ExpDesc for next expression
+        if line >= 1009 && line <= 1015 {
+            eprintln!("[DEBUG explist] Line {}: parsing next expr after comma, n={}", line, n + 1);
+        }
         expr_internal(fs, e)?;
         n += 1;
     }
+    
+    if line >= 1009 && line <= 1015 {
+        eprintln!("[DEBUG explist] Line {}: explist completed, n={}", line, n);
+    }
+    
     Ok(n)
 }
 
@@ -1446,6 +1477,11 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
         v: ExpDesc::new_void(),
     };
 
+    let line = fs.lexer.line;
+    if line >= 1009 && line <= 1015 {
+        eprintln!("[DEBUG exprstat] Line {}: parsing expression statement", line);
+    }
+
     suffixedexp(fs, &mut lh.v)?;
 
     if fs.lexer.current_token() == LuaTokenKind::TkAssign
@@ -1462,6 +1498,9 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
         let pc = unsafe { lh.v.u.info as usize };
         if pc < fs.chunk.code.len() {
             Instruction::set_c(&mut fs.chunk.code[pc], 1);
+            if line >= 1009 && line <= 1015 {
+                eprintln!("[DEBUG exprstat] Line {}: function call at PC {}", line, pc);
+            }
         }
     }
 
