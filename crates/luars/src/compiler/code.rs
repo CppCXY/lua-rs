@@ -989,8 +989,6 @@ fn discharge2anyreg(fs: &mut FuncState, e: &mut ExpDesc) {
 // Port of removelastinstruction from lcode.c (lines 373-376)
 fn remove_last_instruction(fs: &mut FuncState) {
     if fs.pc > 0 {
-        let removed_pc = fs.pc - 1;
-        eprintln!("[DEBUG remove_last_instruction] Removing instruction at PC={}", removed_pc);
         fs.pc -= 1;
         fs.chunk.code.pop();
         fs.chunk.line_info.pop(); // Must also remove line info!
@@ -1095,7 +1093,10 @@ pub fn infix(fs: &mut FuncState, op: BinaryOperator, v: &mut ExpDesc) {
         | BinaryOperator::OpLe
         | BinaryOperator::OpGt
         | BinaryOperator::OpGe => {
-            if !tonumeral(v, None) {
+            // Port of lcode.c:1670-1676: Use isSCnumber, not tonumeral
+            let mut im: i32 = 0;
+            let mut isfloat: bool = false;
+            if !is_scnumber(v, &mut im, &mut isfloat) {
                 exp2anyreg(fs, v);
             }
         }
@@ -1958,7 +1959,15 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
                 ExpKind::VKFLT => {
                     // Negate float constant in place
                     let val = unsafe { e.u.nval };
-                    e.u.nval = -val;
+                    let negated = -val;
+                    // Check if result is -0.0 (bit pattern 0x8000000000000000)
+                    // Official Lua doesn't fold -0.0 to constant because it needs special handling
+                    if negated.to_bits() == 0x8000000000000000 {
+                        // Don't fold, emit UNM instruction instead
+                        codeunexpval(fs, op, e);
+                        return;
+                    }
+                    e.u.nval = negated;
                     return;
                 }
                 _ => {}
@@ -2125,7 +2134,7 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
         return None;
     }
 
-    match e.kind {
+    let result = match e.kind {
         ExpKind::VFALSE => Some(LuaValue::boolean(false)),
         ExpKind::VTRUE => Some(LuaValue::boolean(true)),
         ExpKind::VNIL => Some(LuaValue::nil()),
@@ -2148,7 +2157,15 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
             }
         }
         ExpKind::VKINT => Some(LuaValue::integer(unsafe { e.u.ival })),
-        ExpKind::VKFLT => Some(LuaValue::float(unsafe { e.u.nval })),
+        ExpKind::VKFLT => {
+            let val = unsafe { e.u.nval };
+            // Reject -0.0 as compile-time constant (like official Lua)
+            // Official Lua doesn't optimize -0.0 to RDKCTC because it needs special handling
+            if val.to_bits() == 0x8000000000000000 {
+                return None;
+            }
+            Some(LuaValue::float(val))
+        }
         ExpKind::VCONST => {
             // Get from actvar array (port of const2val from lcode.c:75-78)
             let vidx = unsafe { e.u.info } as usize;
@@ -2159,7 +2176,9 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
             }
         }
         _ => None,
-    }
+    };
+
+    result
 }
 
 // LUA_MULTRET constant from lua.h

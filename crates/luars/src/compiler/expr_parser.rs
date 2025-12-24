@@ -34,15 +34,7 @@ pub fn expr(fs: &mut FuncState) -> Result<ExpDesc, String> {
 
 // Internal version that uses mutable reference
 pub(crate) fn expr_internal(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
-    let line = fs.lexer.line;
-    let token = fs.lexer.current_token();
-    if line >= 1009 && line <= 1015 {
-        eprintln!("[DEBUG expr_internal] Line {}: token={:?}", line, token);
-    }
     subexpr(fs, v, 0)?; // Discard returned operator
-    if line >= 1009 && line <= 1015 {
-        eprintln!("[DEBUG expr_internal] Line {}: result kind={:?}, current_line={}", line, v.kind, fs.lexer.line);
-    }
     Ok(())
 }
 
@@ -326,10 +318,6 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
         (nparams.wrapping_add(1)) as u32,
         2,
     );
-    
-    if line >= 1005 && line <= 1015 {
-        eprintln!("[DEBUG funcargs] Line {}: generated CALL at PC={}, fixing line to {}", line, pc, line);
-    }
     
     code::fixline(fs, line); // Fix line number for CALL instruction (lparser.c:1063)
     f.kind = ExpKind::VCALL;
