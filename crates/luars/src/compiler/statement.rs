@@ -189,11 +189,14 @@ pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
         false
     };
 
+    // Get nactvar before the mutable borrow
+    let nactvar = fs.nactvar;
+    
     if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
         bl.previous = prev_id;
         bl.first_label = fs.labels.len();
         bl.first_goto = fs.pending_gotos.len();
-        bl.nactvar = fs.nactvar;
+        bl.nactvar = nactvar;
         bl.upval = false;
         bl.is_loop = isloop;
         bl.in_scope = parent_in_scope; // Inherit from parent
@@ -288,6 +291,7 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
             label.nactvar = bl.nactvar;
         }
     }
+    
 
     // Add to label list before solving gotos
     let label_for_list = label.clone();
@@ -300,6 +304,7 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
 
     if needsclose {
         // Need a close instruction
+        // Port of lparser.c:617: luaK_codeABC(fs, OP_CLOSE, luaY_nvarstack(fs), 0, 0);
         let stklevel = fs.reglevel(fs.nactvar);
         code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
         return true;
@@ -314,16 +319,14 @@ fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
     let bl_nactvar = bl.nactvar;
     let bl_upval = bl.upval;
     let first_goto = bl.first_goto;
+    let bl_stklevel = fs.reglevel(bl_nactvar);
 
     for i in first_goto..fs.pending_gotos.len() {
-        let gt_nactvar = fs.pending_gotos[i].nactvar;
-        let gt_stklevel = fs.reglevel(gt_nactvar);
-
-        // Check if leaving a variable scope
-        let bl_stklevel = fs.reglevel(bl_nactvar);
-
-        // Now we can modify the goto
         let gt = &mut fs.pending_gotos[i];
+        
+        // Use the saved stklevel from goto creation, not recalculated from current nactvar
+        let gt_stklevel = gt.stklevel;
+
         if gt_stklevel > bl_stklevel {
             gt.close |= bl_upval; // Jump may need a close
         }
@@ -348,14 +351,13 @@ pub fn leaveblock(fs: &mut FuncState) {
                     bl.upval,
                 )
             } else {
-                eprintln!("[ERROR leaveblock] Block {:?} not found!", bl_id);
                 return;
             }
         };
 
         // Port of lparser.c:675-677
         let mut hasclose = false;
-        let stklevel = fs.reglevel(nactvar);
+        let stklevel = fs.reglevel(nactvar);  // lparser.c:676: reglevel(fs, bl->nactvar)
 
         // Remove block locals
         fs.remove_vars(nactvar);
@@ -1236,8 +1238,10 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
             var_desc.kind = VarKind::RDKCTC;
             var_desc.const_value = Some(value); // Save the constant value
         }
-        fs.adjust_local_vars(nvars - 1); // exclude last variable
-        fs.nactvar += 1; // but count it
+        // In Lua C, this is: adjustlocalvars(ls, nvars - 1); fs->nactvar++;
+        // But since nactvar() returns actvar.len(), and adjust_local_vars doesn't change length,
+        // we need to call adjust_local_vars(nvars) to process all variables including the constant
+        fs.adjust_local_vars(nvars);
         check_to_close(fs, toclose);
         return Ok(());
     }
@@ -1562,3 +1566,4 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
 
     Ok(())
 }
+

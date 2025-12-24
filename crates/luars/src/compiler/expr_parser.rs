@@ -826,3 +826,4 @@ fn expect(fs: &mut FuncState, tk: LuaTokenKind) -> Result<(), String> {
         Err(fs.token_error(&format!("expected '{:?}'", tk)))
     }
 }
+

@@ -27,9 +27,9 @@ pub struct FuncState<'a> {
     pub last_target: usize,            // label of last 'jump label'
     pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
     pub labels: Vec<LabelDesc>,        // list of active labels
-    pub actvar: Vec<VarDesc>,          // list of active local variables
+    pub actvar: Vec<VarDesc>,          // list of all variable descriptors (active and pending)
+    pub nactvar: u8,                   // number of active variables (actvar[0..nactvar] are active)
     pub upvalues: Vec<Upvaldesc>,      // upvalue descriptors
-    pub nactvar: u8,                   // number of active local variables
     pub nups: u8,                      // number of upvalues
     pub freereg: u8,                   // first free register
     pub iwthabs: u8,                   // instructions issued since last absolute line info
@@ -172,14 +172,14 @@ impl<'a> FuncState<'a> {
             last_target: 0,
             pending_gotos: Vec::new(),
             labels: Vec::new(),
+            actvar: Vec::new(),
             nactvar: 0,
+            upvalues: Vec::new(),
             nups: 0,
             freereg: 0,
             iwthabs: 0,
             needclose: false,
             is_vararg,
-            actvar: Vec::new(),
-            upvalues: Vec::new(),
             source_name,
             first_local: 0,
             chunk_constants_map: HashMap::new(),
@@ -231,14 +231,14 @@ impl<'a> FuncState<'a> {
             last_target: 0,
             pending_gotos: Vec::new(),
             labels: Vec::new(),
+            actvar: Vec::new(),
             nactvar: 0,
+            upvalues: Vec::new(),
             nups: 0,
             freereg: 0,
             iwthabs: 0,
             needclose: false,
             is_vararg,
-            actvar: Vec::new(),
-            upvalues: Vec::new(),
             first_local: parent.actvar.len(),
             source_name: parent.source_name.clone(),
             chunk_constants_map: HashMap::new(),
@@ -265,27 +265,19 @@ impl<'a> FuncState<'a> {
 
     // Port of adjustlocalvars from lparser.c:311-321
     pub fn adjust_local_vars(&mut self, nvars: u8) {
-        // Get current register level (where new variables start)
-        // This skips const variables (RDKCTC) and returns the next available register
-        let mut reglevel = self.nvarstack();
-
+        // Variables have already been added to actvar by new_localvar
+        // This function assigns register indices to them and marks them as active
+        let mut reglevel = self.reglevel(self.nactvar);
         for _ in 0..nvars {
-            let vidx = self.nactvar as usize;
-            self.nactvar += 1;
-
-            if let Some(var) = self.actvar.get_mut(vidx) {
-                // All variables (including const) get a ridx assigned
-                // Const variables' ridx is not actually used for register allocation
+            let vidx = self.nactvar;
+            if let Some(var) = self.actvar.get_mut(vidx as usize) {
                 var.ridx = reglevel as i16;
-                reglevel += 1; // Always increment, even for const variables
-
+                reglevel += 1;
                 // Add variable name to chunk's locals for debugging
                 self.chunk.locals.push(var.name.clone());
             }
+            self.nactvar += 1;
         }
-
-        // Note: freereg is NOT updated here - it's updated after each statement
-        // See lparser.c:1912: ls->fs->freereg = luaY_nvarstack(ls->fs);
     }
 
     // Port of reglevel from lparser.c:229-237
@@ -313,12 +305,9 @@ impl<'a> FuncState<'a> {
     pub fn remove_vars(&mut self, tolevel: u8) {
         while self.nactvar > tolevel {
             self.nactvar -= 1;
-            // Note: freereg is NOT decremented here, it's set in leaveblock via reglevel
-            // Also remove from actvar array to avoid "holes"
-            if (self.nactvar as usize) < self.actvar.len() {
-                self.actvar.remove(self.nactvar as usize);
-            }
         }
+        // Also truncate actvar Vec to remove pending variables that were never activated
+        self.actvar.truncate(self.nactvar as usize);
     }
 
     // Port of searchvar from lparser.c (lines 390-404)

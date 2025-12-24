@@ -925,6 +925,27 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
 // static int luaK_exp2K (FuncState *fs, expdesc *e)
 fn exp2k(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
     if !e.has_jumps() {
+        // Handle VCONST: convert compile-time constant to actual constant expression
+        if e.kind == ExpKind::VCONST {
+            let vidx = e.u.info() as usize;
+            if let Some(var) = fs.actvar.get(vidx) {
+                if let Some(value) = var.const_value {
+                    const_to_exp(value, e);
+                    // Continue to process the converted expression
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // Handle VKSTR: convert to VK with proper constant index
+        if e.kind == ExpKind::VKSTR {
+            str2k(fs, e);
+            // Now e.kind is VK, continue below
+        }
+
         let info = match e.kind {
             ExpKind::VTRUE => bool_t(fs),
             ExpKind::VFALSE => bool_f(fs),
@@ -2278,3 +2299,4 @@ pub fn code_extraarg(fs: &mut FuncState, a: u32) -> usize {
     fs.pc += 1;
     pc
 }
+

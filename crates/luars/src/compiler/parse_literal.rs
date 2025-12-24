@@ -298,7 +298,11 @@ fn long_string_value(text: &str) -> Result<String, String> {
 
     let content = &text[i..(text.len() - equal_num - 2)];
 
-    Ok(content.to_string())
+    // Port of llex.c:302-306: normalize all line endings to '\n'
+    // In Lua's read_long_string, both '\n' and '\r' are saved as '\n'
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+
+    Ok(normalized)
 }
 
 fn normal_string_value(text: &str) -> Result<String, String> {
