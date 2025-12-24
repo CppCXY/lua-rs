@@ -318,7 +318,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
         (nparams.wrapping_add(1)) as u32,
         2,
     );
-    
+
     code::fixline(fs, line); // Fix line number for CALL instruction (lparser.c:1063)
     f.kind = ExpKind::VCALL;
     f.u.info = pc as i32;
@@ -521,10 +521,8 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
         // Use indexed to determine VINDEXSTR vs VINDEXED based on key
         let mut tab = ExpDesc::new_void();
         tab.kind = ExpKind::VNONRELOC;
-        unsafe {
-            tab.u.info = cc.table_reg as i32;
-        }
-        
+        tab.u.info = cc.table_reg as i32;
+
         code::indexed(fs, &mut tab, &mut key);
 
         // Generate appropriate store instruction based on tab.kind
@@ -583,16 +581,14 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             let field_idx = string_k(fs, field_name);
             let mut key = ExpDesc::new_void();
             key.kind = ExpKind::VK;
-            unsafe {
-                key.u.info = field_idx as i32;
-            }
+
+            key.u.info = field_idx as i32;
 
             // Create table expression
             let mut tab = ExpDesc::new_void();
             tab.kind = ExpKind::VNONRELOC;
-            unsafe {
-                tab.u.info = cc.table_reg as i32;
-            }
+
+            tab.u.info = cc.table_reg as i32;
 
             // indexed will handle VINDEXSTR vs VINDEXED based on constant index size
             // If field_idx > 255, it will set tab.kind = VINDEXED
@@ -630,7 +626,7 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
                     panic!("Unexpected expression kind in table constructor");
                 }
             }
-            
+
             cc.nh += 1;
             fs.freereg = saved_freereg;
         } else {
@@ -728,8 +724,10 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
 
     // lparser.c:994: If vararg, generate VARARGPREP instruction
+    // A parameter should be the number of fixed parameters (lparser.c:954)
     if is_vararg {
-        code::code_abc(&mut child_fs, OpCode::VarargPrep, 0, 0, 0);
+        let nparams = params.len() as u32;
+        code::code_abc(&mut child_fs, OpCode::VarargPrep, nparams, 0, 0);
     }
 
     // lparser.c:996-999: Register parameters as local variables

@@ -700,7 +700,9 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
 fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     // repeatstat -> REPEAT block UNTIL cond
     fs.lexer.bump(); // skip REPEAT
-    let repeat_init = fs.pc;
+    // lparser.c:1490: int repeat_init = luaK_getlabel(fs);
+    // Mark loop start as jump target to prevent instruction merging
+    let repeat_init = code::getlabel(fs);
 
     let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
@@ -716,18 +718,21 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     statlist(fs)?;
     check_match(fs, LuaTokenKind::TkUntil, LuaTokenKind::TkRepeat, line)?;
 
-    // Parse until condition
+    // Parse until condition (lparser.c:1497)
+    // cond() reads expression and generates jump-if-true
     let mut v = expr(fs)?;
-    code::exp2nextreg(fs, &mut v);
-
-    // Jump back if condition is false
-    code::code_asj(
-        fs,
-        OpCode::Jmp,
-        (repeat_init as isize - fs.pc as isize - 1) as i32,
-    );
+    // Convert nil to false for condition testing (lparser.c:1409)
+    if v.kind == ExpKind::VNIL {
+        v.kind = ExpKind::VFALSE;
+    }
+    // Generate jump if condition is true (exit loop) (lparser.c:1410)
+    code::goiftrue(fs, &mut v);
+    let condexit = v.f; // List of jumps when condition is false
 
     leaveblock(fs);
+
+    // Patch all "false" jumps to loop back to repeat_init (lparser.c:1507)
+    code::patchlist(fs, condexit, repeat_init as isize);
     Ok(())
 }
 

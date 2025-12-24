@@ -291,6 +291,16 @@ pub fn concat(fs: &mut FuncState, l1: &mut isize, l2: isize) {
     }
 }
 
+// Port of luaK_getlabel from lcode.c:233-236
+// int luaK_getlabel (FuncState *fs)
+// Marks current position as a jump target and returns the current pc.
+// This updates lasttarget which prevents instruction merging/optimization
+// at jump targets (e.g., loop entry points should not merge with previous LOADNIL).
+pub fn getlabel(fs: &mut FuncState) -> usize {
+    fs.last_target = fs.pc;
+    fs.pc
+}
+
 // Port of luaK_patchlist from lcode.c:307-310
 // void luaK_patchlist (FuncState *fs, int list, int target)
 pub fn patchlist(fs: &mut FuncState, list: isize, target: isize) {
@@ -568,16 +578,18 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
             code_abx(fs, OpCode::LoadK, reg as u32, unsafe { e.u.info as u32 });
         }
         ExpKind::VKFLT => {
-            // lcode.c:680-687: luaK_float(fs, reg, e->u.nval);
+            // lcode.c:681-687: luaK_float(fs, reg, e->u.nval);
             // Try to use LOADF if float can be exactly represented as integer in sBx range
             let val = unsafe { e.u.nval };
 
             // Check if float can be exactly converted to integer (no fractional part)
             if val.fract() == 0.0 && val.is_finite() {
                 let int_val = val as i64;
-                // Check if integer fits in sBx range: -65536 to 65535
-                // (MAXARG_Bx is typically 2^17-1 = 131071, OFFSET_sBx = 65536)
-                if int_val >= -65536 && int_val <= 65535 {
+                // Check if integer fits in sBx range (17-bit signed): -65535 to 65535
+                // Same range as LOADI (uses fitsBx in official Lua)
+                let max_sbx = (Instruction::MAX_BX - (Instruction::OFFSET_SBX as u32)) as i64;
+                let min_sbx = -(Instruction::OFFSET_SBX as i64);
+                if int_val >= min_sbx && int_val <= max_sbx {
                     // Use LOADF: encodes integer in sBx, loads as float at runtime
                     code_asbx(fs, OpCode::LoadF, reg as u32, int_val as i32);
                 } else {
@@ -592,11 +604,14 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
             }
         }
         ExpKind::VKINT => {
-            // Check if value fits in sBx field (typically 16-bit signed: -2^15 to 2^15-1)
-            // Port of luaK_int from lcode.c:717-724
+            // Check if value fits in sBx field (17-bit signed)
+            // Port of luaK_int from lcode.c:673-678 and fitsBx from lcode.c:668-670
             let ival = unsafe { e.u.ival };
-            // sBx range check: -32768 to 32767 (or -OFFSET_sBx to MAXARG_sBx - OFFSET_sBx)
-            if ival >= i16::MIN as i64 && ival <= i16::MAX as i64 {
+            // sBx range check: -OFFSET_sBx to (MAXARG_Bx - OFFSET_sBx)
+            // OFFSET_sBx = 65535, MAXARG_Bx = 131071, so range is -65535 to 65535
+            let max_sbx = (Instruction::MAX_BX - (Instruction::OFFSET_SBX as u32)) as i64;
+            let min_sbx = -(Instruction::OFFSET_SBX as i64);
+            if ival >= min_sbx && ival <= max_sbx {
                 code_asbx(fs, OpCode::LoadI, reg as u32, ival as i32);
             } else {
                 // Value too large for LOADI, must use LOADK
@@ -1847,7 +1862,13 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     flip,
                 );
             } else {
-                // Both operands in registers - port of codebinexpval (lcode.c:1425-1434)
+                // Both operands in registers - port of codebinNoK (lcode.c:1490-1496)
+                // If we flipped operands for K optimization attempt, swap back to original order
+                if flip {
+                    swapexps(e1, e2);
+                }
+                
+                // Now port of codebinexpval (lcode.c:1425-1434)
                 let o2 = exp2anyreg(fs, e2);
 
                 // Determine instruction opcode

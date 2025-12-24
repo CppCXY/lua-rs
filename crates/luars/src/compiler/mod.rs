@@ -72,6 +72,7 @@ pub fn compile_code_with_name(
     if fs.is_vararg {
         let saved_line = fs.lexer.line;
         fs.lexer.line = 1;
+        // Main function has 0 fixed parameters (lparser.c:954)
         code::code_abc(&mut fs, OpCode::VarargPrep, 0, 0, 0);
         fs.lexer.line = saved_line;
     }
