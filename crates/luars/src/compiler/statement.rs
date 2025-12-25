@@ -97,34 +97,14 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
         }
     }
 
-    // Port of lparser.c:1912: Free registers after statement
+    // Port of lparser.c:2136-2137: Free registers after statement
     // "ls->fs->freereg = luaY_nvarstack(ls->fs);"
     // luaY_nvarstack returns reglevel(fs, fs->nactvar)
-    fs.freereg = nvarstack(fs);
+    // Use the reglevel method from FuncState which correctly handles all variable kinds
+    fs.freereg = fs.nvarstack();
 
     // leavelevel(fs.lexer);
     Ok(())
-}
-
-// Port of reglevel from lparser.c (lines 323-330)
-// Returns the register level (number of registers used) for the first 'nvar' variables
-fn reglevel(fs: &FuncState, mut nvar: u8) -> u8 {
-    while nvar > 0 {
-        nvar -= 1;
-        if let Some(var) = fs.actvar.get(nvar as usize) {
-            if var.kind != VarKind::RDKCTC {
-                // Variable is in a register
-                return (var.ridx + 1) as u8;
-            }
-        }
-    }
-    0
-}
-
-// Port of luaY_nvarstack from lparser.c (line 332)
-// Returns the number of registers used by active variables
-fn nvarstack(fs: &FuncState) -> u8 {
-    reglevel(fs, fs.nactvar)
 }
 
 // Port of testnext from lparser.c
@@ -427,7 +407,7 @@ fn block(fs: &mut FuncState) -> Result<(), String> {
 fn retstat(fs: &mut FuncState) -> Result<(), String> {
     use ExpKind;
     // Port of lparser.c:1816: int first = luaY_nvarstack(fs);
-    let mut first = nvarstack(fs);
+    let mut first = fs.nvarstack();
     let mut nret: i32;
     let mut e = ExpDesc::new_void();
 
@@ -530,7 +510,7 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
         let lb_pc = lb.pc;
         let lb_nactvar = lb.nactvar;
         let lblevel = fs.reglevel(lb_nactvar);
-        let current_level = nvarstack(fs);
+        let current_level = fs.nvarstack();
 
         // If leaving scope of variables, need CLOSE instruction
         if current_level > lblevel {
@@ -760,7 +740,7 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     if bl2_upval {
         let exit = code::jump(fs); // normal exit must jump over fix
         code::patchtohere(fs, condexit); // repetition must close upvalues
-        code::code_abc(fs, OpCode::Close, reglevel(fs, bl2_nactvar) as u32, 0, 0);
+        code::code_abc(fs, OpCode::Close, fs.reglevel(bl2_nactvar) as u32, 0, 0);
         condexit = code::jump(fs) as isize; // repeat after closing upvalues
         code::patchtohere(fs, exit as isize); // normal exit comes to here
     }
@@ -817,13 +797,12 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
 
 fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), String> {
     // fornum -> NAME = exp, exp [,exp] forbody
-    // Port of lparser.c:1568-1590
+    // Port of lparser.c:1685-1704
 
     // Reserve registers for internal loop variables (must be done before parsing expressions)
     let base = fs.freereg;
 
-    // Create 3 internal control variables: (for state), (for state), (for state)
-    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
+    // Create 2 internal control variables (Lua 5.5: only 2, not 3!)
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
 
@@ -851,8 +830,9 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
         code::reserve_regs(fs, 1);
     }
 
-    // Adjust local variables (3 control variables)
-    fs.adjust_local_vars(3);
+    // Adjust local variables (2 internal control variables only!)
+    // The loop variable itself will be adjusted in forbody
+    fs.adjust_local_vars(2);
 
     // Generate FORPREP with initial jump offset 0
     let prep_pc = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
@@ -904,13 +884,12 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
 fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // forlist -> NAME {,NAME} IN explist forbody
-    // Port of lparser.c:1591-1616
-    let mut nvars = 5; // gen, state, control, toclose, 'indexname'
+    // Port of lparser.c:1707-1731
+    let mut nvars = 4; // function, state, closing, control (indexname)
 
     let base = fs.freereg;
 
-    // Create 4 internal control variables
-    fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
+    // Create 3 internal control variables (Lua 5.5: iterator function, state, closing var)
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
@@ -931,22 +910,25 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     let mut e = ExpDesc::new_void();
     let nexps = explist(fs, &mut e)?;
 
-    // Adjust to 4 values (generator, state, control, toclose)
+    // Adjust to 4 values (iterator function, state, closing, control) per lparser.c:1726
     adjust_assign(fs, 4, nexps, &mut e);
 
-    // Activate the 4 control variables
-    fs.adjust_local_vars(4);
+    // Activate the 3 internal control variables (not the control variable yet!)
+    // Per lparser.c:1727: adjustlocalvars(ls, 3);
+    fs.adjust_local_vars(3);
 
-    // lparser.c:1612: marktobeclosed(fs); /* last control var. must be closed */
+    // lparser.c:1728: marktobeclosed(fs); /* last internal var. must be closed */
     mark_to_be_closed(fs);
 
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
 
-    // lparser.c:1552: Generate TFORPREP with Bx=0, will be fixed later
+    // lparser.c:1667: Generate TFORPREP with Bx=0, will be fixed later
     let prep_pc = code::code_abx(fs, OpCode::TForPrep, base as u32, 0);
+    // lparser.c:1668: fs->freereg--; both 'forprep' remove one register from the stack
+    fs.freereg -= 1;
 
-    // lparser.c:1552: enterblock(fs, &bl, 0) - NOT a loop block (for scope of declared vars)
+    // lparser.c:1669: enterblock(fs, &bl, 0) - NOT a loop block (for scope of declared vars)
     let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
         first_label: 0,
@@ -958,23 +940,25 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     });
     enterblock(fs, bl_id, false); // false = not a loop
 
-    // lparser.c:1554: adjustlocalvars(ls, nvars); /* activate declared variables */
-    fs.adjust_local_vars((nvars - 4) as u8);
-    code::reserve_regs(fs, (nvars - 4) as u8);
+    // lparser.c:1670: adjustlocalvars(ls, nvars); /* activate declared variables */
+    // nvars-3 because we already adjusted 3 internal variables
+    fs.adjust_local_vars((nvars - 3) as u8);
+    code::reserve_regs(fs, (nvars - 3) as u8);
 
     block(fs)?;
 
     leaveblock(fs);
 
-    // lparser.c:1558: fixforjump(fs, prep, luaK_getlabel(fs), 0);
+    // lparser.c:1674: fixforjump(fs, prep, luaK_getlabel(fs), 0);
     // Fix TFORPREP to jump to current position (after leaveblock)
     let label_after_block = fs.pc;
     fix_for_jump(fs, prep_pc, label_after_block, false)?;
 
-    // lparser.c:1559-1561: Generate TFORCALL for generic for
-    code::code_abc(fs, OpCode::TForCall, base as u32, 0, (nvars - 4) as u32);
+    // lparser.c:1676: Generate TFORCALL for generic for
+    // nvars-3 because the first 3 are internal variables
+    code::code_abc(fs, OpCode::TForCall, base as u32, 0, (nvars - 3) as u32);
 
-    // lparser.c:1562: Generate TFORLOOP with Bx=0, will be fixed later
+    // lparser.c:1679: Generate TFORLOOP with Bx=0, will be fixed later
     let endfor_pc = code::code_abx(fs, OpCode::TForLoop, base as u32, 0);
 
     // lparser.c:1563: fixforjump(fs, endfor, prep + 1, 1);

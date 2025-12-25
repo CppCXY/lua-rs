@@ -140,6 +140,17 @@ pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool
     pc
 }
 
+// Port of luaK_codevABCk - for vABCk format instructions (NEWTABLE, SETLIST)
+// Used when C field is 10 bits (vC) instead of 8 bits
+pub fn code_vabck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool) -> usize {
+    let instr = Instruction::create_vabck(op, a, b, c, k);
+    let pc = fs.pc;
+    fs.chunk.code.push(instr);
+    fs.chunk.line_info.push(fs.lexer.lastline as u32);
+    fs.pc += 1;
+    pc
+}
+
 // Generate instruction with sJ field (for JMP)
 pub fn code_asj(fs: &mut FuncState, op: OpCode, sj: i32) -> usize {
     let instr = Instruction::create_sj(op, sj);
@@ -2245,21 +2256,21 @@ pub fn hasmultret(e: &ExpDesc) -> bool {
     matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG)
 }
 
-// Port of luaK_setlist from lcode.c:1810-1823
+// Port of luaK_setlist from lcode.c:1892-1911
 pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
     debug_assert!(tostore != 0);
 
     let c = if tostore == LUA_MULTRET { 0 } else { tostore };
 
-    const MAXARG_C: u32 = 255; // 8-bit C field
-
-    if nelems <= MAXARG_C {
-        code_abc(fs, OpCode::SetList, base as u32, c, nelems);
+    // SETLIST uses vABCk format, so vC field is 10 bits (0-1023), not 8 bits (0-255)
+    // From lcode.c:1896: if (nelems <= MAXARG_vC)
+    if nelems <= Instruction::MAX_vC {
+        code_vabck(fs, OpCode::SetList, base as u32, c, nelems, false);
     } else {
-        // Need extra argument for large index
-        let extra = nelems / (MAXARG_C + 1);
-        let c_arg = nelems % (MAXARG_C + 1);
-        code_abck(fs, OpCode::SetList, base as u32, c, c_arg, true);
+        // Need extra argument for large index (lcode.c:1898-1901)
+        let extra = nelems / (Instruction::MAX_vC + 1);
+        let c_arg = nelems % (Instruction::MAX_vC + 1);
+        code_vabck(fs, OpCode::SetList, base as u32, c, c_arg, true);
         code_extraarg(fs, extra);
     }
 
@@ -2279,24 +2290,26 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
         0
     };
 
-    // C field: lower bits of array size (lcode.c:1797)
-    // rc = asize % (MAXARG_C + 1)
-    let rc = asize % (Instruction::MAX_C + 1);
+    // C field: lower bits of array size (lcode.c:1877)
+    // rc = asize % (MAXARG_vC + 1)
+    // Note: NEWTABLE uses vABC format, so vC field is 10 bits (0-1023), not 8 bits (0-255)
+    let rc = asize % (Instruction::MAX_vC + 1);
 
-    // EXTRAARG: higher bits of array size (lcode.c:1796)
-    // extra = asize / (MAXARG_C + 1)
-    let extra = asize / (Instruction::MAX_C + 1);
-    // k flag: true if needs EXTRAARG (lcode.c:1798)
+    // EXTRAARG: higher bits of array size (lcode.c:1876)
+    // extra = asize / (MAXARG_vC + 1)
+    let extra = asize / (Instruction::MAX_vC + 1);
+    // k flag: true if needs EXTRAARG (lcode.c:1878)
     let k = extra > 0;
 
-    // Update the NEWTABLE instruction (lcode.c:1799)
+    // Update the NEWTABLE instruction (lcode.c:1880)
     let inst = &mut fs.chunk.code[pc];
     let opcode = Instruction::get_opcode(*inst);
     debug_assert_eq!(opcode, OpCode::NewTable);
 
-    *inst = Instruction::create_abck(OpCode::NewTable, ra as u32, rb, rc, k);
+    // NEWTABLE uses vABCk format (10-bit vC field), not ABCk format (8-bit C field)
+    *inst = Instruction::create_vabck(OpCode::NewTable, ra as u32, rb, rc, k);
 
-    // Update EXTRAARG instruction (lcode.c:1800)
+    // Update EXTRAARG instruction (lcode.c:1881)
     // *(inst + 1) = CREATE_Ax(OP_EXTRAARG, extra);
     if pc + 1 < fs.chunk.code.len() {
         fs.chunk.code[pc + 1] = Instruction::create_ax(OpCode::ExtraArg, extra);

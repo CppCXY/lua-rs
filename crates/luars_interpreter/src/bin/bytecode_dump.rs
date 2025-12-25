@@ -171,7 +171,9 @@ fn dump_chunk(
         let ax = Instruction::get_ax(instr);
         let sbx = Instruction::get_sbx(instr);
         let k = Instruction::get_k(instr);
-
+        // For vABCk format instructions, also get vB and vC
+        let vb = Instruction::get_vb(instr);
+        let vc = Instruction::get_vc(instr);
         // Get line number for this instruction (luac format)
         let line = if pc < chunk.line_info.len() {
             chunk.line_info[pc]
@@ -207,8 +209,9 @@ fn dump_chunk(
                 format!("SETTABLE {} {} {}{}", a, b, c, k_str)
             }
             OpCode::NewTable => {
+                // NEWTABLE uses vABCk format with vB and vC fields (not B and C)
                 // NEWTABLE never shows k flag (per luac.c:430)
-                format!("NEWTABLE {} {} {}", a, b, c)
+                format!("NEWTABLE {} {} {}", a, vb, vc)
             }
             OpCode::Self_ => {
                 let k_str = if k { "k" } else { "" };
@@ -318,9 +321,10 @@ fn dump_chunk(
                 format!("EQK {} {} {}", a, b, k as u32)
             }
             OpCode::SetList => {
-                // SETLIST A B C k: for i = 1, B do R[A][C+i] := R[A+i] end
+                // SETLIST uses vABCk format with vB and vC fields (not B and C)
+                // SETLIST A vB vC k: for i = 1, vB do R[A][vC+i] := R[A+i] end
                 let k_str = if k { "k" } else { "" };
-                format!("SETLIST {} {} {}{}", a, b, c, k_str)
+                format!("SETLIST {} {} {}{}", a, vb, vc, k_str)
             }
             OpCode::ExtraArg => format!("EXTRAARG {}", ax),
             OpCode::Tbc => format!("TBC {}", a),

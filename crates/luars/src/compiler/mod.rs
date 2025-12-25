@@ -35,7 +35,7 @@ pub fn compile_code_with_name(
     pool: &mut ObjectPool,
     chunk_name: &str,
 ) -> Result<Chunk, String> {
-    let level = LuaLanguageLevel::Lua54;
+    let level = LuaLanguageLevel::Lua55;
     let tokenize_result = {
         let mut lexer = LuaTokenize::new(
             Reader::new(source),

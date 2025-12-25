@@ -239,6 +239,11 @@ impl<'a> LuaTokenize<'a> {
             }
             '#' => {
                 self.reader.bump();
+                if self.reader.is_start_of_line() && self.line == 1 {
+                    self.reader.eat_while(|ch| ch != '\n' && ch != '\r');
+                    return LuaTokenKind::TkShebang;
+                }
+
                 if self.reader.current_char() != '!' {
                     return LuaTokenKind::TkLen;
                 }

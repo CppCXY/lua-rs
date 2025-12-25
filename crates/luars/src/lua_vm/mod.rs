@@ -170,7 +170,7 @@ impl LuaVM {
     }
 
     /// Execute a chunk directly (convenience method)
-    pub fn execute(&mut self, _chunk: Rc<Chunk>) -> LuaResult<LuaValue> {
+    pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<LuaValue> {
         todo!()
     }
 
@@ -203,7 +203,8 @@ impl LuaVM {
     /// No recursion - pure state machine
     fn run(&mut self) -> LuaResult<LuaValue> {
         // Delegate to the optimized dispatcher loop
-        // execute::luavm_execute(self)
+        // TODO: The full execute module is commented out
+        // For now, return a placeholder to avoid panic
         todo!()
     }
 

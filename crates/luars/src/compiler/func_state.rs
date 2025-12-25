@@ -268,10 +268,17 @@ impl<'a> FuncState<'a> {
     // Port of new_localvar from lparser.c
     pub fn new_localvar(&mut self, name: String, kind: VarKind) -> u16 {
         let vidx = self.actvar.len() as u16;
+        // For global variables and compile-time constants, ridx doesn't matter
+        // as they don't occupy stack registers. Set to -1 as a marker.
+        let ridx = if kind.is_global() || kind == VarKind::RDKCTC {
+            -1
+        } else {
+            self.freereg as i16
+        };
         self.actvar.push(VarDesc {
             name,
             kind,
-            ridx: self.freereg as i16,
+            ridx,
             vidx,
             const_value: None, // Initially no const value
         });
@@ -283,7 +290,7 @@ impl<'a> FuncState<'a> {
         self.actvar.get_mut(vidx as usize)
     }
 
-    // Port of adjustlocalvars from lparser.c:311-321
+    // Port of adjustlocalvars from lparser.c:329-338
     pub fn adjust_local_vars(&mut self, nvars: u8) {
         // Variables have already been added to actvar by new_localvar
         // This function assigns register indices to them and marks them as active
@@ -300,13 +307,15 @@ impl<'a> FuncState<'a> {
         }
     }
 
-    // Port of reglevel from lparser.c:229-237
+    // Port of reglevel from lparser.c:236-242
     // Returns the register level for variables outside the block
+    // Matches Lua 5.5's: while (nvar-- > 0) { if (varinreg(vd)) return vd->ridx + 1; }
     pub fn reglevel(&self, nvar: u8) -> u8 {
         let mut n = nvar as i32 - 1;
         while n >= 0 {
             if let Some(vd) = self.actvar.get(n as usize) {
-                if vd.kind != VarKind::RDKCTC {
+                // Use is_in_reg() which matches varinreg(v) macro: (v->vd.kind <= RDKTOCLOSE)
+                if vd.kind.is_in_reg() {
                     return (vd.ridx + 1) as u8;
                 }
             }

@@ -111,6 +111,9 @@ impl Instruction {
     pub const SIZE_B: u32 = 8;
     pub const SIZE_C: u32 = 8;
     pub const SIZE_K: u32 = 1;
+    // vABC format fields (variable-size B and C)
+    pub const SIZE_vB: u32 = 6;
+    pub const SIZE_vC: u32 = 10;
     pub const SIZE_BX: u32 = Self::SIZE_C + Self::SIZE_B + Self::SIZE_K; // 17
     pub const SIZE_AX: u32 = Self::SIZE_BX + Self::SIZE_A; // 25
     pub const SIZE_SJ: u32 = Self::SIZE_BX + Self::SIZE_A; // 25
@@ -121,6 +124,9 @@ impl Instruction {
     pub const POS_K: u32 = Self::POS_A + Self::SIZE_A;
     pub const POS_B: u32 = Self::POS_K + Self::SIZE_K;
     pub const POS_C: u32 = Self::POS_B + Self::SIZE_B;
+    // vABC format positions
+    pub const POS_vB: u32 = Self::POS_K + Self::SIZE_K;
+    pub const POS_vC: u32 = Self::POS_vB + Self::SIZE_vB;
     pub const POS_BX: u32 = Self::POS_K;
     pub const POS_AX: u32 = Self::POS_A;
     pub const POS_SJ: u32 = Self::POS_A;
@@ -129,6 +135,8 @@ impl Instruction {
     pub const MAX_A: u32 = (1 << Self::SIZE_A) - 1;
     pub const MAX_B: u32 = (1 << Self::SIZE_B) - 1;
     pub const MAX_C: u32 = (1 << Self::SIZE_C) - 1;
+    pub const MAX_vB: u32 = (1 << Self::SIZE_vB) - 1;
+    pub const MAX_vC: u32 = (1 << Self::SIZE_vC) - 1;
     pub const MAX_BX: u32 = (1 << Self::SIZE_BX) - 1;
     pub const MAX_AX: u32 = (1 << Self::SIZE_AX) - 1;
     pub const MAX_SJ: u32 = (1 << Self::SIZE_SJ) - 1;
@@ -261,6 +269,17 @@ impl Instruction {
         Self::set_arg(i, (v + Self::OFFSET_SJ) as u32, Self::POS_SJ, Self::SIZE_SJ);
     }
 
+    // Get vB and vC fields for vABCk format instructions (like NEWTABLE, SETLIST)
+    #[inline(always)]
+    pub fn get_vb(i: u32) -> u32 {
+        Self::get_arg(i, Self::POS_vB, Self::SIZE_vB)
+    }
+
+    #[inline(always)]
+    pub fn get_vc(i: u32) -> u32 {
+        Self::get_arg(i, Self::POS_vC, Self::SIZE_vC)
+    }
+
     // Instruction creation
     pub fn create_abc(op: OpCode, a: u32, b: u32, c: u32) -> u32 {
         ((op as u32) << Self::POS_OP) | (a << Self::POS_A) | (b << Self::POS_B) | (c << Self::POS_C)
@@ -272,6 +291,16 @@ impl Instruction {
             | ((if k { 1 } else { 0 }) << Self::POS_K)
             | (b << Self::POS_B)
             | (c << Self::POS_C)
+    }
+
+    // Create instruction in vABCk format (variable-size B and C fields)
+    // Used for instructions like NEWTABLE where C field is 10 bits instead of 8
+    pub fn create_vabck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> u32 {
+        ((op as u32) << Self::POS_OP)
+            | (a << Self::POS_A)
+            | ((if k { 1 } else { 0 }) << Self::POS_K)
+            | (b << Self::POS_vB)
+            | (c << Self::POS_vC)
     }
 
     pub fn create_abx(op: OpCode, a: u32, bx: u32) -> u32 {
