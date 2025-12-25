@@ -363,12 +363,10 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         if info != -1 {
             // info >= 0 means we're in scope of a collective declaration
             let abs_idx = info as usize;
-            if let Some(vd) = fs.actvar.get(abs_idx - fs.first_local) {
+            if let Some(vd) = fs.actvar.get(abs_idx) {
                 if vd.kind == VarKind::GDKCONST {
                     // lparser.c:530: var->u.ind.ro = 1; /* mark variable as read-only */
-                    if let ExpUnion::Ind(ref mut ind) = v.u {
-                        ind.ro = true;
-                    }
+                    v.u.ind_mut().ro = true;
                 }
             }
         }
