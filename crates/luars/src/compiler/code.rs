@@ -883,16 +883,23 @@ pub fn string_k(fs: &mut FuncState, s: String) -> usize {
 //   e->u.info = stringK(fs, e->u.strval);
 //   e->k = VK;
 // }
+// Port of str2K from lcode.c:774-779
+// static int str2K (FuncState *fs, expdesc *e) {
+//   lua_assert(e->k == VKSTR);
+//   e->u.info = stringK(fs, e->u.strval);
+//   e->k = VK;
+//   return e->u.info;
+// }
+// In our Rust implementation, VKSTR already contains the constant index in u.info
+// (set by string_k when creating the expression), so we just change the kind.
 fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
-    if e.kind == ExpKind::VKSTR {
-        // String is already in constants (stored in e.u.info), just change kind
-        e.kind = ExpKind::VK;
-        let string_id = StringId(e.u.info() as u32);
-        let value = LuaValue::string(string_id);
-        // For strings, key == value
-        let const_idx = add_constant(fs, value);
-        e.u = ExpUnion::Info(const_idx as i32);
-    }
+    debug_assert!(e.kind == ExpKind::VKSTR);
+    // In Lua C, VKSTR stores TString* in u.strval, and str2K calls stringK to get index
+    // In our Rust code, VKSTR already stores the constant table index in u.info
+    // (set when the VKSTR expression was created), so just change the kind
+    e.kind = ExpKind::VK;
+    // u.info already contains the correct constant index, no need to change it
+    let _ = fs; // Suppress unused warning
 }
 
 // Helper to add constant to chunk
@@ -2083,10 +2090,12 @@ pub fn exp2val(fs: &mut FuncState, e: &mut ExpDesc) {
 // Port of luaK_indexed from lcode.c:1280-1310
 // void luaK_indexed (FuncState *fs, expdesc *t, expdesc *k)
 pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
-    // Convert string to constant if needed
+    // lcode.c:1358-1360: int keystr = -1; if (k->k == VKSTR) keystr = str2K(fs, k);
+    let mut keystr: i32 = -1;
     if k.kind == ExpKind::VKSTR {
         // str2K - convert to constant
         str2k(fs, k);
+        keystr = k.u.info();
     }
 
     // Table must be in local/nonreloc/upval
@@ -2100,7 +2109,7 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
             t: temp as i16,
             idx: k.u.info() as i16,
             ro: false,
-            keystr: -1,
+            keystr: keystr,  // lcode.c:1394: t->u.ind.keystr = keystr;
         });
         t.kind = ExpKind::VINDEXUP;
     } else {
@@ -2121,6 +2130,8 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
             t.u.ind_mut().idx = exp2anyreg(fs, k) as i16;
             t.kind = ExpKind::VINDEXED;
         }
+        // lcode.c:1394: t->u.ind.keystr = keystr;
+        t.u.ind_mut().keystr = keystr;
     }
 }
 
@@ -2172,24 +2183,16 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     reserve_regs(fs, 2); // function and 'self'
 
     // SELF A B C: R(A+1) := R(B); R(A) := R(B)[RK(C)]
-    // Follow Lua 5.5: only emit OP_SELF with k=0 when method name is a short string
-    // and can be represented as a constant index (exp2k). Otherwise, fallback to
-    // MOVE + GETTABLE sequence.
-    if matches!(key.kind, ExpKind::VKSTR) {
-        // Try to convert string constant to VK (constant table)
-        if exp2k(fs, key) {
-            // Emit OP_SELF with k = 0 (never set k for SELF)
-            code_abck(fs, OpCode::Self_, base as u32, ereg as u32, key.u.info() as u32, false);
-        } else {
-            // Fallback: put method name in a register and emit MOVE + GETTABLE
-            exp2anyreg(fs, key);
-            code_abc(fs, OpCode::Move, (base + 1) as u32, ereg as u32, 0);
-            // key.u.info now holds register or constant index as appropriate
-            let kc = key.u.info() as u32;
-            code_abc(fs, OpCode::GetTable, base as u32, ereg as u32, kc);
-        }
+    // Follow Lua 5.5: only emit OP_SELF when method name is a string constant
+    // in the constant table. Otherwise, fallback to MOVE + GETTABLE sequence.
+    // Note: In our implementation, method names are already converted to VK by expr_parser.rs
+    // (see suffixedexp), so we check for VK instead of VKSTR.
+    if key.kind == ExpKind::VK && key.u.info() >= 0 && (key.u.info() as usize) <= MAXINDEXRK {
+        // Method name is a constant in valid K index range
+        // Emit OP_SELF with k = 0 (Lua 5.5 never sets k flag for SELF)
+        code_abck(fs, OpCode::Self_, base as u32, ereg as u32, key.u.info() as u32, false);
     } else {
-        // If key is not a string literal, use generic path
+        // Fallback: put method name in a register and emit MOVE + GETTABLE
         exp2anyreg(fs, key);
         code_abc(fs, OpCode::Move, (base + 1) as u32, ereg as u32, 0);
         let kc = key.u.info() as u32;
@@ -2285,12 +2288,12 @@ pub fn setlist(fs: &mut FuncState, base: u8, nelems: u32, tostore: u32) {
 
     // SETLIST uses vABCk format, so vC field is 10 bits (0-1023), not 8 bits (0-255)
     // From lcode.c:1896: if (nelems <= MAXARG_vC)
-    if nelems <= Instruction::MAX_vC {
+    if nelems <= Instruction::MAX_V_C {
         code_vabck(fs, OpCode::SetList, base as u32, c, nelems, false);
     } else {
         // Need extra argument for large index (lcode.c:1898-1901)
-        let extra = nelems / (Instruction::MAX_vC + 1);
-        let c_arg = nelems % (Instruction::MAX_vC + 1);
+        let extra = nelems / (Instruction::MAX_V_C + 1);
+        let c_arg = nelems % (Instruction::MAX_V_C + 1);
         code_vabck(fs, OpCode::SetList, base as u32, c, c_arg, true);
         code_extraarg(fs, extra);
     }
@@ -2314,11 +2317,11 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
     // C field: lower bits of array size (lcode.c:1877)
     // rc = asize % (MAXARG_vC + 1)
     // Note: NEWTABLE uses vABC format, so vC field is 10 bits (0-1023), not 8 bits (0-255)
-    let rc = asize % (Instruction::MAX_vC + 1);
+    let rc = asize % (Instruction::MAX_V_C + 1);
 
     // EXTRAARG: higher bits of array size (lcode.c:1876)
     // extra = asize / (MAXARG_vC + 1)
-    let extra = asize / (Instruction::MAX_vC + 1);
+    let extra = asize / (Instruction::MAX_V_C + 1);
     // k flag: true if needs EXTRAARG (lcode.c:1878)
     let k = extra > 0;
 
@@ -2347,3 +2350,44 @@ pub fn code_extraarg(fs: &mut FuncState, a: u32) -> usize {
     pc
 }
 
+// Port of luaK_codecheckglobal from lcode.c:715-726
+// void luaK_codecheckglobal (FuncState *fs, expdesc *var, int k, int line)
+pub fn codecheckglobal(fs: &mut FuncState, var: &mut ExpDesc, mut k: i32, line: usize) {
+    // lcode.c:716: luaK_exp2anyreg(fs, var);
+    exp2anyreg(fs, var);
+    
+    // lcode.c:717: luaK_fixline(fs, line);
+    fixline(fs, line);
+    
+    // lcode.c:718: k = (k >= MAXARG_Bx) ? 0 : k + 1;
+    // This modifies k in-place!
+    const MAX_BX: i32 = (1 << 17) - 1; // 17 bits for Bx field
+    k = if k >= MAX_BX { 
+        0 
+    } else { 
+        k + 1 
+    };
+    
+    // lcode.c:719: luaK_codeABx(fs, OP_ERRNNIL, var->u.info, k);
+    code_abx(fs, OpCode::ErrNNil, var.u.info() as u32, k as u32);
+    
+    // lcode.c:720: luaK_fixline(fs, line);
+    fixline(fs, line);
+    
+    // lcode.c:721: freeexp(fs, var);
+    // Port of freeexp from lcode.c:525-527
+    // static void freeexp (FuncState *fs, expdesc *e) {
+    //   if (e->k == VNONRELOC)
+    //     freereg(fs, e->u.info);
+    // }
+    if var.kind == ExpKind::VNONRELOC {
+        // freereg is just freering = reg (lcode.c:401-404)
+        // We don't have a freereg function, so just decrease freereg
+        // Actually we should call reserveregs with negative value, but that's not how Rust works
+        // In Lua, freereg(fs, r) does: fs->freereg = r (lcode.c:403)
+        let reg = var.u.info() as u8;
+        if fs.freereg > reg {
+            fs.freereg = reg;
+        }
+    }
+}

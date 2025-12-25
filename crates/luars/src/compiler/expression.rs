@@ -11,6 +11,7 @@ pub enum ExpKind {
     VKSTR,  // string constant; strval = TString address
     VNONRELOC, // expression has its value in a fixed register; info = result register
     VLOCAL, // local variable; var.ridx = register index; var.vidx = relative index in 'actvar.arr'
+    VVARGVAR, // vararg parameter; var.ridx = register index; var.vidx = relative index in 'actvar.arr'
     VUPVAL, // upvalue variable; info = index of upvalue in 'upvalues'
     VCONST, // compile-time <const> variable; info = absolute index in 'actvar.arr'
     VGLOBAL, // Lua 5.5: global variable declaration; info = index in actvar for global name

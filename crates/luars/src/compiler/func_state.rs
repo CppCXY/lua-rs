@@ -339,27 +339,55 @@ impl<'a> FuncState<'a> {
         self.actvar.truncate(self.nactvar as usize);
     }
 
-    // Port of searchvar from lparser.c (lines 390-404)
+    // Port of searchvar from lparser.c (lines 414-443)
     pub fn searchvar(&self, name: &str, var: &mut ExpDesc) -> i32 {
         for i in (0..self.nactvar as usize).rev() {
             if let Some(vd) = self.actvar.get(i) {
-                if vd.name == name {
+                // Check for global declaration (lparser.c:419)
+                if vd.kind.is_global() {
+                    // lparser.c:420-421: collective declaration?
+                    if vd.name.is_empty() {
+                        // lparser.c:421-422: no previous collective declaration?
+                        if var.u.info() < 0 {
+                            // This is the first one - record its position
+                            var.u = ExpUnion::Info((self.first_local + i) as i32);
+                        }
+                    } else {
+                        // lparser.c:424: global name
+                        if vd.name == name {
+                            // lparser.c:425-426: found!
+                            *var = ExpDesc::new_void();
+                            var.kind = ExpKind::VGLOBAL;
+                            var.u = ExpUnion::Info((self.first_local + i) as i32);
+                            return ExpKind::VGLOBAL as i32;
+                        } else if var.u.info() == -1 {
+                            // lparser.c:428-429: active preambular declaration?
+                            // Invalidate preambular declaration
+                            var.u = ExpUnion::Info(-2);
+                        }
+                    }
+                } else if vd.name == name {
+                    // lparser.c:432: local variable found
                     if vd.kind == VarKind::RDKCTC {
-                        // VCONST: store variable index in u.info for check_readonly
+                        // lparser.c:433: compile-time constant
                         *var = ExpDesc::new_void();
                         var.kind = ExpKind::VCONST;
-                        var.u = ExpUnion::Info(i as i32);
+                        var.u = ExpUnion::Info((self.first_local + i) as i32);
                         return ExpKind::VCONST as i32;
                     } else {
-                        // Get register index from variable descriptor
+                        // lparser.c:435-439: regular local variable
                         let ridx = vd.ridx as u8;
                         *var = ExpDesc::new_local(ridx, i as u16);
-                        return ExpKind::VLOCAL as i32;
+                        // lparser.c:437-438: vararg parameter?
+                        if vd.kind == VarKind::RDKVAVAR {
+                            var.kind = ExpKind::VVARGVAR;
+                        }
+                        return var.kind as i32;
                     }
                 }
             }
         }
-        -1
+        -1  // lparser.c:442: not found
     }
 
     // Port of searchupvalue from lparser.c (lines 340-351)

@@ -111,9 +111,9 @@ impl Instruction {
     pub const SIZE_B: u32 = 8;
     pub const SIZE_C: u32 = 8;
     pub const SIZE_K: u32 = 1;
-    // vABC format fields (variable-size B and C)
-    pub const SIZE_vB: u32 = 6;
-    pub const SIZE_vC: u32 = 10;
+    // vABC format fields (variable-size B and C) - note: lowercase 'v' per Lua 5.5
+    pub const SIZE_V_B: u32 = 6;
+    pub const SIZE_V_C: u32 = 10;
     pub const SIZE_BX: u32 = Self::SIZE_C + Self::SIZE_B + Self::SIZE_K; // 17
     pub const SIZE_AX: u32 = Self::SIZE_BX + Self::SIZE_A; // 25
     pub const SIZE_SJ: u32 = Self::SIZE_BX + Self::SIZE_A; // 25
@@ -124,9 +124,9 @@ impl Instruction {
     pub const POS_K: u32 = Self::POS_A + Self::SIZE_A;
     pub const POS_B: u32 = Self::POS_K + Self::SIZE_K;
     pub const POS_C: u32 = Self::POS_B + Self::SIZE_B;
-    // vABC format positions
-    pub const POS_vB: u32 = Self::POS_K + Self::SIZE_K;
-    pub const POS_vC: u32 = Self::POS_vB + Self::SIZE_vB;
+    // vABC format positions - note: lowercase 'v' per Lua 5.5
+    pub const POS_V_B: u32 = Self::POS_K + Self::SIZE_K;
+    pub const POS_V_C: u32 = Self::POS_V_B + Self::SIZE_V_B;
     pub const POS_BX: u32 = Self::POS_K;
     pub const POS_AX: u32 = Self::POS_A;
     pub const POS_SJ: u32 = Self::POS_A;
@@ -135,8 +135,8 @@ impl Instruction {
     pub const MAX_A: u32 = (1 << Self::SIZE_A) - 1;
     pub const MAX_B: u32 = (1 << Self::SIZE_B) - 1;
     pub const MAX_C: u32 = (1 << Self::SIZE_C) - 1;
-    pub const MAX_vB: u32 = (1 << Self::SIZE_vB) - 1;
-    pub const MAX_vC: u32 = (1 << Self::SIZE_vC) - 1;
+    pub const MAX_V_B: u32 = (1 << Self::SIZE_V_B) - 1;
+    pub const MAX_V_C: u32 = (1 << Self::SIZE_V_C) - 1;
     pub const MAX_BX: u32 = (1 << Self::SIZE_BX) - 1;
     pub const MAX_AX: u32 = (1 << Self::SIZE_AX) - 1;
     pub const MAX_SJ: u32 = (1 << Self::SIZE_SJ) - 1;
@@ -272,12 +272,12 @@ impl Instruction {
     // Get vB and vC fields for vABCk format instructions (like NEWTABLE, SETLIST)
     #[inline(always)]
     pub fn get_vb(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_vB, Self::SIZE_vB)
+        Self::get_arg(i, Self::POS_V_B, Self::SIZE_V_B)
     }
 
     #[inline(always)]
     pub fn get_vc(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_vC, Self::SIZE_vC)
+        Self::get_arg(i, Self::POS_V_C, Self::SIZE_V_C)
     }
 
     // Instruction creation
@@ -299,8 +299,8 @@ impl Instruction {
         ((op as u32) << Self::POS_OP)
             | (a << Self::POS_A)
             | ((if k { 1 } else { 0 }) << Self::POS_K)
-            | (b << Self::POS_vB)
-            | (c << Self::POS_vC)
+            | (b << Self::POS_V_B)
+            | (c << Self::POS_V_C)
     }
 
     pub fn create_abx(op: OpCode, a: u32, bx: u32) -> u32 {

@@ -336,34 +336,81 @@ fn yindex(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     Ok(())
 }
 
-// Port of singlevar from lparser.c (lines 463-474)
+// Port of singlevar/buildvar from lparser.c (lines 520-534)
 pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     let name = fs.lexer.current_token_text().to_string();
     fs.lexer.bump();
 
-    // Call singlevaraux with base=1
+    // lparser.c:522: global by default
+    init_exp(v, ExpKind::VGLOBAL, -1);
+    
+    // lparser.c:523: Call singlevaraux with base=1
     singlevaraux(fs, &name, v, true);
 
-    // If global name (VVOID), access through _ENV
-    if v.kind == ExpKind::VVOID {
-        // Get environment variable (_ENV)
-        singlevaraux(fs, "_ENV", v, true);
-
-        // _ENV must exist
-        if v.kind == ExpKind::VVOID {
-            return Err("_ENV not found".to_string());
+    // lparser.c:524: If global name?
+    if v.kind == ExpKind::VGLOBAL {
+        let info = v.u.info();
+        
+        // lparser.c:526-527: global by default in the scope of a global declaration?
+        if info == -2 {
+            return Err(format!("variable '{}' not declared", name));
         }
-
-        code::exp2anyregup(fs, v);
-
-        // Key is variable name
-        let k_idx = string_k(fs, name);
-        let mut key = ExpDesc::new_k(k_idx);
-
-        // env[varname]
-        code::indexed(fs, v, &mut key);
+        
+        // lparser.c:528: buildglobal(ls, varname, var)
+        buildglobal(fs, &name, v)?;
+        
+        // lparser.c:529-531: check if it's a const global (in collective declaration scope)
+        if info != -1 {
+            // info >= 0 means we're in scope of a collective declaration
+            let abs_idx = info as usize;
+            if let Some(vd) = fs.actvar.get(abs_idx - fs.first_local) {
+                if vd.kind == VarKind::GDKCONST {
+                    // lparser.c:530: var->u.ind.ro = 1; /* mark variable as read-only */
+                    if let ExpUnion::Ind(ref mut ind) = v.u {
+                        ind.ro = true;
+                    }
+                }
+            }
+        }
     }
 
+    Ok(())
+}
+
+// Port of buildglobal from lparser.c (lines 502-513)
+pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Result<(), String> {
+    // lparser.c:505: global by default
+    init_exp(var, ExpKind::VGLOBAL, -1);
+    
+    // lparser.c:506: get environment variable (_ENV)
+    singlevaraux(fs, "_ENV", var, true);
+    
+    // lparser.c:507-509: _ENV is global when accessing variable?
+    if var.kind == ExpKind::VGLOBAL {
+        return Err(format!("_ENV is global when accessing variable '{}'", varname));
+    }
+    
+    // lparser.c:510: _ENV could be a constant
+    code::exp2anyregup(fs, var);
+    
+    // lparser.c:511: codestring(&key, varname); /* key is variable name */
+    // Port of codestring from lparser.c:159-164
+    // static void codestring (expdesc *e, TString *s) {
+    //   e->f = e->t = NO_JUMP;
+    //   e->k = VKSTR;
+    //   e->u.strval = s;
+    // }
+    // Create key as VKSTR (not VK) so indexed can track it correctly
+    let k_idx = string_k(fs, varname.to_string());
+    let mut key = ExpDesc::new_void();
+    key.kind = ExpKind::VKSTR;
+    key.u = ExpUnion::Info(k_idx as i32);
+    key.t = -1;
+    key.f = -1;
+    
+    // lparser.c:512: var represents _ENV[varname]
+    code::indexed(fs, var, &mut key);
+    
     Ok(())
 }
 
@@ -399,9 +446,9 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
                     let idx = fs.newupvalue(name, var) as u8;
                     init_exp(var, ExpKind::VUPVAL, idx as i32);
                 }
-            } else {
-                init_exp(var, ExpKind::VVOID, 0);
             }
+            // lparser.c:498-503: else it's a global or constant, don't change anything (return)
+            // Don't set to VVOID - preserve VGLOBAL/VCONST from earlier initialization
         } else {
             init_exp(var, ExpKind::VUPVAL, vidx as i32);
         }

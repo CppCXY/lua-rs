@@ -378,6 +378,9 @@ fn dump_chunk(
             OpCode::Test => format!("TEST {} {}", a, k as u32),
             OpCode::TestSet => format!("TESTSET {} {} {}", a, b, k as u32),
 
+            // Lua 5.5: ERRNNIL instruction (ABx format)
+            OpCode::ErrNNil => format!("ERRNNIL {} {}", a, bx),
+
             _ => format!("{:?} {} {} {}", opcode, a, b, c),
         };
 
@@ -423,6 +426,15 @@ fn dump_chunk(
                 // Show constant value（对齐luac）
                 if bx < chunk.constants.len() as u32 {
                     format!(" ; {}", format_constant(chunk, bx, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::ErrNNil => {
+                // ERRNNIL A Bx: check R[A] ~= nil, Bx-1 is index of global name
+                // Bx = k + 1, so k = Bx - 1
+                if bx > 0 && (bx - 1) < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, bx - 1, vm))
                 } else {
                     String::new()
                 }
