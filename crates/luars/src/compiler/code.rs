@@ -2172,8 +2172,29 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     reserve_regs(fs, 2); // function and 'self'
 
     // SELF A B C: R(A+1) := R(B); R(A) := R(B)[RK(C)]
-    // Use code_abrk to support constant keys
-    code_abrk(fs, OpCode::Self_, base as u32, ereg as u32, key);
+    // Follow Lua 5.5: only emit OP_SELF with k=0 when method name is a short string
+    // and can be represented as a constant index (exp2k). Otherwise, fallback to
+    // MOVE + GETTABLE sequence.
+    if matches!(key.kind, ExpKind::VKSTR) {
+        // Try to convert string constant to VK (constant table)
+        if exp2k(fs, key) {
+            // Emit OP_SELF with k = 0 (never set k for SELF)
+            code_abck(fs, OpCode::Self_, base as u32, ereg as u32, key.u.info() as u32, false);
+        } else {
+            // Fallback: put method name in a register and emit MOVE + GETTABLE
+            exp2anyreg(fs, key);
+            code_abc(fs, OpCode::Move, (base + 1) as u32, ereg as u32, 0);
+            // key.u.info now holds register or constant index as appropriate
+            let kc = key.u.info() as u32;
+            code_abc(fs, OpCode::GetTable, base as u32, ereg as u32, kc);
+        }
+    } else {
+        // If key is not a string literal, use generic path
+        exp2anyreg(fs, key);
+        code_abc(fs, OpCode::Move, (base + 1) as u32, ereg as u32, 0);
+        let kc = key.u.info() as u32;
+        code_abc(fs, OpCode::GetTable, base as u32, ereg as u32, kc);
+    }
     free_exp(fs, key);
 }
 
