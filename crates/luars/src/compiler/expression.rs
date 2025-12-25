@@ -13,6 +13,7 @@ pub enum ExpKind {
     VLOCAL, // local variable; var.ridx = register index; var.vidx = relative index in 'actvar.arr'
     VUPVAL, // upvalue variable; info = index of upvalue in 'upvalues'
     VCONST, // compile-time <const> variable; info = absolute index in 'actvar.arr'
+    VGLOBAL, // Lua 5.5: global variable declaration; info = index in actvar for global name
     VINDEXED, // indexed variable; ind.t = table register; ind.idx = key's R index
     VINDEXUP, // indexed upvalue; ind.t = upvalue; ind.idx = key's K index
     VINDEXI, // indexed variable with constant integer; ind.t = table register; ind.idx = key's value
@@ -78,7 +79,12 @@ impl ExpUnion {
         match self {
             ExpUnion::Ind(ind) => ind,
             _ => {
-                *self = ExpUnion::Ind(IndVars { t: -1, idx: -1 });
+                *self = ExpUnion::Ind(IndVars { 
+                    t: -1, 
+                    idx: -1, 
+                    ro: false, 
+                    keystr: -1 
+                });
                 if let ExpUnion::Ind(ind) = self {
                     ind
                 } else {
@@ -98,8 +104,10 @@ impl ExpUnion {
 
 #[derive(Clone, Copy)]
 pub struct IndVars {
-    pub t: i16,   // table (register or upvalue)
-    pub idx: i16, // index (register or constant)
+    pub t: i16,      // table (register or upvalue)
+    pub idx: i16,    // index (R or "long" K)
+    pub ro: bool,    // true if variable is read-only
+    pub keystr: i32, // index in 'k' of string key, or -1 if not a string
 }
 
 #[derive(Clone, Copy)]
@@ -208,6 +216,8 @@ impl ExpDesc {
             u: ExpUnion::Ind(IndVars {
                 t: t as i16,
                 idx: idx as i16,
+                ro: false,
+                keystr: -1,
             }),
             t: -1,
             f: -1,

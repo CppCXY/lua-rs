@@ -1,5 +1,5 @@
 -- $Id: testes/gc.lua $
--- See Copyright Notice in file all.lua
+-- See Copyright Notice in file lua.h
 
 print('testing incremental garbage collection')
 
@@ -27,24 +27,51 @@ end
 
 -- test weird parameters to 'collectgarbage'
 do
-  -- save original parameters
-  local a = collectgarbage("setpause", 200)
-  local b = collectgarbage("setstepmul", 200)
+  collectgarbage("incremental")
+  local opause = collectgarbage("param", "pause", 100)
+  local ostepmul = collectgarbage("param", "stepmul", 100)
+  assert(collectgarbage("param", "pause") == 100)
+  assert(collectgarbage("param", "stepmul") == 100)
   local t = {0, 2, 10, 90, 500, 5000, 30000, 0x7ffffffe}
   for i = 1, #t do
-    local p = t[i]
+    collectgarbage("param", "pause", t[i])
     for j = 1, #t do
-      local m = t[j]
-      collectgarbage("setpause", p)
-      collectgarbage("setstepmul", m)
-      collectgarbage("step", 0)
-      collectgarbage("step", 10000)
+      collectgarbage("param", "stepmul", t[j])
+      collectgarbage("step", t[j])
     end
   end
   -- restore original parameters
-  collectgarbage("setpause", a)
-  collectgarbage("setstepmul", b)
+  collectgarbage("param", "pause", opause)
+  collectgarbage("param", "stepmul", ostepmul)
   collectgarbage()
+end
+
+
+--
+-- test the "size" of basic GC steps (whatever they mean...)
+--
+do  print("steps")
+
+  local function dosteps (siz)
+    collectgarbage()
+    local a = {}
+    for i=1,100 do a[i] = {{}}; local b = {} end
+    local x = gcinfo()
+    local i = 0
+    repeat   -- do steps until it completes a collection cycle
+      i = i+1
+    until collectgarbage("step", siz)
+    assert(gcinfo() < x)
+    return i    -- number of steps
+  end
+
+
+  if not _port then
+    collectgarbage"stop"
+    assert(dosteps(10) < dosteps(2))
+    collectgarbage"restart"
+  end
+
 end
 
 
@@ -174,45 +201,6 @@ do
 end
 
 
---
--- test the "size" of basic GC steps (whatever they mean...)
---
-do
-print("steps")
-
-  print("steps (2)")
-
-  local function dosteps (siz)
-    collectgarbage()
-    local a = {}
-    for i=1,100 do a[i] = {{}}; local b = {} end
-    local x = gcinfo()
-    local i = 0
-    repeat   -- do steps until it completes a collection cycle
-      i = i+1
-    until collectgarbage("step", siz)
-    assert(gcinfo() < x)
-    return i    -- number of steps
-  end
-
-  collectgarbage"stop"
-
-  if not _port then
-    assert(dosteps(10) < dosteps(2))
-  end
-
-  -- collector should do a full collection with so many steps
-  assert(dosteps(20000) == 1)
-  assert(collectgarbage("step", 20000) == true)
-  assert(collectgarbage("step", 20000) == true)
-
-  assert(not collectgarbage("isrunning"))
-  collectgarbage"restart"
-  assert(collectgarbage("isrunning"))
-
-end
-
-
 if not _port then
   -- test the pace of the collector
   collectgarbage(); collectgarbage()
@@ -300,11 +288,16 @@ x,y,z=nil
 collectgarbage()
 assert(next(a) == string.rep('$', 11))
 
+do   -- invalid mode
+  local a = setmetatable({}, {__mode = 34})
+  collectgarbage()
+end
+
 
 if T then   -- bug since 5.3: all-weak tables are not being revisited
   T.gcstate("propagate")
   local t = setmetatable({}, {__mode = "kv"})
-  T.gcstate("atomic")   -- 't' was visited
+  T.gcstate("enteratomic")   -- 't' was visited
   setmetatable(t, {__mode = "kv"})
   T.gcstate("pause")  -- its new metatable is not being visited
   assert(getmetatable(t).__mode == "kv")
@@ -468,12 +461,9 @@ do   -- tests for string keys in weak tables
   local m = collectgarbage("count")         -- current memory
   local a = setmetatable({}, {__mode = "kv"})
   a[string.rep("a", 2^22)] = 25   -- long string key -> number value
-  a[string.rep("b", 2^22)] = {}   -- long string key -> colectable value
-  a[{}] = 14                     -- colectable key
-  assert(collectgarbage("count") > m + 2^13)    -- 2^13 == 2 * 2^22 in KB
+  a[string.rep("b", 2^22)] = {}   -- long string key -> collectable value
+  a[{}] = 14                     -- collectable key
   collectgarbage()
-  assert(collectgarbage("count") >= m + 2^12 and
-        collectgarbage("count") < m + 2^13)    -- one key was collected
   local k, v = next(a)   -- string key with number value preserved
   assert(k == string.rep("a", 2^22) and v == 25)
   assert(next(a, k) == nil)  -- everything else cleared
@@ -484,7 +474,7 @@ do   -- tests for string keys in weak tables
   assert(next(a) == nil)
   -- make sure will not try to compare with dead key
   assert(a[string.rep("b", 100)] == undef)
-  assert(collectgarbage("count") <= m + 1)   -- eveything collected
+  assert(collectgarbage("count") <= m + 1)   -- everything collected
 end
 
 
@@ -549,7 +539,7 @@ do
     local co = coroutine.create(f)
     assert(coroutine.resume(co, co))
   end
-  -- Now, thread and closure are not reacheable any more.
+  -- Now, thread and closure are not reachable any more.
   collectgarbage()
   assert(collected)
   collectgarbage("restart")
@@ -559,7 +549,7 @@ end
 do
   collectgarbage()
   collectgarbage"stop"
-  collectgarbage("step", 0)   -- steps should not unblock the collector
+  collectgarbage("step")   -- steps should not unblock the collector
   local x = gcinfo()
   repeat
     for i=1,1000 do _ENV.a = {} end   -- no collection during the loop
@@ -585,8 +575,8 @@ if T then   -- tests for weird cases collecting upvalues
   -- create coroutine in a weak table, so it will never be marked
   t.co = coroutine.wrap(foo)
   local f = t.co()   -- create function to access local 'a'
-  T.gcstate("atomic")   -- ensure all objects are traversed
-  assert(T.gcstate() == "atomic")
+  T.gcstate("enteratomic")   -- ensure all objects are traversed
+  assert(T.gcstate() == "enteratomic")
   assert(t.co() == 100)   -- resume coroutine, creating new table for 'a'
   assert(T.gccolor(t.co) == "white")  -- thread was not traversed
   T.gcstate("pause")   -- collect thread, but should mark 'a' before that
@@ -599,7 +589,7 @@ if T then   -- tests for weird cases collecting upvalues
   collectgarbage()
   collectgarbage"stop"
   local a = {}     -- avoid 'u' as first element in 'allgc'
-  T.gcstate"atomic"
+  T.gcstate"enteratomic"
   T.gcstate"sweepallgc"
   local x = {}
   assert(T.gccolor(u) == "black")   -- userdata is "old" (black)
@@ -621,6 +611,21 @@ if T then
   debug.setmetatable(x, {__gc = nop})   -- ...the old one
   assert(T.gccolor(y) == "white")
   T.checkmemory()
+  collectgarbage("restart")
+end
+
+
+if T then
+  collectgarbage("stop")
+  T.gcstate("pause")
+  local sup = {x = 0}
+  local a = setmetatable({}, {__newindex = sup})
+  T.gcstate("enteratomic")
+  assert(T.gccolor(sup) == "black")
+  a.x = {}   -- should not break the invariant
+  assert(not (T.gccolor(sup) == "black" and T.gccolor(sup.x) == "white"))
+  T.gcstate("pause")  -- complete the GC cycle
+  sup.x.y = 10
   collectgarbage("restart")
 end
 
@@ -654,7 +659,7 @@ do
     assert(getmetatable(o) == tt)
     -- create new objects during GC
     local a = 'xuxu'..(10+3)..'joao', {}
-    ___Glob = o  -- ressurrect object!
+    ___Glob = o  -- resurrect object!
     setmetatable({}, tt)  -- creates a new one with same metatable
     print(">>> closing state " .. "<<<\n")
   end

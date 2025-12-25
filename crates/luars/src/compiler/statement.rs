@@ -72,6 +72,10 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
                 localstat(fs)?;
             }
         }
+        LuaTokenKind::TkGlobal => {
+            // Lua 5.5: global statement
+            globalstatfunc(fs, line)?;
+        }
         LuaTokenKind::TkDbColon => {
             fs.lexer.bump(); // skip ::
             labelstat(fs)?;
@@ -823,8 +827,8 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
 
-    // Create the loop variable
-    fs.new_localvar(varname, VarKind::VDKREG);
+    // Create the loop variable (read-only control variable in Lua 5.5)
+    fs.new_localvar(varname, VarKind::RDKCONST);
 
     check(fs, LuaTokenKind::TkAssign)?; // check '='
     fs.lexer.bump(); // skip '='
@@ -911,8 +915,8 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
     fs.new_localvar("(for state)".to_string(), VarKind::VDKREG);
 
-    // Create declared variables (starting with indexname)
-    fs.new_localvar(indexname, VarKind::VDKREG);
+    // Create declared variables (starting with indexname) - read-only in Lua 5.5
+    fs.new_localvar(indexname, VarKind::RDKCONST);
 
     while testnext(fs, LuaTokenKind::TkComma) {
         let varname = str_checkname(fs)?;
@@ -1036,9 +1040,9 @@ fn localfunc(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of getlocalattribute from lparser.c
-fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
-    // ATTRIB -> ['<' Name '>']
+// Port of getvarattribute from lparser.c:1793-1810
+// attrib -> ['<' NAME '>']
+fn getvarattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, String> {
     if testnext(fs, LuaTokenKind::TkLt) {
         if fs.lexer.current_token() != LuaTokenKind::TkName {
             return Err("expected attribute name".to_string());
@@ -1058,7 +1062,20 @@ fn get_local_attribute(fs: &mut FuncState) -> Result<VarKind, String> {
             Err(fs.syntax_error(&format!("unknown attribute '{}'", attr)))
         }
     } else {
-        Ok(VarKind::VDKREG) // regular variable
+        Ok(default) // return default value
+    }
+}
+
+// Port of getglobalattribute from lparser.c:1858-1869
+// Get attribute for global variable, adapting local attributes to global equivalents
+fn getglobalattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, String> {
+    let kind = getvarattribute(fs, default)?;
+    match kind {
+        VarKind::RDKTOCLOSE => {
+            Err(fs.syntax_error("global variables cannot be to-be-closed"))
+        }
+        VarKind::RDKCONST => Ok(VarKind::GDKCONST), // adjust kind for global variable
+        _ => Ok(kind),
     }
 }
 
@@ -1182,16 +1199,18 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     let mut nvars = 0;
     let mut e = ExpDesc::new_void();
 
-    // Parse variable list
-    loop {
-        let name = str_checkname(fs)?;
-        let vidx = fs.new_localvar(name, VarKind::VDKREG);
-        let kind = get_local_attribute(fs)?;
+    // Get prefixed attribute (if any); default is regular local variable
+    let defkind = getvarattribute(fs, VarKind::VDKREG)?;
 
-        // Set kind for this variable
-        if let Some(var) = fs.get_local_var_desc(vidx) {
-            var.kind = kind;
-        }
+    // Parse variable list: NAME attrib { ',' NAME attrib }
+    loop {
+        let vname = str_checkname(fs)?;
+        
+        // Get postfixed attribute (if any)
+        let kind = getvarattribute(fs, defkind)?;
+        
+        // Create variable with determined kind
+        fs.new_localvar(vname, kind);
 
         if kind == VarKind::RDKTOCLOSE {
             if toclose != -1 {
@@ -1412,7 +1431,19 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
 fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<(), String> {
     let mut e = ExpDesc::new_void();
 
-    // Get the LhsAssign data
+    // Get a copy of the LhsAssign data for checking
+    let mut lh_v_for_check = {
+        let lh = fs
+            .compiler_state
+            .get_lhs_assign(lh_id)
+            .ok_or_else(|| "invalid LhsAssign id".to_string())?;
+        lh.v.clone()
+    };
+
+    // Check if variable is read-only before assignment
+    check_readonly(fs, &mut lh_v_for_check)?;
+
+    // Get the LhsAssign data again for actual assignment
     let lh_v = {
         let lh = fs
             .compiler_state
@@ -1424,9 +1455,6 @@ fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<()
     if !vkisvar(lh_v.kind) {
         return Err("syntax error".to_string());
     }
-
-    // Check if variable is readonly (const)
-    check_readonly(fs, &lh_v)?;
 
     if testnext(fs, LuaTokenKind::TkComma) {
         // restassign -> ',' suffixedexp restassign
@@ -1567,3 +1595,187 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
     Ok(())
 }
 
+// ============ Lua 5.5: Global statement support ============
+
+// Port of globalstatfunc from lparser.c:1962-1969
+// static void globalstatfunc (LexState *ls, int line)
+fn globalstatfunc(fs: &mut FuncState, line: usize) -> Result<(), String> {
+    // stat -> GLOBAL globalfunc | GLOBAL globalstat
+    fs.lexer.bump(); // skip 'global'
+    
+    if testnext(fs, LuaTokenKind::TkFunction) {
+        globalfunc(fs, line)?;
+    } else {
+        globalstat(fs)?;
+    }
+    
+    Ok(())
+}
+
+// Port of globalstat from lparser.c:1931-1943
+// static void globalstat (LexState *ls)
+fn globalstat(fs: &mut FuncState) -> Result<(), String> {
+    // globalstat -> (GLOBAL) attrib '*'
+    // globalstat -> (GLOBAL) attrib NAME attrib {',' NAME attrib}
+    
+    // Get prefixed attribute (if any); default is regular global variable (GDKREG)
+    let defkind = getglobalattribute(fs, VarKind::GDKREG)?;
+    
+    if testnext(fs, LuaTokenKind::TkMul) {
+        // global * - collective declaration (voids implicit global-by-default)
+        // Use empty string name to represent '*' entries
+        fs.new_localvar(String::new(), defkind);
+        fs.nactvar += 1; // Activate declaration
+        return Ok(());
+    }
+    
+    // global name [, name ...] [= explist]
+    globalnames(fs, defkind)?;
+    
+    Ok(())
+}
+
+// Port of globalnames from lparser.c:1908-1928
+// static void globalnames (LexState *ls, lu_byte defkind)
+fn globalnames(fs: &mut FuncState, defkind: VarKind) -> Result<(), String> {
+    // Parse: NAME attrib {',' NAME attrib} ['=' explist]
+    let mut nvars = 0;
+    let mut lastidx: u16;
+    
+    loop {
+        // Check for NAME token
+        if fs.lexer.current_token() != LuaTokenKind::TkName {
+            return Err(fs.syntax_error("name expected"));
+        }
+        
+        // Get variable name
+        let vname = fs.lexer.current_token_text().to_string();
+        fs.lexer.bump();
+        
+        // Get postfixed attribute (if any)
+        let kind = getglobalattribute(fs, defkind)?;
+        
+        // Create the global variable entry and save last index for initialization
+        lastidx = fs.new_localvar(vname, kind);
+        nvars += 1;
+        
+        if !testnext(fs, LuaTokenKind::TkComma) {
+            break;
+        }
+    }
+    
+    // Check for initialization: = explist
+    if testnext(fs, LuaTokenKind::TkAssign) {
+        // Initialize globals: calls initglobal recursively
+        // lastidx points to the last variable, so first variable is at (lastidx - nvars + 1)
+        let line = 0; // TODO: get proper line number from lexer
+        initglobal(fs, nvars, (lastidx - nvars as u16 + 1) as usize, 0, line)?;
+    }
+    
+    // Activate all declared globals
+    fs.nactvar = (fs.nactvar as i32 + nvars) as u8;
+    
+    Ok(())
+}
+
+// Port of initglobal from lparser.c:1886-1912
+// Recursively traverse list of globals to be initialized
+fn initglobal(fs: &mut FuncState, nvars: i32, firstidx: usize, n: i32, line: usize) -> Result<(), String> {
+    if n == nvars {
+        // Traversed all variables? Read list of expressions
+        let mut e = ExpDesc::new_void();
+        let nexps = explist(fs, &mut e)?;
+        adjust_assign(fs, nvars as usize, nexps, &mut e);
+    } else {
+        // Handle variable 'n'
+        let var_desc = &fs.actvar[firstidx + n as usize];
+        let varname = var_desc.name.clone();
+        let mut var = ExpDesc::new_void();
+        buildglobal(fs, &varname, &mut var)?;
+        
+        // Control recursion depth - in Lua 5.5 this calls enterlevel/leavelevel
+        initglobal(fs, nvars, firstidx, n + 1, line)?;
+        
+        checkglobal(fs, &varname, line)?;
+        storevartop(fs, &var);
+    }
+    
+    Ok(())
+}
+
+// Port of globalfunc from lparser.c:1946-1960
+// static void globalfunc (LexState *ls, int line)
+fn globalfunc(fs: &mut FuncState, line: usize) -> Result<(), String> {
+    // globalfunc -> (GLOBAL FUNCTION) NAME body
+    
+    // Check for function name
+    if fs.lexer.current_token() != LuaTokenKind::TkName {
+        return Err(fs.syntax_error("function name expected"));
+    }
+    
+    let fname = fs.lexer.current_token_text().to_string();
+    fs.lexer.bump();
+    
+    // Declare as global variable (GDKREG)
+    fs.new_localvar(fname.clone(), VarKind::GDKREG);
+    fs.nactvar += 1; // Enter its scope
+    
+    // Build global variable expression
+    let mut var = ExpDesc::new_void();
+    buildglobal(fs, &fname, &mut var)?;
+    
+    // Parse function body
+    let mut b = ExpDesc::new_void();
+    body(fs, &mut b, false)?;
+    
+    checkglobal(fs, &fname, line)?;
+    
+    // Store function in global variable
+    storevar(fs, &var, &mut b);
+    code::fixline(fs, line);
+    
+    Ok(())
+}
+
+// Port of checkglobal from lparser.c:1876-1883
+// Check and emit code for global variable access
+fn checkglobal(fs: &mut FuncState, varname: &str, line: usize) -> Result<(), String> {
+    let mut var = ExpDesc::new_void();
+    buildglobal(fs, varname, &mut var)?;
+    
+    // In full Lua 5.5, this calls luaK_codecheckglobal
+    // For now, we'll skip this as it requires VM support
+    // This generates warnings/errors for accessing undefined globals
+    
+    let _ = line; // Suppress unused warning
+    Ok(())
+}
+
+// Port of buildglobal from lparser.c (inline in various places)
+// Build expression for _ENV.varname
+fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Result<(), String> {
+    // In Lua 5.5, globals are accessed via _ENV table
+    // This is similar to singlevaraux in lparser.c
+    
+    // Get _ENV variable (upvalue 0 in main function)
+    // For now, simplified: mark as global access
+    var.kind = ExpKind::VGLOBAL;
+    var.u = ExpUnion::Info(-1);
+    
+    // Full implementation would:
+    // 1. Look up _ENV in upvalues
+    // 2. Generate indexed access: _ENV[varname]
+    // 3. Store the constant index for varname
+    
+    let _ = (fs, varname); // Suppress unused warnings
+    Ok(())
+}
+
+// Helper: Store value at top of stack to variable
+fn storevartop(fs: &mut FuncState, var: &ExpDesc) {
+    // Port of luaK_storevar with value at top of stack
+    // In Lua 5.5, this is used by initglobal
+    
+    // For now, simplified implementation
+    let _ = (fs, var); // Suppress unused warnings
+}

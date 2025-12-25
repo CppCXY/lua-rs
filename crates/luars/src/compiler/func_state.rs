@@ -139,10 +139,30 @@ pub struct Dyndata {
 // Variable kinds
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarKind {
-    VDKREG = 0,     // regular variable
-    RDKCONST = 1,   // constant variable <const>
-    RDKTOCLOSE = 2, // to-be-closed variable <close>
-    RDKCTC = 3,     // compile-time constant
+    VDKREG = 0,     // regular local variable
+    RDKCONST = 1,   // local constant (read-only) <const>
+    RDKVAVAR = 2,   // vararg parameter
+    RDKTOCLOSE = 3, // to-be-closed variable <close>
+    RDKCTC = 4,     // local compile-time constant
+    GDKREG = 5,     // regular global variable
+    GDKCONST = 6,   // global constant
+}
+
+impl VarKind {
+    // Test for variables that live in registers
+    pub fn is_in_reg(self) -> bool {
+        matches!(self, VarKind::VDKREG | VarKind::RDKCONST | VarKind::RDKVAVAR | VarKind::RDKTOCLOSE)
+    }
+    
+    // Test for global variables
+    pub fn is_global(self) -> bool {
+        matches!(self, VarKind::GDKREG | VarKind::GDKCONST)
+    }
+    
+    // Test for readonly variables (const or for-loop control variable)
+    pub fn is_readonly(self) -> bool {
+        matches!(self, VarKind::RDKCONST | VarKind::GDKCONST)
+    }
 }
 
 pub struct VarDesc {

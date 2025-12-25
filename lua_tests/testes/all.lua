@@ -1,9 +1,13 @@
 #!../lua
 -- $Id: testes/all.lua $
--- See Copyright Notice at the end of this file
+-- See Copyright Notice in file lua.h
 
+global <const> *
 
-local version = "Lua 5.4"
+global _soft, _port, _nomsg
+global T
+
+local version = "Lua 5.5"
 if _VERSION ~= version then
   io.stderr:write("This test suite is for ", version,
                   ", not for ", _VERSION, "\nExiting tests")
@@ -28,14 +32,13 @@ _nomsg = rawget(_G, "_nomsg") or false
 local usertests = rawget(_G, "_U")
 
 if usertests then
-  -- tests for sissies ;)  Avoid problems
-  _soft = true
-  _port = true
-  _nomsg = true
+  _soft = true   -- avoid tests that take too long
+  _port = true   -- avoid non-portable tests
+  _nomsg = true  -- avoid messages about tests not performed
 end
 
 -- tests should require debug when needed
-debug = nil
+global debug; debug = nil
 
 
 if usertests then
@@ -72,7 +75,7 @@ do   -- (
 
 -- track messages for tests not performed
 local msgs = {}
-function Message (m)
+global function Message (m)
   if not _nomsg then
     print(m)
     msgs[#msgs+1] = string.sub(m, 3, -3)
@@ -183,6 +186,7 @@ dofile('nextvar.lua')
 dofile('pm.lua')
 dofile('utf8.lua')
 dofile('api.lua')
+dofile('memerr.lua')
 assert(dofile('events.lua') == 12)
 dofile('vararg.lua')
 dofile('closure.lua')
@@ -282,31 +286,4 @@ if not usertests then
 end
 
 print("final OK !!!")
-
-
-
---[[
-*****************************************************************************
-* Copyright (C) 1994-2025 Lua.org, PUC-Rio.
-*
-* Permission is hereby granted, free of charge, to any person obtaining
-* a copy of this software and associated documentation files (the
-* "Software"), to deal in the Software without restriction, including
-* without limitation the rights to use, copy, modify, merge, publish,
-* distribute, sublicense, and/or sell copies of the Software, and to
-* permit persons to whom the Software is furnished to do so, subject to
-* the following conditions:
-*
-* The above copyright notice and this permission notice shall be
-* included in all copies or substantial portions of the Software.
-*
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-*****************************************************************************
-]]
 

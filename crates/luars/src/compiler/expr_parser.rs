@@ -701,6 +701,17 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
             } else if fs.lexer.current_token() == LuaTokenKind::TkDots {
                 fs.lexer.bump();
                 is_vararg = true;
+                
+                // Lua 5.5: Named vararg parameter (... name)
+                // Check if there's a name after ...
+                if fs.lexer.current_token() == LuaTokenKind::TkName {
+                    let vararg_name = fs.lexer.current_token_text().to_string();
+                    fs.lexer.bump();
+                    params.push(vararg_name);
+                } else {
+                    // Anonymous vararg - use default name
+                    params.push("(vararg table)".to_string());
+                }
                 break;
             } else {
                 return Err("expected parameter".to_string());

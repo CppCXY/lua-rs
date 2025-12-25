@@ -1,8 +1,9 @@
 -- $Id: testes/strings.lua $
--- See Copyright Notice in file all.lua
+-- See Copyright Notice in file lua.h
 
 -- ISO Latin encoding
 
+global <const> *
 
 print('testing strings and string library')
 
@@ -94,9 +95,9 @@ assert(string.byte("hi", 2, 1) == nil)
 assert(string.char() == "")
 assert(string.char(0, 255, 0) == "\0\255\0")
 assert(string.char(0, string.byte("\xe4"), 0) == "\0\xe4\0")
-assert(string.char(string.byte("\xe4l\0ï¿½u", 1, -1)) == "\xe4l\0ï¿½u")
-assert(string.char(string.byte("\xe4l\0ï¿½u", 1, 0)) == "")
-assert(string.char(string.byte("\xe4l\0ï¿½u", -10, 100)) == "\xe4l\0ï¿½u")
+assert(string.char(string.byte("\xe4l\0óu", 1, -1)) == "\xe4l\0óu")
+assert(string.char(string.byte("\xe4l\0óu", 1, 0)) == "")
+assert(string.char(string.byte("\xe4l\0óu", -10, 100)) == "\xe4l\0óu")
 
 checkerror("out of range", string.char, 256)
 checkerror("out of range", string.char, -1)
@@ -106,13 +107,12 @@ checkerror("out of range", string.char, math.mininteger)
 assert(string.upper("ab\0c") == "AB\0C")
 assert(string.lower("\0ABCc%$") == "\0abcc%$")
 assert(string.rep('teste', 0) == '')
-assert(string.rep('tï¿½s\00tï¿½', 2) == 'tï¿½s\0tï¿½tï¿½s\000tï¿½')
+assert(string.rep('tés\00tê', 2) == 'tés\0têtés\000tê')
 assert(string.rep('', 10) == '')
 
-if string.packsize("i") == 4 then
-  -- result length would be 2^31 (int overflow)
-  checkerror("too large", string.rep, 'aa', (1 << 30))
-  checkerror("too large", string.rep, 'a', (1 << 30), ',')
+do
+  checkerror("too large", string.rep, 'aa', math.maxinteger);
+  checkerror("too large", string.rep, 'a', math.maxinteger, ',')
 end
 
 -- repetitions with separator
@@ -157,6 +157,12 @@ else   -- compatible coercion
   assert(tostring(-1203 + 0.0) == "-1203")
 end
 
+
+local function topointer (s)
+  return string.format("%p", s)
+end
+
+
 do  -- tests for '%p' format
   -- not much to test, as C does not specify what '%p' does.
   -- ("The value of the pointer is converted to a sequence of printing
@@ -180,41 +186,41 @@ do  -- tests for '%p' format
 
   do
     local t1 = {}; local t2 = {}
-    assert(string.format("%p", t1) ~= string.format("%p", t2))
+    assert(topointer(t1) ~= topointer(t2))
   end
 
   do     -- short strings are internalized
     local s1 = string.rep("a", 10)
     local s2 = string.rep("aa", 5)
-  assert(string.format("%p", s1) == string.format("%p", s2))
+  assert(topointer(s1) == topointer(s2))
   end
 
   do     -- long strings aren't internalized
     local s1 = string.rep("a", 300); local s2 = string.rep("a", 300)
-    assert(string.format("%p", s1) ~= string.format("%p", s2))
+    assert(topointer(s1) ~= topointer(s2))
   end
 end
 
--- local x = '"ï¿½lo"\n\\'
--- assert(string.format('%q%s', x, x) == '"\\"ï¿½lo\\"\\\n\\\\""ï¿½lo"\n\\')
--- assert(string.format('%q', "\0") == [["\0"]])
--- assert(load(string.format('return %q', x))() == x)
--- x = "\0\1\0023\5\0009"
--- assert(load(string.format('return %q', x))() == x)
--- assert(string.format("\0%c\0%c%x\0", string.byte("\xe4"), string.byte("b"), 140) ==
---               "\0\xe4\0b8c\0")
--- assert(string.format('') == "")
--- assert(string.format("%c",34)..string.format("%c",48)..string.format("%c",90)..string.format("%c",100) ==
---        string.format("%1c%-c%-1c%c", 34, 48, 90, 100))
--- assert(string.format("%s\0 is not \0%s", 'not be', 'be') == 'not be\0 is not \0be')
--- assert(string.format("%%%d %010d", 10, 23) == "%10 0000000023")
--- assert(tonumber(string.format("%f", 10.3)) == 10.3)
--- assert(string.format('"%-50s"', 'a') == '"a' .. string.rep(' ', 49) .. '"')
+local x = '"ílo"\n\\'
+assert(string.format('%q%s', x, x) == '"\\"ílo\\"\\\n\\\\""ílo"\n\\')
+assert(string.format('%q', "\0") == [["\0"]])
+assert(load(string.format('return %q', x))() == x)
+x = "\0\1\0023\5\0009"
+assert(load(string.format('return %q', x))() == x)
+assert(string.format("\0%c\0%c%x\0", string.byte("\xe4"), string.byte("b"), 140) ==
+              "\0\xe4\0b8c\0")
+assert(string.format('') == "")
+assert(string.format("%c",34)..string.format("%c",48)..string.format("%c",90)..string.format("%c",100) ==
+       string.format("%1c%-c%-1c%c", 34, 48, 90, 100))
+assert(string.format("%s\0 is not \0%s", 'not be', 'be') == 'not be\0 is not \0be')
+assert(string.format("%%%d %010d", 10, 23) == "%10 0000000023")
+assert(tonumber(string.format("%f", 10.3)) == 10.3)
+assert(string.format('"%-50s"', 'a') == '"a' .. string.rep(' ', 49) .. '"')
 
--- assert(string.format("-%.20s.20s", string.rep("%", 2000)) ==
---                      "-"..string.rep("%", 20)..".20s")
--- assert(string.format('"-%20s.20s"', string.rep("%", 2000)) ==
---        string.format("%q", "-"..string.rep("%", 2000)..".20s"))
+assert(string.format("-%.20s.20s", string.rep("%", 2000)) ==
+                     "-"..string.rep("%", 20)..".20s")
+assert(string.format('"-%20s.20s"', string.rep("%", 2000)) ==
+       string.format("%q", "-"..string.rep("%", 2000)..".20s"))
 
 do
   local function checkQ (v)
@@ -432,16 +438,16 @@ if not _port then
     return false
   end
 
-  -- if trylocale("collate")  then
-  --   assert("alo" < "ï¿½lo" and "ï¿½lo" < "amo")
-  -- end
+  if trylocale("collate")  then
+    assert("alo" < "álo" and "álo" < "amo")
+  end
 
-  -- if trylocale("ctype") then
-  --   assert(string.gsub("ï¿½ï¿½ï¿½ï¿½ï¿½", "%a", "x") == "xxxxx")
-  --   assert(string.gsub("ï¿½ï¿½ï¿½ï¿½", "%l", "x") == "xï¿½xï¿½")
-  --   assert(string.gsub("ï¿½ï¿½ï¿½ï¿½", "%u", "x") == "ï¿½xï¿½x")
-  --   assert(string.upper"ï¿½ï¿½ï¿½{xuxu}ï¿½ï¿½o" == "ï¿½ï¿½ï¿½{XUXU}ï¿½ï¿½O")
-  -- end
+  if trylocale("ctype") then
+    assert(string.gsub("áéíóú", "%a", "x") == "xxxxx")
+    assert(string.gsub("áÁéÉ", "%l", "x") == "xÁxÉ")
+    assert(string.gsub("áÁéÉ", "%u", "x") == "áxéx")
+    assert(string.upper"áÁé{xuxu}ção" == "ÁÁÉ{XUXU}ÇÃO")
+  end
 
   os.setlocale("C")
   assert(os.setlocale() == 'C')
@@ -521,6 +527,37 @@ else
   testpfs("P", str, {})
 end
 
+if T == nil then
+  (Message or print)('\n >>> testC not active: skipping external strings tests <<<\n')
+else
+  print("testing external strings")
+  local x = T.externKstr("hello")   -- external fixed short string
+  assert(x == "hello")
+  local x = T.externstr("hello")   -- external allocated short string
+  assert(x == "hello")
+  x = string.rep("a", 100)   -- long string
+  local y = T.externKstr(x)   -- external fixed long string
+  assert(y == x)
+  local z = T.externstr(x)   -- external allocated long string
+  assert(z == y)
+
+  local e = T.externstr("")   -- empty external string
+  assert(e .. "x" == "x" and "x" .. e == "x")
+  assert(e .. e == "" and #e == 0)
+
+  -- external string as the "n" key in vararg table
+  local n = T.externstr("n")
+  local n0 = T.externstr("n\0")
+  local function aux (...t) assert(t[n0] == nil); return t[n] end
+  assert(aux(10, 20, 30) == 3)
+
+  -- external string as mode in weak table
+  local t = setmetatable({}, {__mode = T.externstr("kv")})
+  t[{}] = {}
+  assert(next(t))
+  collectgarbage()
+  assert(next(t) == nil)
+end
 
 print('OK')
 

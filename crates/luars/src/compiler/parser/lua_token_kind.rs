@@ -14,6 +14,7 @@ pub enum LuaTokenKind {
     TkFalse,
     TkFor,
     TkFunction,
+    TkGlobal,
     TkGoto,
     TkIf,
     TkIn,
@@ -98,6 +99,7 @@ impl LuaTokenKind {
                 | LuaTokenKind::TkFalse
                 | LuaTokenKind::TkFor
                 | LuaTokenKind::TkFunction
+                | LuaTokenKind::TkGlobal
                 | LuaTokenKind::TkGoto
                 | LuaTokenKind::TkIf
                 | LuaTokenKind::TkIn

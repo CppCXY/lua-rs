@@ -1,11 +1,7 @@
 -- $Id: testes/sort.lua $
--- See Copyright Notice in file all.lua
+-- See Copyright Notice in file lua.h
 
 print "testing (parts of) table library"
-
-print "testing unpack"
-
-local unpack = table.unpack
 
 local maxI = math.maxinteger
 local minI = math.mininteger
@@ -15,6 +11,40 @@ local function checkerror (msg, f, ...)
   local s, err = pcall(f, ...)
   assert(not s and string.find(err, msg))
 end
+
+
+do print "testing 'table.create'"
+  local N = 10000
+  collectgarbage()
+  local m = collectgarbage("count") * 1024
+  local t = table.create(N)
+  local memdiff = collectgarbage("count") * 1024 - m
+  assert(memdiff > N * 4)
+  for i = 1, 20 do
+    assert(#t == i - 1)
+    t[i] = 0
+  end
+  for i = 1, 20 do  t[#t + 1] = i * 10  end
+  assert(#t == 40 and t[39] == 190)
+  assert(not T or T.querytab(t) == N)
+  t = nil
+  collectgarbage()
+  m = collectgarbage("count") * 1024
+  t = table.create(0, 1024)
+  memdiff = collectgarbage("count") * 1024 - m
+  assert(memdiff > 1024 * 12)
+  assert(not T or select(2, T.querytab(t)) == 1024)
+
+  local maxint1 = 1 << (string.packsize("i") * 8 - 1)
+  checkerror("out of range", table.create, maxint1)
+  checkerror("out of range", table.create, 0, maxint1)
+  checkerror("table overflow", table.create, 0, maxint1 - 1)
+end
+
+
+print "testing unpack"
+
+local unpack = table.unpack
 
 
 checkerror("wrong number of arguments", table.insert, {}, 2, 3, 4)
@@ -169,7 +199,7 @@ do
                 __index = function (_,k) pos1 = k end,
                 __newindex = function (_,k) pos2 = k; error() end, })
     local st, msg = pcall(table.move, a, f, e, t)
-    assert(not st and not msg and pos1 == x and pos2 == y)
+    assert(not st and pos1 == x and pos2 == y)
   end
   checkmove(1, maxI, 0, 1, 0)
   checkmove(0, maxI - 1, 1, maxI - 1, maxI)

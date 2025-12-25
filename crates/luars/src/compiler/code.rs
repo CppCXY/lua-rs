@@ -2088,6 +2088,8 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
         t.u = ExpUnion::Ind(IndVars {
             t: temp as i16,
             idx: k.u.info() as i16,
+            ro: false,
+            keystr: -1,
         });
         t.kind = ExpKind::VINDEXUP;
     } else {

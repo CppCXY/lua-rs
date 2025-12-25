@@ -56,6 +56,7 @@ impl<'a> LuaTokenize<'a> {
             "false" => LuaTokenKind::TkFalse,
             "for" => LuaTokenKind::TkFor,
             "function" => LuaTokenKind::TkFunction,
+            "global" => LuaTokenKind::TkGlobal,  // Lua 5.5 新增
             "goto" => {
                 if self.lexer_config.support_goto() {
                     LuaTokenKind::TkGoto
