@@ -598,7 +598,7 @@ impl ObjectPool {
             userdata: Pool::new(),
             threads: BoxPool::with_capacity(8),
             string_intern: StringInternTable::with_capacity(256),
-            max_intern_length: 40, // Strings <= 40 bytes are interned
+            max_intern_length: 40, // Strings <= 40 bytes are interned (LUAI_MAXSHORTLEN)
             // Placeholder values - will be initialized below
             tm_index: StringId(0),
             tm_newindex: StringId(0),

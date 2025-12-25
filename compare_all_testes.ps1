@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$luacPath = "lua_src\lua-5.4.8\build\Release\luac.exe"
+$luacPath = "lua_src\lua-5.5.0\build\Release\luac.exe"
 $bytecode_dumpPath = "target\release\bytecode_dump.exe"
 $testesDir = "lua_tests\testes"
 $outputDir = "bytecode_comparison_output"

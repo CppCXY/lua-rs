@@ -492,6 +492,14 @@ fn dump_chunk(
         println!("\t{}\t[{}]\t{}\t{}", pc + 1, line, detail, comment);
     }
 
+    // Print constants list (for debugging)
+    if !chunk.constants.is_empty() {
+        println!("constants ({}) for {}:", chunk.constants.len(), func_name);
+        for (idx, _val) in chunk.constants.iter().enumerate() {
+            println!("\t{}\t{}", idx, format_constant(chunk, idx as u32, vm));
+        }
+    }
+
     // Flush stdout to ensure all output is written
     use std::io::Write;
     std::io::stdout().flush().ok();

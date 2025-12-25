@@ -19,6 +19,7 @@
 // │   - GC objects: unused (ID is in tag)            │
 // └──────────────────────────────────────────────────┘
 
+use crate::ObjectPool;
 use crate::gc::{FunctionId, StringId, TableId, ThreadId, UserdataId};
 use crate::lua_value::CFunction;
 
@@ -418,37 +419,39 @@ impl LuaValue {
     }
 
     // ============ Equality ============
+    /// Raw equality with ObjectPool access for long string content comparison
+    /// This implements Lua 5.4's behavior:
+    /// - Short strings (≤40 bytes): Compare StringId (pointer comparison in C, since interned)
+    /// - Long strings (>40 bytes): Compare string content (luaS_eqlngstr in C)
+    /// - Other types: Use standard equality
+    pub fn raw_equal(&self, other: &LuaValue, pool: &ObjectPool) -> bool {
+        // Fast path: if primary/secondary are identical, values are equal
+        // This handles: nil, bool, integers, floats, short strings (same StringId),
+        // and all GC objects with same ID
+        if self.primary == other.primary && self.secondary == other.secondary {
+            return true;
+        }
 
-    /// Raw equality (no metamethods)
-    /// OPTIMIZED: Branchless comparison for common case
-    #[inline(always)]
-    pub fn raw_equal(&self, other: &Self) -> bool {
-        // Fast path: compare primary (type tag + ID for GC objects)
-        if self.primary != other.primary {
+        // Type must match for any potential equality
+        if self.kind() != other.kind() {
             return false;
         }
 
-        // Primary matches - now check secondary based on type
-        let tag = self.primary & TAG_MASK;
+        // Special case: long strings need content comparison
+        // (StringIds differ for non-interned strings even with same content)
+        if let (Some(sid1), Some(sid2)) = (self.as_string_id(), other.as_string_id()) {
+            // If StringIds are same, already caught by fast path above
+            // So here we know StringIds differ - check if both are long strings
+            let s1 = pool.get_string(sid1);
+            let s2 = pool.get_string(sid2);
 
-        // For nil, boolean: only primary matters (secondary is unused)
-        // For integers, floats: need to compare secondary
-        // For GC objects: secondary is unused, ID is in primary
-        match tag {
-            TAG_NIL | TAG_FALSE | TAG_TRUE => true,
-            TAG_FLOAT => {
-                // IEEE 754: NaN != NaN, but our bits might match
-                // Need proper float comparison
-                if self.secondary == other.secondary {
-                    let a = f64::from_bits(self.secondary);
-                    a == a // Returns false if NaN
-                } else {
-                    false
-                }
-            }
-            TAG_INTEGER => self.secondary == other.secondary,
-            _ => true, // GC objects: ID is in primary, secondary unused
+            // If either is short string (should be interned), StringIds should match
+            // So both must be long strings here
+            return s1 == s2; // Content comparison
         }
+
+        // All other types: standard equality already checked in fast path
+        false
     }
 
     // ============ Type name ============

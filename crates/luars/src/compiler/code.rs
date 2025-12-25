@@ -1,5 +1,5 @@
 // Code generation - Port from lcode.c (Lua 5.4.8)
-// This file corresponds to lua-5.4.8/src/lcode.c
+// This file corresponds to lua-5.5.0/src/lcode.c
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::compiler::tm_kind::TmKind;
@@ -895,14 +895,25 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 // but we use rust's HashMap to handle that, so we just pass the same value for both key and value.
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     // Query scanner table with key (lcode.c:548)
-    if let Some(&idx) = fs.compiler_state.scanner_table.get(&value) {
+    // We need to manually search because long strings require content comparison via ObjectPool
+    let mut found_idx: Option<usize> = None;
+    
+    for (&candidate_value, &idx) in fs.compiler_state.scanner_table.iter() {
+        // Use raw_equal_with_pool for proper long string content comparison
+        if value.raw_equal(&candidate_value, fs.pool) {
+            found_idx = Some(idx);
+            break;
+        }
+    }
+    
+    if let Some(idx) = found_idx {
         // Check if we can reuse this constant (lcode.c:550-555)
         // Must check: within bounds, same type tag, and equal value
         if idx < fs.chunk.constants.len()
             && let Some(existing) = fs.chunk.constants.get(idx)
         {
             // Must match both type and value (distinguishes float from integer)
-            if existing.kind() == value.kind() && *existing == value {
+            if existing.kind() == value.kind() && value.raw_equal(existing, fs.pool) {
                 return idx;
             }
         }

@@ -1,5 +1,5 @@
 // Expression parsing - Port from lparser.c (Lua 5.4.8)
-// This file corresponds to expression parsing parts of lua-5.4.8/src/lparser.c
+// This file corresponds to expression parsing parts of lua-5.5.0/src/lparser.c
 use crate::compiler::expression::{ExpDesc, ExpKind, ExpUnion};
 use crate::compiler::func_state::{BlockCnt, FuncState};
 use crate::compiler::parse_literal::{
