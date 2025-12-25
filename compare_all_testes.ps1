@@ -89,6 +89,42 @@ foreach ($file in $luaFiles) {
         # 简单比较指令数量
         if ($officialLines.Count -ne $ourLines.Count) {
             Write-Host " [FAIL - instruction count mismatch: $($officialLines.Count) vs $($ourLines.Count)]" -ForegroundColor Red
+            
+            # 显示第一个开始不同的地方
+            Write-Host ""
+            $minCount = [Math]::Min($officialLines.Count, $ourLines.Count)
+            $firstDiff = -1
+            for ($i = 0; $i -lt $minCount; $i++) {
+                $officialLine = $officialLines[$i] -replace '\s+', ' '
+                $ourLine = $ourLines[$i] -replace '\s+', ' '
+                if ($officialLine -ne $ourLine) {
+                    $firstDiff = $i
+                    break
+                }
+            }
+            
+            if ($firstDiff -ge 0) {
+                Write-Host "  First difference at instruction #$($firstDiff+1):" -ForegroundColor Yellow
+                Write-Host "  Official: $($officialLines[$firstDiff])" -ForegroundColor Cyan
+                Write-Host "  Ours:     $($ourLines[$firstDiff])" -ForegroundColor Magenta
+            } else {
+                # 指令数量不同，但前面都一样，显示官方多出来的或我们多出来的部分
+                if ($officialLines.Count -gt $ourLines.Count) {
+                    Write-Host "  We're missing instructions starting from #$($ourLines.Count+1):" -ForegroundColor Yellow
+                    $showUntil = [Math]::Min($officialLines.Count - 1, $ourLines.Count + 5)
+                    for ($i = $ourLines.Count; $i -le $showUntil; $i++) {
+                        Write-Host "  Official[$($i+1)]: $($officialLines[$i])" -ForegroundColor Cyan
+                    }
+                } else {
+                    Write-Host "  We have extra instructions starting from #$($officialLines.Count+1):" -ForegroundColor Yellow
+                    $showUntil = [Math]::Min($ourLines.Count - 1, $officialLines.Count + 5)
+                    for ($i = $officialLines.Count; $i -le $showUntil; $i++) {
+                        Write-Host "  Ours[$($i+1)]: $($ourLines[$i])" -ForegroundColor Magenta
+                    }
+                }
+            }
+            Write-Host ""
+            
             $failedFiles++
             $failedList += @{
                 File = $file.Name
@@ -108,6 +144,7 @@ foreach ($file in $luaFiles) {
         
         # 详细比较每条指令
         $mismatch = $false
+        $mismatchLine = -1
         for ($i = 0; $i -lt $officialLines.Count; $i++) {
             # 两边格式现在一致，都是：数字 [数字] 指令 参数 ; 注释
             $officialLine = $officialLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s+', ' ' -replace '\s*;.*$', ''
@@ -119,8 +156,37 @@ foreach ($file in $luaFiles) {
             
             if ($officialLine -ne $ourLine) {
                 if (-not $mismatch) {
-                    Write-Host " [FAIL - instruction mismatch at line $($i+1)]" -ForegroundColor Red
                     $mismatch = $true
+                    $mismatchLine = $i
+                    Write-Host " [FAIL - instruction mismatch at line $($i+1)]" -ForegroundColor Red
+                    
+                    # 显示上下文（前3行、当前行、后3行）
+                    Write-Host ""
+                    Write-Host "  First mismatch at instruction #$($i+1):" -ForegroundColor Yellow
+                    
+                    # 显示前3行上下文
+                    $contextStart = [Math]::Max(0, $i - 3)
+                    for ($j = $contextStart; $j -lt $i; $j++) {
+                        $ctx = $officialLines[$j] -replace '\s+', ' '
+                        Write-Host "    $ctx" -ForegroundColor DarkGray
+                    }
+                    
+                    # 显示不匹配的行（带完整内容）
+                    Write-Host "  Official: $($officialLines[$i])" -ForegroundColor Cyan
+                    Write-Host "  Ours:     $($ourLines[$i])" -ForegroundColor Magenta
+                    
+                    # 显示后3行上下文
+                    $contextEnd = [Math]::Min($officialLines.Count - 1, $i + 3)
+                    for ($j = $i + 1; $j -le $contextEnd; $j++) {
+                        $ctx = $officialLines[$j] -replace '\s+', ' '
+                        Write-Host "    $ctx" -ForegroundColor DarkGray
+                    }
+                    Write-Host ""
+                    
+                    # 如果不是verbose模式，只显示第一个错误就停止比较
+                    if (-not $Verbose) {
+                        break
+                    }
                 }
                 
                 if ($Verbose) {

@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $baseName = [System.IO.Path]::GetFileNameWithoutExtension($LuaFile)
-$luacPath = "lua_src\lua-5.4.8\build\Release\luac.exe"
+$luacPath = "lua_src\lua-5.5.0\build\Release\luac.exe"
 $bytecode_dumpPath = "target\release\bytecode_dump.exe"
 
 # 检查文件是否存在
