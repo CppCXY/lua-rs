@@ -17,31 +17,7 @@ use std::rc::Rc;
 pub use lua_table::LuaTable;
 pub use lua_table::tm_flags; // Export TmFlags for metamethod absence caching
 pub use lua_thread::*;
-pub use lua_value::{
-    ID_MASK,
-    LuaValue,
-    LuaValueKind,
-    NAN_BASE,
-    TAG_BOOLEAN,
-    TAG_CFUNCTION,
-    TAG_FALSE,
-    TAG_FLOAT,
-    TAG_FUNCTION,
-    TAG_INTEGER,
-    TAG_MASK,
-    TAG_NIL,
-    TAG_STRING,
-    TAG_TABLE,
-    TAG_THREAD,
-    TAG_TRUE,
-    TAG_UPVALUE,
-    TAG_USERDATA,
-    // Compatibility aliases
-    TYPE_MASK,
-    VALUE_FALSE,
-    VALUE_NIL,
-    VALUE_TRUE,
-};
+pub use lua_value::{LuaValue, LuaValueKind};
 
 /// Multi-return values from Lua functions
 /// OPTIMIZED: Compact enum representation (32 bytes)
