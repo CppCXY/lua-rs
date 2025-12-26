@@ -912,17 +912,20 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 // For other types (numbers), key == value (numbers are deduplicated per-function)
 // but we use rust's HashMap to handle that, so we just pass the same value for both key and value.
 fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
-    // Query scanner table with key (lcode.c:548)
-    // We need to manually search because long strings require content comparison via ObjectPool
-    let mut found_idx: Option<usize> = None;
-    
-    for (&candidate_value, &idx) in fs.scanner_table.iter() {
-        // Use raw_equal_with_pool for proper long string content comparison
-        if value.raw_equal(&candidate_value, fs.pool) {
-            found_idx = Some(idx);
-            break;
+    // Query kcache table with key (lcode.c:548)
+    // Use Lua 5.5's luaH_get for O(1) hash lookup instead of O(n) traversal
+    let found_idx: Option<usize> = {
+        if let Some(kcache_table) = fs.pool.get_table(fs.kcache) {
+            // luaH_get returns the value if found (stored as integer index)
+            if let Some(idx_value) = kcache_table.raw_get(&value) {
+                idx_value.as_integer().map(|i| i as usize)
+            } else {
+                None
+            }
+        } else {
+            None
         }
-    }
+    };
     
     if let Some(idx) = found_idx {
         // Check if we can reuse this constant (lcode.c:550-555)
@@ -941,8 +944,11 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     let idx = fs.chunk.constants.len();
     fs.chunk.constants.push(value.clone());
 
-    // Store key->index mapping in scanner table (lcode.c:562-563)
-    fs.scanner_table.insert(value.clone(), idx);
+    // Store key->index mapping in kcache table (lcode.c:562-563)
+    // luaH_set: store index as integer value
+    if let Some(kcache_table) = fs.pool.get_table_mut(fs.kcache) {
+        kcache_table.raw_set(value.clone(), LuaValue::integer(idx as i64));
+    }
 
     idx
 }

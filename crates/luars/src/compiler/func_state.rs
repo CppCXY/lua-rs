@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use crate::Chunk;
 use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
 // Port of FuncState and related structures from lparser.h
-use crate::gc::ObjectPool;
+use crate::gc::{ObjectPool, TableId};
 use crate::{LuaValue, compiler::parser::LuaLexer};
 
 // Upvalue descriptor
@@ -37,7 +35,7 @@ pub struct FuncState<'a> {
     pub is_vararg: bool,               // true if function is vararg
     pub first_local: usize,            // index of first local variable in prev
     pub source_name: String,           // source file name for error messages
-    pub scanner_table: HashMap<LuaValue, usize>, // constant to index mapping for deduplication (per-function)
+    pub kcache: TableId,               // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
 }
 
 pub struct CompilerState {
@@ -178,6 +176,9 @@ impl<'a> FuncState<'a> {
         is_vararg: bool,
         source_name: String,
     ) -> Self {
+        // Create kcache table for constant deduplication (like Lua 5.5's open_func)
+        let kcache= pool.create_table(0, 0);
+        
         FuncState {
             chunk: Chunk::new(),
             prev: None,
@@ -199,7 +200,7 @@ impl<'a> FuncState<'a> {
             is_vararg,
             source_name,
             first_local: 0,
-            scanner_table: HashMap::new(),
+            kcache,
         }
     }
 
@@ -237,6 +238,9 @@ impl<'a> FuncState<'a> {
 
     // Create child function state
     pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
+        // Create new kcache table for child function
+        let kcache = parent.pool.create_table(0, 0);
+        
         FuncState {
             chunk: Chunk::new(),
             prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
@@ -258,7 +262,7 @@ impl<'a> FuncState<'a> {
             is_vararg,
             first_local: parent.actvar.len(),
             source_name: parent.source_name.clone(),
-            scanner_table: HashMap::new(),
+            kcache,
         }
     }
 
