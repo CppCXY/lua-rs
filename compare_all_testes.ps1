@@ -146,15 +146,17 @@ foreach ($file in $luaFiles) {
         $mismatch = $false
         $mismatchLine = -1
         for ($i = 0; $i -lt $officialLines.Count; $i++) {
-            # 两边格式现在一致，都是：数字 [数字] 指令 参数 ; 注释
-            $officialLine = $officialLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s+', ' ' -replace '\s*;.*$', ''
-            $ourLine = $ourLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s+', ' ' -replace '\s*;.*$', ''
+            # 提取指令和参数，忽略注释
+            # 格式：数字 [数字] 指令 参数... ; 注释
+            # 我们需要比较：指令名称和参数（数字部分）
+            $officialInstr = $officialLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s*;.*$', '' -replace '\s+', ' '
+            $ourInstr = $ourLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s*;.*$', '' -replace '\s+', ' '
             
-            # 规范化指令名称（移除注释和额外空格）
-            $officialLine = $officialLine.Trim()
-            $ourLine = $ourLine.Trim()
+            # 规范化（去除首尾空格）
+            $officialInstr = $officialInstr.Trim()
+            $ourInstr = $ourInstr.Trim()
             
-            if ($officialLine -ne $ourLine) {
+            if ($officialInstr -ne $ourInstr) {
                 if (-not $mismatch) {
                     $mismatch = $true
                     $mismatchLine = $i
