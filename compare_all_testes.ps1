@@ -95,8 +95,8 @@ foreach ($file in $luaFiles) {
             $minCount = [Math]::Min($officialLines.Count, $ourLines.Count)
             $firstDiff = -1
             for ($i = 0; $i -lt $minCount; $i++) {
-                $officialLine = $officialLines[$i] -replace '\s+', ' '
-                $ourLine = $ourLines[$i] -replace '\s+', ' '
+                $officialLine = $officialLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
+                $ourLine = $ourLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
                 if ($officialLine -ne $ourLine) {
                     $firstDiff = $i
                     break
@@ -105,21 +105,25 @@ foreach ($file in $luaFiles) {
             
             if ($firstDiff -ge 0) {
                 Write-Host "  First difference at instruction #$($firstDiff+1):" -ForegroundColor Yellow
-                Write-Host "  Official: $($officialLines[$firstDiff])" -ForegroundColor Cyan
-                Write-Host "  Ours:     $($ourLines[$firstDiff])" -ForegroundColor Magenta
+                $officialDisplay = $officialLines[$firstDiff] -replace '\s*;.*$', ''
+                $ourDisplay = $ourLines[$firstDiff] -replace '\s*;.*$', ''
+                Write-Host "  Official: $officialDisplay" -ForegroundColor Cyan
+                Write-Host "  Ours:     $ourDisplay" -ForegroundColor Magenta
             } else {
                 # 指令数量不同，但前面都一样，显示官方多出来的或我们多出来的部分
                 if ($officialLines.Count -gt $ourLines.Count) {
                     Write-Host "  We're missing instructions starting from #$($ourLines.Count+1):" -ForegroundColor Yellow
                     $showUntil = [Math]::Min($officialLines.Count - 1, $ourLines.Count + 5)
                     for ($i = $ourLines.Count; $i -le $showUntil; $i++) {
-                        Write-Host "  Official[$($i+1)]: $($officialLines[$i])" -ForegroundColor Cyan
+                        $display = $officialLines[$i] -replace '\s*;.*$', ''
+                        Write-Host "  Official[$($i+1)]: $display" -ForegroundColor Cyan
                     }
                 } else {
                     Write-Host "  We have extra instructions starting from #$($officialLines.Count+1):" -ForegroundColor Yellow
                     $showUntil = [Math]::Min($ourLines.Count - 1, $officialLines.Count + 5)
                     for ($i = $officialLines.Count; $i -le $showUntil; $i++) {
-                        Write-Host "  Ours[$($i+1)]: $($ourLines[$i])" -ForegroundColor Magenta
+                        $display = $ourLines[$i] -replace '\s*;.*$', ''
+                        Write-Host "  Ours[$($i+1)]: $display" -ForegroundColor Magenta
                     }
                 }
             }
@@ -166,21 +170,23 @@ foreach ($file in $luaFiles) {
                     Write-Host ""
                     Write-Host "  First mismatch at instruction #$($i+1):" -ForegroundColor Yellow
                     
-                    # 显示前3行上下文
+                    # 显示前3行上下文（只显示指令部分，不含注释）
                     $contextStart = [Math]::Max(0, $i - 3)
                     for ($j = $contextStart; $j -lt $i; $j++) {
-                        $ctx = $officialLines[$j] -replace '\s+', ' '
+                        $ctx = $officialLines[$j] -replace '\s*;.*$', '' -replace '\s+', ' '
                         Write-Host "    $ctx" -ForegroundColor DarkGray
                     }
                     
-                    # 显示不匹配的行（带完整内容）
-                    Write-Host "  Official: $($officialLines[$i])" -ForegroundColor Cyan
-                    Write-Host "  Ours:     $($ourLines[$i])" -ForegroundColor Magenta
+                    # 显示不匹配的行（不含注释，突出差异）
+                    $officialDisplay = $officialLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
+                    $ourDisplay = $ourLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
+                    Write-Host "  Official: $officialDisplay" -ForegroundColor Cyan
+                    Write-Host "  Ours:     $ourDisplay" -ForegroundColor Magenta
                     
-                    # 显示后3行上下文
+                    # 显示后3行上下文（只显示指令部分，不含注释）
                     $contextEnd = [Math]::Min($officialLines.Count - 1, $i + 3)
                     for ($j = $i + 1; $j -le $contextEnd; $j++) {
-                        $ctx = $officialLines[$j] -replace '\s+', ' '
+                        $ctx = $officialLines[$j] -replace '\s*;.*$', '' -replace '\s+', ' '
                         Write-Host "    $ctx" -ForegroundColor DarkGray
                     }
                     Write-Host ""
@@ -193,8 +199,10 @@ foreach ($file in $luaFiles) {
                 
                 if ($Verbose) {
                     Write-Host "  Line $($i+1):" -ForegroundColor Yellow
-                    Write-Host "    Official: $officialLine" -ForegroundColor Gray
-                    Write-Host "    Ours:     $ourLine" -ForegroundColor Gray
+                    $officialClean = $officialLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
+                    $ourClean = $ourLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
+                    Write-Host "    Official: $officialClean" -ForegroundColor Gray
+                    Write-Host "    Ours:     $ourClean" -ForegroundColor Gray
                 }
             }
         }
