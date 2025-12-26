@@ -252,23 +252,23 @@ fn dump_chunk(
             OpCode::Le => format!("LE {} {} {}", a, b, k as u32),
             OpCode::EqI => {
                 // sB field is signed 8-bit integer
-                let sb = b as i32 - Instruction::OFFSET_SB;
+                let sb = b as i32 - Instruction::OFFSET_SC;
                 format!("EQI {} {} {}", a, sb, k as u32)
             }
             OpCode::LtI => {
-                let sb = b as i32 - Instruction::OFFSET_SB;
+                let sb = b as i32 - Instruction::OFFSET_SC;
                 format!("LTI {} {} {}", a, sb, k as u32)
             }
             OpCode::LeI => {
-                let sb = b as i32 - Instruction::OFFSET_SB;
+                let sb = b as i32 - Instruction::OFFSET_SC;
                 format!("LEI {} {} {}", a, sb, k as u32)
             }
             OpCode::GtI => {
-                let sb = b as i32 - Instruction::OFFSET_SB;
+                let sb = b as i32 - Instruction::OFFSET_SC;
                 format!("GTI {} {} {}", a, sb, k as u32)
             }
             OpCode::GeI => {
-                let sb = b as i32 - Instruction::OFFSET_SB;
+                let sb = b as i32 - Instruction::OFFSET_SC;
                 format!("GEI {} {} {}", a, sb, k as u32)
             }
             OpCode::ForLoop => {
@@ -298,7 +298,7 @@ fn dump_chunk(
             }
             OpCode::MmBinI => {
                 // MMBINI shows 4 parameters, B is signed
-                let sb = b as i32 - Instruction::OFFSET_SB;
+                let sb = b as i32 - Instruction::OFFSET_SC;
                 format!("MMBINI {} {} {} {}", a, sb, c, k as u32)
             }
             OpCode::MmBinK => {
@@ -386,13 +386,28 @@ fn dump_chunk(
 
         // Add comment for some instructions (like luac)
         let comment = match opcode {
-            OpCode::GetTabUp | OpCode::SetTabUp => {
-                // Show upvalue name and constant name（对齐luac）
+            OpCode::GetTabUp => {
+                // GETTABUP: Show upvalue name and constant name
                 if b < chunk.upvalue_count as u32 && c < chunk.constants.len() as u32 {
                     format!(" ; _ENV {}", format_constant(chunk, c, vm))
                 } else {
                     String::new()
                 }
+            }
+            OpCode::SetTabUp => {
+                // SETTABUP: Show upvalue name, key constant, and value constant (if k=1)
+                let mut comment = String::new();
+                if b < chunk.upvalue_count as u32 {
+                    comment.push_str(" ; _ENV");
+                    if b < chunk.constants.len() as u32 {
+                        comment.push_str(&format!(" {}", format_constant(chunk, b, vm)));
+                    }
+                    // If k flag is set, show value constant
+                    if k && c < chunk.constants.len() as u32 {
+                        comment.push_str(&format!(" {}", format_constant(chunk, c, vm)));
+                    }
+                }
+                comment
             }
             OpCode::GetField => {
                 // GETFIELD A B C: table in B, field name in C
@@ -404,8 +419,40 @@ fn dump_chunk(
             }
             OpCode::SetField => {
                 // SETFIELD A B C: table in A, field name in B, value in C
+                // Show field name constant and value constant (if k=1)
+                let mut comment = String::new();
                 if b < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, b, vm))
+                    comment.push_str(&format!(" ; {}", format_constant(chunk, b, vm)));
+                    // If k flag is set, show value constant
+                    if k && c < chunk.constants.len() as u32 {
+                        comment.push_str(&format!(" {}", format_constant(chunk, c, vm)));
+                    }
+                }
+                comment
+            }
+            OpCode::SetTable => {
+                // SETTABLE A B C: table in A, key in B, value in C
+                // If k flag is set, show value constant
+                if k && c < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, c, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::SetI => {
+                // SETI A B C: table in A, index in B, value in C
+                // If k flag is set, show value constant
+                if k && c < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, c, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::Self_ => {
+                // SELF A B C: R[A+1]=R[B], R[A]=R[B][RK(C)]
+                // If k flag is set, show method name constant
+                if k && c < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, c, vm))
                 } else {
                     String::new()
                 }
@@ -418,9 +465,113 @@ fn dump_chunk(
                     String::new()
                 }
             }
+            // All K-suffix arithmetic operations show constant value
+            OpCode::AddK | OpCode::SubK | OpCode::MulK | OpCode::ModK | OpCode::PowK 
+            | OpCode::DivK | OpCode::IDivK => {
+                if c < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, c, vm))
+                } else {
+                    String::new()
+                }
+            }
+            // All K-suffix bitwise operations show constant value
+            OpCode::BAndK | OpCode::BOrK | OpCode::BXorK => {
+                if c < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, c, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::EqK => {
+                // EQK A B k: show constant value
+                if b < chunk.constants.len() as u32 {
+                    format!(" ; {}", format_constant(chunk, b, vm))
+                } else {
+                    String::new()
+                }
+            }
+            OpCode::MmBinK => {
+                // MMBINK: show event name and constant value
+                let event_name = match c {
+                    6 => "__add",
+                    7 => "__sub",
+                    8 => "__mul",
+                    9 => "__mod",
+                    10 => "__pow",
+                    11 => "__div",
+                    12 => "__idiv",
+                    13 => "__band",
+                    14 => "__bor",
+                    15 => "__bxor",
+                    16 => "__shl",
+                    17 => "__shr",
+                    _ => "",
+                };
+                let mut comment = format!(" ; {}", event_name);
+                if b < chunk.constants.len() as u32 {
+                    comment.push_str(&format!(" {}", format_constant(chunk, b, vm)));
+                }
+                if k {
+                    comment.push_str(" flip");
+                }
+                comment
+            }
+            OpCode::MmBinI => {
+                // MMBINI: show event name
+                let event_name = match c {
+                    6 => "__add",
+                    7 => "__sub",
+                    8 => "__mul",
+                    9 => "__mod",
+                    10 => "__pow",
+                    11 => "__div",
+                    12 => "__idiv",
+                    13 => "__band",
+                    14 => "__bor",
+                    15 => "__bxor",
+                    16 => "__shl",
+                    17 => "__shr",
+                    _ => "",
+                };
+                if k {
+                    format!(" ; {} flip", event_name)
+                } else {
+                    format!(" ; {}", event_name)
+                }
+            }
+            OpCode::MmBin => {
+                // MMBIN: show event name
+                let event_name = match c {
+                    6 => "__add",
+                    7 => "__sub",
+                    8 => "__mul",
+                    9 => "__mod",
+                    10 => "__pow",
+                    11 => "__div",
+                    12 => "__idiv",
+                    13 => "__band",
+                    14 => "__bor",
+                    15 => "__bxor",
+                    16 => "__shl",
+                    17 => "__shr",
+                    _ => "",
+                };
+                format!(" ; {}", event_name)
+            }
+            OpCode::NewTable => {
+                // NEWTABLE: show array size (vc + EXTRAARGC)
+                // For now just show vc since we don't parse EXTRAARG here
+                format!(" ; {}", vc)
+            }
             OpCode::Closure => {
-                // Show child function address (just use index)
-                format!(" ; function_{}", bx)
+                // Show child function address - luac shows actual pointer
+                // We'll show a stable identifier based on bx
+                if bx < chunk.child_protos.len() as u32 {
+                    // Use child proto's address-like format
+                    format!(" ; {:p}", &chunk.child_protos[bx as usize] as *const _)
+                } else {
+                    String::new()
+                }
             }
             OpCode::LoadK => {
                 // Show constant value（对齐luac）
@@ -501,11 +652,25 @@ fn dump_chunk(
                 let target = pc + 1 - bx as usize; // +1 for 1-based, -Bx for backward jump
                 format!(" ; to {}", target)
             }
+            OpCode::Vararg => {
+                // VARARG: show return count
+                if c == 0 {
+                    format!(" ; all out")
+                } else {
+                    format!(" ; {} out", c - 1)
+                }
+            }
             _ => String::new(),
         };
 
         // Print instruction in luac format: [line] OPCODE args ; comment
-        println!("\t{}\t[{}]\t{}\t{}", pc + 1, line, detail, comment);
+        // Split detail into opcode name and arguments for proper formatting
+        // Official luac uses: printf("%-9s\t",opnames[o]) for opcode, then args
+        let parts: Vec<&str> = detail.splitn(2, ' ').collect();
+        let opcode_name = parts[0];
+        let args = if parts.len() > 1 { parts[1] } else { "" };
+        
+        println!("\t{}\t[{}]\t{:<9}\t{}{}", pc + 1, line, opcode_name, args, comment);
     }
 
     // Print constants list (for debugging)

@@ -37,7 +37,7 @@ pub struct FuncState<'a> {
     pub is_vararg: bool,               // true if function is vararg
     pub first_local: usize,            // index of first local variable in prev
     pub source_name: String,           // source file name for error messages
-    pub chunk_constants_map: HashMap<LuaValue, usize>, // constant to index mapping for chunk
+    pub scanner_table: HashMap<LuaValue, usize>, // constant to index mapping for deduplication (per-function)
 }
 
 pub struct CompilerState {
@@ -45,8 +45,6 @@ pub struct CompilerState {
     pub block_cnt_pool: Vec<Option<BlockCnt>>,
     // pool of LhsAssign structures for assignment chain management
     pub lhs_assign_pool: Vec<Option<LhsAssign>>,
-    // Global scanner table for constant deduplication (corresponds to LexState.h in Lua C)
-    pub scanner_table: HashMap<LuaValue, usize>,
 }
 
 impl CompilerState {
@@ -54,7 +52,6 @@ impl CompilerState {
         CompilerState {
             block_cnt_pool: Vec::new(),
             lhs_assign_pool: Vec::new(),
-            scanner_table: HashMap::new(),
         }
     }
 
@@ -202,7 +199,7 @@ impl<'a> FuncState<'a> {
             is_vararg,
             source_name,
             first_local: 0,
-            chunk_constants_map: HashMap::new(),
+            scanner_table: HashMap::new(),
         }
     }
 
@@ -261,7 +258,7 @@ impl<'a> FuncState<'a> {
             is_vararg,
             first_local: parent.actvar.len(),
             source_name: parent.source_name.clone(),
-            chunk_constants_map: HashMap::new(),
+            scanner_table: HashMap::new(),
         }
     }
 

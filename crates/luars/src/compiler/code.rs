@@ -10,13 +10,13 @@ use crate::lua_vm::{Instruction, OpCode};
 // Port of int2sC from lcode.c (macro)
 // Convert integer to sC format (with OFFSET_sC = 128)
 fn int2sc(i: i32) -> u32 {
-    ((i as u32).wrapping_add(128)) & 0xFF
+    ((i as u32).wrapping_add(127)) & 0xFF
 }
 
 // Port of fitsC from lcode.c:660-662
 // Check whether 'i' can be stored in an 'sC' operand
 fn fits_c(i: i64) -> bool {
-    let offset_sc = 128i64;
+    let offset_sc = 127i64;
     let max_arg_c = 255u32; // MAXARG_C = 255 for 8-bit C field
     (i.wrapping_add(offset_sc) as u64) <= (max_arg_c as u64)
 }
@@ -916,7 +916,7 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     // We need to manually search because long strings require content comparison via ObjectPool
     let mut found_idx: Option<usize> = None;
     
-    for (&candidate_value, &idx) in fs.compiler_state.scanner_table.iter() {
+    for (&candidate_value, &idx) in fs.scanner_table.iter() {
         // Use raw_equal_with_pool for proper long string content comparison
         if value.raw_equal(&candidate_value, fs.pool) {
             found_idx = Some(idx);
@@ -942,10 +942,7 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     fs.chunk.constants.push(value.clone());
 
     // Store key->index mapping in scanner table (lcode.c:562-563)
-    fs.compiler_state.scanner_table.insert(value.clone(), idx);
-
-    // Also update local map for backward compatibility
-    fs.chunk_constants_map.insert(value.clone(), idx);
+    fs.scanner_table.insert(value.clone(), idx);
 
     idx
 }
@@ -1662,8 +1659,9 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
             if op == BinaryOperator::OpAdd {
                 if let ExpKind::VKINT = e2.kind {
                     let imm_val = e2.u.ival();
-                    // For ADD: only check if the value fits in signed 8-bit after encoding
-                    if imm_val >= -128 && imm_val <= 127 {
+                    // For ADD: check if value fits in sC field (int2sC(i) = i + 127 must be in 0-255)
+                    // So i must be in range -127 to 128
+                    if imm_val >= -127 && imm_val <= 128 {
                         // Use ADDI instruction
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((imm_val + 127) & 0xff) as u32;
@@ -1676,7 +1674,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         e1.u = ExpUnion::Info(pc as i32);
 
                         // Generate MMBINI for metamethod fallback
-                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
                         code_abck(
                             fs,
                             OpCode::MmBinI,
@@ -1694,8 +1692,8 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 if let ExpKind::VKINT = e2.kind {
                     let imm_val = e2.u.ival();
                     let neg_imm = -imm_val;
-                    // Both values must fit in -128..127 range (fitsC check in lcode.c:1469)
-                    if imm_val >= -128 && imm_val <= 127 && neg_imm >= -128 && neg_imm <= 127 {
+                    // Both values must fit in -127..128 range (sC field capacity)
+                    if imm_val >= -127 && imm_val <= 128 && neg_imm >= -127 && neg_imm <= 128 {
                         // Use ADDI with negated immediate
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((neg_imm + 127) & 0xff) as u32; // Encode negated value for ADDI
@@ -1709,7 +1707,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
 
                         // Generate MMBINI with ORIGINAL value for metamethod
                         // (finishbinexpneg corrects the metamethod argument - lcode.c:1476)
-                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
                         code_abck(
                             fs,
                             OpCode::MmBinI,
@@ -1731,7 +1729,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // 3. else -> regular SHL
                 if let ExpKind::VKINT = e1.kind {
                     let imm_val = e1.u.ival();
-                    if imm_val >= -128 && imm_val <= 127 {
+                    if imm_val >= -127 && imm_val <= 128 {
                         // Case 1: SHLI (immediate << register)
                         swapexps(e1, e2); // Put immediate on right for processing
                         let r1 = exp2anyreg(fs, e1);
@@ -1745,7 +1743,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         e1.u = ExpUnion::Info(pc as i32);
 
                         // MMBINI with flip=1 since immediate was on left
-                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
                         code_abck(
                             fs,
                             OpCode::MmBinI,
@@ -1760,7 +1758,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     // Case 2: Check if e2 can be negated -> use SHRI
                     let imm_val = e2.u.ival();
                     let neg_imm = -imm_val;
-                    if imm_val >= -128 && imm_val <= 127 && neg_imm >= -128 && neg_imm <= 127 {
+                    if imm_val >= -127 && imm_val <= 128 && neg_imm >= -127 && neg_imm <= 128 {
                         // Use SHRI with negated immediate (a << b = a >> -b)
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((neg_imm + 127) & 0xff) as u32;
@@ -1773,7 +1771,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         e1.u = ExpUnion::Info(pc as i32);
 
                         // MMBINI with ORIGINAL value for TM_SHL
-                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
                         code_abck(
                             fs,
                             OpCode::MmBinI,
@@ -1790,7 +1788,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // OPR_SHR: if e2 is small int -> SHRI, else regular SHR
                 if let ExpKind::VKINT = e2.kind {
                     let imm_val = e2.u.ival();
-                    if imm_val >= -128 && imm_val <= 127 {
+                    if imm_val >= -127 && imm_val <= 128 {
                         let r1 = exp2anyreg(fs, e1);
                         let enc_imm = ((imm_val + 127) & 0xff) as u32;
                         let pc = code_abc(fs, OpCode::ShrI, 0, r1 as u32, enc_imm);
@@ -1801,7 +1799,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                         e1.kind = ExpKind::VRELOC;
                         e1.u = ExpUnion::Info(pc as i32);
 
-                        let mm_imm = ((imm_val + 128) & 0xff) as u32;
+                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
                         code_abck(
                             fs,
                             OpCode::MmBinI,
