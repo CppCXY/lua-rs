@@ -193,7 +193,8 @@ pub fn finish(fs: &mut FuncState) {
                 if needclose || is_vararg {
                     // Convert to RETURN
                     let a = Instruction::get_a(*instr);
-                    let b = Instruction::get_b(*instr);
+                    // For RETURN0, B=1 (0 returns + 1); for RETURN1, B=2 (1 return + 1)
+                    let b = if opcode == OpCode::Return0 { 1 } else { 2 };
                     let mut new_instr = Instruction::create_abck(OpCode::Return, a, b, 0, false);
 
                     // lcode.c:1861-1865: Set k and C fields

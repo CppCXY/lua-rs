@@ -218,7 +218,10 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             LuaTokenKind::TkLeftBracket => {
                 // [exp]
                 let mut key = ExpDesc::new_void();
-                code::exp2anyregup(fs, v);
+                // Lua 5.5: Don't discharge VVARGVAR, keep it so indexed can generate GETVARG
+                if v.kind != ExpKind::VVARGVAR {
+                    code::exp2anyregup(fs, v);
+                }
                 yindex(fs, &mut key)?;
                 code::indexed(fs, v, &mut key);
             }
@@ -866,6 +869,10 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     // lparser.c:760: close_func calls leaveblock(fs) - close function body block
     statement::leaveblock(&mut child_fs);
+
+    // Set param_count on chunk BEFORE calling finish, so finish can use it for RETURN instructions
+    child_fs.chunk.param_count = param_count;
+    child_fs.chunk.is_vararg = is_vararg;
 
     // Port of close_func from lparser.c:763 - finish code generation
     code::finish(&mut child_fs);
