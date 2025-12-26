@@ -183,7 +183,14 @@ fn dump_chunk(
 
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
-            OpCode::Vararg => format!("VARARG {} {} {}", a, b, c),
+            OpCode::Vararg => {
+                let k_flag = Instruction::get_k(instr);
+                if k_flag {
+                    format!("VARARG {} {} {}k", a, b, c)
+                } else {
+                    format!("VARARG {} {} {}", a, b, c)
+                }
+            }
             OpCode::GetVarg => format!("GETVARG {} {} {}", a, b, c),
             OpCode::Move => format!("MOVE {} {}", a, b),
             OpCode::LoadI => format!("LOADI {} {}", a, sbx),

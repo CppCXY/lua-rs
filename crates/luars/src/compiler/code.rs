@@ -181,7 +181,13 @@ pub fn ret(fs: &mut FuncState, first: u8, nret: u8) -> usize {
 pub fn finish(fs: &mut FuncState) {
     let needclose = fs.needclose;
     let is_vararg = fs.is_vararg;
+    let needs_vararg_table = fs.chunk.needs_vararg_table;
     let num_params = fs.chunk.param_count;
+
+    // lcode.c:1932-1933: If function uses vararg table, clear hidden vararg flag
+    // In Lua 5.5, PF_VAHID is cleared if PF_VATAB is set
+    // This means named vararg functions (...t) don't need RETURN C field
+    let use_hidden_vararg = is_vararg && !needs_vararg_table;
 
     for i in 0..fs.pc {
         let instr = &mut fs.chunk.code[i];
@@ -189,19 +195,20 @@ pub fn finish(fs: &mut FuncState) {
 
         match opcode {
             OpCode::Return0 | OpCode::Return1 => {
-                // lcode.c:1854-1859: Convert RETURN0/RETURN1 to RETURN if needed
-                if needclose || is_vararg {
+                // lcode.c:1941-1944: Convert RETURN0/RETURN1 to RETURN if needed
+                // Only convert when needclose OR use_hidden_vararg (PF_VAHID)
+                if needclose || use_hidden_vararg {
                     // Convert to RETURN
                     let a = Instruction::get_a(*instr);
                     // For RETURN0, B=1 (0 returns + 1); for RETURN1, B=2 (1 return + 1)
                     let b = if opcode == OpCode::Return0 { 1 } else { 2 };
                     let mut new_instr = Instruction::create_abck(OpCode::Return, a, b, 0, false);
 
-                    // lcode.c:1861-1865: Set k and C fields
+                    // lcode.c:1948-1950: Set k and C fields
                     if needclose {
                         Instruction::set_k(&mut new_instr, true);
                     }
-                    if is_vararg {
+                    if use_hidden_vararg {
                         Instruction::set_c(&mut new_instr, (num_params + 1) as u32);
                     }
 
@@ -209,16 +216,32 @@ pub fn finish(fs: &mut FuncState) {
                 }
             }
             OpCode::Return | OpCode::TailCall => {
-                // lcode.c:1861-1865: Set k and C fields for existing RETURN/TAILCALL
+                // lcode.c:1948-1950: Set k and C fields for existing RETURN/TAILCALL
                 if needclose {
                     Instruction::set_k(instr, true);
                 }
-                if is_vararg {
+                if use_hidden_vararg {
                     Instruction::set_c(instr, (num_params + 1) as u32);
                 }
             }
+            OpCode::GetVarg => {
+                // lcode.c:1953-1956: Convert GETVARG to GETTABLE if has vararg table
+                if needs_vararg_table {
+                    // Function has vararg table, must use GETTABLE instead
+                    let a = Instruction::get_a(*instr);
+                    let b = Instruction::get_b(*instr);
+                    let c = Instruction::get_c(*instr);
+                    *instr = Instruction::create_abc(OpCode::GetTable, a, b, c);
+                }
+            }
+            OpCode::Vararg => {
+                // lcode.c:1958-1961: Set k flag if has vararg table
+                if needs_vararg_table {
+                    Instruction::set_k(instr, true);
+                }
+            }
             OpCode::Jmp => {
-                // lcode.c:1867-1870: Fix jumps to final target
+                // lcode.c:1963-1966: Fix jumps to final target
                 let target = finaltarget(&fs.chunk.code, i);
                 fixjump_at(fs, i, target);
             }
@@ -516,9 +539,9 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
             e.kind = ExpKind::VNONRELOC;
         }
         ExpKind::VVARGVAR => {
-            // Lua 5.5: vararg parameter - convert to regular local
-            // This marks that the function needs a vararg table
-            fs.chunk.is_vararg = true;
+            // lcode.c:824-828: vararg parameter - convert to regular local
+            // luaK_vapar2local calls needvatab() - marks function needs vararg table (PF_VATAB)
+            fs.chunk.needs_vararg_table = true;
             // Now it's equivalent to a regular local variable
             e.u = ExpUnion::Info(e.u.var().ridx as i32);
             e.kind = ExpKind::VNONRELOC;
