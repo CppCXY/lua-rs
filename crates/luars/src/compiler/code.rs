@@ -1010,6 +1010,7 @@ fn exp2k(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
             ExpKind::VKINT => int_k(fs, e.u.ival()),
             ExpKind::VKFLT => number_k(fs, e.u.nval()),
             ExpKind::VKSTR => str2k(fs, e),
+            ExpKind::VK => e.u.info() as usize, // Already a constant, just use the info
             _ => return false,
         };
 
