@@ -45,6 +45,12 @@ pub const LUA_TFUNCTION: u8 = 6;
 pub const LUA_TUSERDATA: u8 = 7;
 pub const LUA_TTHREAD: u8 = 8;
 
+// Extra types for non-values
+pub const LUA_NUMTYPES: u8 = 9;
+pub const LUA_TUPVAL: u8 = LUA_NUMTYPES;  // upvalues
+pub const LUA_TPROTO: u8 = LUA_NUMTYPES + 1;  // function prototypes  
+pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2;  // removed keys in tables
+
 // ============ Variant tags (with bits 4-5) ============
 // makevariant(t,v) = ((t) | ((v) << 4))
 
@@ -94,6 +100,18 @@ pub const fn novariant(tt: u8) -> u8 {
 #[inline(always)]
 pub const fn withvariant(tt: u8) -> u8 {
     tt & 0x3F
+}
+
+/// ctb - mark a tag as collectable
+#[inline(always)]
+pub const fn ctb(t: u8) -> u8 {
+    t | BIT_ISCOLLECTABLE
+}
+
+/// tagisempty - check if tag represents empty slot
+#[inline(always)]
+pub const fn tagisempty(tag: u8) -> bool {
+    novariant(tag) == LUA_TNIL
 }
 
 // ============ Value union ============

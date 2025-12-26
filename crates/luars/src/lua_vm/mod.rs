@@ -488,11 +488,11 @@ impl LuaVM {
         }
     }
 
-    pub fn table_get_raw(&self, table: &LuaValue, key: &LuaValue) -> LuaValue {
+    pub fn table_get_raw(&self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
         if let Some(table_ref) = self.get_table(table) {
-            table_ref.raw_get(key).unwrap_or(LuaValue::nil())
+            table_ref.raw_get(key)
         } else {
-            LuaValue::nil()
+            None
         }
     }
 

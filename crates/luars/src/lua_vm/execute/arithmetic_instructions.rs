@@ -1200,7 +1200,7 @@ pub fn exec_len(vm: &mut LuaVM, instr: u32, base_ptr: usize) -> LuaResult<()> {
                 (table.len() as i64, None)
             } else {
                 let mm_key = LuaValue::string(vm.object_pool.tm_len);
-                match mt_table.raw_get(&mm_key) {
+                match mt_table.raw_get(&mm_key, &vm.object_pool) {
                     Some(mm) if !mm.is_nil() => (0, Some(mm)),
                     _ => (table.len() as i64, None),
                 }

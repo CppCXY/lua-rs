@@ -494,7 +494,7 @@ impl GC {
                 let (should_mark, entries, mt_value, weak_mode) = {
                     if let Some(table) = pool.tables.get(gc_id.index()) {
                         if table.header.is_gray() {
-                            let entries = table.data.iter_all();
+                            let entries: Vec<_> = table.data.iter_all().collect();
                             let mt = table.data.get_metatable();
 
                             // Check weak mode from metatable
@@ -1180,7 +1180,7 @@ impl GC {
                                 };
 
                                 if should {
-                                    let entries = table.data.iter_all();
+                                    let entries: Vec<_> = table.data.iter_all().collect();
                                     let mt = table.data.get_metatable();
 
                                     // Check weak mode from metatable
@@ -1404,7 +1404,7 @@ impl GC {
     fn get_weak_mode(&self, metatable: &GcTable, pool: &ObjectPool) -> Option<(bool, bool)> {
         // Find __mode key - it should be a string "k", "v", or "kv" (or "vk")
         for n in metatable.data.nodes.iter() {
-            let key = &n.key;
+            let key = n.key();
             // Check if key is the string "__mode"
             if let Some(key_str_id) = key.as_string_id() {
                 if key_str_id == pool.tm_mode {

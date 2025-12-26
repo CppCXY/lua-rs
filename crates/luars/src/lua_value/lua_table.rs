@@ -1,536 +1,688 @@
-// High-performance Lua table implementation following Lua 5.4 design
-// - Array part for integer keys [1..n]
-// - Hash part using open addressing (same as Lua 5.4)
-use super::LuaValue;
-use crate::{LuaVM, TableId};
+// LuaTable - Rust优化的Lua Table实现
+//
+// **设计理念**: 在保持Lua语义的前提下，利用Rust的优势进行优化
+//
+// **与Lua C实现的差异**:
+// 1. Array存储: Vec<LuaValue>代替分离的Value*+tag* - 更简单，内存局部性好
+// 2. Hash存储: Box<[Node]>代替Vec<Node> - 节省capacity字段（8字节）
+// 3. 移除lastfree: Rust Vec操作已很快，无需额外优化
+// 4. 移除lenhint: 简化实现，按需计算长度
+//
+// **内存布局对比** (64位系统):
+// Lua C Table: ~48-56字节 (使用指针)
+// Rust优化前: 112字节 (3个Vec + 未使用字段)
+// Rust优化后: ~56字节 (Vec + Box + 基础字段)
 
-/// Hash node - mimics Lua 5.4's Node structure
-/// Contains key+value pair
+use super::lua_value::{
+    LUA_TDEADKEY, LUA_TNIL, LUA_VNUMINT, LUA_VSHRSTR, LuaValue, LuaValueKind, Value, ctb, novariant,
+};
+use crate::{TableId, gc::ObjectPool};
+
+// ============ Constants ============
+
+/// BITDUMMY flag: table没有hash part (使用dummy node)
+const BITDUMMY: u8 = 1 << 6;
+
+/// LOG_2查找表: log_2[i-1] = ceil(log2(i))
+/// 用于快速计算ceil(log2(x))
+const LOG_2: [u8; 256] = [
+    0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+];
+
+// ============ Node (Hash table节点) ============
+
+/// Hash table节点
+///
+/// 保持与Lua C一致的结构，但使用struct而非union (Rust安全)
 #[derive(Clone, Copy)]
 pub struct Node {
-    pub key: LuaValue,
+    /// 节点的value
     pub value: LuaValue,
+
+    /// Key的类型tag
+    pub key_tt: u8,
+
+    /// 冲突链表的next索引 (-1表示链结束)
+    pub next: i32,
+
+    /// Key的值
+    pub key_val: Value,
 }
 
 impl Node {
+    /// 创建空节点 (使用DEADKEY标记)
     #[inline(always)]
-    fn empty() -> Self {
-        Node {
-            key: LuaValue::nil(),
-            value: LuaValue::nil(),
+    pub fn empty() -> Self {
+        Self {
+            value: LuaValue::empty(),
+            key_tt: LUA_TDEADKEY,
+            next: -1,
+            key_val: Value { i: 0 },
         }
     }
 
-    /// Check if node is empty - only need to check key (nil key = empty slot)
+    /// 检查节点是否为空
     #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.key.is_nil()
+    pub fn is_empty(&self) -> bool {
+        novariant(self.key_tt) == LUA_TNIL
+    }
+
+    /// 检查key是否为dead
+    #[inline(always)]
+    pub fn is_dead(&self) -> bool {
+        self.key_tt == LUA_TDEADKEY
+    }
+
+    /// 获取key (构造LuaValue)
+    #[inline(always)]
+    pub fn key(&self) -> LuaValue {
+        LuaValue {
+            value_: self.key_val,
+            tt_: self.key_tt,
+        }
+    }
+
+    /// 设置key
+    #[inline(always)]
+    pub fn set_key(&mut self, key: &LuaValue) {
+        self.key_val = key.value_;
+        self.key_tt = key.tt_;
+    }
+
+    /// 检查key是否为integer
+    #[inline(always)]
+    pub fn key_is_integer(&self) -> bool {
+        self.key_tt == LUA_VNUMINT
+    }
+
+    /// 获取integer key的值
+    #[inline(always)]
+    pub fn key_integer(&self) -> i64 {
+        debug_assert!(self.key_is_integer());
+        unsafe { self.key_val.i }
+    }
+
+    /// 检查key是否为short string
+    #[inline(always)]
+    pub fn key_is_shrstr(&self) -> bool {
+        self.key_tt == ctb(LUA_VSHRSTR)
+    }
+
+    /// 获取string key的ID
+    #[inline(always)]
+    pub fn key_string_id(&self) -> u32 {
+        debug_assert!(self.key_is_shrstr());
+        unsafe { self.key_val.gc_id }
     }
 }
 
-/// Metamethod flags for fast lookup (like Lua 5.4's flags field)
-/// A bit set to 1 means the metamethod is NOT present (absence cache)
-/// Only the first 6 metamethods use this optimization (TM_INDEX..TM_EQ)
-pub mod tm_flags {
-    pub const TM_INDEX: u8 = 1 << 0; // __index
-    pub const TM_NEWINDEX: u8 = 1 << 1; // __newindex
-    pub const TM_GC: u8 = 1 << 2; // __gc
-    pub const TM_MODE: u8 = 1 << 3; // __mode
-    pub const TM_LEN: u8 = 1 << 4; // __len
-    pub const TM_EQ: u8 = 1 << 5; // __eq
-    pub const TM_CALL: u8 = 1 << 6; // __call (bonus: very common)
-    pub const MASK_ALL: u8 = 0x7F; // All 7 bits
-}
+// ============ LuaTable ============
 
-/// Lua table implementation
-/// - Array part for integer keys [1..n]
-/// - Hash part using open addressing with chaining (same as Lua 5.4)
+/// Rust极致优化的Lua Table
+///
+/// **内存布局** (64位):
+/// - meta: 8 bytes (压缩: flags[8bits] + lsizenode[8bits] + metatable_id[48bits])
+/// - array: 24 bytes (Vec: ptr+len+cap)
+/// - nodes: 16 bytes (Box<[T]>: ptr+len)
+/// - object_pool: 8 bytes (指向ObjectPool的裸指针)
+/// **总计: 56字节!**
+///
+/// **meta字段位布局**:
+/// - bits 0-7:   flags (metamethod缓存)
+/// - bits 8-15:  lsizenode (hash大小的log2)
+/// - bits 16-63: metatable_id (0表示无metatable，1-based)
 pub struct LuaTable {
-    /// Array part: stores values for integer keys [1..array.len()]
-    /// Always initialized (empty Vec if no array elements)
-    pub(crate) array: Vec<LuaValue>,
+    /// 压缩的元数据字段
+    /// Layout: flags(8) | lsizenode(8) | metatable_id(48)
+    /// metatable_id为0表示没有metatable
+    /// metatable_id为n+1表示TableId(n) (1-based以避免0冲突)
+    meta: u64,
 
-    /// Hash part: open-addressed hash table with linear probing
-    /// This matches Lua 5.4's design for better iteration performance
-    /// Always initialized (empty Vec if no hash elements)
-    pub(crate) nodes: Vec<Node>,
+    /// Array part: 存储正整数key (1..array.len())
+    /// 移除了asize字段 - array.len()就是大小
+    array: Vec<LuaValue>,
 
-    /// Number of occupied slots in hash part (O(1) load factor tracking)
-    hash_size: usize,
+    /// Hash part: 存储非数组key
+    pub nodes: Box<[Node]>,
 
-    /// Metatable - optional table that defines special behaviors  
-    /// Store as LuaValue (table ID) instead of Rc for ID-based architecture
-    metatable: Option<TableId>,
-
-    /// Metamethod absence flags (like Lua 5.4)
-    /// A bit set to 1 means the metamethod is NOT present (cached absence)
-    /// This allows O(1) check for common metamethods instead of hash lookup
-    pub tm_flags: u8,
+    object_pool: *const ObjectPool, // 用于hash计算和key比较
 }
 
 impl LuaTable {
-    /// Create an empty table
-    #[inline(always)]
-    pub fn new(array_size: usize, hash_size: usize) -> Self {
-        // FAST PATH: Most common case is empty table
-        if array_size == 0 && hash_size == 0 {
-            return LuaTable {
-                array: Vec::new(),
-                nodes: Vec::new(),
-                hash_size: 0,
-                metatable: None,
-                tm_flags: 0, // All metamethods unknown initially
-            };
-        }
-
-        // Hash size must be power of 2 for fast modulo using & (size-1)
-        let actual_hash_size = if hash_size > 0 {
-            hash_size.next_power_of_two()
-        } else {
+    /// 创建新table
+    pub fn new(asize: u32, hsize: u32, object_pool: *const ObjectPool) -> Self {
+        // 计算hash part大小
+        let lsizenode = if hsize == 0 {
             0
+        } else {
+            Self::ceillog2(hsize) as u8
         };
 
-        LuaTable {
-            array: if array_size > 0 {
-                Vec::with_capacity(array_size)
-            } else {
-                Vec::new()
-            },
-            nodes: if actual_hash_size > 0 {
-                vec![Node::empty(); actual_hash_size]
-            } else {
-                Vec::new()
-            },
-            hash_size: 0,
-            metatable: None,
-            tm_flags: 0, // All metamethods unknown initially
+        let actual_hsize = if lsizenode == 0 { 0 } else { 1u32 << lsizenode };
+
+        // 初始化array part
+        let array = vec![LuaValue::empty(); asize as usize];
+
+        // 初始化hash part
+        let nodes = if actual_hsize == 0 {
+            Box::new([])
+        } else {
+            vec![Node::empty(); actual_hsize as usize].into_boxed_slice()
+        };
+
+        // 构建meta字段
+        let flags = if actual_hsize == 0 { BITDUMMY } else { 0 };
+        let meta = Self::pack_meta(flags, lsizenode, None);
+
+        Self {
+            meta,
+            array,
+            nodes,
+            object_pool,
         }
     }
 
-    /// Hash function for LuaValue - optimized for speed
-    /// Uses identity hash for GC objects (string/table/function ID) and value hash for primitives
+    // ============ Meta字段的压缩/解压 ============
+
+    /// 打包meta字段: flags(8) | lsizenode(8) | metatable_id(48)
     #[inline(always)]
-    fn hash_key(key: &LuaValue, size: usize) -> usize {
-        // Combine primary and secondary for best distribution
-        // For strings: primary has tag|id, secondary is 0 -> hash of id
-        // For integers: primary has tag, secondary has value -> hash of value
-        // For floats: similar to integers
-        // XOR gives good mixing without branch
-        let raw = key.primary.wrapping_add(key.secondary);
-
-        // Fibonacci hashing - excellent distribution for sequential IDs
-        // Golden ratio: 2^64 / phi ≈ 0x9e3779b97f4a7c15
-        let hash = raw.wrapping_mul(0x9e3779b97f4a7c15);
-
-        // Fast modulo using bitmask (size is power of 2)
-        (hash >> 32) as usize & (size - 1)
+    fn pack_meta(flags: u8, lsizenode: u8, metatable: Option<TableId>) -> u64 {
+        let metatable_bits = match metatable {
+            None => 0u64,
+            Some(TableId(id)) => (id as u64) + 1, // 1-based以避免0
+        };
+        (flags as u64) | ((lsizenode as u64) << 8) | (metatable_bits << 16)
     }
 
-    /// Find a node with the given key, returns Some(index) if found
+    /// 获取flags
     #[inline(always)]
-    fn find_node(&self, key: &LuaValue) -> Option<usize> {
-        let size = self.nodes.len();
-        if size == 0 {
-            return None;
-        }
-
-        let mut idx = Self::hash_key(key, size);
-        let start_idx = idx;
-
-        // Fast path: check first slot (no collision case - most common)
-        let node = unsafe { self.nodes.get_unchecked(idx) };
-        if node.is_empty() {
-            return None;
-        }
-        if node.key == *key {
-            return Some(idx);
-        }
-
-        // Collision path: linear probe
-        loop {
-            idx = (idx + 1) & (size - 1);
-
-            if idx == start_idx {
-                return None;
-            }
-
-            let node = unsafe { self.nodes.get_unchecked(idx) };
-            if node.is_empty() {
-                return None;
-            }
-            if node.key == *key {
-                return Some(idx);
-            }
-        }
+    fn flags(&self) -> u8 {
+        (self.meta & 0xFF) as u8
     }
 
-    /// Resize hash part to new size (power of 2)
-    fn resize_hash(&mut self, new_size: usize) {
-        if new_size == 0 {
-            self.nodes = Vec::new();
-            self.hash_size = 0;
-            return;
-        }
-
-        // Must be power of 2 for fast modulo
-        debug_assert!(new_size.is_power_of_two());
-
-        let old_nodes = std::mem::replace(&mut self.nodes, vec![Node::empty(); new_size]);
-        self.hash_size = 0; // Reset counter, will be rebuilt during rehash
-
-        // Rehash all existing nodes
-        for old_node in old_nodes {
-            if !old_node.is_empty() {
-                self.insert_node_simple(old_node.key, old_node.value);
-            }
-        }
-    }
-
-    /// Simple insert using linear probing (no complex chaining)
-    #[inline]
-    fn insert_node_simple(&mut self, key: LuaValue, value: LuaValue) {
-        let size = self.nodes.len();
-        debug_assert!(size > 0, "insert_node_simple called with empty nodes");
-
-        let mut idx = Self::hash_key(&key, size);
-
-        // Fast path: first slot is empty (common case)
-        let node = unsafe { self.nodes.get_unchecked(idx) };
-        if node.is_empty() {
-            self.nodes[idx] = Node { key, value };
-            self.hash_size += 1;
-            return;
-        }
-        if node.key == key {
-            self.nodes[idx].value = value;
-            return;
-        }
-
-        // Collision path
-        let start_idx = idx;
-        loop {
-            idx = (idx + 1) & (size - 1);
-
-            if idx == start_idx {
-                // Table is full - should not happen if resize is correct
-                panic!(
-                    "Hash table is full during insert: size={}, hash_size={}, key={:?}",
-                    size, self.hash_size, key
-                );
-            }
-
-            let node = unsafe { self.nodes.get_unchecked(idx) };
-            if node.is_empty() {
-                self.nodes[idx] = Node { key, value };
-                self.hash_size += 1;
-                return;
-            }
-            if node.key == key {
-                self.nodes[idx].value = value;
-                return;
-            }
-        }
-    }
-
-    /// Insert a key-value pair into hash part
-    fn insert_node(&mut self, key: LuaValue, value: LuaValue) {
-        if self.nodes.is_empty() {
-            // Initialize hash table with small size
-            self.resize_hash(8);
-        }
-
-        // Check load factor using O(1) counter - resize if > 75%
-        let nodes_len = self.nodes.len();
-        if nodes_len > 0 && self.hash_size * 4 >= nodes_len * 3 {
-            // Double the size, minimum 8
-            let new_size = nodes_len * 2;
-            self.resize_hash(new_size);
-        }
-
-        self.insert_node_simple(key, value);
-    }
-
-    /// Get the metatable of this table
-    pub fn get_metatable(&self) -> Option<LuaValue> {
-        self.metatable.map(|mt_id| LuaValue::table(mt_id))
-    }
-
-    /// Set the metatable of this table
-    /// Resets tm_flags since the new metatable may have different metamethods
-    pub fn set_metatable(&mut self, mt: Option<LuaValue>) {
-        self.metatable = mt.and_then(|v| v.as_table_id());
-        // Reset all flags - metamethods need to be re-checked
-        self.tm_flags = 0;
-    }
-
-    /// Fast metamethod absence check (like Lua 5.4's fasttm macro)
-    /// Returns true if the metamethod is known to be absent (flag is set)
-    /// This is O(1) vs O(n) hash lookup
+    /// 设置flags
     #[inline(always)]
-    pub fn tm_absent(&self, flag: u8) -> bool {
-        (self.tm_flags & flag) != 0
+    fn set_flags(&mut self, flags: u8) {
+        self.meta = (self.meta & !0xFF) | (flags as u64);
     }
 
-    /// Mark a metamethod as absent (cache the lookup result)
-    /// Called after a failed lookup to speed up future checks
+    /// 获取lsizenode
     #[inline(always)]
-    pub fn set_tm_absent(&mut self, flag: u8) {
-        self.tm_flags |= flag;
+    fn lsizenode(&self) -> u8 {
+        ((self.meta >> 8) & 0xFF) as u8
     }
 
-    /// Clear a specific tm flag (called when metamethod is set)
+    /// 设置lsizenode
     #[inline(always)]
-    pub fn clear_tm_absent(&mut self, flag: u8) {
-        self.tm_flags &= !flag;
+    fn set_lsizenode(&mut self, lsizenode: u8) {
+        self.meta = (self.meta & !(0xFFu64 << 8)) | ((lsizenode as u64) << 8);
     }
 
-    /// Fast integer key access - O(1) for array part
-    /// Ultra-optimized hot path for ipairs iterations
-    /// Note: This only checks the array part for performance.
-    /// Use get_int_full() if the value might be in the hash part.
+    /// 获取metatable
     #[inline(always)]
-    pub fn get_int(&self, key: i64) -> Option<LuaValue> {
-        if key > 0 {
-            let idx = (key - 1) as usize;
-            if idx < self.array.len() {
-                // SAFETY: bounds check is done explicitly
-                unsafe {
-                    let val = self.array.get_unchecked(idx);
-                    if !val.is_nil() {
-                        return Some(*val);
-                    }
+    fn metatable(&self) -> Option<crate::TableId> {
+        let bits = self.meta >> 16;
+        if bits == 0 {
+            None
+        } else {
+            Some(TableId((bits - 1) as u32))
+        }
+    }
+
+    /// 设置metatable
+    #[inline(always)]
+    fn set_metatable_internal(&mut self, metatable: Option<TableId>) {
+        let metatable_bits = match metatable {
+            None => 0u64,
+            Some(TableId(id)) => (id as u64) + 1,
+        };
+        self.meta = (self.meta & 0xFFFF) | (metatable_bits << 16);
+    }
+
+    /// 计算ceil(log2(x)) - 来自Lua的luaO_ceillog2
+    /// 返回最小的整数n使得 x <= 2^n
+    fn ceillog2(mut x: u32) -> u32 {
+        if x == 0 {
+            return 0;
+        }
+
+        let mut l = 0;
+        x -= 1;
+        while x >= 256 {
+            l += 8;
+            x >>= 8;
+        }
+        l + LOG_2[x as usize] as u32
+    }
+
+    // ============ Hash functions ============
+
+    /// 计算key的hash位置 - mainposition
+    fn mainposition(&self, key: &LuaValue) -> usize {
+        let sizenode = self.sizenode();
+        if sizenode == 0 {
+            return 0;
+        }
+
+        // Lua的hashmod: hash % ((sizenode-1)|1)
+        // |1 确保除数是奇数，避免偶数hash值产生冲突
+        let modulo = (sizenode - 1) | 1;
+
+        match key.kind() {
+            LuaValueKind::Integer => {
+                // hashint: 对integer取模
+                let i = unsafe { key.value_.i };
+                let ui = i as u64;
+                if ui <= i32::MAX as u64 {
+                    (ui as usize) % modulo
+                } else {
+                    (ui as usize) % modulo
                 }
+            }
+            LuaValueKind::String => {
+                // 使用LuaString的hash
+                let string_id = key.as_string_id().unwrap();
+                if let Some(s) = unsafe { &*self.object_pool }.get_string(string_id) {
+                    s.hash as usize
+                } else {
+                    // 字符串不存在，使用ID作为hash
+                    (string_id.0 as usize) % modulo
+                }
+            }
+            LuaValueKind::Boolean => {
+                let b = unsafe { key.value_.i }; // 布尔值存储在i字段
+                (b as usize) % modulo
+            }
+            LuaValueKind::Table => {
+                let id = unsafe { key.value_.gc_id };
+                (id as usize) % modulo
+            }
+            _ => {
+                let hash = unsafe { key.value_.i };
+                ((hash as u64) as usize) % modulo
+            }
+        }
+    }
+
+    /// 在hash part中查找key
+    fn getnode<'a>(&'a self, key: &LuaValue) -> Option<&'a Node> {
+        if self.is_dummy() {
+            return None;
+        }
+
+        let mp = self.mainposition(key);
+        let mut node = &self.nodes[mp];
+
+        let object_pool = unsafe { &*self.object_pool };
+        // 沿着collision chain查找
+        loop {
+            if !node.is_dead() {
+                let node_key = node.key();
+                if node_key.raw_equal(key, object_pool) {
+                    return Some(node);
+                }
+            }
+
+            if node.next < 0 {
+                break;
+            }
+            node = &self.nodes[node.next as usize];
+        }
+
+        None
+    }
+
+    /// 在hash part中查找key (可变版本)
+    fn getnode_mut<'a>(&'a mut self, key: &LuaValue) -> Option<&'a mut Node> {
+        if self.is_dummy() {
+            return None;
+        }
+
+        let mp = self.mainposition(key);
+        let mut idx = mp;
+        let object_pool = unsafe { &*self.object_pool };
+        loop {
+            let node_key = self.nodes[idx].key();
+            // SAFETY: pool指针来自caller，在调用期间保持有效
+            if !self.nodes[idx].is_dead() && node_key.raw_equal(key, object_pool) {
+                return Some(&mut self.nodes[idx]);
+            }
+
+            let next = self.nodes[idx].next;
+            if next < 0 {
+                break;
+            }
+            idx = next as usize;
+        }
+
+        None
+    }
+
+    /// 查找第一个空闲节点
+    fn get_free_pos(&self) -> Option<usize> {
+        if self.is_dummy() {
+            return None;
+        }
+
+        // 从后向前查找空闲节点
+        for i in (0..self.nodes.len()).rev() {
+            if self.nodes[i].is_dead() {
+                return Some(i);
             }
         }
         None
     }
 
-    /// Integer key access that also checks hash part
-    /// Used by GETI when array lookup fails
-    #[inline]
-    pub fn get_int_full(&self, key: i64) -> Option<LuaValue> {
-        // First try array part (fast path)
-        if let Some(val) = self.get_int(key) {
-            return Some(val);
-        }
-        // Fall back to hash part
-        self.get_from_hash(&LuaValue::integer(key))
-    }
+    // ============ Public API ============
 
-    /// Optimized string key access using &str - avoids LuaValue allocation
-    /// This is a hot path for table access with string literals
+    /// 获取hash part大小
     #[inline(always)]
-    pub fn get_str(&self, vm: &mut LuaVM, key_str: &str) -> Option<LuaValue> {
-        let key = vm.create_string(key_str);
-        self.get_from_hash(&key)
+    pub fn sizenode(&self) -> usize {
+        if self.is_dummy() {
+            0
+        } else {
+            1usize << self.lsizenode()
+        }
     }
 
-    /// Generic key access
-    pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
-        // Try array part first for integer keys
-        if let Some(i) = key.as_integer() {
-            if let Some(val) = self.get_int(i) {
+    /// 检查是否使用dummy node
+    #[inline(always)]
+    pub fn is_dummy(&self) -> bool {
+        (self.flags() & BITDUMMY) != 0
+    }
+
+    /// 获取array大小
+    #[inline(always)]
+    pub fn asize(&self) -> u32 {
+        self.array.len() as u32
+    }
+
+    /// Get value by integer key
+    pub fn get_int(&self, key: i64) -> Option<LuaValue> {
+        // Try array part (Lua uses 1-based indexing)
+        let asize = self.asize();
+        if key > 0 && (key as u32) <= asize {
+            let idx = (key - 1) as usize;
+            let val = self.array[idx];
+            if !val.is_nil() {
                 return Some(val);
             }
         }
-        // Fall back to hash part
-        self.get_from_hash(key)
+        // Search hash part
+        let key_val = LuaValue::integer(key);
+        self.getnode(&key_val).map(|node| node.value)
     }
 
-    /// Get from hash part
-    #[inline(always)]
-    pub(crate) fn get_from_hash(&self, key: &LuaValue) -> Option<LuaValue> {
-        match self.find_node(key) {
-            Some(idx) => Some(unsafe { self.nodes.get_unchecked(idx).value }),
-            None => None,
-        }
-    }
-
-    /// Fast integer key write
-    /// OPTIMIZED: Use resize_with for better performance
-    #[inline]
+    /// Set value by integer key
     pub fn set_int(&mut self, key: i64, value: LuaValue) {
-        if value.is_nil() {
-            // Setting to nil - just mark as nil in array
-            if key > 0 {
-                let idx = (key - 1) as usize;
-                if idx < self.array.len() {
-                    self.array[idx] = LuaValue::nil();
-                }
-            }
+        // Try array part
+        let asize = self.asize();
+        if key > 0 && (key as u32) <= asize {
+            let idx = (key - 1) as usize;
+            self.array[idx] = value;
             return;
         }
-
-        if key > 0 {
-            let idx = (key - 1) as usize;
-            let array_len = self.array.len();
-
-            if idx < array_len {
-                // Fast path: within existing array
-                self.array[idx] = value;
-                return;
-            } else if idx == array_len {
-                // Sequential append - use reserve to reduce reallocations
-                if self.array.capacity() == array_len {
-                    // Need to grow - reserve extra space
-                    let extra = if array_len == 0 { 8 } else { array_len };
-                    self.array.reserve(extra);
-                }
-                self.array.push(value);
-                return;
-            } else if idx < array_len + 8 && idx < 256 {
-                // Small gap - fill with nils and extend
-                self.array.resize_with(idx + 1, LuaValue::nil);
-                self.array[idx] = value;
-                return;
-            }
-        }
-
-        // Out of array range or large gap, use hash
-        self.set_in_hash(LuaValue::integer(key), value);
+        // Set in hash part
+        let key_val = LuaValue::integer(key);
+        self.set_hash_value(&key_val, value);
     }
 
-    /// Generic key write
+    /// Get value by key
+    pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
+        // Try integer key in array part
+        if let Some(i) = key.as_integer() {
+            return self.get_int(i);
+        }
+        // Search hash part for other key types
+        self.getnode(key).map(|node| node.value)
+    }
+
+    /// Set value by key
     pub fn raw_set(&mut self, key: LuaValue, value: LuaValue) {
-        // Try array part for small positive integers (up to 64K)
+        // Try integer key in array part
         if let Some(i) = key.as_integer() {
             self.set_int(i, value);
             return;
         }
-        self.set_in_hash(key, value);
+        // Set in hash part for other key types
+        self.set_hash_value(&key, value);
     }
 
-    /// Set in hash part - Lua-style open addressing
-    fn set_in_hash(&mut self, key: LuaValue, value: LuaValue) {
-        if value.is_nil() {
-            // Setting to nil - remove the key
-            if let Some(idx) = self.find_node(&key) {
-                self.nodes[idx] = Node::empty();
-                self.hash_size -= 1;
+    /// Set value in hash part
+    fn set_hash_value(&mut self, key: &LuaValue, value: LuaValue) {
+        if self.is_dummy() {
+            // TODO: 需要扩展hash part，暂时忽略
+            return;
+        }
+
+        // 查找已存在的key
+        if let Some(node) = self.getnode_mut(key) {
+            node.value = value;
+            return;
+        }
+
+        // Key不存在，需要插入新key
+        // 查找空闲位置
+        let free_pos = match self.get_free_pos() {
+            Some(pos) => pos,
+            None => {
+                // TODO: 需要rehash，暂时忽略
+                return;
             }
+        };
+
+        // 获取mainposition
+        let mp = self.mainposition(key);
+        let main_node_key = self.nodes[mp].key();
+        let pool = unsafe { &*self.object_pool };
+        if self.nodes[mp].is_dead() {
+            // mainposition是空的，直接插入
+            self.nodes[mp].set_key(key);
+            self.nodes[mp].value = value;
+            self.nodes[mp].next = -1;
+        } else if main_node_key.raw_equal(key, pool) {
+            // Key已存在（理论上不应该到这里，因为上面已经处理了）
+            self.nodes[mp].value = value;
         } else {
-            // Insert or update
-            self.insert_node(key, value);
+            // Collision: mainposition被占用
+            let other_mp = self.mainposition(&main_node_key);
+
+            if other_mp == mp {
+                // 当前节点在正确位置，新key插入free_pos，链到mp
+                self.nodes[free_pos].set_key(key);
+                self.nodes[free_pos].value = value;
+                self.nodes[free_pos].next = self.nodes[mp].next;
+                self.nodes[mp].next = free_pos as i32;
+            } else {
+                // 当前节点不在正确位置，移动它到free_pos
+                // 先找到指向mp的节点
+                let mut prev_idx = other_mp;
+                while self.nodes[prev_idx].next as usize != mp {
+                    prev_idx = self.nodes[prev_idx].next as usize;
+                }
+
+                // 将mp的内容移到free_pos
+                self.nodes[free_pos] = self.nodes[mp];
+                // 更新链表
+                self.nodes[prev_idx].next = free_pos as i32;
+                // 在mp位置插入新key
+                self.nodes[mp].set_key(key);
+                self.nodes[mp].value = value;
+                self.nodes[mp].next = -1;
+            }
         }
     }
 
     /// Get array length
-    #[inline]
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.array.len()
     }
 
-    /// Iterator for next() function - follows Lua's iteration order
-    /// First iterates array part, then hash part (linear scan for cache efficiency!)
-    pub fn next(&self, key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
-        if key.is_nil() {
-            // Start from beginning - find first non-nil in array
-            for (i, val) in self.array.iter().enumerate() {
-                if !val.is_nil() {
-                    return Some((LuaValue::integer((i + 1) as i64), *val));
-                }
-            }
-            // Then first non-empty node in hash
-            for node in &self.nodes {
-                if !node.is_empty() {
-                    return Some((node.key, node.value));
-                }
-            }
-            return None;
-        }
-
-        // Continue from given key
-        if let Some(i) = key.as_integer() {
-            if i > 0 {
-                let idx = i as usize;
-                // Look for next non-nil in array
-                for j in idx..self.array.len() {
-                    if !self.array[j].is_nil() {
-                        return Some((LuaValue::integer((j + 1) as i64), self.array[j]));
-                    }
-                }
-                // End of array, move to hash - return first non-empty node
-                for node in &self.nodes {
-                    if !node.is_empty() {
-                        return Some((node.key, node.value));
-                    }
-                }
-                return None;
-            }
-        }
-
-        // Key is in hash part - find it quickly and return next non-empty node
-        if let Some(current_idx) = self.find_node(key) {
-            // Found current key - scan forward from next position
-            for idx in (current_idx + 1)..self.nodes.len() {
-                if !self.nodes[idx].is_empty() {
-                    return Some((self.nodes[idx].key, self.nodes[idx].value));
-                }
-            }
-        }
-        None
+    /// Get metatable
+    pub fn get_metatable(&self) -> Option<LuaValue> {
+        self.metatable().map(LuaValue::table)
     }
 
-    /// Insert value at position in array part, shifting elements to the right
-    /// Position is 0-indexed internally but Lua uses 1-indexed
-    pub fn insert_array_at(&mut self, pos: usize, value: LuaValue) -> Result<(), String> {
-        let len = self.len();
-        if pos > len {
-            return Err("insert position out of bounds".to_string());
-        }
-
-        // CRITICAL OPTIMIZATION: Fast path for appending at end (no shift needed!)
-        if pos == len {
-            self.array.push(value);
-            return Ok(());
-        }
-
-        // OPTIMIZATION: Use Vec::insert which uses memmove internally
-        self.array.insert(pos, value);
-        Ok(())
+    /// Set metatable
+    pub fn set_metatable(&mut self, metatable: Option<LuaValue>) {
+        let mt = metatable.and_then(|v| v.as_table_id());
+        self.set_metatable_internal(mt);
     }
 
-    /// Remove value at position in array part, shifting elements to the left
-    /// Position is 0-indexed internally but Lua uses 1-indexed
-    pub fn remove_array_at(&mut self, pos: usize) -> Result<LuaValue, String> {
-        let len = self.len();
-        if pos >= len {
-            return Err("remove position out of bounds".to_string());
-        }
-
-        let removed = self.array[pos];
-
-        // CRITICAL OPTIMIZATION: Fast path for removing from end (no shift needed!)
-        if pos == len - 1 {
-            self.array.pop();
-            return Ok(removed);
-        }
-
-        // OPTIMIZATION: Use copy_within for bulk memory move
-        self.array.copy_within(pos + 1..len, pos);
-        self.array.pop();
-
-        Ok(removed)
+    /// Insert at array index
+    pub fn insert_array_at(&mut self, _idx: usize, _value: LuaValue) -> Result<(), String> {
+        Err("not implemented".to_string())
     }
 
-    /// Iterator for GC - returns all key-value pairs
-    pub fn iter_all(&self) -> Vec<(LuaValue, LuaValue)> {
-        let mut result = Vec::new();
+    /// Metamethod absence check
+    #[inline(always)]
+    pub fn tm_absent(&self, flag: u8) -> bool {
+        (self.flags() & flag) != 0
+    }
 
-        // Iterate array part
-        for (i, val) in self.array.iter().enumerate() {
+    /// Set metamethod absent flag
+    #[inline(always)]
+    pub fn set_tm_absent(&mut self, flag: u8) {
+        let flags = self.flags() | flag;
+        self.set_flags(flags);
+    }
+
+    /// Clear metamethod absent flag
+    #[inline(always)]
+    pub fn clear_tm_absent(&mut self, flag: u8) {
+        let flags = self.flags() & !flag;
+        self.set_flags(flags);
+    }
+
+    /// Iterate all key-value pairs (for GC)
+    /// 包含array part和hash part的所有元素
+    pub fn iter_all(&self) -> impl Iterator<Item = (LuaValue, LuaValue)> + '_ {
+        // Array part: 索引从1开始
+        let array_iter = self.array.iter().enumerate().filter_map(|(idx, val)| {
             if !val.is_nil() {
-                result.push((LuaValue::integer((i + 1) as i64), *val));
+                Some((LuaValue::integer((idx + 1) as i64), *val))
+            } else {
+                None
             }
+        });
+
+        // Hash part
+        let hash_iter = self.nodes.iter().filter_map(|node| {
+            if !node.is_empty() && !node.is_dead() {
+                Some((node.key(), node.value))
+            } else {
+                None
+            }
+        });
+
+        array_iter.chain(hash_iter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_table() {
+        let object_pool = ObjectPool::new();
+        let t = LuaTable::new(0, 0, &object_pool as *const _);
+        assert_eq!(t.asize(), 0);
+        assert_eq!(t.sizenode(), 0);
+        assert!(t.is_dummy());
+    }
+
+    #[test]
+    fn test_table_with_array() {
+        let object_pool = ObjectPool::new();
+        let t = LuaTable::new(10, 0, &object_pool as *const _);
+        assert_eq!(t.asize(), 10);
+        assert_eq!(t.len(), 10);
+        assert!(t.is_dummy());
+    }
+
+    #[test]
+    fn test_table_with_hash() {
+        let object_pool = ObjectPool::new();
+        let t = LuaTable::new(0, 8, &object_pool as *const _);
+        assert_eq!(t.asize(), 0);
+        assert_eq!(t.sizenode(), 8);
+        assert!(!t.is_dummy());
+        assert_eq!(t.lsizenode(), 3);
+    }
+
+    #[test]
+    fn test_ceillog2() {
+        assert_eq!(LuaTable::ceillog2(0), 0);
+        assert_eq!(LuaTable::ceillog2(1), 0);
+        assert_eq!(LuaTable::ceillog2(2), 1);
+        assert_eq!(LuaTable::ceillog2(3), 2);
+        assert_eq!(LuaTable::ceillog2(4), 2);
+        assert_eq!(LuaTable::ceillog2(5), 3);
+        assert_eq!(LuaTable::ceillog2(8), 3);
+        assert_eq!(LuaTable::ceillog2(9), 4);
+    }
+
+    #[test]
+    fn test_meta_packing() {
+        let object_pool = ObjectPool::new();
+        let mut t = LuaTable::new(0, 8, &object_pool as *const _);
+
+        // 测试flags
+        assert_eq!(t.flags(), 0);
+        t.set_flags(0x42);
+        assert_eq!(t.flags(), 0x42);
+
+        // 测试lsizenode
+        assert_eq!(t.lsizenode(), 3);
+        t.set_lsizenode(5);
+        assert_eq!(t.lsizenode(), 5);
+        assert_eq!(t.flags(), 0x42); // flags应该不变
+
+        // 测试metatable
+        assert_eq!(t.metatable(), None);
+        t.set_metatable_internal(Some(TableId(999)));
+        assert_eq!(t.metatable(), Some(TableId(999)));
+        assert_eq!(t.flags(), 0x42); // flags应该不变
+        assert_eq!(t.lsizenode(), 5); // lsizenode应该不变
+
+        // 测试清除metatable
+        t.set_metatable_internal(None);
+        assert_eq!(t.metatable(), None);
+    }
+
+    #[test]
+    fn test_string_key_equality() {
+        let mut pool = ObjectPool::new();
+        let tid = pool.create_table(0, 8);
+
+        // 创建两个内容相同的长字符串
+        let long_str1 = "a".repeat(100); // 长字符串
+        let long_str2 = "a".repeat(100); // 另一个相同内容的长字符串
+
+        let (key1, _) = pool.create_string(&long_str1);
+        let (key2, _) = pool.create_string(&long_str2);
+        let key1_value = LuaValue::string(key1);
+        let key2_value = LuaValue::string(key2);
+
+        // 设置值
+        if let Some(table) = pool.get_table_mut(tid) {
+            table.raw_set(key1_value, LuaValue::integer(42));
         }
 
-        // Iterate hash part - linear scan!
-        for node in &self.nodes {
-            if !node.is_empty() {
-                result.push((node.key, node.value));
-            }
+        // 用内容相同但ID可能不同的key2查找
+        if let Some(table) = pool.get_table(tid) {
+            let result = table.raw_get(&key2_value);
+            // 应该能找到，因为raw_equal会比较字符串内容
+            assert_eq!(result, Some(LuaValue::integer(42)));
         }
-
-        result
     }
 }

@@ -100,7 +100,7 @@ fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let Some(pkg_table) = vm.object_pool.get_table(package_id) else {
             return Err(vm.error("Invalid package table".to_string()));
         };
-        pkg_table.raw_get(&preload_key).unwrap_or(LuaValue::nil())
+        pkg_table.raw_get(&preload_key, &vm.object_pool).unwrap_or(LuaValue::nil())
     };
 
     let Some(preload_id) = preload_val.as_table_id() else {
@@ -112,7 +112,7 @@ fn searcher_preload(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             return Err(vm.error("package.preload is not a table".to_string()));
         };
         preload_table
-            .raw_get(&modname_val)
+            .raw_get(&modname_val, &vm.object_pool)
             .unwrap_or(LuaValue::nil())
     };
 
@@ -150,7 +150,7 @@ fn searcher_lua(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let Some(pkg_table) = vm.object_pool.get_table(package_id) else {
             return Err(vm.error("Invalid package table".to_string()));
         };
-        let Some(path_value) = pkg_table.raw_get(&path_key) else {
+        let Some(path_value) = pkg_table.raw_get(&path_key, &vm.object_pool) else {
             return Err(vm.error("package.path not found".to_string()));
         };
         let Some(path_id) = path_value.as_string_id() else {

@@ -621,7 +621,7 @@ fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 let metatable_key = vm.create_string("__metatable");
                 if let Some(mt_id) = mt.as_table_id() {
                     if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
-                        if let Some(protected) = mt_table.raw_get(&metatable_key) {
+                        if let Some(protected) = mt_table.raw_get(&metatable_key, &vm.object_pool) {
                             if !protected.is_nil() {
                                 // Return the __metatable field value instead of the actual metatable
                                 return Ok(MultiValue::single(protected));
@@ -652,7 +652,7 @@ fn lua_getmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                         let metatable_key = vm.create_string("__metatable");
                         if let Some(mt_id) = mt.as_table_id() {
                             if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
-                                if let Some(protected) = mt_table.raw_get(&metatable_key) {
+                                if let Some(protected) = mt_table.raw_get(&metatable_key, &vm.object_pool) {
                                     if !protected.is_nil() {
                                         return Ok(MultiValue::single(protected));
                                     }
@@ -691,7 +691,7 @@ fn lua_setmetatable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         if let Some(current_mt) = table_ref.get_metatable() {
             if let Some(mt_id) = current_mt.as_table_id() {
                 if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
-                    mt_table.raw_get(&metatable_field).is_some()
+                    mt_table.raw_get(&metatable_field, &vm.object_pool).is_some()
                 } else {
                     false
                 }
@@ -738,7 +738,7 @@ fn lua_rawget(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
     if let Some(table_id) = table.as_table_id() {
         if let Some(table_ref) = vm.object_pool.get_table(table_id) {
-            let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
+            let value = table_ref.raw_get(&key, &vm.object_pool).unwrap_or(LuaValue::nil());
             return Ok(MultiValue::single(value));
         }
     }
@@ -861,10 +861,10 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             let Some(package_ref) = vm.object_pool.get_table(package_id) else {
                 return Err(vm.error("package table not found".to_string()));
             };
-            if let Some(loaded_table) = package_ref.raw_get(&loaded_key) {
+            if let Some(loaded_table) = package_ref.raw_get(&loaded_key, &vm.object_pool) {
                 if let Some(loaded_id) = loaded_table.as_table_id() {
                     if let Some(loaded_ref) = vm.object_pool.get_table(loaded_id) {
-                        loaded_ref.raw_get(&modname_value)
+                        loaded_ref.raw_get(&modname_value, &vm.object_pool)
                     } else {
                         None
                     }
@@ -899,7 +899,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let Some(package_ref) = vm.object_pool.get_table(package_id) else {
             return Err(vm.error("Invalid package table".to_string()));
         };
-        let searchers_val = package_ref.raw_get(&key).unwrap_or(LuaValue::nil());
+        let searchers_val = package_ref.raw_get(&key, &vm.object_pool).unwrap_or(LuaValue::nil());
 
         let Some(searchers_id) = searchers_val.as_table_id() else {
             return Err(vm.error("package.searchers is not a table".to_string()));
@@ -986,7 +986,7 @@ fn lua_require(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 let loaded_key = vm.create_string("loaded");
                 if let Some(package_id) = package_table.as_table_id() {
                     if let Some(package_ref) = vm.object_pool.get_table(package_id) {
-                        if let Some(loaded_table) = package_ref.raw_get(&loaded_key) {
+                        if let Some(loaded_table) = package_ref.raw_get(&loaded_key, &vm.object_pool) {
                             if let Some(loaded_id) = loaded_table.as_table_id() {
                                 if let Some(loaded_ref) = vm.object_pool.get_table_mut(loaded_id) {
                                     loaded_ref.raw_set(modname_value, module_value.clone());

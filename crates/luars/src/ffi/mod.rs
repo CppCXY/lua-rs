@@ -308,7 +308,7 @@ pub fn ffi_call_wrapper(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let wrapper_ref_cell = vm
             .get_table(&wrapper)
             .ok_or(LuaError::RuntimeError("Invalid wrapper table".to_string()))?;
-        let ptr_val = wrapper_ref_cell.borrow().raw_get(&ptr_key);
+        let ptr_val = wrapper_ref_cell.borrow().raw_get(&ptr_key, &vm.object_pool);
         let ptr = if let Some(ptr_value) = ptr_val {
             ptr_value.as_integer().ok_or(LuaError::RuntimeError(
                 "ffi call: invalid function pointer".to_string(),
@@ -702,7 +702,7 @@ pub fn ffi_struct_index(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let table_ref_cell = vm
             .get_table(&struct_table)
             .ok_or(LuaError::RuntimeError("Invalid struct table".to_string()))?;
-        let type_name_val = table_ref_cell.borrow().raw_get(&type_key);
+        let type_name_val = table_ref_cell.borrow().raw_get(&type_key, &vm.object_pool);
 
         let type_name = if let Some(tn) = type_name_val {
             if let Some(s) = tn.as_string_ptr() {
@@ -730,14 +730,14 @@ pub fn ffi_struct_index(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             .ok_or_else(|| LuaError::RuntimeError(format!("Field '{}' not found", field_name)))?;
 
         // Get stored field values
-        let fields_table_val = table_ref_cell.borrow().raw_get(&fields_key);
+        let fields_table_val = table_ref_cell.borrow().raw_get(&fields_key, &vm.object_pool);
 
         if let Some(ft) = fields_table_val {
             if ft.is_table() {
                 let fields_ref_cell = vm
                     .get_table(&ft)
                     .ok_or(LuaError::RuntimeError("Invalid fields table".to_string()))?;
-                let field_val = fields_ref_cell.borrow().raw_get(&field_key);
+                let field_val = fields_ref_cell.borrow().raw_get(&field_key, &vm.object_pool);
                 if let Some(fv) = field_val {
                     return Ok(MultiValue::single(fv));
                 }

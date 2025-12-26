@@ -986,7 +986,7 @@ impl ObjectPool {
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> TableId {
         let gc_table = GcTable {
             header: GcHeader::default(),
-            data: LuaTable::new(array_size, hash_size),
+            data: LuaTable::new(array_size as u32, hash_size as u32, self as *mut ObjectPool),
         };
         TableId(self.tables.alloc(gc_table))
     }
@@ -995,7 +995,7 @@ impl ObjectPool {
     pub fn create_table_default(&mut self) -> TableId {
         let gc_table = GcTable {
             header: GcHeader::default(),
-            data: LuaTable::new(0, 0),
+            data: LuaTable::new(0, 0, self as *mut ObjectPool),
         };
         TableId(self.tables.alloc(gc_table))
     }
