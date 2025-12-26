@@ -225,20 +225,16 @@ pub fn finish(fs: &mut FuncState) {
                 }
             }
             OpCode::GetVarg => {
-                // lcode.c:1953-1956: Convert GETVARG to GETTABLE if has vararg table
-                if needs_vararg_table {
-                    // Function has vararg table, must use GETTABLE instead
-                    let a = Instruction::get_a(*instr);
-                    let b = Instruction::get_b(*instr);
-                    let c = Instruction::get_c(*instr);
-                    *instr = Instruction::create_abc(OpCode::GetTable, a, b, c);
-                }
+                // lcode.c:1953-1956: GETVARG instruction handling
+                // NOTE: In Lua 5.5, GETVARG is kept as-is in most cases
+                // It's only converted to GETTABLE in specific optimization scenarios
+                // For now, keep GETVARG as-is to match official behavior
             }
             OpCode::Vararg => {
-                // lcode.c:1958-1961: Set k flag if has vararg table
-                if needs_vararg_table {
-                    Instruction::set_k(instr, true);
-                }
+                // lcode.c:1958-1961: VARARG instruction k flag handling
+                // NOTE: In Lua 5.5, VARARG k flag is NOT related to needs_vararg_table
+                // The k flag is only set for specific VARARG usage patterns
+                // For now, don't set k flag (matching official behavior)
             }
             OpCode::Jmp => {
                 // lcode.c:1963-1966: Fix jumps to final target
@@ -539,12 +535,9 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
             e.kind = ExpKind::VNONRELOC;
         }
         ExpKind::VVARGVAR => {
-            // lcode.c:824-828: vararg parameter - convert to regular local
-            // luaK_vapar2local calls needvatab() - marks function needs vararg table (PF_VATAB)
-            fs.chunk.needs_vararg_table = true;
-            // Now it's equivalent to a regular local variable
-            e.u = ExpUnion::Info(e.u.var().ridx as i32);
-            e.kind = ExpKind::VNONRELOC;
+            // Lua 5.5: Keep VVARGVAR as-is, don't discharge
+            // This allows indexed() to detect it and generate GETVARG/VVARGIND
+            // Only convert to VNONRELOC when actually used as a value (not indexed)
         }
         ExpKind::VUPVAL => {
             e.u = ExpUnion::Info(code_abc(fs, OpCode::GetUpval, 0, e.u.info() as u32, 0) as i32);
@@ -686,6 +679,14 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
         ExpKind::VNONRELOC => {
             if e.u.info() != reg as i32 {
                 code_abc(fs, OpCode::Move, reg as u32, e.u.info() as u32, 0);
+            }
+        }
+        ExpKind::VVARGVAR => {
+            // Lua 5.5: vararg parameter used as value (not indexed)
+            // Move from vararg parameter register to target register
+            let vreg = e.u.var().ridx;
+            if vreg as u32 != reg as u32 {
+                code_abc(fs, OpCode::Move, reg as u32, vreg as u32, 0);
             }
         }
         ExpKind::VRELOC => {

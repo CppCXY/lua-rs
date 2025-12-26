@@ -156,8 +156,8 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             if !fs.is_vararg {
                 return Err(fs.syntax_error("cannot use '...' outside a vararg function"));
             }
-            // lparser.c:1173: init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, fs->f->numparams, 1));
-            // B parameter is the number of fixed parameters (excluding named vararg)
+            // lparser.c:1173: Always generate VARARG instruction for ... expression
+            // The k flag will be set in finish() if needed
             let numparams = fs.numparams as u32;
             let pc = code::code_abc(fs, OpCode::Vararg, 0, numparams, 1);
             *v = ExpDesc::new_void();
@@ -424,11 +424,6 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
 fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
     let vkind = fs.searchvar(name, var);
     if vkind >= 0 {
-        if vkind == ExpKind::VLOCAL as i32 && !base {
-            // lparser.c:442: markupval(fs, var->u.var.vidx); /* local will be used as an upval */
-            let vidx = var.u.var().vidx;
-            mark_upval(fs, vidx as u8);
-        }
         // If it's VCONST, it stays VCONST - no change needed
     } else {
         let vidx = fs.searchupvalue(name);
@@ -448,7 +443,8 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
                             code::const_to_exp(value, var);
                         }
                     }
-                } else if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL {
+                } else if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL || var.kind == ExpKind::VVARGVAR {
+                    // lparser.c:460-462: create upvalue for local, upvalue, or vararg parameter
                     let idx = fs.newupvalue(name, var) as u8;
                     init_exp(var, ExpKind::VUPVAL, idx as i32);
                 }
@@ -769,8 +765,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
                     params.push(vararg_name);
                     param_kinds.push(VarKind::RDKVAVAR);
                 } else {
-                    // Anonymous vararg
-                    params.push("(vararg table)".to_string());
+                    // Anonymous vararg - still needs a placeholder local variable
+                    // Use empty string as marker (like Lua 5.5)
+                    params.push("".to_string());
                     param_kinds.push(VarKind::RDKVAVAR);
                 }
                 break;
@@ -794,6 +791,20 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // FuncState new_fs; new_fs.f = addprototype(ls); open_func(ls, &new_fs, &bl);
     let fs_ptr = fs as *mut FuncState;
     let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
+
+    // lparser.c:753: open_func calls enterblock(fs, bl, 0) - create function body block
+    // CRITICAL: Must be done BEFORE registering parameters, with nactvar=0
+    // This is critical - every function body needs an outer block!
+    let func_bl_id = child_fs.compiler_state.alloc_blockcnt(BlockCnt {
+        previous: None,
+        first_label: 0,
+        first_goto: 0,
+        nactvar: child_fs.nactvar,  // Should be 0 at this point
+        upval: false,
+        is_loop: false,
+        in_scope: true,
+    });
+    statement::enterblock(&mut child_fs, func_bl_id, false);
 
     // Lua 5.5 parlist: Register parameters (fixed parameters first)
     // Count fixed parameters (exclude vararg parameter)
@@ -822,7 +833,13 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
         child_fs.chunk.is_vararg = true;
         // Register the vararg parameter variable (after numparams is set)
         if params.len() > nparams {
-            child_fs.new_localvar(params[nparams].clone(), param_kinds[nparams]);
+            // Check if it's a named vararg (non-empty name) or anonymous vararg (empty name)
+            let vararg_name = &params[nparams];
+            if !vararg_name.is_empty() {
+                // Named vararg parameter means we need the vararg table
+                child_fs.chunk.needs_vararg_table = true;
+            }
+            child_fs.new_localvar(vararg_name.clone(), param_kinds[nparams]);
             child_fs.adjust_local_vars(1); // vararg parameter
         }
     }
@@ -831,19 +848,6 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // Reserve registers for parameters
     let nactvar = child_fs.nactvar;
     code::reserve_regs(&mut child_fs, nactvar as u8);
-
-    // lparser.c:753: open_func calls enterblock(fs, bl, 0) - create function body block
-    // This is critical - every function body needs an outer block!
-    let func_bl_id = child_fs.compiler_state.alloc_blockcnt(BlockCnt {
-        previous: None,
-        first_label: 0,
-        first_goto: 0,
-        nactvar: child_fs.nactvar,
-        upval: false,
-        is_loop: false,
-        in_scope: true,
-    });
-    statement::enterblock(&mut child_fs, func_bl_id, false);
 
     // Lua 5.5: Generate VARARGPREP after registering parameters but before statlist
     // This must be the first instruction in the function
