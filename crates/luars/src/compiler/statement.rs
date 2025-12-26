@@ -1278,7 +1278,7 @@ fn vkisindexed(k: ExpKind) -> bool {
     use ExpKind;
     matches!(
         k,
-        ExpKind::VINDEXED | ExpKind::VINDEXUP | ExpKind::VINDEXI | ExpKind::VINDEXSTR
+        ExpKind::VINDEXED | ExpKind::VINDEXUP | ExpKind::VINDEXI | ExpKind::VINDEXSTR | ExpKind::VVARGIND
     )
 }
 
@@ -1368,6 +1368,19 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
         }
         ExpKind::VINDEXED => {
             // Use code_abrk to support RK operand (register or constant)
+            code::code_abrk(
+                fs,
+                OpCode::SetTable,
+                var.u.ind().t as u32,
+                var.u.ind().idx as u32,
+                ex,
+            );
+        }
+        ExpKind::VVARGIND => {
+            // Lua 5.5: assignment to indexed vararg parameter
+            // Mark that function needs a vararg table
+            fs.chunk.is_vararg = true;
+            // Now, assignment is to a regular table (fallthrough to SETTABLE)
             code::code_abrk(
                 fs,
                 OpCode::SetTable,

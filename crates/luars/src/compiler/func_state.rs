@@ -33,6 +33,7 @@ pub struct FuncState<'a> {
     pub iwthabs: u8,                   // instructions issued since last absolute line info
     pub needclose: bool,               // true if function needs to close upvalues when returning
     pub is_vararg: bool,               // true if function is vararg
+    pub numparams: u8,                 // number of fixed parameters (excluding vararg parameter)
     pub first_local: usize,            // index of first local variable in prev
     pub source_name: String,           // source file name for error messages
     pub kcache: TableId,               // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
@@ -198,6 +199,7 @@ impl<'a> FuncState<'a> {
             iwthabs: 0,
             needclose: false,
             is_vararg,
+            numparams: 0,
             source_name,
             first_local: 0,
             kcache,
@@ -260,6 +262,7 @@ impl<'a> FuncState<'a> {
             iwthabs: 0,
             needclose: false,
             is_vararg,
+            numparams: 0,
             first_local: parent.actvar.len(),
             source_name: parent.source_name.clone(),
             kcache,

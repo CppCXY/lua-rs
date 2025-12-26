@@ -514,6 +514,14 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
             e.u = ExpUnion::Info(e.u.var().ridx as i32);
             e.kind = ExpKind::VNONRELOC;
         }
+        ExpKind::VVARGVAR => {
+            // Lua 5.5: vararg parameter - convert to regular local
+            // This marks that the function needs a vararg table
+            fs.chunk.is_vararg = true;
+            // Now it's equivalent to a regular local variable
+            e.u = ExpUnion::Info(e.u.var().ridx as i32);
+            e.kind = ExpKind::VNONRELOC;
+        }
         ExpKind::VUPVAL => {
             e.u = ExpUnion::Info(code_abc(fs, OpCode::GetUpval, 0, e.u.info() as u32, 0) as i32);
             e.kind = ExpKind::VRELOC;
@@ -556,6 +564,19 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
             e.u = ExpUnion::Info(code_abc(
                 fs,
                 OpCode::GetTable,
+                0,
+                e.u.ind().t as u32,
+                e.u.ind().idx as u32,
+            ) as i32);
+            e.kind = ExpKind::VRELOC;
+        }
+        ExpKind::VVARGIND => {
+            // Lua 5.5: indexed vararg parameter - generate GETVARG instruction
+            free_reg(fs, e.u.ind().t as u8);
+            free_reg(fs, e.u.ind().idx as u8);
+            e.u = ExpUnion::Info(code_abc(
+                fs,
+                OpCode::GetVarg,
                 0,
                 e.u.ind().t as u32,
                 e.u.ind().idx as u32,
@@ -2112,7 +2133,7 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
         keystr = k.u.info();
     }
 
-    // Table must be in local/nonreloc/upval
+    // Table must be in local/nonreloc/upval/vvargvar
     if t.kind == ExpKind::VUPVAL && !is_kstr(fs, k) {
         exp2anyreg(fs, t);
     }
@@ -2126,6 +2147,18 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
             keystr: keystr,  // lcode.c:1394: t->u.ind.keystr = keystr;
         });
         t.kind = ExpKind::VINDEXUP;
+    } else if t.kind == ExpKind::VVARGVAR {
+        // Lua 5.5: indexing the vararg parameter
+        let kreg = exp2anyreg(fs, k);  // put key in some register
+        let vreg = t.u.var().ridx;     // register with vararg param
+        // lua_assert(vreg == fs->f->numparams);
+        t.u = ExpUnion::Ind(IndVars {
+            t: vreg as i16,
+            idx: kreg as i16,
+            ro: false,
+            keystr: keystr,
+        });
+        t.kind = ExpKind::VVARGIND;  // t represents vararg[k]
     } else {
         // Register index of the table
         t.u.ind_mut().t = if t.kind == ExpKind::VLOCAL {

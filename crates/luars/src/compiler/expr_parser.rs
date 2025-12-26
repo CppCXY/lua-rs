@@ -156,8 +156,10 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             if !fs.is_vararg {
                 return Err(fs.syntax_error("cannot use '...' outside a vararg function"));
             }
-            // lparser.c:1173: init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, 0, 1));
-            let pc = code::code_abc(fs, OpCode::Vararg, 0, 0, 1);
+            // lparser.c:1173: init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, fs->f->numparams, 1));
+            // B parameter is the number of fixed parameters (excluding named vararg)
+            let numparams = fs.numparams as u32;
+            let pc = code::code_abc(fs, OpCode::Vararg, 0, numparams, 1);
             *v = ExpDesc::new_void();
             v.kind = ExpKind::VVARARG;
             v.u = ExpUnion::Info(pc as i32);
@@ -457,7 +459,10 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
 // fieldsel -> ['.' | ':'] NAME
 pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
     // lparser.c:815: luaK_exp2anyregup(fs, v);
-    code::exp2anyregup(fs, v);
+    // Lua 5.5: Don't discharge VVARGVAR, keep it so indexed can generate GETVARG
+    if v.kind != ExpKind::VVARGVAR {
+        code::exp2anyregup(fs, v);
+    }
 
     // lparser.c:816: luaX_next(ls);  /* skip the dot or colon */
     fs.lexer.bump();
@@ -526,9 +531,11 @@ fn lastlistfield(fs: &mut FuncState, cc: &mut ConsControl) {
     if code::hasmultret(&cc.v) {
         code::setmultret(fs, &mut cc.v);
         code::setlist(fs, cc.table_reg, cc.na, code::LUA_MULTRET);
-        // lparser.c:884: cc->na--; do not count last expression (unknown number of elements)
-        // Note: na should be > 0 here, but use saturating_sub to avoid panic
-        cc.na = cc.na.saturating_sub(1);
+        // lparser.c:975: cc->na--; do not count last expression (unknown number of elements)
+        // IMPORTANT: In C, this can underflow if na=0, wrapping to MAX_u32. This is intentional!
+        // The subsequent cc->na += cc->tostore will correct it: MAX_u32 + 1 = 0
+        // We must use wrapping_sub, not saturating_sub
+        cc.na = cc.na.wrapping_sub(1);
     } else {
         if cc.v.kind != ExpKind::VVOID {
             code::exp2nextreg(fs, &mut cc.v);
@@ -731,10 +738,12 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // Determine if vararg before creating child
     let mut is_vararg = false;
     let mut params = Vec::new();
+    let mut param_kinds = Vec::new();
 
     // Collect parameter names first
     if is_method {
         params.push("self".to_string());
+        param_kinds.push(VarKind::VDKREG);
     }
 
     if fs.lexer.current_token() != LuaTokenKind::TkRightParen {
@@ -743,19 +752,20 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
                 let param_name = fs.lexer.current_token_text().to_string();
                 fs.lexer.bump();
                 params.push(param_name);
+                param_kinds.push(VarKind::VDKREG);
             } else if fs.lexer.current_token() == LuaTokenKind::TkDots {
                 fs.lexer.bump();
                 is_vararg = true;
-                
-                // Lua 5.5: Named vararg parameter (... name)
-                // Check if there's a name after ...
+                // Lua 5.5: Named vararg parameter (...name)
                 if fs.lexer.current_token() == LuaTokenKind::TkName {
                     let vararg_name = fs.lexer.current_token_text().to_string();
                     fs.lexer.bump();
                     params.push(vararg_name);
+                    param_kinds.push(VarKind::RDKVAVAR);
                 } else {
-                    // Anonymous vararg - use default name
+                    // Anonymous vararg
                     params.push("(vararg table)".to_string());
+                    param_kinds.push(VarKind::RDKVAVAR);
                 }
                 break;
             } else {
@@ -779,23 +789,37 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     let fs_ptr = fs as *mut FuncState;
     let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
 
-    // lparser.c:994: If vararg, generate VARARGPREP instruction
-    // A parameter should be the number of fixed parameters (lparser.c:954)
-    if is_vararg {
-        let nparams = params.len() as u32;
-        code::code_abc(&mut child_fs, OpCode::VarargPrep, nparams, 0, 0);
+    // Lua 5.5 parlist: Register parameters (fixed parameters first)
+    // Count fixed parameters (exclude vararg parameter)
+    let mut nparams = 0;
+    for kind in param_kinds.iter() {
+        if *kind != VarKind::RDKVAVAR {
+            nparams += 1;
+        } else {
+            break;
+        }
     }
-
-    // lparser.c:996-999: Register parameters as local variables
-    // parlist(ls); adjustlocalvars(ls, nparams);
-    for param in params {
-        child_fs.new_localvar(param, VarKind::VDKREG);
+    
+    // Register fixed parameters
+    for i in 0..nparams {
+        child_fs.new_localvar(params[i].clone(), param_kinds[i]);
     }
-    child_fs.adjust_local_vars(child_fs.actvar.len() as u8);
-
-    // lparser.c:982: Set numparams after adjustlocalvars
+    child_fs.adjust_local_vars(nparams as u8);
+    
+    // lparser.c:982: Set numparams BEFORE registering vararg parameter
     // f->numparams = cast_byte(fs->nactvar);
     let param_count = child_fs.nactvar as usize;
+    child_fs.numparams = param_count as u8; // Store in FuncState for VARARG instruction
+    
+    // If vararg, setvararg and register vararg parameter AFTER setting numparams
+    if is_vararg {
+        child_fs.chunk.is_vararg = true;
+        // Register the vararg parameter variable (after numparams is set)
+        if params.len() > nparams {
+            child_fs.new_localvar(params[nparams].clone(), param_kinds[nparams]);
+            child_fs.adjust_local_vars(1); // vararg parameter
+        }
+    }
 
     // lparser.c:1001: luaK_reserveregs(fs, fs->nactvar);
     // Reserve registers for parameters
@@ -814,6 +838,13 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
         in_scope: true,
     });
     statement::enterblock(&mut child_fs, func_bl_id, false);
+    
+    // Lua 5.5: Generate VARARGPREP after registering parameters but before statlist
+    // This must be the first instruction in the function
+    // Note: In Lua 5.5, VARARGPREP parameter is 0 (not the number of fixed params)
+    if is_vararg {
+        code::code_abc(&mut child_fs, OpCode::VarargPrep, 0, 0, 0);
+    }
 
     // lparser.c:1002: Parse function body statements
     // statlist(ls);

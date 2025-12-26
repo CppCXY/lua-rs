@@ -19,6 +19,7 @@ pub enum ExpKind {
     VINDEXUP, // indexed upvalue; ind.t = upvalue; ind.idx = key's K index
     VINDEXI, // indexed variable with constant integer; ind.t = table register; ind.idx = key's value
     VINDEXSTR, // indexed variable with literal string; ind.t = table register; ind.idx = key's K index
+    VVARGIND, // indexed vararg parameter; ind.t = vararg register; ind.idx = key's R index (Lua 5.5)
     VJMP,      // expression is a test/comparison; info = pc of corresponding jump instruction
     VRELOC,    // expression can put result in any register; info = instruction pc
     VCALL,     // expression is a function call; info = instruction pc

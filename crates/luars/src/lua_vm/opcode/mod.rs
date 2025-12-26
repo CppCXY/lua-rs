@@ -148,10 +148,12 @@ pub enum OpCode {
 
     // Vararg operations
     Vararg,     // R[A], R[A+1], ..., R[A+C-2] = vararg
-    VarargPrep, // (adjust vararg parameters)
-
+    GetVarg,    // R[A] := R[B][R[C]], R[B] is vararg parameter (Lua 5.5)
+    
     // Error checking for global variables (Lua 5.5)
     ErrNNil, // raise error if R[A] ~= nil (K[Bx - 1] is global name)
+    
+    VarargPrep, // (adjust vararg parameters)
 
     // Extra argument
     ExtraArg, // extra (larger) argument for previous opcode

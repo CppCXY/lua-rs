@@ -183,7 +183,8 @@ fn dump_chunk(
 
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
-            OpCode::Vararg => format!("VARARG {} {}", a, b),
+            OpCode::Vararg => format!("VARARG {} {} {}", a, b, c),
+            OpCode::GetVarg => format!("GETVARG {} {} {}", a, b, c),
             OpCode::Move => format!("MOVE {} {}", a, b),
             OpCode::LoadI => format!("LOADI {} {}", a, sbx),
             OpCode::LoadK => format!("LOADK {} {}", a, bx),
@@ -659,6 +660,11 @@ fn dump_chunk(
                 } else {
                     format!(" ; {} out", c - 1)
                 }
+            }
+            OpCode::GetVarg => {
+                // GETVARG: access named vararg parameter
+                // A = destination register, B = vararg param register, C = key register
+                format!("")
             }
             _ => String::new(),
         };
