@@ -230,7 +230,7 @@ impl TValue {
     #[inline(always)]
     pub fn shrstring(id: StringId) -> Self {
         Self {
-            value_: Value::gc(id.0),
+            value_: Value::gc(id.index()),
             tt_: LUA_VSHRSTR,
         }
     }
@@ -238,15 +238,19 @@ impl TValue {
     #[inline(always)]
     pub fn lngstring(id: StringId) -> Self {
         Self {
-            value_: Value::gc(id.0),
+            value_: Value::gc(id.index()),
             tt_: LUA_VLNGSTR,
         }
     }
 
-    // For now, default to shrstring (will determine at runtime based on length)
+    /// Create a string value from StringId (automatically selects short/long based on flag)
     #[inline(always)]
     pub fn string(id: StringId) -> Self {
-        Self::shrstring(id)
+        if id.is_short() {
+            Self::shrstring(id)
+        } else {
+            Self::lngstring(id)
+        }
     }
 
     #[inline(always)]
@@ -497,7 +501,13 @@ impl TValue {
     #[inline(always)]
     pub fn tsvalue(&self) -> StringId {
         debug_assert!(self.ttisstring());
-        StringId(unsafe { self.value_.gc_id })
+        let index = unsafe { self.value_.gc_id };
+        // Reconstruct StringId with correct long/short flag based on type tag
+        if self.ttisshrstring() {
+            StringId::short(index)
+        } else {
+            StringId::long(index)
+        }
     }
 
     #[inline(always)]
@@ -755,7 +765,7 @@ impl TValue {
 
                 // Short strings are interned, so ID comparison is enough
                 if self.ttisshrstring() && other.ttisshrstring() {
-                    return sid1.0 == sid2.0;
+                    return sid1.index() == sid2.index();
                 }
 
                 // Long strings need content comparison
@@ -894,7 +904,7 @@ impl std::fmt::Debug for TValue {
             LuaValueKind::Boolean => write!(f, "{}", self.bvalue()),
             LuaValueKind::Integer => write!(f, "{}", self.ivalue()),
             LuaValueKind::Float => write!(f, "{}", self.fltvalue()),
-            LuaValueKind::String => write!(f, "string({})", self.tsvalue().0),
+            LuaValueKind::String => write!(f, "string({})", self.tsvalue().raw()),
             LuaValueKind::Table => write!(f, "table({})", self.hvalue().0),
             LuaValueKind::Function => write!(f, "function({})", self.clvalue().0),
             LuaValueKind::CFunction => write!(f, "cfunction({:#x})", unsafe { self.value_.f }),
@@ -918,7 +928,7 @@ impl std::fmt::Display for TValue {
                     write!(f, "{}", n)
                 }
             }
-            LuaValueKind::String => write!(f, "string({})", self.tsvalue().0),
+            LuaValueKind::String => write!(f, "string({})", self.tsvalue().raw()),
             LuaValueKind::Table => write!(f, "table: {:x}", self.hvalue().0),
             LuaValueKind::Function => write!(f, "function: {:x}", self.clvalue().0),
             LuaValueKind::CFunction => write!(f, "function: {:x}", unsafe { self.value_.f }),
@@ -1018,15 +1028,15 @@ mod tests {
 
     #[test]
     fn test_string() {
-        let v = TValue::string(StringId(123));
+        let v = TValue::string(StringId::short(123));
         assert!(v.ttisstring());
         assert!(v.ttisshrstring());
-        assert_eq!(v.tsvalue(), StringId(123));
+        assert_eq!(v.tsvalue(), StringId::short(123));
 
-        let lng = TValue::lngstring(StringId(456));
+        let lng = TValue::lngstring(StringId::long(456));
         assert!(lng.ttisstring());
         assert!(lng.ttislngstring());
-        assert_eq!(lng.tsvalue(), StringId(456));
+        assert_eq!(lng.tsvalue(), StringId::long(456));
     }
 
     #[test]
@@ -1059,7 +1069,7 @@ mod tests {
     fn test_collectable_bit() {
         let nil = TValue::nil();
         let int = TValue::integer(42);
-        let str = TValue::string(StringId(1));
+        let str = TValue::string(StringId::short(1));
         let tbl = TValue::table(TableId(1));
 
         assert!(!nil.iscollectable());

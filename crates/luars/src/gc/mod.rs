@@ -458,7 +458,7 @@ impl GC {
             }
             LuaValueKind::String => {
                 if let Some(id) = value.as_string_id() {
-                    if let Some(s) = pool.strings.get_mut(id.0) {
+                    if let Some(s) = pool.strings.get_mut(id.index()) {
                         // Strings are leaves - mark black directly
                         s.header.make_black();
                     }
@@ -1303,7 +1303,7 @@ impl GC {
                 crate::lua_value::LuaValueKind::String => {
                     // Mark strings (they can be collected if not fixed)
                     if let Some(id) = value.as_string_id() {
-                        if let Some(string) = pool.strings.get_mut(id.0) {
+                        if let Some(string) = pool.strings.get_mut(id.index()) {
                             string.header.make_black();
                         }
                     }
@@ -1343,7 +1343,7 @@ impl GC {
             }
             LuaValueKind::String => {
                 if let Some(id) = value.as_string_id() {
-                    if let Some(s) = pool.strings.get(id.0) {
+                    if let Some(s) = pool.strings.get(id.index()) {
                         return !s.header.is_fixed() && s.header.is_white();
                     }
                 }
@@ -1411,7 +1411,7 @@ impl GC {
                     let value = &n.value;
                     // Found __mode, now check the value
                     if let Some(val_str_id) = value.as_string_id() {
-                        if let Some(val_str) = pool.strings.get(val_str_id.0) {
+                        if let Some(val_str) = pool.strings.get(val_str_id.index()) {
                             let mode_str = val_str.data.as_str();
                             let weak_keys = mode_str.contains('k');
                             let weak_values = mode_str.contains('v');

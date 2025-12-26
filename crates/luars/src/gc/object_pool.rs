@@ -600,40 +600,40 @@ impl ObjectPool {
             string_intern: StringInternTable::with_capacity(256),
             max_intern_length: 40, // Strings <= 40 bytes are interned (LUAI_MAXSHORTLEN)
             // Placeholder values - will be initialized below
-            tm_index: StringId(0),
-            tm_newindex: StringId(0),
-            tm_call: StringId(0),
-            tm_tostring: StringId(0),
-            tm_len: StringId(0),
-            tm_pairs: StringId(0),
-            tm_ipairs: StringId(0),
-            tm_gc: StringId(0),
-            tm_close: StringId(0),
-            tm_mode: StringId(0),
-            tm_name: StringId(0),
-            tm_eq: StringId(0),
-            tm_lt: StringId(0),
-            tm_le: StringId(0),
-            tm_add: StringId(0),
-            tm_sub: StringId(0),
-            tm_mul: StringId(0),
-            tm_div: StringId(0),
-            tm_mod: StringId(0),
-            tm_pow: StringId(0),
-            tm_unm: StringId(0),
-            tm_idiv: StringId(0),
-            tm_band: StringId(0),
-            tm_bor: StringId(0),
-            tm_bxor: StringId(0),
-            tm_bnot: StringId(0),
-            tm_shl: StringId(0),
-            tm_shr: StringId(0),
-            tm_concat: StringId(0),
-            tm_metatable: StringId(0),
-            str_suspended: StringId(0),
-            str_running: StringId(0),
-            str_normal: StringId(0),
-            str_dead: StringId(0),
+            tm_index: StringId::default(),
+            tm_newindex: StringId::default(),
+            tm_call: StringId::default(),
+            tm_tostring: StringId::default(),
+            tm_len: StringId::default(),
+            tm_pairs: StringId::default(),
+            tm_ipairs: StringId::default(),
+            tm_gc: StringId::default(),
+            tm_close: StringId::default(),
+            tm_mode: StringId::default(),
+            tm_name: StringId::default(),
+            tm_eq: StringId::default(),
+            tm_lt: StringId::default(),
+            tm_le: StringId::default(),
+            tm_add: StringId::default(),
+            tm_sub: StringId::default(),
+            tm_mul: StringId::default(),
+            tm_div: StringId::default(),
+            tm_mod: StringId::default(),
+            tm_pow: StringId::default(),
+            tm_unm: StringId::default(),
+            tm_idiv: StringId::default(),
+            tm_band: StringId::default(),
+            tm_bor: StringId::default(),
+            tm_bxor: StringId::default(),
+            tm_bnot: StringId::default(),
+            tm_shl: StringId::default(),
+            tm_shr: StringId::default(),
+            tm_concat: StringId::default(),
+            tm_metatable: StringId::default(),
+            str_suspended: StringId::default(),
+            str_running: StringId::default(),
+            str_normal: StringId::default(),
+            str_dead: StringId::default(),
         };
 
         // Pre-create all metamethod name strings (like Lua's luaT_init)
@@ -768,7 +768,7 @@ impl ObjectPool {
             // Use closure to compare string content (handles hash collisions correctly)
             let compare = |id: StringId| -> bool {
                 self.strings
-                    .get(id.0)
+                    .get(id.index())
                     .map(|gs| gs.data.as_str() == s)
                     .unwrap_or(false)
             };
@@ -784,7 +784,7 @@ impl ObjectPool {
                         header: GcHeader::default(),
                         data: LuaString::with_hash(s.to_string(), hash),
                     };
-                    let id = StringId(self.strings.alloc(gc_string));
+                    let id = StringId::short(self.strings.alloc(gc_string));
                     self.string_intern.insert(hash, id, insert_idx);
 
                     // Check if resize needed (pass dummy closure since we just inserted)
@@ -799,7 +799,7 @@ impl ObjectPool {
                 header: GcHeader::default(),
                 data: LuaString::with_hash(s.to_string(), hash),
             };
-            (StringId(self.strings.alloc(gc_string)), true)
+            (StringId::long(self.strings.alloc(gc_string)), true)
         }
     }
 
@@ -814,7 +814,7 @@ impl ObjectPool {
             // Use closure to compare string content
             let compare = |id: StringId| -> bool {
                 self.strings
-                    .get(id.0)
+                    .get(id.index())
                     .map(|gs| gs.data.as_str() == s.as_str())
                     .unwrap_or(false)
             };
@@ -830,7 +830,7 @@ impl ObjectPool {
                         header: GcHeader::default(),
                         data: LuaString::with_hash(s, hash),
                     };
-                    let id = StringId(self.strings.alloc(gc_string));
+                    let id = StringId::short(self.strings.alloc(gc_string));
                     self.string_intern.insert(hash, id, insert_idx);
 
                     // Check if resize needed
@@ -845,7 +845,7 @@ impl ObjectPool {
                 header: GcHeader::default(),
                 data: LuaString::with_hash(s, hash),
             };
-            (StringId(self.strings.alloc(gc_string)), true)
+            (StringId::long(self.strings.alloc(gc_string)), true)
         }
     }
 
@@ -866,16 +866,16 @@ impl ObjectPool {
 
     #[inline(always)]
     pub fn get_string(&self, id: StringId) -> Option<&LuaString> {
-        self.strings.get(id.0).map(|gs| &gs.data)
+        self.strings.get(id.index()).map(|gs| &gs.data)
     }
 
     #[inline(always)]
     pub fn get_string_str(&self, id: StringId) -> Option<&str> {
-        self.strings.get(id.0).map(|gs| gs.data.as_str())
+        self.strings.get(id.index()).map(|gs| gs.data.as_str())
     }
 
     pub fn is_short_string(&self, id: StringId) -> bool {
-        if let Some(gs) = self.strings.get(id.0) {
+        if let Some(gs) = self.strings.get(id.index()) {
             gs.data.as_str().len() <= self.max_intern_length
         } else {
             false
@@ -889,7 +889,7 @@ impl ObjectPool {
     pub fn create_substring(&mut self, source_id: StringId, start: usize, end: usize) -> StringId {
         // First phase: get substring info and check intern table
         let intern_result = {
-            let Some(gs) = self.strings.get(source_id.0) else {
+            let Some(gs) = self.strings.get(source_id.index()) else {
                 return self.create_string("").0;
             };
             let s = gs.data.as_str();
@@ -915,7 +915,7 @@ impl ObjectPool {
             if len <= self.max_intern_length {
                 let compare = |id: StringId| -> bool {
                     self.strings
-                        .get(id.0)
+                        .get(id.index())
                         .map(|gs| gs.data.as_str() == slice)
                         .unwrap_or(false)
                 };
@@ -944,7 +944,7 @@ impl ObjectPool {
                     header: GcHeader::default(),
                     data: LuaString::with_hash(substring, hash),
                 };
-                let id = StringId(self.strings.alloc(gc_string));
+                let id = StringId::short(self.strings.alloc(gc_string));
                 self.string_intern.insert(hash, id, insert_idx);
                 self.string_intern.maybe_resize(|_| hash);
                 id
@@ -954,7 +954,7 @@ impl ObjectPool {
                     header: GcHeader::default(),
                     data: LuaString::with_hash(substring, hash),
                 };
-                StringId(self.strings.alloc(gc_string))
+                StringId::long(self.strings.alloc(gc_string))
             }
         } else {
             unreachable!()
@@ -965,7 +965,7 @@ impl ObjectPool {
     /// Used for metamethod names and other permanent strings
     #[inline]
     pub fn fix_string(&mut self, id: StringId) {
-        if let Some(gs) = self.strings.get_mut(id.0) {
+        if let Some(gs) = self.strings.get_mut(id.index()) {
             gs.header.set_fixed();
             gs.header.make_black(); // Always considered marked
         }
@@ -1246,7 +1246,7 @@ impl ObjectPool {
             // Remove from intern table if interned
             if let Some(gs) = self.strings.get(id) {
                 let hash = Self::hash_string(gs.data.as_str());
-                self.string_intern.remove(hash, StringId(id));
+                self.string_intern.remove(hash, StringId::short(id));
             }
             self.strings.free(id);
         }
@@ -1277,7 +1277,7 @@ impl ObjectPool {
 
     #[inline]
     pub fn remove_string(&mut self, id: StringId) {
-        self.strings.free(id.0);
+        self.strings.free(id.index());
     }
 
     #[inline]

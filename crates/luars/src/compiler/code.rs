@@ -74,7 +74,7 @@ pub fn const_to_exp(value: LuaValue, e: &mut ExpDesc) {
         }
         LuaValueKind::String => {
             e.kind = ExpKind::VKSTR;
-            e.u = ExpUnion::Info(value.as_string_id().unwrap_or(StringId(0)).0 as i32);
+            e.u = ExpUnion::Info(value.as_string_id().unwrap_or(StringId::short(0)).index() as i32);
         }
         _ => {
             // Other types shouldn't appear as compile-time constants

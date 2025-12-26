@@ -290,10 +290,10 @@ impl LuaTable {
                 // 使用LuaString的hash
                 let string_id = key.as_string_id().unwrap();
                 if let Some(s) = unsafe { &*self.object_pool }.get_string(string_id) {
-                    s.hash as usize
+                    (s.hash as usize) % modulo
                 } else {
                     // 字符串不存在，使用ID作为hash
-                    (string_id.0 as usize) % modulo
+                    (string_id.raw() as usize) % modulo
                 }
             }
             LuaValueKind::Boolean => {
@@ -380,6 +380,36 @@ impl LuaTable {
         None
     }
 
+    /// 调整hash part大小
+    fn resize_hash(&mut self, new_size: usize) {
+        if new_size == 0 {
+            // 设置为dummy
+            self.nodes = Box::new([]);
+            self.set_lsizenode(0);
+            self.set_flags(self.flags() | BITDUMMY);
+            return;
+        }
+
+        // 保存旧节点
+        let old_nodes = std::mem::replace(&mut self.nodes, Box::new([]));
+
+        // 创建新的hash part
+        let lsizenode = Self::ceillog2(new_size as u32) as u8;
+        let actual_size = 1usize << lsizenode;
+        self.nodes = vec![Node::empty(); actual_size].into_boxed_slice();
+        self.set_lsizenode(lsizenode);
+        self.set_flags(self.flags() & !BITDUMMY);
+
+        // 重新插入所有旧节点
+        for old_node in old_nodes.iter() {
+            if !old_node.is_dead() && !old_node.is_empty() {
+                let key = old_node.key();
+                let value = old_node.value;
+                self.set_hash_value(&key, value);
+            }
+        }
+    }
+
     // ============ Public API ============
 
     /// 获取hash part大小
@@ -429,7 +459,14 @@ impl LuaTable {
             self.array[idx] = value;
             return;
         }
-        // Set in hash part
+
+        // Lua语义：如果key == asize + 1，追加到数组末尾
+        if key > 0 && key as u32 == asize + 1 {
+            self.array.push(value);
+            return;
+        }
+
+        // 其他情况：Set in hash part
         let key_val = LuaValue::integer(key);
         self.set_hash_value(&key_val, value);
     }
@@ -458,8 +495,8 @@ impl LuaTable {
     /// Set value in hash part
     fn set_hash_value(&mut self, key: &LuaValue, value: LuaValue) {
         if self.is_dummy() {
-            // TODO: 需要扩展hash part，暂时忽略
-            return;
+            // 扩展hash part：分配初始大小为4的hash表
+            self.resize_hash(4);
         }
 
         // 查找已存在的key
@@ -473,7 +510,11 @@ impl LuaTable {
         let free_pos = match self.get_free_pos() {
             Some(pos) => pos,
             None => {
-                // TODO: 需要rehash，暂时忽略
+                // 需要rehash：扩大一倍
+                let new_size = self.sizenode() * 2;
+                self.resize_hash(new_size);
+                // 重新设置值
+                self.set_hash_value(key, value);
                 return;
             }
         };
@@ -537,9 +578,31 @@ impl LuaTable {
         self.set_metatable_internal(mt);
     }
 
-    /// Insert at array index
-    pub fn insert_array_at(&mut self, _idx: usize, _value: LuaValue) -> Result<(), String> {
-        Err("not implemented".to_string())
+    /// Insert at array index (Lua 1-based indexing)
+    /// 在指定位置插入元素，后面的元素向后移动
+    pub fn insert_array_at(&mut self, idx: usize, value: LuaValue) -> Result<(), String> {
+        if idx == 0 {
+            return Err("index must be >= 1 (Lua uses 1-based indexing)".to_string());
+        }
+
+        let asize = self.asize() as usize;
+
+        if idx > asize + 1 {
+            return Err(format!(
+                "index {} out of bounds (array size is {})",
+                idx, asize
+            ));
+        }
+
+        if idx == asize + 1 {
+            // 追加到末尾
+            self.array.push(value);
+        } else {
+            // 插入到中间，Vec的insert使用0-based索引
+            self.array.insert(idx - 1, value);
+        }
+
+        Ok(())
     }
 
     /// Metamethod absence check
@@ -660,29 +723,89 @@ mod tests {
     }
 
     #[test]
+    fn test_simple_hash_insert() {
+        let mut pool = ObjectPool::new();
+        let tid = pool.create_table(0, 0); // 从dummy开始
+
+        let (key, _) = pool.create_string("test");
+        let key_value = LuaValue::string(key);
+
+        if let Some(table) = pool.get_table_mut(tid) {
+            println!(
+                "Before insert: is_dummy={}, sizenode={}",
+                table.is_dummy(),
+                table.sizenode()
+            );
+            table.raw_set(key_value, LuaValue::integer(42));
+            println!(
+                "After insert: is_dummy={}, sizenode={}",
+                table.is_dummy(),
+                table.sizenode()
+            );
+
+            let result = table.raw_get(&key_value);
+            assert_eq!(
+                result,
+                Some(LuaValue::integer(42)),
+                "Failed to get after set"
+            );
+        }
+    }
+
+    #[test]
     fn test_string_key_equality() {
         let mut pool = ObjectPool::new();
         let tid = pool.create_table(0, 8);
 
-        // 创建两个内容相同的长字符串
-        let long_str1 = "a".repeat(100); // 长字符串
-        let long_str2 = "a".repeat(100); // 另一个相同内容的长字符串
+        // 测试短字符串（会被intern）
+        let str1 = "test_string";
+        let (key1, _) = pool.create_string(str1);
+        let (key2, _) = pool.create_string(str1);
 
-        let (key1, _) = pool.create_string(&long_str1);
-        let (key2, _) = pool.create_string(&long_str2);
-        let key1_value = LuaValue::string(key1);
-        let key2_value = LuaValue::string(key2);
+        // 短字符串会被intern，所以ID应该相同
+        assert_eq!(key1, key2, "Short strings should be interned");
+        assert!(key1.is_short(), "Should be marked as short string");
 
-        // 设置值
+        // 测试长字符串（不会被intern，但内容相同）
+        let long_str1 = "a".repeat(100);
+        let long_str2 = "a".repeat(100);
+
+        let (long_key1, _) = pool.create_string(&long_str1);
+        let (long_key2, _) = pool.create_string(&long_str2);
+
+        assert_ne!(
+            long_key1, long_key2,
+            "Long strings should have different IDs"
+        );
+        assert!(long_key1.is_long(), "Should be marked as long string");
+        assert!(long_key2.is_long(), "Should be marked as long string");
+
+        let long_val1 = LuaValue::string(long_key1);
+        let long_val2 = LuaValue::string(long_key2);
+
+        // 验证LuaValue正确识别为长字符串
+        assert!(!long_val1.ttisshrstring(), "Should not be short string");
+        assert!(!long_val2.ttisshrstring(), "Should not be short string");
+
+        // 设置长字符串key
         if let Some(table) = pool.get_table_mut(tid) {
-            table.raw_set(key1_value, LuaValue::integer(42));
+            table.raw_set(long_val1, LuaValue::integer(42));
+            let result = table.raw_get(&long_val1);
+            assert_eq!(
+                result,
+                Some(LuaValue::integer(42)),
+                "Should find with same key"
+            );
         }
 
-        // 用内容相同但ID可能不同的key2查找
+        // 用内容相同但ID不同的long_key2查找，应该也能找到（通过raw_equal比较内容）
         if let Some(table) = pool.get_table(tid) {
-            let result = table.raw_get(&key2_value);
-            // 应该能找到，因为raw_equal会比较字符串内容
-            assert_eq!(result, Some(LuaValue::integer(42)));
+            let result = table.raw_get(&long_val2);
+            assert_eq!(
+                result,
+                Some(LuaValue::integer(42)),
+                "Should find with content-equal key"
+            );
         }
     }
 }
