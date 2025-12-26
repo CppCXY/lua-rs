@@ -836,6 +836,8 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     // Generate FORPREP with initial jump offset 0
     let prep_pc = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
+    // lparser.c:1668: both 'forprep' remove one register from the stack
+    fs.freereg -= 1;
 
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
