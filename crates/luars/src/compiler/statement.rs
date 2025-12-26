@@ -997,7 +997,7 @@ fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     expr_parser::body(fs, &mut func_val, is_method)?;
 
     // Check if variable is readonly
-    check_readonly(fs, &base)?;
+    check_readonly(fs, &mut base)?;
 
     // Store function: base = func_val
     storevar(fs, &base, &mut func_val);
@@ -1267,6 +1267,7 @@ fn vkisvar(k: ExpKind) -> bool {
             | ExpKind::VUPVAL
             | ExpKind::VCONST
             | ExpKind::VINDEXED
+            | ExpKind::VVARGIND  // Lua 5.5: vararg indexed is a variable
             | ExpKind::VINDEXUP
             | ExpKind::VINDEXI
             | ExpKind::VINDEXSTR
@@ -1378,9 +1379,9 @@ fn storevar(fs: &mut FuncState, var: &ExpDesc, ex: &mut ExpDesc) {
         }
         ExpKind::VVARGIND => {
             // Lua 5.5: assignment to indexed vararg parameter
-            // Mark that function needs a vararg table
-            fs.chunk.is_vararg = true;
-            // Now, assignment is to a regular table (fallthrough to SETTABLE)
+            // Mark that function needs a vararg table (needvatab in lcode.c)
+            fs.chunk.needs_vararg_table = true;
+            // Now, assignment is to a regular table (SETTABLE instruction)
             code::code_abrk(
                 fs,
                 OpCode::SetTable,
@@ -1541,8 +1542,15 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
 }
 
 // Port of check_readonly from lparser.c (lines 277-304)
-fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
+fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
     use ExpKind;
+
+    // lparser.c:307-310: Handle VVARGIND - needs vararg table and convert to VINDEXED
+    if e.kind == ExpKind::VVARGIND {
+        fs.chunk.needs_vararg_table = true;
+        e.kind = ExpKind::VINDEXED;
+        // Fall through to VINDEXED check
+    }
 
     let varname: Option<String> = match e.kind {
         ExpKind::VCONST => {
@@ -1554,7 +1562,7 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
                 Some("<const>".to_string())
             }
         }
-        ExpKind::VLOCAL => {
+        ExpKind::VLOCAL | ExpKind::VVARGVAR => {
             // Check if local variable is const or compile-time const
             // Note: RDKTOCLOSE variables are NOT readonly!
             let vidx = e.u.var().vidx as u16;
@@ -1582,6 +1590,20 @@ fn check_readonly(fs: &mut FuncState, e: &ExpDesc) -> Result<(), String> {
             } else {
                 None
             }
+        }
+        ExpKind::VINDEXUP | ExpKind::VINDEXSTR | ExpKind::VINDEXED => {
+            // Check if indexed access is to a read-only table field
+            // For now, we don't support the `ro` flag completely
+            // Just check if the flag is set
+            if e.u.ind().ro {
+                Some("<readonly field>".to_string())
+            } else {
+                None
+            }
+        }
+        ExpKind::VINDEXI => {
+            // Integer index cannot be read-only
+            return Ok(());
         }
         _ => None,
     };

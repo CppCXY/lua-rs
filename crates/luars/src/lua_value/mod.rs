@@ -396,6 +396,7 @@ pub struct Chunk {
     pub upvalue_count: usize,
     pub param_count: usize,
     pub is_vararg: bool, // Whether function uses ... (varargs)
+    pub needs_vararg_table: bool, // Whether function needs vararg table (PF_VATAB in Lua 5.5)
     pub max_stack_size: usize,
     pub child_protos: Vec<Rc<Chunk>>, // Nested function prototypes
     pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
@@ -414,6 +415,7 @@ impl Chunk {
             upvalue_count: 0,
             param_count: 0,
             is_vararg: false,
+            needs_vararg_table: false,
             max_stack_size: 0,
             child_protos: Vec::new(),
             upvalue_descs: Vec::new(),
