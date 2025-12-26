@@ -834,14 +834,19 @@ fn bool_f(fs: &mut FuncState) -> usize {
 }
 
 // Add nil to constants
-// Port of nilK from lcode.c:646-652
+// Port of nilK from lcode.c:665-671
 fn nil_k(fs: &mut FuncState) -> usize {
-    // Cannot use nil as key; use a special sentinel instead
-    // In Lua C, they use the hash table itself as key (lcode.c:650)
-
-    // but we are rust! So we can just use LuaValue::nil() as both key and value
+    // Cannot use nil as key; instead use table itself as key (lcode.c:669)
+    // static int nilK (FuncState *fs) {
+    //   TValue k, v;
+    //   setnilvalue(&v);
+    //   /* cannot use nil as key; instead use table itself */
+    //   sethvalue(fs->ls->L, &k, fs->kcache);
+    //   return k2proto(fs, &k, &v);
+    // }
+    let key = LuaValue::table(fs.kcache);
     let val = LuaValue::nil();
-    add_constant(fs, val)
+    add_constant_with_key(fs, key, val)
 }
 
 // Add integer to constants
@@ -911,13 +916,14 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
 // For strings, key == value (strings are deduplicated globally)
 // For other types (numbers), key == value (numbers are deduplicated per-function)
 // but we use rust's HashMap to handle that, so we just pass the same value for both key and value.
-fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
-    // Query kcache table with key (lcode.c:548)
-    // Use Lua 5.5's luaH_get for O(1) hash lookup instead of O(n) traversal
+// Port of k2proto from lcode.c:565-575 (with separate key)
+// static int k2proto (FuncState *fs, TValue *key, TValue *v)
+fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> usize {
+    // Query kcache table with key (lcode.c:567)
     let found_idx: Option<usize> = {
         if let Some(kcache_table) = fs.pool.get_table(fs.kcache) {
             // luaH_get returns the value if found (stored as integer index)
-            if let Some(idx_value) = kcache_table.raw_get(&value) {
+            if let Some(idx_value) = kcache_table.raw_get(&key) {
                 idx_value.as_integer().map(|i| i as usize)
             } else {
                 None
@@ -928,29 +934,33 @@ fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
     };
     
     if let Some(idx) = found_idx {
-        // Check if we can reuse this constant (lcode.c:550-555)
-        // Must check: within bounds, same type tag, and equal value
+        // Check if we can reuse this constant (lcode.c:568-572)
         if idx < fs.chunk.constants.len()
             && let Some(existing) = fs.chunk.constants.get(idx)
         {
-            // Must match both type and value (distinguishes float from integer)
-            if existing.kind() == value.kind() && value.raw_equal(existing, fs.pool) {
+            // Must match value (lcode.c:570-571)
+            // Note: For floats, collisions can happen; for non-floats, must be equal
+            if value.raw_equal(existing, fs.pool) {
                 return idx;
             }
         }
     }
 
-    // Constant not found or cannot be reused; create a new entry (lcode.c:558-569)
+    // Constant not found or cannot be reused; create a new entry (lcode.c:573-577)
     let idx = fs.chunk.constants.len();
     fs.chunk.constants.push(value.clone());
 
-    // Store key->index mapping in kcache table (lcode.c:562-563)
-    // luaH_set: store index as integer value
+    // Store key->index mapping in kcache table (lcode.c:575-576)
     if let Some(kcache_table) = fs.pool.get_table_mut(fs.kcache) {
-        kcache_table.raw_set(value.clone(), LuaValue::integer(idx as i64));
+        kcache_table.raw_set(key, LuaValue::integer(idx as i64));
     }
 
     idx
+}
+
+// Port of k2proto from lcode.c:565-575 (when key == value)
+fn add_constant(fs: &mut FuncState, value: LuaValue) -> usize {
+    add_constant_with_key(fs, value.clone(), value)
 }
 
 // Port of luaK_exp2K from lcode.c:1000-1026
