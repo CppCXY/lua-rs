@@ -95,8 +95,9 @@ foreach ($file in $luaFiles) {
             $minCount = [Math]::Min($officialLines.Count, $ourLines.Count)
             $firstDiff = -1
             for ($i = 0; $i -lt $minCount; $i++) {
-                $officialLine = $officialLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
-                $ourLine = $ourLines[$i] -replace '\s*;.*$', '' -replace '\s+', ' '
+                # 去掉指令序号、行号和注释，只比较指令和参数
+                $officialLine = $officialLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s*;.*$', '' -replace '\s+', ' '
+                $ourLine = $ourLines[$i] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s*;.*$', '' -replace '\s+', ' '
                 if ($officialLine -ne $ourLine) {
                     $firstDiff = $i
                     break
@@ -105,10 +106,17 @@ foreach ($file in $luaFiles) {
             
             if ($firstDiff -ge 0) {
                 Write-Host "  First difference at instruction #$($firstDiff+1):" -ForegroundColor Yellow
-                $officialDisplay = $officialLines[$firstDiff] -replace '\s*;.*$', ''
-                $ourDisplay = $ourLines[$firstDiff] -replace '\s*;.*$', ''
-                Write-Host "  Official: $officialDisplay" -ForegroundColor Cyan
-                Write-Host "  Ours:     $ourDisplay" -ForegroundColor Magenta
+                # 显示完整的指令（包含行号）
+                $officialFull = $officialLines[$firstDiff] -replace '\s*;.*$', ''
+                $ourFull = $ourLines[$firstDiff] -replace '\s*;.*$', ''
+                # 也显示不含行号的指令，帮助判断是否只是行号不同
+                $officialInstr = $officialLines[$firstDiff] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s*;.*$', '' -replace '\s+', ' '
+                $ourInstr = $ourLines[$firstDiff] -replace '^\s*\d+\s+\[\d+\]\s+', '' -replace '\s*;.*$', '' -replace '\s+', ' '
+                Write-Host "  Official: $officialFull" -ForegroundColor Cyan
+                Write-Host "  Ours:     $ourFull" -ForegroundColor Magenta
+                if ($officialInstr.Trim() -eq $ourInstr.Trim()) {
+                    Write-Host "  Note: Instructions match, only line numbers differ" -ForegroundColor Yellow
+                }
             } else {
                 # 指令数量不同，但前面都一样，显示官方多出来的或我们多出来的部分
                 if ($officialLines.Count -gt $ourLines.Count) {
