@@ -147,12 +147,12 @@ pub enum OpCode {
     Closure, // R[A] := closure(KPROTO[Bx])
 
     // Vararg operations
-    Vararg,     // R[A], R[A+1], ..., R[A+C-2] = vararg
-    GetVarg,    // R[A] := R[B][R[C]], R[B] is vararg parameter (Lua 5.5)
-    
+    Vararg,  // R[A], R[A+1], ..., R[A+C-2] = vararg
+    GetVarg, // R[A] := R[B][R[C]], R[B] is vararg parameter (Lua 5.5)
+
     // Error checking for global variables (Lua 5.5)
     ErrNNil, // raise error if R[A] ~= nil (K[Bx - 1] is global name)
-    
+
     VarargPrep, // (adjust vararg parameters)
 
     // Extra argument

@@ -1279,7 +1279,11 @@ fn vkisindexed(k: ExpKind) -> bool {
     use ExpKind;
     matches!(
         k,
-        ExpKind::VINDEXED | ExpKind::VINDEXUP | ExpKind::VINDEXI | ExpKind::VINDEXSTR | ExpKind::VVARGIND
+        ExpKind::VINDEXED
+            | ExpKind::VINDEXUP
+            | ExpKind::VINDEXI
+            | ExpKind::VINDEXSTR
+            | ExpKind::VVARGIND
     )
 }
 
@@ -1689,7 +1693,7 @@ fn globalnames(fs: &mut FuncState, defkind: VarKind) -> Result<(), String> {
     if testnext(fs, LuaTokenKind::TkAssign) {
         // Initialize globals: calls initglobal recursively
         // lastidx points to the last variable, so first variable is at (lastidx - nvars + 1)
-        let line = fs.lexer.line;  // Current line number for error reporting
+        let line = fs.lexer.line; // Current line number for error reporting
         initglobal(fs, nvars, (lastidx - nvars as u16 + 1) as usize, 0, line)?;
     }
 

@@ -467,8 +467,13 @@ fn dump_chunk(
                 }
             }
             // All K-suffix arithmetic operations show constant value
-            OpCode::AddK | OpCode::SubK | OpCode::MulK | OpCode::ModK | OpCode::PowK 
-            | OpCode::DivK | OpCode::IDivK => {
+            OpCode::AddK
+            | OpCode::SubK
+            | OpCode::MulK
+            | OpCode::ModK
+            | OpCode::PowK
+            | OpCode::DivK
+            | OpCode::IDivK => {
                 if c < chunk.constants.len() as u32 {
                     format!(" ; {}", format_constant(chunk, c, vm))
                 } else {
@@ -675,8 +680,15 @@ fn dump_chunk(
         let parts: Vec<&str> = detail.splitn(2, ' ').collect();
         let opcode_name = parts[0];
         let args = if parts.len() > 1 { parts[1] } else { "" };
-        
-        println!("\t{}\t[{}]\t{:<9}\t{}{}", pc + 1, line, opcode_name, args, comment);
+
+        println!(
+            "\t{}\t[{}]\t{:<9}\t{}{}",
+            pc + 1,
+            line,
+            opcode_name,
+            args,
+            comment
+        );
     }
 
     // Print constants list (for debugging)

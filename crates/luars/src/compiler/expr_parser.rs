@@ -345,22 +345,22 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
     // lparser.c:522: global by default
     init_exp(v, ExpKind::VGLOBAL, -1);
-    
+
     // lparser.c:523: Call singlevaraux with base=1
     singlevaraux(fs, &name, v, true);
 
     // lparser.c:524: If global name?
     if v.kind == ExpKind::VGLOBAL {
         let info = v.u.info();
-        
+
         // lparser.c:526-527: global by default in the scope of a global declaration?
         if info == -2 {
             return Err(format!("variable '{}' not declared", name));
         }
-        
+
         // lparser.c:528: buildglobal(ls, varname, var)
         buildglobal(fs, &name, v)?;
-        
+
         // lparser.c:529-531: check if it's a const global (in collective declaration scope)
         if info != -1 {
             // info >= 0 means we're in scope of a collective declaration
@@ -381,18 +381,21 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Result<(), String> {
     // lparser.c:505: global by default
     init_exp(var, ExpKind::VGLOBAL, -1);
-    
+
     // lparser.c:506: get environment variable (_ENV)
     singlevaraux(fs, "_ENV", var, true);
-    
+
     // lparser.c:507-509: _ENV is global when accessing variable?
     if var.kind == ExpKind::VGLOBAL {
-        return Err(format!("_ENV is global when accessing variable '{}'", varname));
+        return Err(format!(
+            "_ENV is global when accessing variable '{}'",
+            varname
+        ));
     }
-    
+
     // lparser.c:510: _ENV could be a constant
     code::exp2anyregup(fs, var);
-    
+
     // lparser.c:511: codestring(&key, varname); /* key is variable name */
     // Port of codestring from lparser.c:159-164
     // static void codestring (expdesc *e, TString *s) {
@@ -401,16 +404,16 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
     //   e->u.strval = s;
     // }
     // Create key as VKSTR (not VK) so indexed can track it correctly
-    let k_idx = string_k(fs, varname.to_string());
+    let (str_id, _) = fs.pool.create_string(&varname);
     let mut key = ExpDesc::new_void();
     key.kind = ExpKind::VKSTR;
-    key.u = ExpUnion::Info(k_idx as i32);
+    key.u = ExpUnion::Str(str_id);
     key.t = -1;
     key.f = -1;
-    
+
     // lparser.c:512: var represents _ENV[varname]
     code::indexed(fs, var, &mut key);
-    
+
     Ok(())
 }
 
@@ -799,18 +802,18 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
             break;
         }
     }
-    
+
     // Register fixed parameters
     for i in 0..nparams {
         child_fs.new_localvar(params[i].clone(), param_kinds[i]);
     }
     child_fs.adjust_local_vars(nparams as u8);
-    
+
     // lparser.c:982: Set numparams BEFORE registering vararg parameter
     // f->numparams = cast_byte(fs->nactvar);
     let param_count = child_fs.nactvar as usize;
     child_fs.numparams = param_count as u8; // Store in FuncState for VARARG instruction
-    
+
     // If vararg, setvararg and register vararg parameter AFTER setting numparams
     if is_vararg {
         child_fs.chunk.is_vararg = true;
@@ -838,7 +841,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
         in_scope: true,
     });
     statement::enterblock(&mut child_fs, func_bl_id, false);
-    
+
     // Lua 5.5: Generate VARARGPREP after registering parameters but before statlist
     // This must be the first instruction in the function
     // Note: In Lua 5.5, VARARGPREP parameter is 0 (not the number of fixed params)
@@ -913,4 +916,3 @@ fn expect(fs: &mut FuncState, tk: LuaTokenKind) -> Result<(), String> {
         Err(fs.token_error(&format!("expected '{:?}'", tk)))
     }
 }
-

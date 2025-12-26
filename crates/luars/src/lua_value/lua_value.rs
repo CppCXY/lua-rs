@@ -47,9 +47,9 @@ pub const LUA_TTHREAD: u8 = 8;
 
 // Extra types for non-values
 pub const LUA_NUMTYPES: u8 = 9;
-pub const LUA_TUPVAL: u8 = LUA_NUMTYPES;  // upvalues
-pub const LUA_TPROTO: u8 = LUA_NUMTYPES + 1;  // function prototypes  
-pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2;  // removed keys in tables
+pub const LUA_TUPVAL: u8 = LUA_NUMTYPES; // upvalues
+pub const LUA_TPROTO: u8 = LUA_NUMTYPES + 1; // function prototypes  
+pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2; // removed keys in tables
 
 // ============ Variant tags (with bits 4-5) ============
 // makevariant(t,v) = ((t) | ((v) << 4))
@@ -120,11 +120,11 @@ pub const fn tagisempty(tag: u8) -> bool {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub union Value {
-    pub gc_id: u32,      // GC object ID (String/Table/Function/Userdata/Thread)
-    pub p: u64,          // light userdata pointer
-    pub f: u64,          // light C function pointer
-    pub i: i64,          // integer number
-    pub n: f64,          // float number
+    pub gc_id: u32, // GC object ID (String/Table/Function/Userdata/Thread)
+    pub p: u64,     // light userdata pointer
+    pub f: u64,     // light C function pointer
+    pub i: i64,     // integer number
+    pub n: f64,     // float number
 }
 
 impl Value {
@@ -155,7 +155,9 @@ impl Value {
 
     #[inline(always)]
     pub fn cfunction(f: CFunction) -> Self {
-        Value { f: f as usize as u64 }
+        Value {
+            f: f as usize as u64,
+        }
     }
 }
 
@@ -165,9 +167,9 @@ impl Value {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct TValue {
-    pub value_: Value,   // 8 bytes
-    pub tt_: u8,         // 1 byte type tag
-    // 7 bytes padding for 16-byte alignment
+    pub value_: Value, // 8 bytes
+    pub tt_: u8,       // 1 byte type tag
+                       // 7 bytes padding for 16-byte alignment
 }
 
 impl TValue {
@@ -750,7 +752,7 @@ impl TValue {
 
         // Type-specific comparison
         match self.ttype() {
-            LUA_TNIL => true, // All nils are equal
+            LUA_TNIL => true,                      // All nils are equal
             LUA_TBOOLEAN => self.tt_ == other.tt_, // Already checked above
             LUA_TNUMBER => {
                 if self.ttisinteger() {

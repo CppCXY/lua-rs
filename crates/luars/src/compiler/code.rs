@@ -74,7 +74,7 @@ pub fn const_to_exp(value: LuaValue, e: &mut ExpDesc) {
         }
         LuaValueKind::String => {
             e.kind = ExpKind::VKSTR;
-            e.u = ExpUnion::Info(value.as_string_id().unwrap_or(StringId::short(0)).index() as i32);
+            e.u = ExpUnion::Str(value.as_string_id().unwrap_or(StringId::short(0)));
         }
         _ => {
             // Other types shouldn't appear as compile-time constants
@@ -918,14 +918,14 @@ pub fn string_k(fs: &mut FuncState, s: String) -> usize {
 // }
 // In our Rust implementation, VKSTR already contains the constant index in u.info
 // (set by string_k when creating the expression), so we just change the kind.
-fn str2k(fs: &mut FuncState, e: &mut ExpDesc) {
+fn str2k(fs: &mut FuncState, e: &mut ExpDesc) -> usize {
     debug_assert!(e.kind == ExpKind::VKSTR);
-    // In Lua C, VKSTR stores TString* in u.strval, and str2K calls stringK to get index
-    // In our Rust code, VKSTR already stores the constant table index in u.info
-    // (set when the VKSTR expression was created), so just change the kind
     e.kind = ExpKind::VK;
-    // u.info already contains the correct constant index, no need to change it
-    let _ = fs; // Suppress unused warning
+    let str_id = e.u.str();
+    let value = LuaValue::string(str_id);
+    let k = add_constant(fs, value);
+    e.u = ExpUnion::Info(k as i32);
+    k
 }
 
 // Helper to add constant to chunk
@@ -953,7 +953,7 @@ fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> 
             None
         }
     };
-    
+
     if let Some(idx) = found_idx {
         // Check if we can reuse this constant (lcode.c:568-572)
         if idx < fs.chunk.constants.len()
@@ -1003,19 +1003,13 @@ fn exp2k(fs: &mut FuncState, e: &mut ExpDesc) -> bool {
             }
         }
 
-        // Handle VKSTR: convert to VK with proper constant index
-        if e.kind == ExpKind::VKSTR {
-            str2k(fs, e);
-            // Now e.kind is VK, continue below
-        }
-
         let info = match e.kind {
             ExpKind::VTRUE => bool_t(fs),
             ExpKind::VFALSE => bool_f(fs),
             ExpKind::VNIL => nil_k(fs),
             ExpKind::VKINT => int_k(fs, e.u.ival()),
             ExpKind::VKFLT => number_k(fs, e.u.nval()),
-            ExpKind::VK => e.u.info() as usize,
+            ExpKind::VKSTR => str2k(fs, e),
             _ => return false,
         };
 
@@ -2144,13 +2138,13 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
             t: temp as i16,
             idx: k.u.info() as i16,
             ro: false,
-            keystr: keystr,  // lcode.c:1394: t->u.ind.keystr = keystr;
+            keystr: keystr, // lcode.c:1394: t->u.ind.keystr = keystr;
         });
         t.kind = ExpKind::VINDEXUP;
     } else if t.kind == ExpKind::VVARGVAR {
         // Lua 5.5: indexing the vararg parameter
-        let kreg = exp2anyreg(fs, k);  // put key in some register
-        let vreg = t.u.var().ridx;     // register with vararg param
+        let kreg = exp2anyreg(fs, k); // put key in some register
+        let vreg = t.u.var().ridx; // register with vararg param
         // lua_assert(vreg == fs->f->numparams);
         t.u = ExpUnion::Ind(IndVars {
             t: vreg as i16,
@@ -2158,7 +2152,7 @@ pub fn indexed(fs: &mut FuncState, t: &mut ExpDesc, k: &mut ExpDesc) {
             ro: false,
             keystr: keystr,
         });
-        t.kind = ExpKind::VVARGIND;  // t represents vararg[k]
+        t.kind = ExpKind::VVARGIND; // t represents vararg[k]
     } else {
         // Register index of the table
         t.u.ind_mut().t = if t.kind == ExpKind::VLOCAL {
@@ -2237,7 +2231,14 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     if key.kind == ExpKind::VK && key.u.info() >= 0 && (key.u.info() as usize) <= MAXINDEXRK {
         // Method name is a constant in valid K index range
         // Emit OP_SELF with k = 0 (Lua 5.5 never sets k flag for SELF)
-        code_abck(fs, OpCode::Self_, base as u32, ereg as u32, key.u.info() as u32, false);
+        code_abck(
+            fs,
+            OpCode::Self_,
+            base as u32,
+            ereg as u32,
+            key.u.info() as u32,
+            false,
+        );
     } else {
         // Fallback: put method name in a register and emit MOVE + GETTABLE
         exp2anyreg(fs, key);
@@ -2278,12 +2279,8 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
         ExpKind::VNIL => Some(LuaValue::nil()),
         ExpKind::VKSTR => {
             // String constant - already in constants
-            let idx = e.u.info() as usize;
-            if idx < fs.chunk.constants.len() {
-                Some(fs.chunk.constants[idx])
-            } else {
-                None
-            }
+            let id = e.u.str();
+            Some(LuaValue::string(id))
         }
         ExpKind::VK => {
             // Constant in K
@@ -2402,25 +2399,21 @@ pub fn code_extraarg(fs: &mut FuncState, a: u32) -> usize {
 pub fn codecheckglobal(fs: &mut FuncState, var: &mut ExpDesc, mut k: i32, line: usize) {
     // lcode.c:716: luaK_exp2anyreg(fs, var);
     exp2anyreg(fs, var);
-    
+
     // lcode.c:717: luaK_fixline(fs, line);
     fixline(fs, line);
-    
+
     // lcode.c:718: k = (k >= MAXARG_Bx) ? 0 : k + 1;
     // This modifies k in-place!
     const MAX_BX: i32 = (1 << 17) - 1; // 17 bits for Bx field
-    k = if k >= MAX_BX { 
-        0 
-    } else { 
-        k + 1 
-    };
-    
+    k = if k >= MAX_BX { 0 } else { k + 1 };
+
     // lcode.c:719: luaK_codeABx(fs, OP_ERRNNIL, var->u.info, k);
     code_abx(fs, OpCode::ErrNNil, var.u.info() as u32, k as u32);
-    
+
     // lcode.c:720: luaK_fixline(fs, line);
     fixline(fs, line);
-    
+
     // lcode.c:721: freeexp(fs, var);
     // Port of freeexp from lcode.c:525-527
     // static void freeexp (FuncState *fs, expdesc *e) {

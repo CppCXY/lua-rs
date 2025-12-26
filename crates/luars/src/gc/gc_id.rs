@@ -46,6 +46,11 @@ impl StringId {
         self.0 & Self::INDEX_MASK
     }
 
+    #[inline(always)]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
     /// Get the raw u32 value (with flag bit)
     #[inline(always)]
     pub const fn raw(self) -> u32 {

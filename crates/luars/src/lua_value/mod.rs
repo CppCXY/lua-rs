@@ -395,7 +395,7 @@ pub struct Chunk {
     pub locals: Vec<String>,
     pub upvalue_count: usize,
     pub param_count: usize,
-    pub is_vararg: bool, // Whether function uses ... (varargs)
+    pub is_vararg: bool,          // Whether function uses ... (varargs)
     pub needs_vararg_table: bool, // Whether function needs vararg table (PF_VATAB in Lua 5.5)
     pub max_stack_size: usize,
     pub child_protos: Vec<Rc<Chunk>>, // Nested function prototypes

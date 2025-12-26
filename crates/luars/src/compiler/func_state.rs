@@ -36,7 +36,7 @@ pub struct FuncState<'a> {
     pub numparams: u8,                 // number of fixed parameters (excluding vararg parameter)
     pub first_local: usize,            // index of first local variable in prev
     pub source_name: String,           // source file name for error messages
-    pub kcache: TableId,               // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
+    pub kcache: TableId, // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
 }
 
 pub struct CompilerState {
@@ -147,14 +147,17 @@ pub enum VarKind {
 impl VarKind {
     // Test for variables that live in registers
     pub fn is_in_reg(self) -> bool {
-        matches!(self, VarKind::VDKREG | VarKind::RDKCONST | VarKind::RDKVAVAR | VarKind::RDKTOCLOSE)
+        matches!(
+            self,
+            VarKind::VDKREG | VarKind::RDKCONST | VarKind::RDKVAVAR | VarKind::RDKTOCLOSE
+        )
     }
-    
+
     // Test for global variables
     pub fn is_global(self) -> bool {
         matches!(self, VarKind::GDKREG | VarKind::GDKCONST)
     }
-    
+
     // Test for readonly variables (const or for-loop control variable)
     pub fn is_readonly(self) -> bool {
         matches!(self, VarKind::RDKCONST | VarKind::GDKCONST)
@@ -178,8 +181,8 @@ impl<'a> FuncState<'a> {
         source_name: String,
     ) -> Self {
         // Create kcache table for constant deduplication (like Lua 5.5's open_func)
-        let kcache= pool.create_table(0, 0);
-        
+        let kcache = pool.create_table(0, 0);
+
         FuncState {
             chunk: Chunk::new(),
             prev: None,
@@ -242,7 +245,7 @@ impl<'a> FuncState<'a> {
     pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
         // Create new kcache table for child function
         let kcache = parent.pool.create_table(0, 0);
-        
+
         FuncState {
             chunk: Chunk::new(),
             prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
@@ -391,7 +394,7 @@ impl<'a> FuncState<'a> {
                 }
             }
         }
-        -1  // lparser.c:442: not found
+        -1 // lparser.c:442: not found
     }
 
     // Port of searchupvalue from lparser.c (lines 340-351)

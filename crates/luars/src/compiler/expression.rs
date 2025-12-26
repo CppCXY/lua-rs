@@ -1,3 +1,5 @@
+use crate::StringId;
+
 // Port of expdesc from lcode.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpKind {
@@ -12,18 +14,18 @@ pub enum ExpKind {
     VNONRELOC, // expression has its value in a fixed register; info = result register
     VLOCAL, // local variable; var.ridx = register index; var.vidx = relative index in 'actvar.arr'
     VVARGVAR, // vararg parameter; var.ridx = register index; var.vidx = relative index in 'actvar.arr'
-    VUPVAL, // upvalue variable; info = index of upvalue in 'upvalues'
-    VCONST, // compile-time <const> variable; info = absolute index in 'actvar.arr'
-    VGLOBAL, // Lua 5.5: global variable declaration; info = index in actvar for global name
+    VUPVAL,   // upvalue variable; info = index of upvalue in 'upvalues'
+    VCONST,   // compile-time <const> variable; info = absolute index in 'actvar.arr'
+    VGLOBAL,  // Lua 5.5: global variable declaration; info = index in actvar for global name
     VINDEXED, // indexed variable; ind.t = table register; ind.idx = key's R index
     VINDEXUP, // indexed upvalue; ind.t = upvalue; ind.idx = key's K index
     VINDEXI, // indexed variable with constant integer; ind.t = table register; ind.idx = key's value
     VINDEXSTR, // indexed variable with literal string; ind.t = table register; ind.idx = key's K index
     VVARGIND, // indexed vararg parameter; ind.t = vararg register; ind.idx = key's R index (Lua 5.5)
-    VJMP,      // expression is a test/comparison; info = pc of corresponding jump instruction
-    VRELOC,    // expression can put result in any register; info = instruction pc
-    VCALL,     // expression is a function call; info = instruction pc
-    VVARARG,   // vararg expression; info = instruction pc
+    VJMP,     // expression is a test/comparison; info = pc of corresponding jump instruction
+    VRELOC,   // expression can put result in any register; info = instruction pc
+    VCALL,    // expression is a function call; info = instruction pc
+    VVARARG,  // vararg expression; info = instruction pc
 }
 
 #[derive(Clone)]
@@ -38,6 +40,8 @@ pub struct ExpDesc {
 pub enum ExpUnion {
     // for generic use
     Info(i32),
+    // for VKSTR
+    Str(StringId),
     // for VKINT
     IVal(i64),
     // for VKFLT
@@ -53,6 +57,13 @@ impl ExpUnion {
         match self {
             ExpUnion::Info(info) => *info,
             _ => panic!("ExpUnion does not contain info"),
+        }
+    }
+
+    pub fn str(&self) -> StringId {
+        match self {
+            ExpUnion::Str(sid) => *sid,
+            _ => panic!("ExpUnion does not contain str"),
         }
     }
 
@@ -81,11 +92,11 @@ impl ExpUnion {
         match self {
             ExpUnion::Ind(ind) => ind,
             _ => {
-                *self = ExpUnion::Ind(IndVars { 
-                    t: -1, 
-                    idx: -1, 
-                    ro: false, 
-                    keystr: -1 
+                *self = ExpUnion::Ind(IndVars {
+                    t: -1,
+                    idx: -1,
+                    ro: false,
+                    keystr: -1,
                 });
                 if let ExpUnion::Ind(ind) = self {
                     ind
