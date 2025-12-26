@@ -430,15 +430,15 @@ impl LuaTable {
 
     /// 获取array大小
     #[inline(always)]
-    pub fn asize(&self) -> u32 {
-        self.array.len() as u32
+    pub fn asize(&self) -> usize {
+        self.array.len()
     }
 
     /// Get value by integer key
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
         // Try array part (Lua uses 1-based indexing)
         let asize = self.asize();
-        if key > 0 && (key as u32) <= asize {
+        if key > 0 && (key as usize) <= asize {
             let idx = (key - 1) as usize;
             let val = self.array[idx];
             if !val.is_nil() {
@@ -454,14 +454,14 @@ impl LuaTable {
     pub fn set_int(&mut self, key: i64, value: LuaValue) {
         // Try array part
         let asize = self.asize();
-        if key > 0 && (key as u32) <= asize {
+        if key > 0 && (key as usize) <= asize {
             let idx = (key - 1) as usize;
             self.array[idx] = value;
             return;
         }
 
         // Lua语义：如果key == asize + 1，追加到数组末尾
-        if key > 0 && key as u32 == asize + 1 {
+        if key > 0 && key as usize == asize + 1 {
             self.array.push(value);
             return;
         }
