@@ -227,9 +227,11 @@ pub fn finish(fs: &mut FuncState) {
             }
             OpCode::GetVarg => {
                 // lcode.c:1953-1956: GETVARG instruction handling
-                // NOTE: In Lua 5.5, GETVARG is kept as-is in most cases
-                // It's only converted to GETTABLE in specific optimization scenarios
-                // For now, keep GETVARG as-is to match official behavior
+                // If function has a vararg table (PF_VATAB), convert to GETTABLE
+                if needs_vararg_table {
+                    let pc = &mut fs.chunk.code[i];
+                    Instruction::set_opcode(pc, OpCode::GetTable);
+                }
             }
             OpCode::Vararg => {
                 // lcode.c:1958-1961: VARARG instruction k flag handling
@@ -2142,7 +2144,10 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
 // Port of luaK_exp2anyregup from lcode.c:978-981
 // void luaK_exp2anyregup (FuncState *fs, expdesc *e)
 pub fn exp2anyregup(fs: &mut FuncState, e: &mut ExpDesc) {
-    if e.kind != ExpKind::VUPVAL || e.has_jumps() {
+    // lcode.c:1034-1035: Skip exp2anyreg for VUPVAL and VVARGVAR (unless has jumps)
+    // if ((e->k != VUPVAL && e->k != VVARGVAR) || hasjumps(e))
+    //     luaK_exp2anyreg(fs, e);
+    if (e.kind != ExpKind::VUPVAL && e.kind != ExpKind::VVARGVAR) || e.has_jumps() {
         exp2anyreg(fs, e);
     }
 }
