@@ -490,32 +490,35 @@ pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
     Ok(n)
 }
 
-// Port of newgotoentry from lparser.c:575-577
-// Adds a new goto entry to the pending gotos list
-fn newgotoentry(fs: &mut FuncState, name: String, line: usize, pc: usize) {
-    let stklevel = fs.reglevel(fs.nactvar); // Save stklevel at creation time
+// Port of newgotoentry from lparser.c:663-667
+// Creates a new goto entry with JMP and placeholder CLOSE instruction
+// Returns the pc of the JMP instruction
+fn newgotoentry(fs: &mut FuncState, name: String, line: usize) -> usize {
+    // lparser.c:665: int pc = luaK_jump(fs); /* create jump */
+    let pc = code::jump(fs);
+    // lparser.c:666: luaK_codeABC(fs, OP_CLOSE, 0, 1, 0); /* spaceholder, marked as dead */
+    code::code_abc(fs, OpCode::Close, 0, 1, 0);
+    
+    let stklevel = fs.reglevel(fs.nactvar);
     let label = LabelDesc {
         name,
         pc,
         line,
         nactvar: fs.nactvar,
-        stklevel, // Save the stklevel
+        stklevel,
         close: false,
     };
     fs.pending_gotos.push(label);
+    pc
 }
 
 // Port of breakstat from lparser.c:1547-1559
 // Break statement. Semantically equivalent to "goto break"
 fn breakstat(fs: &mut FuncState) -> Result<(), String> {
     let line = fs.lexer.line;
-    // lparser.c:1556: breakstat calls newgotoentry(ls, ls->brkn, line);
-    // newgotoentry creates a jump and a placeholder CLOSE instruction
-    let jmp = code::jump(fs);
-    // lparser.c:665: luaK_codeABC(fs, OP_CLOSE, 0, 1, 0); /* spaceholder, marked as dead */
-    // The 'B' parameter is 1 to mark it as dead (placeholder)
-    code::code_abc(fs, OpCode::Close, 0, 1, 0);
-    newgotoentry(fs, "break".to_string(), line, jmp);
+    // lparser.c:1556: newgotoentry(ls, luaS_newliteral(ls->L, "break"), line);
+    // newgotoentry内部创建JMP和placeholder CLOSE instruction
+    newgotoentry(fs, "break".to_string(), line);
     Ok(())
 }
 
@@ -543,11 +546,9 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
         code::patchlist(fs, jmp as isize, lb_pc as isize);
     } else {
         // Forward jump - will be resolved when label is declared
-        // lparser.c:663-665: newgotoentry creates jump and placeholder CLOSE
-        let jmp = code::jump(fs);
-        // lparser.c:665: luaK_codeABC(fs, OP_CLOSE, 0, 1, 0); /* spaceholder, marked as dead */
-        code::code_abc(fs, OpCode::Close, 0, 1, 0);
-        newgotoentry(fs, name, line, jmp);
+        // lparser.c:1432: newgotoentry(ls, luaX_newstring(ls, name), line);
+        // newgotoentry内部创建JMP和placeholder CLOSE instruction
+        newgotoentry(fs, name, line);
     }
 
     Ok(())
@@ -578,72 +579,34 @@ fn labelstat(fs: &mut FuncState) -> Result<(), String> {
     Ok(())
 }
 
-// Port of test_then_block from lparser.c:1635-1668
+// Port of test_then_block from lparser.c:1752-1764 (Lua 5.5)
 fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), String> {
     // test_then_block -> [IF | ELSEIF] cond THEN block
-    fs.lexer.bump(); // skip IF or ELSEIF
-
-    // lparser.c:1642: expr(ls, &v);
-    let mut v = expr(fs)?;
-
-    // lparser.c:1643: checknext(ls, TK_THEN);
+    // lparser.c:1756: luaX_next(ls); /* skip IF or ELSEIF */
+    fs.lexer.bump();
+    
+    // lparser.c:1757: condtrue = cond(ls); /* read condition */
+    let condtrue = cond(fs)?;
+    
+    // lparser.c:1758: checknext(ls, TK_THEN);
     check(fs, LuaTokenKind::TkThen)?;
-    fs.lexer.bump(); // consume THEN
-
-    let jf: isize; // instruction to skip 'then' code (if condition is false)
-
-    // lparser.c:1647-1660: Optimization for 'if x then break'
-    if fs.lexer.current_token() == LuaTokenKind::TkBreak {
-        let line = fs.lexer.line;
-        // lparser.c:1649: luaK_goiffalse(ls->fs, &v); /* will jump if condition is true */
-        code::goiffalse(fs, &mut v);
-        // lparser.c:1650: luaX_next(ls); /* skip 'break' */
-        fs.lexer.bump(); // skip 'break'
-        // lparser.c:1651: enterblock(fs, &bl, 0); /* must enter block before 'goto' */
-        let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
-        enterblock(fs, bl_id, false);
-        // lparser.c:1652: newgotoentry(ls, luaS_newliteral(ls->L, "break"), line, v.t);
-        newgotoentry(fs, "break".to_string(), line, v.t as usize);
-        // lparser.c:1653: while (testnext(ls, ';')) {} /* skip semicolons */
-        while testnext(fs, LuaTokenKind::TkSemicolon) {}
-        // lparser.c:1654: if (block_follow(ls, 0)) { /* jump is the entire block? */
-        if block_follow(fs, false) {
-            // lparser.c:1655-1656: leaveblock(fs); return; /* and that is it */
-            leaveblock(fs);
-            return Ok(());
-        } else {
-            // lparser.c:1658-1659: /* must skip over 'then' part if condition is false */
-            jf = code::jump(fs) as isize;
-        }
-    } else {
-        // lparser.c:1661-1664: regular case (not a break)
-        // lparser.c:1662: luaK_goiftrue(ls->fs, &v); /* skip over block if condition is false */
-        code::goiftrue(fs, &mut v);
-        // lparser.c:1663: enterblock(fs, &bl, 0);
-        let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
-        enterblock(fs, bl_id, false);
-        // lparser.c:1664: jf = v.f;
-        jf = v.f;
-    }
-
-    // lparser.c:1666: statlist(ls); /* 'then' part */
-    // Official code calls statlist directly because enterblock was already called above
-    statlist(fs)?;
-    // lparser.c:1667: leaveblock(fs);
-    leaveblock(fs);
-
-    // lparser.c:1668-1670: Jump to end after then block if followed by else/elseif
-    if fs.lexer.current_token() == LuaTokenKind::TkElseIf
-        || fs.lexer.current_token() == LuaTokenKind::TkElse
+    fs.lexer.bump();
+    
+    // lparser.c:1759: block(ls); /* 'then' part */
+    block(fs)?;
+    
+    // lparser.c:1760-1762: if followed by else/elseif, jump over it
+    if fs.lexer.current_token() == LuaTokenKind::TkElse
+        || fs.lexer.current_token() == LuaTokenKind::TkElseIf
     {
-        // lparser.c:1670: luaK_concat(fs, escapelist, luaK_jump(fs));
+        // lparser.c:1762: luaK_concat(fs, escapelist, luaK_jump(fs));
         let jmp = code::jump(fs) as isize;
         code::concat(fs, escapelist, jmp);
     }
-
-    // lparser.c:1671: luaK_patchtohere(fs, jf);
-    code::patchtohere(fs, jf);
-
+    
+    // lparser.c:1763: luaK_patchtohere(fs, condtrue);
+    code::patchtohere(fs, condtrue);
+    
     Ok(())
 }
 
