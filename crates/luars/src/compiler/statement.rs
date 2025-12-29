@@ -572,28 +572,9 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
     let line = fs.lexer.line;
     let name = str_checkname(fs)?;
 
-    // Check if label already exists (backward jump)
-    if let Some(lb) = findlabel(fs, &name) {
-        // Backward jump - resolve immediately
-        let lb_pc = lb.pc;
-        let lb_nactvar = lb.nactvar;
-        let lblevel = fs.reglevel(lb_nactvar);
-        let current_level = fs.nvarstack();
-
-        // If leaving scope of variables, need CLOSE instruction
-        if current_level > lblevel {
-            code::code_abc(fs, OpCode::Close, lblevel as u32, 0, 0);
-        }
-
-        // Create jump and patch to label
-        let jmp = code::jump(fs);
-        code::patchlist(fs, jmp as isize, lb_pc as isize);
-    } else {
-        // Forward jump - will be resolved when label is declared
-        // lparser.c:1432: newgotoentry(ls, luaX_newstring(ls, name), line);
-        // newgotoentry内部创建JMP和placeholder CLOSE instruction
-        newgotoentry(fs, name, line);
-    }
+    // lparser.c:1538-1541: All gotos (forward and backward) use newgotoentry
+    // They are all resolved later via solvegotos mechanism
+    newgotoentry(fs, name.clone(), line);
 
     Ok(())
 }
