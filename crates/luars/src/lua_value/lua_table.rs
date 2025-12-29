@@ -278,13 +278,15 @@ impl LuaTable {
         match key.kind() {
             LuaValueKind::Integer => {
                 // hashint: 对integer取模
+                // 使用整数的位表示作为hash值（与Lua ltable.c的hashint一致）
                 let i = unsafe { key.value_.i };
-                let ui = i as u64;
-                if ui <= i32::MAX as u64 {
-                    (ui as usize) % modulo
-                } else {
-                    (ui as usize) % modulo
-                }
+                (i as usize) % modulo
+            }
+            LuaValueKind::Float => {
+                // hashfloat: 对float取模，使用位表示作为hash
+                let n = unsafe { key.value_.n };
+                let bits = n.to_bits();
+                (bits as usize) % modulo
             }
             LuaValueKind::String => {
                 // 使用LuaString的hash
@@ -481,6 +483,20 @@ impl LuaTable {
         self.getnode(key).map(|node| node.value)
     }
 
+    /// Get value by key (strict version for kcache - no numeric type conversion)
+    /// Unlike raw_get, this does NOT treat integer 0 and float 0.0 as the same key
+    pub fn raw_get_strict(&self, key: &LuaValue) -> Option<LuaValue> {
+        // For kcache, we need strict type matching
+        // Integer keys go to array part ONLY if they are actually integers
+        if key.ttisinteger() {
+            if let Some(i) = key.as_integer_strict() {
+                return self.get_int(i);
+            }
+        }
+        // Search hash part for all other keys (including floats)
+        self.getnode(key).map(|node| node.value)
+    }
+
     /// Set value by key
     pub fn raw_set(&mut self, key: LuaValue, value: LuaValue) {
         // Try integer key in array part
@@ -489,6 +505,21 @@ impl LuaTable {
             return;
         }
         // Set in hash part for other key types
+        self.set_hash_value(&key, value);
+    }
+
+    /// Set value by key (strict version for kcache - no numeric type conversion)
+    /// Unlike raw_set, this does NOT treat integer 0 and float 0.0 as the same key
+    pub fn raw_set_strict(&mut self, key: LuaValue, value: LuaValue) {
+        // For kcache, we need strict type matching
+        // Integer keys go to array part ONLY if they are actually integers
+        if key.ttisinteger() {
+            if let Some(i) = key.as_integer_strict() {
+                self.set_int(i, value);
+                return;
+            }
+        }
+        // Set in hash part for all other keys (including floats)
         self.set_hash_value(&key, value);
     }
 

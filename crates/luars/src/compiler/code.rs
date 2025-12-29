@@ -919,8 +919,24 @@ fn int_k(fs: &mut FuncState, i: i64) -> usize {
 }
 
 // Add number to constants
+// Port of luaK_numberK from lcode.c:639-660
 fn number_k(fs: &mut FuncState, n: f64) -> usize {
     let val = LuaValue::float(n);
+    
+    // Special handling for float 0.0 to avoid collision with integer 0
+    // Port of lcode.c:641-643:
+    //   if (r == 0) {
+    //     setpvalue(&kv, fs);  /* use FuncState as index */
+    //     return k2proto(fs, &kv, &o);  /* cannot collide */
+    //   }
+    if n == 0.0 {
+        // Use kcache table itself as key (like nilK does)
+        // This prevents collision with integer 0 in the kcache table
+        let key = LuaValue::table(fs.kcache);
+        return add_constant_with_key(fs, key, val);
+    }
+    
+    // For other floats, use the float itself as key
     add_constant(fs, val)
 }
 

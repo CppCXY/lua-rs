@@ -226,32 +226,6 @@ fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
     fs.pending_gotos.remove(g);
 }
 
-// Port of solvegotos from lparser.c:696-719
-// Solves forward jumps. Check whether new label matches any pending gotos
-// in current block and solves them. Return true if any of the gotos need to close upvalues.
-fn solvegotos(fs: &mut FuncState, lb: &LabelDesc, bl_upval: bool) -> bool {
-    let first_goto = if let Some(bl) = &fs.current_block_cnt() {
-        bl.first_goto
-    } else {
-        0
-    };
-
-    let mut i = first_goto;
-    let mut needsclose = false;
-
-    while i < fs.pending_gotos.len() {
-        if fs.pending_gotos[i].name == lb.name {
-            needsclose |= fs.pending_gotos[i].close;
-            solvegoto(fs, i, lb, bl_upval);
-            // solvegoto removes item at i, so don't increment
-        } else {
-            i += 1;
-        }
-    }
-
-    needsclose
-}
-
 // Port of findlabel from lparser.c:544-557
 // Search for an active label with the given name
 fn findlabel<'a>(fs: &'a FuncState, name: &str) -> Option<&'a LabelDesc> {
