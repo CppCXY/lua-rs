@@ -1109,6 +1109,10 @@ pub fn mark_upval(fs: &mut FuncState, level: u8) {
             if bl.nactvar <= level {
                 bl.upval = true;
                 fs.needclose = true;
+                // Debug print
+                if false {  // Set to true to enable debug output
+                    eprintln!("mark_upval: level={}, setting needclose=true", level);
+                }
                 break;
             }
             bl_id_opt = bl.previous;

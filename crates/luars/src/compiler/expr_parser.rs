@@ -844,17 +844,22 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // If vararg, setvararg and register vararg parameter AFTER setting numparams
     if is_vararg {
         child_fs.chunk.is_vararg = true;
+        // lparser.c:1060: By default, use hidden vararg arguments (PF_VAHID)
+        // This will be cleared in finish() if vararg table is actually used (PF_VATAB)
+        child_fs.chunk.use_hidden_vararg = true;
         // Register the vararg parameter variable (after numparams is set)
         if params.len() > nparams {
-            // Check if it's a named vararg (non-empty name) or anonymous vararg (empty name)
+            // Named or anonymous vararg parameter
             let vararg_name = &params[nparams];
-            if !vararg_name.is_empty() {
-                // Named vararg parameter means we need the vararg table
-                child_fs.chunk.needs_vararg_table = true;
-            }
+            // Note: We do NOT set needs_vararg_table here!
+            // It will be set later if the vararg table is actually used
+            // (e.g., via GETVARG, vapar2local, check_readonly)
             child_fs.new_localvar(vararg_name.clone(), param_kinds[nparams]);
             child_fs.adjust_local_vars(1); // vararg parameter
         }
+    } else {
+        // Non-vararg functions don't use hidden vararg
+        child_fs.chunk.use_hidden_vararg = false;
     }
 
     // lparser.c:1001: luaK_reserveregs(fs, fs->nactvar);
@@ -889,7 +894,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     // Set param_count on chunk BEFORE calling finish, so finish can use it for RETURN instructions
     child_fs.chunk.param_count = param_count;
-    child_fs.chunk.is_vararg = is_vararg;
+    // Note: is_vararg and use_hidden_vararg are already set earlier when processing vararg parameters
 
     // Port of close_func from lparser.c:763 - finish code generation
     code::finish(&mut child_fs);

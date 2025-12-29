@@ -67,6 +67,10 @@ pub fn compile_code_with_name(
     // Port of mainfunc from lparser.c
     // main function is always vararg
 
+    // Set use_hidden_vararg for main function (vararg with no named parameters)
+    // This corresponds to PF_VAHID flag in Lua 5.5
+    fs.chunk.use_hidden_vararg = true;
+
     // Generate VARARGPREP if function is vararg
     // Reset line to 1 for first instruction (VARARGPREP), regardless of comments before
     if fs.is_vararg {

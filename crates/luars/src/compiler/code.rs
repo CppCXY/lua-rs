@@ -180,14 +180,15 @@ pub fn ret(fs: &mut FuncState, first: u8, nret: u8) -> usize {
 // void luaK_finish (FuncState *fs)
 pub fn finish(fs: &mut FuncState) {
     let needclose = fs.needclose;
-    let is_vararg = fs.is_vararg;
     let needs_vararg_table = fs.chunk.needs_vararg_table;
     let num_params = fs.chunk.param_count;
 
     // lcode.c:1932-1933: If function uses vararg table, clear hidden vararg flag
-    // In Lua 5.5, PF_VAHID is cleared if PF_VATAB is set
-    // This means named vararg functions (...t) don't need RETURN C field
-    let use_hidden_vararg = is_vararg && !needs_vararg_table;
+    // In Lua 5.5: if (p->flag & PF_VATAB) p->flag &= ~PF_VAHID;
+    if needs_vararg_table {
+        fs.chunk.use_hidden_vararg = false;
+    }
+    let use_hidden_vararg = fs.chunk.use_hidden_vararg;
 
     for i in 0..fs.pc {
         let instr = &mut fs.chunk.code[i];
@@ -232,9 +233,11 @@ pub fn finish(fs: &mut FuncState) {
             }
             OpCode::Vararg => {
                 // lcode.c:1958-1961: VARARG instruction k flag handling
-                // NOTE: In Lua 5.5, VARARG k flag is NOT related to needs_vararg_table
-                // The k flag is only set for specific VARARG usage patterns
-                // For now, don't set k flag (matching official behavior)
+                // If function has a vararg table (PF_VATAB), set k flag
+                if needs_vararg_table {
+                    let pc = &mut fs.chunk.code[i];
+                    Instruction::set_k(pc, true);
+                }
             }
             OpCode::Jmp => {
                 // lcode.c:1963-1966: Fix jumps to final target
@@ -539,14 +542,17 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
                 }
             }
         }
-        ExpKind::VLOCAL => {
+        ExpKind::VVARGVAR => {
+            // lcode.c:825-828: VVARGVAR converts to VLOCAL, then falls through
+            vapar_to_local(fs, e);
+            // FALLTHROUGH to VLOCAL case
+            // After vapar_to_local, e.kind is VLOCAL, so process as VLOCAL
             e.u = ExpUnion::Info(e.u.var().ridx as i32);
             e.kind = ExpKind::VNONRELOC;
         }
-        ExpKind::VVARGVAR => {
-            // Lua 5.5: Keep VVARGVAR as-is, don't discharge
-            // This allows indexed() to detect it and generate GETVARG/VVARGIND
-            // Only convert to VNONRELOC when actually used as a value (not indexed)
+        ExpKind::VLOCAL => {
+            e.u = ExpUnion::Info(e.u.var().ridx as i32);
+            e.kind = ExpKind::VNONRELOC;
         }
         ExpKind::VUPVAL => {
             e.u = ExpUnion::Info(code_abc(fs, OpCode::GetUpval, 0, e.u.info() as u32, 0) as i32);
