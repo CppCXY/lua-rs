@@ -207,7 +207,10 @@ fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
 
     if needs_close {
         // lparser.c:608-613: Need CLOSE instruction
-        let stklevel = fs.reglevel(label.nactvar);
+        // CRITICAL: Use label.stklevel computed when label was created,
+        // not reglevel(label.nactvar), because actvar may have been modified by removevars
+        let stklevel = label.stklevel;
+        
         // Move jump to CLOSE position (pc + 1)
         let jmp_instr = fs.chunk.code[pc];
         fs.chunk.code[pc + 1] = jmp_instr;
@@ -269,9 +272,10 @@ fn checkrepeated(fs: &FuncState, name: &str) -> Result<(), String> {
 
 // Port of createlabel from lparser.c:608-621
 // Create a new label with the given 'name' at the given 'line'.
-// Solves all pending gotos to this new label and adds a close instruction if necessary.
-// Returns true iff it added a close instruction.
-fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool {
+// 'last' tells whether label is the last non-op statement in its block.
+// Note: In Lua 5.5, createlabel does NOT solve gotos or generate CLOSE instructions.
+// Gotos are solved later in solvegotos() called from leaveblock().
+fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) {
     let pc = code::get_label(fs);
 
     // Create label descriptor
@@ -280,7 +284,7 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
         pc,
         line,
         nactvar: fs.nactvar,
-        stklevel: fs.reglevel(fs.nactvar), // Save stklevel
+        stklevel: 0, // Will be computed below
         close: false,
     };
 
@@ -292,27 +296,14 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
         }
     }
 
-    // Add to label list before solving gotos
-    let label_for_list = label.clone();
+    // CRITICAL: Compute stklevel AFTER nactvar is finalized
+    // This ensures stklevel matches the correct nactvar value
+    label.stklevel = fs.reglevel(label.nactvar);
 
-    // Get bl_upval from current block
-    let bl_upval = fs.current_block_cnt().map_or(false, |bl| bl.upval);
-
-    // Solve pending gotos
-    let needsclose = solvegotos(fs, &label, bl_upval);
-
-    // Now add to label list
-    fs.labels.push(label_for_list);
-
-    if needsclose {
-        // Need a close instruction
-        // Port of lparser.c:617: luaK_codeABC(fs, OP_CLOSE, luaY_nvarstack(fs), 0, 0);
-        let stklevel = fs.reglevel(fs.nactvar);
-        code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
-        return true;
-    }
-
-    false
+    // Add to label list
+    // Note: We do NOT solve gotos here, unlike our old implementation.
+    // Gotos will be solved in solvegotos() called from leaveblock().
+    fs.labels.push(label);
 }
 
 // Port of solvegotos from lparser.c:696-717 (Lua 5.5)
@@ -1142,10 +1133,11 @@ fn mark_to_be_closed(fs: &mut FuncState) {
 // Port of checktoclose from lparser.c:1717-1722
 fn check_to_close(fs: &mut FuncState, level: isize) {
     if level != -1 {
-        // lparser.c:1719: marktobeclosed(fs);
+        // lparser.c:1812: marktobeclosed(fs);
         mark_to_be_closed(fs);
-        // lparser.c:1720: luaK_codeABC(fs, OP_TBC, reglevel(fs, level), 0, 0);
-        code::code_abc(fs, OpCode::Tbc, level as u32, 0, 0);
+        // lparser.c:1813: luaK_codeABC(fs, OP_TBC, reglevel(fs, level), 0, 0);
+        let reg_level = fs.reglevel(level as u8);
+        code::code_abc(fs, OpCode::Tbc, reg_level as u32, 0, 0);
     }
 }
 
