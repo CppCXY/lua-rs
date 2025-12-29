@@ -347,10 +347,12 @@ impl<'a> FuncState<'a> {
     }
 
     // Port of searchvar from lparser.c (lines 414-443)
-    pub fn searchvar(&self, name: &str, var: &mut ExpDesc) -> i32 {
+    pub fn searchvar(&self, name: &str, var: &mut ExpDesc, base: bool) -> i32 {
         for i in (0..self.nactvar as usize).rev() {
             if let Some(vd) = self.actvar.get(i) {
                 // Check for global declaration (lparser.c:419)
+                // Note: Lua 5.5 checks global declarations in all scopes,
+                // the base parameter is used for other purposes
                 if vd.kind.is_global() {
                     // lparser.c:420-421: collective declaration?
                     if vd.name.is_empty() {

@@ -422,9 +422,22 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
 
 // Port of singlevaraux from lparser.c (lines 435-456)
 fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
-    let vkind = fs.searchvar(name, var);
+    let vkind = fs.searchvar(name, var, base);
     if vkind >= 0 {
-        // If it's VCONST, it stays VCONST - no change needed
+        // lparser.c:478-486: found at current level
+        if !base {
+            // lparser.c:480-484: variable will be used as upvalue
+            if var.kind == ExpKind::VVARGVAR {
+                // lparser.c:481: vararg parameter used as upvalue needs vararg table
+                code::vapar_to_local(fs, var);
+            }
+            if var.kind == ExpKind::VLOCAL {
+                // lparser.c:483: mark that this local will be used as upvalue
+                let vidx = var.u.var().vidx;
+                mark_upval(fs, vidx as u8);
+            }
+        }
+        // lparser.c:485: else nothing else to be done (base=true, used in current scope)
     } else {
         let vidx = fs.searchupvalue(name);
         if vidx < 0 {

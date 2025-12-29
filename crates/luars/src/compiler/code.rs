@@ -516,6 +516,15 @@ pub fn exp2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
     e.kind = ExpKind::VNONRELOC;
 }
 
+// Port of luaK_vapar2local from lcode.c:808-813
+// Change a vararg parameter into a regular local variable
+pub fn vapar_to_local(fs: &mut FuncState, var: &mut ExpDesc) {
+    // lcode.c:809: needvatab(fs->f); function will need a vararg table
+    fs.chunk.needs_vararg_table = true;
+    // lcode.c:811: now a vararg parameter is equivalent to a regular local variable
+    var.kind = ExpKind::VLOCAL;
+}
+
 // Port of luaK_dischargevars from lcode.c:766-817
 // void luaK_dischargevars (FuncState *fs, expdesc *e)
 pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
