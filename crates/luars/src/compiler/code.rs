@@ -2270,12 +2270,36 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     reserve_regs(fs, 2); // function and 'self'
 
     // SELF A B C: R(A+1) := R(B); R(A) := R(B)[RK(C)]
-    // Follow Lua 5.5: only emit OP_SELF when method name is a string constant
-    // in the constant table. Otherwise, fallback to MOVE + GETTABLE sequence.
+    // Follow Lua 5.5: only emit OP_SELF when method name is a SHORT string constant
+    // in the constant table. Lua 5.5 has LUAI_MAXSHORTLEN=40, strings longer than
+    // that cannot use SELF optimization (see lcode.c:1331: strisshr check).
     // Note: In our implementation, method names are already converted to VK by expr_parser.rs
     // (see suffixedexp), so we check for VK instead of VKSTR.
-    if key.kind == ExpKind::VK && key.u.info() >= 0 && (key.u.info() as usize) <= MAXINDEXRK {
-        // Method name is a constant in valid K index range
+    const LUAI_MAXSHORTLEN: usize = 40; // Lua 5.5 short string length limit
+    
+    let can_use_self = if key.kind == ExpKind::VK && key.u.info() >= 0 && (key.u.info() as usize) <= MAXINDEXRK {
+        // Check if the constant is a short string
+        let k_idx = key.u.info() as usize;
+        if let Some(constant) = fs.chunk.constants.get(k_idx) {
+            // Check if constant is a string and its length <= 40
+            if let Some(str_id) = constant.as_string_id() {
+                if let Some(lua_str) = fs.pool.get_string(str_id) {
+                    lua_str.as_str().len() <= LUAI_MAXSHORTLEN
+                } else {
+                    false
+                }
+            } else {
+                false // Not a string constant
+            }
+        } else {
+            false // Invalid constant index
+        }
+    } else {
+        false // Not VK or index out of range
+    };
+    
+    if can_use_self {
+        // Method name is a short string constant in valid K index range
         // Emit OP_SELF with k = 0 (Lua 5.5 never sets k flag for SELF)
         code_abck(
             fs,
