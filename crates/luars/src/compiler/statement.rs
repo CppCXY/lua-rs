@@ -193,25 +193,40 @@ pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
 
 // Port of leaveblock from lparser.c
 // Port of leaveblock from lparser.c:672-692
-// Port of solvegoto from lparser.c:525-539
+// Port of closegoto from lparser.c:597-621
 // Solves the goto at index 'g' to given 'label' and removes it from the list
-fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc) {
-    let gt = &fs.pending_gotos[g];
+fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
+    let gt = &fs.pending_gotos[g].clone(); // Clone to avoid borrow issues
 
-    // Check if goto jumps into scope (would be an error in full implementation)
-    // For now we skip the scope check
+    // lparser.c:606-614: Check if goto needs a CLOSE instruction
+    // gt->close means the goto jumps out of the scope of some variables
+    // (label->nactvar < gt->nactvar && bup) means label is in outer scope and block has upvalues
+    let needs_close = gt.close || (label.nactvar < gt.nactvar && bl_upval);
 
-    // Patch the jump
-    code::patchlist(fs, gt.pc as isize, label.pc as isize);
+    let mut pc = gt.pc;
 
-    // Remove goto from pending list
+    if needs_close {
+        // lparser.c:608-613: Need CLOSE instruction
+        let stklevel = fs.reglevel(label.nactvar);
+        // Move jump to CLOSE position (pc + 1)
+        let jmp_instr = fs.chunk.code[pc];
+        fs.chunk.code[pc + 1] = jmp_instr;
+        // Put real CLOSE instruction at original position
+        fs.chunk.code[pc] = Instruction::create_abc(OpCode::Close, stklevel as u32, 0, 0);
+        pc += 1; // Must point to jump instruction now
+    }
+
+    // lparser.c:615: Patch the jump to label
+    code::patchlist(fs, pc as isize, label.pc as isize);
+
+    // lparser.c:616-619: Remove goto from pending list
     fs.pending_gotos.remove(g);
 }
 
-// Port of solvegotos from lparser.c:582-596
+// Port of solvegotos from lparser.c:696-719
 // Solves forward jumps. Check whether new label matches any pending gotos
 // in current block and solves them. Return true if any of the gotos need to close upvalues.
-fn solvegotos(fs: &mut FuncState, lb: &LabelDesc) -> bool {
+fn solvegotos(fs: &mut FuncState, lb: &LabelDesc, bl_upval: bool) -> bool {
     let first_goto = if let Some(bl) = &fs.current_block_cnt() {
         bl.first_goto
     } else {
@@ -224,7 +239,7 @@ fn solvegotos(fs: &mut FuncState, lb: &LabelDesc) -> bool {
     while i < fs.pending_gotos.len() {
         if fs.pending_gotos[i].name == lb.name {
             needsclose |= fs.pending_gotos[i].close;
-            solvegoto(fs, i, lb);
+            solvegoto(fs, i, lb, bl_upval);
             // solvegoto removes item at i, so don't increment
         } else {
             i += 1;
@@ -280,8 +295,11 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
     // Add to label list before solving gotos
     let label_for_list = label.clone();
 
+    // Get bl_upval from current block
+    let bl_upval = fs.current_block_cnt().map_or(false, |bl| bl.upval);
+
     // Solve pending gotos
-    let needsclose = solvegotos(fs, &label);
+    let needsclose = solvegotos(fs, &label, bl_upval);
 
     // Now add to label list
     fs.labels.push(label_for_list);
@@ -487,13 +505,16 @@ fn newgotoentry(fs: &mut FuncState, name: String, line: usize, pc: usize) {
     fs.pending_gotos.push(label);
 }
 
-// Port of breakstat from lparser.c:1437-1440
+// Port of breakstat from lparser.c:1547-1559
 // Break statement. Semantically equivalent to "goto break"
 fn breakstat(fs: &mut FuncState) -> Result<(), String> {
     let line = fs.lexer.line;
-    // breakstat is simply a goto to a label named "break"
-    // The actual loop checking is done by createlabel when the break label is created
+    // lparser.c:1556: breakstat calls newgotoentry(ls, ls->brkn, line);
+    // newgotoentry creates a jump and a placeholder CLOSE instruction
     let jmp = code::jump(fs);
+    // lparser.c:665: luaK_codeABC(fs, OP_CLOSE, 0, 1, 0); /* spaceholder, marked as dead */
+    // The 'B' parameter is 1 to mark it as dead (placeholder)
+    code::code_abc(fs, OpCode::Close, 0, 1, 0);
     newgotoentry(fs, "break".to_string(), line, jmp);
     Ok(())
 }
@@ -522,7 +543,10 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
         code::patchlist(fs, jmp as isize, lb_pc as isize);
     } else {
         // Forward jump - will be resolved when label is declared
+        // lparser.c:663-665: newgotoentry creates jump and placeholder CLOSE
         let jmp = code::jump(fs);
+        // lparser.c:665: luaK_codeABC(fs, OP_CLOSE, 0, 1, 0); /* spaceholder, marked as dead */
+        code::code_abc(fs, OpCode::Close, 0, 1, 0);
         newgotoentry(fs, name, line, jmp);
     }
 
