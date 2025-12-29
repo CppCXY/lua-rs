@@ -420,9 +420,9 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
     Ok(())
 }
 
-// Port of singlevaraux from lparser.c (lines 435-456)
+// Port of singlevaraux from lparser.c (lines 475-495)
 fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
-    let vkind = fs.searchvar(name, var, base);
+    let vkind = fs.searchvar(name, var);
     if vkind >= 0 {
         // lparser.c:478-486: found at current level
         if !base {

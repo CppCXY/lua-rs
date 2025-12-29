@@ -315,39 +315,78 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) -> bool 
     false
 }
 
-// Port of movegotosout from lparser.c:627-637
-// Adjust pending gotos to outer level of a block
-fn movegotosout(fs: &mut FuncState, bl: &BlockCnt) {
-    let bl_nactvar = bl.nactvar;
-    let bl_upval = bl.upval;
-    let first_goto = bl.first_goto;
-    let bl_stklevel = fs.reglevel(bl_nactvar);
-
-    for i in first_goto..fs.pending_gotos.len() {
-        let gt = &mut fs.pending_gotos[i];
-
-        // Use the saved stklevel from goto creation, not recalculated from current nactvar
-        let gt_stklevel = gt.stklevel;
-
-        if gt_stklevel > bl_stklevel {
-            gt.close |= bl_upval; // Jump may need a close
+// Port of solvegotos from lparser.c:696-717 (Lua 5.5)
+// Solve pending gotos when leaving a block
+fn solvegotos_on_leaveblock(fs: &mut FuncState, bl: &BlockCnt, outlevel: u8, goto_levels: &[(usize, u8)]) {
+    let mut igt = bl.first_goto; // first goto in the finishing block
+    let mut level_idx = 0;
+    
+    while igt < fs.pending_gotos.len() {
+        let gt_name = fs.pending_gotos[igt].name.clone();
+        
+        // Search for a matching label in the current block
+        let label_opt = fs.labels[bl.first_label..]
+            .iter()
+            .find(|lb| lb.name == gt_name)
+            .cloned();
+        
+        if let Some(label) = label_opt {
+            // Found a match - close and remove goto
+            let bl_upval = bl.upval;
+            solvegoto(fs, igt, &label, bl_upval);
+            // solvegoto removes the goto, so don't increment igt or level_idx
+        } else {
+            // Adjust goto for outer block
+            // lparser.c:710-711: if block has upvalues and goto escapes scope, mark for close
+            // 
+            // NOTE: Known issue with goto.lua test:
+            // When a goto jumps out of a block containing local variables (not upvalues),
+            // the official Lua 5.5 somehow generates a CLOSE instruction, but our
+            // implementation doesn't because bl.upval is false for regular local variables.
+            // 
+            // The condition `bl.upval && gt_level > outlevel` correctly follows Lua 5.5
+            // lparser.c:710-711, but there may be another mechanism in Lua 5.5 that
+            // marks bl->upval=true in cases we haven't identified, or the CLOSE is
+            // generated through a different path (possibly in closegoto when the label
+            // is found in an outer block with upvalues).
+            // 
+            // Removing the bl.upval check causes other tests to fail, so the current
+            // implementation matches Lua 5.5 source code but may not match its behavior
+            // in all cases.
+            //
+            // Use pre-computed level from goto_levels
+            let gt_level = if level_idx < goto_levels.len() && goto_levels[level_idx].0 == igt {
+                let level = goto_levels[level_idx].1;
+                level_idx += 1;
+                level
+            } else {
+                // Fallback: this shouldn't happen if we computed levels correctly
+                0
+            };
+            
+            if bl.upval && gt_level > outlevel {
+                fs.pending_gotos[igt].close = true;
+            }
+            // lparser.c:712: correct level for outer block
+            fs.pending_gotos[igt].nactvar = bl.nactvar;
+            igt += 1; // go to next goto
         }
-        gt.nactvar = bl_nactvar; // Update goto level
     }
+    
+    // lparser.c:716: remove local labels
+    fs.labels.truncate(bl.first_label);
 }
 
-// Port of leaveblock from lparser.c:673-695
+// Port of leaveblock from lparser.c:745-762 (Lua 5.5)
 pub fn leaveblock(fs: &mut FuncState) {
-    // Don't take the block - just read it!
     if let Some(bl_id) = fs.block_cnt_id {
-        // Get immutable reference first to read values
-        let (nactvar, is_loop, first_label, first_goto, has_previous, previous_id, upval) = {
+        // Get block info
+        let (nactvar, first_goto, is_loop, has_previous, previous_id, upval) = {
             if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
                 (
                     bl.nactvar,
-                    bl.is_loop,
-                    bl.first_label,
                     bl.first_goto,
+                    bl.is_loop,
                     bl.previous.is_some(),
                     bl.previous,
                     bl.upval,
@@ -357,56 +396,61 @@ pub fn leaveblock(fs: &mut FuncState) {
             }
         };
 
-        // Port of lparser.c:675-677
-        let mut hasclose = false;
-        let stklevel = fs.reglevel(nactvar); // lparser.c:676: reglevel(fs, bl->nactvar)
-
-        // Remove block locals
-        fs.remove_vars(nactvar);
-
-        // Port of lparser.c:678-679: handle loop break labels
-        if is_loop {
-            hasclose = createlabel(fs, "break", 0, false);
+        // lparser.c:748: level outside block
+        let stklevel = fs.reglevel(nactvar);
+        
+        // Pre-compute reglevel for all pending gotos before removevars
+        // This is needed because removevars will remove actvar entries
+        let mut goto_levels = Vec::new();
+        for i in first_goto..fs.pending_gotos.len() {
+            let gt_nactvar = fs.pending_gotos[i].nactvar;
+            let gt_level = fs.reglevel(gt_nactvar);
+            goto_levels.push((i, gt_level));
         }
-
-        // Port of lparser.c:680: still need a 'close'?
-        if !hasclose && has_previous && upval {
+        
+        // lparser.c:749-750: need a 'close'?
+        if has_previous && upval {
             code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
         }
-
-        // Port of lparser.c:681: free registers
+        
+        // lparser.c:751: free registers
         fs.freereg = stklevel;
-
-        // Port of lparser.c:682: remove local labels
-        fs.labels.truncate(first_label);
-
-        // Port of lparser.c:683: current block now is previous one
-        // Just update the pointer, don't take the block!
-        fs.block_cnt_id = previous_id;
-
-        // Port of lparser.c:684-689: move gotos out or check for undefined gotos
-        if has_previous {
-            // Need to reconstruct bl info for movegotosout
-            // Read the block again to get all fields
+        
+        // lparser.c:752: remove block locals
+        fs.remove_vars(nactvar);
+        
+        // lparser.c:754-755: has to fix pending breaks?
+        if is_loop {
+            createlabel(fs, "break", 0, false);
+        }
+        
+        // lparser.c:756: solve gotos
+        // Need to reconstruct bl for solvegotos_on_leaveblock
+        if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
+            let bl_info = BlockCnt {
+                previous: bl.previous,
+                first_label: bl.first_label,
+                first_goto: bl.first_goto,
+                nactvar: bl.nactvar,
+                upval: bl.upval,
+                is_loop: bl.is_loop,
+                in_scope: bl.in_scope,
+            };
+            solvegotos_on_leaveblock(fs, &bl_info, stklevel, &goto_levels);
+        }
+        
+        // lparser.c:757-760: check for undefined gotos at function level
+        if !has_previous {
             if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
-                let bl_info = BlockCnt {
-                    previous: None, // not used in movegotosout
-                    first_label: bl.first_label,
-                    first_goto: bl.first_goto,
-                    nactvar: bl.nactvar,
-                    upval: bl.upval,
-                    is_loop: bl.is_loop,
-                    in_scope: bl.in_scope,
-                };
-                movegotosout(fs, &bl_info);
-            }
-        } else {
-            // At function level, check for undefined gotos
-            if first_goto < fs.pending_gotos.len() {
-                // In full implementation, this would raise an error
-                // For now, we'll just leave them (they'll be caught later or ignored)
+                if bl.first_goto < fs.pending_gotos.len() {
+                    // In full implementation, this would raise an error
+                    // For now, we'll just leave them
+                }
             }
         }
+        
+        // lparser.c:761: current block now is previous one
+        fs.block_cnt_id = previous_id;
     }
 }
 
@@ -1096,10 +1140,6 @@ pub fn mark_upval(fs: &mut FuncState, level: u8) {
             if bl.nactvar <= level {
                 bl.upval = true;
                 fs.needclose = true;
-                // Debug print
-                if false {  // Set to true to enable debug output
-                    eprintln!("mark_upval: level={}, setting needclose=true", level);
-                }
                 break;
             }
             bl_id_opt = bl.previous;

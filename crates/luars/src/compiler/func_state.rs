@@ -342,12 +342,14 @@ impl<'a> FuncState<'a> {
         while self.nactvar > tolevel {
             self.nactvar -= 1;
         }
-        // Also truncate actvar Vec to remove pending variables that were never activated
+        // Truncate actvar to remove local variables
+        // Note: This is different from Lua 5.5 which keeps removed variables in dyd->actvar
+        // but we truncate here for memory management
         self.actvar.truncate(self.nactvar as usize);
     }
 
     // Port of searchvar from lparser.c (lines 414-443)
-    pub fn searchvar(&self, name: &str, var: &mut ExpDesc, base: bool) -> i32 {
+    pub fn searchvar(&self, name: &str, var: &mut ExpDesc) -> i32 {
         for i in (0..self.nactvar as usize).rev() {
             if let Some(vd) = self.actvar.get(i) {
                 // Check for global declaration (lparser.c:419)

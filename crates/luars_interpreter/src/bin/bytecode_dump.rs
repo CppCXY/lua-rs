@@ -240,8 +240,9 @@ fn dump_chunk(
             OpCode::Concat => format!("CONCAT {} {}", a, b),
             OpCode::Call => format!("CALL {} {} {}", a, b, c),
             OpCode::TailCall => {
-                // TAILCALL A B C: function at A, B args, C=0 (always 0 for tailcall)
-                format!("TAILCALL {} {} {}", a, b, c)
+                // TAILCALL A B C k: function at A, B args, k flag for needclose
+                let k_suffix = if k { "k" } else { "" };
+                format!("TAILCALL {} {} {}{}", a, b, c, k_suffix)
             }
             OpCode::Return => {
                 // k=1: show "1k", k=0: show "1" (no k suffix)
