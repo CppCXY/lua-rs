@@ -438,6 +438,12 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
     let mut nret: i32;
     let mut e = ExpDesc::new_void();
 
+    // Port of lparser.c:2085: Check insidetbc before explist
+    // Must capture this before calling explist which may mutate block state
+    let insidetbc = fs.current_block_cnt()
+        .map(|bl| bl.in_scope)
+        .unwrap_or(false);
+
     if block_follow(fs, true) || fs.lexer.current_token() == LuaTokenKind::TkSemicolon {
         // return with no values
         nret = 0;
@@ -446,7 +452,9 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
         // Check if expression has multiple returns (VCALL or VVARARG)
         if matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG) {
             code::setmultret(fs, &mut e);
-            if e.kind == ExpKind::VCALL && nret == 1 {
+            // Port of lparser.c:2085: if (e.k == VCALL && nret == 1 && !fs->bl->insidetbc)
+            // Tail call optimization: only if not inside a to-be-closed scope
+            if e.kind == ExpKind::VCALL && nret == 1 && !insidetbc {
                 // Tail call optimization
                 let pc = e.u.info() as usize;
                 if pc < fs.chunk.code.len() {
