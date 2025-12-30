@@ -1506,6 +1506,13 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
     use BinaryOperator::*;
     use ExpKind::{VKFLT, VKINT};
 
+    // Port of constfolding from lcode.c:1201-1329
+    // Cannot fold if either operand has jumps (control flow)
+    // This matches tonumeral(e) check in lcode.c which returns 0 if hasjumps(e)
+    if e1.has_jumps() || e2.has_jumps() {
+        return false;
+    }
+
     // Check original types (not whether values can be represented as integers)
     let e1_is_int_type = matches!(e1.kind, VKINT);
     let e2_is_int_type = matches!(e2.kind, VKINT);
@@ -2177,57 +2184,63 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
     match op {
         OpCode::Unm => {
             // Port of lcode.c:1705-1707: try constant folding for unary minus
+            // But only if expression has no jumps (lcode.c:1704: if (!hasjumps(e)))
             // luaO_rawarith(L, LUA_OPUNM, v1, v2, res) where v2 = 0
             // intarith: case LUA_OPUNM: return intop(-, 0, v1)
-            match e.kind {
-                ExpKind::VKINT => {
-                    // Integer negation
-                    let val = e.u.ival();
-                    e.u = ExpUnion::IVal(val.wrapping_neg());
-                    return;
-                }
-                ExpKind::VKFLT => {
-                    // Float negation
-                    let val = e.u.nval();
-                    let negated = -val;
-                    // Don't fold -0.0 (lcode.c:1432-1434)
-                    if negated == 0.0 {
-                        codeunexpval(fs, op, e);
+            if !e.has_jumps() {
+                match e.kind {
+                    ExpKind::VKINT => {
+                        // Integer negation
+                        let val = e.u.ival();
+                        e.u = ExpUnion::IVal(val.wrapping_neg());
                         return;
                     }
-                    e.u = ExpUnion::NVal(negated);
-                    return;
+                    ExpKind::VKFLT => {
+                        // Float negation
+                        let val = e.u.nval();
+                        let negated = -val;
+                        // Don't fold -0.0 (lcode.c:1432-1434)
+                        if negated == 0.0 {
+                            codeunexpval(fs, op, e);
+                            return;
+                        }
+                        e.u = ExpUnion::NVal(negated);
+                        return;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
             codeunexpval(fs, op, e);
         }
         OpCode::BNot => {
             // Port of lcode.c:1705-1707: try constant folding for bitwise not
+            // But only if expression has no jumps
             // luaO_rawarith(L, LUA_OPBNOT, v1, v2, res) where v2 = 0
             // For BNOT, both operands must be convertible to integer (lobject.c:158)
             // intarith: case LUA_OPBNOT: return intop(^, ~l_castS2U(0), v1) = ~v1
-            match e.kind {
-                ExpKind::VKINT => {
-                    // Integer bitwise not
-                    let val = e.u.ival();
-                    e.u = ExpUnion::IVal(!val);
-                    return;
-                }
-                ExpKind::VKFLT => {
-                    // Try to convert float to integer (lobject.c:156-161)
-                    let fval = e.u.nval();
-                    let ival = fval as i64;
-                    // Check if float can be exactly represented as integer
-                    if (ival as f64) == fval {
-                        // Convert to integer and apply bitwise not
-                        e.kind = ExpKind::VKINT;
-                        e.u = ExpUnion::IVal(!ival);
+            if !e.has_jumps() {
+                match e.kind {
+                    ExpKind::VKINT => {
+                        // Integer bitwise not
+                        let val = e.u.ival();
+                        e.u = ExpUnion::IVal(!val);
                         return;
                     }
-                    // Float cannot be converted to integer, emit instruction
+                    ExpKind::VKFLT => {
+                        // Try to convert float to integer (lobject.c:156-161)
+                        let fval = e.u.nval();
+                        let ival = fval as i64;
+                        // Check if float can be exactly represented as integer
+                        if (ival as f64) == fval {
+                            // Convert to integer and apply bitwise not
+                            e.kind = ExpKind::VKINT;
+                            e.u = ExpUnion::IVal(!ival);
+                            return;
+                        }
+                        // Float cannot be converted to integer, emit instruction
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
             codeunexpval(fs, op, e);
         }
