@@ -17,7 +17,7 @@
                 }
             },
             "args": [
-                "test_simple.lua"
+                "test_eqi.lua"
             ],
             "cwd": "${workspaceFolder}"
         },
