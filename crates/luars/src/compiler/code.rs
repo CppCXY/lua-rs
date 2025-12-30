@@ -919,12 +919,12 @@ fn int_k(fs: &mut FuncState, i: i64) -> usize {
 }
 
 // Add number to constants
-// Port of luaK_numberK from lcode.c:639-660
+// Port of luaK_numberK from lcode.c:619-639
 fn number_k(fs: &mut FuncState, n: f64) -> usize {
     let val = LuaValue::float(n);
     
     // Special handling for float 0.0 to avoid collision with integer 0
-    // Port of lcode.c:641-643:
+    // Port of lcode.c:621-624:
     //   if (r == 0) {
     //     setpvalue(&kv, fs);  /* use FuncState as index */
     //     return k2proto(fs, &kv, &o);  /* cannot collide */
@@ -936,8 +936,39 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
         return add_constant_with_key(fs, key, val);
     }
     
-    // For other floats, use the float itself as key
-    add_constant(fs, val)
+    // Port of lcode.c:626-638: use perturbed key to avoid integer collision
+    // const int nbm = l_floatatt(MANT_DIG);  // 53 for double
+    // const lua_Number q = l_mathop(ldexp)(l_mathop(1.0), -nbm + 1);  // 2^-52
+    // const lua_Number k =  r * (1 + q);  /* key */
+    const MANT_DIG: i32 = 53; // mantissa digits for f64
+    let q = 2.0_f64.powi(-MANT_DIG + 1); // 2^-52
+    let k = n * (1.0 + q);  // perturbed key
+    
+    // Check if perturbed key can be converted to integer (lcode.c:630)
+    // If yes, don't use kcache (would collide), just create new entry
+    if k.floor() == k && k >= i64::MIN as f64 && k <= i64::MAX as f64 {
+        // Key is still an integer, would collide - create new entry directly
+        // Port of lcode.c:636: return addk(fs, fs->f, &o);
+        let idx = fs.chunk.constants.len();
+        fs.chunk.constants.push(val);
+        return idx;
+    }
+    
+    // Use perturbed key for kcache lookup (lcode.c:631-633)
+    let key = LuaValue::float(k);
+    let idx = add_constant_with_key(fs, key.clone(), val.clone());
+    
+    // Verify the stored value matches (lcode.c:632)
+    if let Some(existing) = fs.chunk.constants.get(idx) {
+        if val.raw_equal(existing, fs.pool) {
+            return idx;
+        }
+    }
+    
+    // Collision detected - create new entry without caching (lcode.c:636)
+    let idx = fs.chunk.constants.len();
+    fs.chunk.constants.push(val);
+    idx
 }
 
 // Add an integer constant to the constant table
