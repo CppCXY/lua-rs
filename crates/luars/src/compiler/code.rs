@@ -2163,25 +2163,25 @@ fn codeunexpval(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
 pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
     discharge_vars(fs, e);
 
-    // Port of luaK_prefix from lcode.c:1616-1631
+    // Port of luaK_prefix from lcode.c:1700-1715
     match op {
         OpCode::Unm => {
-            // Try constant folding for unary minus (lcode.c:1620-1622)
+            // Port of lcode.c:1705-1707: try constant folding for unary minus
+            // luaO_rawarith(L, LUA_OPUNM, v1, v2, res) where v2 = 0
+            // intarith: case LUA_OPUNM: return intop(-, 0, v1)
             match e.kind {
                 ExpKind::VKINT => {
-                    // Negate integer constant in place
+                    // Integer negation
                     let val = e.u.ival();
                     e.u = ExpUnion::IVal(val.wrapping_neg());
                     return;
                 }
                 ExpKind::VKFLT => {
-                    // Negate float constant in place
+                    // Float negation
                     let val = e.u.nval();
                     let negated = -val;
-                    // Check if result is -0.0 (bit pattern 0x8000000000000000)
-                    // Official Lua doesn't fold -0.0 to constant because it needs special handling
-                    if negated.to_bits() == 0x8000000000000000 {
-                        // Don't fold, emit UNM instruction instead
+                    // Don't fold -0.0 (lcode.c:1432-1434)
+                    if negated == 0.0 {
                         codeunexpval(fs, op, e);
                         return;
                     }
@@ -2190,25 +2190,43 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
                 }
                 _ => {}
             }
-            // Otherwise fall through to codeunexpval
             codeunexpval(fs, op, e);
         }
         OpCode::BNot => {
-            // Try constant folding for bitwise not (lcode.c:1620-1622)
-            if e.kind == ExpKind::VKINT {
-                let val = e.u.ival();
-                e.u = ExpUnion::IVal(!val);
-                return;
+            // Port of lcode.c:1705-1707: try constant folding for bitwise not
+            // luaO_rawarith(L, LUA_OPBNOT, v1, v2, res) where v2 = 0
+            // For BNOT, both operands must be convertible to integer (lobject.c:158)
+            // intarith: case LUA_OPBNOT: return intop(^, ~l_castS2U(0), v1) = ~v1
+            match e.kind {
+                ExpKind::VKINT => {
+                    // Integer bitwise not
+                    let val = e.u.ival();
+                    e.u = ExpUnion::IVal(!val);
+                    return;
+                }
+                ExpKind::VKFLT => {
+                    // Try to convert float to integer (lobject.c:156-161)
+                    let fval = e.u.nval();
+                    let ival = fval as i64;
+                    // Check if float can be exactly represented as integer
+                    if (ival as f64) == fval {
+                        // Convert to integer and apply bitwise not
+                        e.kind = ExpKind::VKINT;
+                        e.u = ExpUnion::IVal(!ival);
+                        return;
+                    }
+                    // Float cannot be converted to integer, emit instruction
+                }
+                _ => {}
             }
-            // Otherwise fall through to codeunexpval
             codeunexpval(fs, op, e);
         }
         OpCode::Len => {
-            // LEN operation (lcode.c:1625)
+            // LEN operation (lcode.c:1709)
             codeunexpval(fs, op, e);
         }
         OpCode::Not => {
-            // NOT operation (lcode.c:1627)
+            // NOT operation (lcode.c:1710)
             codenot(fs, e);
         }
         _ => unreachable!(),

@@ -1312,32 +1312,74 @@ fn check_conflict(fs: &mut FuncState, lh_id: LhsAssignId, v: &ExpDesc) {
     let mut conflict = false;
     let extra = fs.freereg;
 
-    // Check all variables in the chain
+    // lparser.c:1453-1482: Check all previous assignments and update conflicting nodes
+    let mut nodes_to_update: Vec<(LhsAssignId, bool, bool)> = Vec::new(); // (id, update_t, update_idx)
+    
     let mut current = Some(lh_id);
     while let Some(node_id) = current {
         if let Some(node) = fs.compiler_state.get_lhs_assign(node_id) {
-            if vkisindexed(node.v.kind) {
-                // If this is indexed and new var is local/upvalue
-                if v.kind == ExpKind::VLOCAL || v.kind == ExpKind::VUPVAL {
-                    // Check if they might conflict
-                    conflict = true;
-                    break;
+            let mut update_t = false;
+            let mut update_idx = false;
+            
+            if vkisindexed(node.v.kind) {  // assignment to table field?
+                // lparser.c:1456-1463: Check if table is an upvalue
+                if node.v.kind == ExpKind::VINDEXUP {
+                    // lparser.c:1457-1461: Table is upvalue being assigned
+                    if v.kind == ExpKind::VUPVAL && node.v.u.ind().t == v.u.info() as i16 {
+                        conflict = true;
+                        update_t = true;
+                        // lparser.c:1459: lh->v.k = VINDEXSTR
+                    }
+                } else {  // lparser.c:1464-1478: table is a register
+                    // lparser.c:1465-1468: Is table the local being assigned?
+                    if v.kind == ExpKind::VLOCAL && node.v.u.ind().t == v.u.var().ridx {
+                        conflict = true;
+                        update_t = true;  // lparser.c:1467: lh->v.u.ind.t = extra
+                    }
+                    // lparser.c:1469-1474: Is index the local being assigned?
+                    if node.v.kind == ExpKind::VINDEXED && v.kind == ExpKind::VLOCAL &&
+                       node.v.u.ind().idx == v.u.var().ridx {
+                        conflict = true;
+                        update_idx = true;  // lparser.c:1472: lh->v.u.ind.idx = extra
+                    }
                 }
             }
+            
+            if update_t || update_idx {
+                nodes_to_update.push((node_id, update_t, update_idx));
+            }
+            
             current = node.prev;
         } else {
             break;
         }
     }
 
+    // lparser.c:1480-1486: If conflict, copy local/upvalue to temporary
     if conflict {
-        // Copy local/upvalue to temporary
         if v.kind == ExpKind::VLOCAL {
             code::code_abc(fs, OpCode::Move, extra as u32, v.u.var().ridx as u32, 0);
-        } else if v.kind == ExpKind::VUPVAL {
+        } else {
             code::code_abc(fs, OpCode::GetUpval, extra as u32, v.u.info() as u32, 0);
         }
         code::reserve_regs(fs, 1);
+        
+        // Now update all conflicting nodes to use the safe copy
+        for (node_id, update_t, update_idx) in nodes_to_update {
+            if let Some(node) = fs.compiler_state.get_lhs_assign_mut(node_id) {
+                if update_t {
+                    // lparser.c:1459-1461, 1467
+                    if node.v.kind == ExpKind::VINDEXUP {
+                        node.v.kind = ExpKind::VINDEXSTR;
+                    }
+                    node.v.u.ind_mut().t = extra as i16;
+                }
+                if update_idx {
+                    // lparser.c:1472
+                    node.v.u.ind_mut().idx = extra as i16;
+                }
+            }
+        }
     }
 }
 
@@ -1489,6 +1531,15 @@ fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<()
             check_conflict(fs, lh_id, &nv_v);
         }
 
+        // Get updated lh_v after check_conflict for chain building
+        let updated_lh_v = {
+            let lh = fs
+                .compiler_state
+                .get_lhs_assign(lh_id)
+                .ok_or_else(|| "invalid LhsAssign id".to_string())?;
+            lh.v.clone()
+        };
+
         // Get the prev id from current lh before creating new one
         let prev_id = fs
             .compiler_state
@@ -1496,10 +1547,10 @@ fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<()
             .map(|lh| lh.prev)
             .flatten();
 
-        // Build chain: new node points to a copy of current lh
+        // Build chain: new node points to a copy of current lh (updated)
         let new_prev_id = fs.compiler_state.alloc_lhs_assign(LhsAssign {
             prev: prev_id,
-            v: lh_v.clone(),
+            v: updated_lh_v,
         });
 
         // Create new LhsAssign with the chain
@@ -1519,7 +1570,13 @@ fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<()
             adjust_assign(fs, nvars, nexps, &mut e);
         } else {
             code::setoneret(fs, &mut e);
-            storevar(fs, &lh_v, &mut e);
+            // Get updated lh_v after potential check_conflict updates
+            let updated_lh_v = fs
+                .compiler_state
+                .get_lhs_assign(lh_id)
+                .map(|lh| lh.v.clone())
+                .unwrap_or(lh_v.clone());
+            storevar(fs, &updated_lh_v, &mut e);
             return Ok(());
         }
     }
@@ -1527,7 +1584,13 @@ fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<()
     // Default assignment
     e.kind = ExpKind::VNONRELOC;
     e.u = ExpUnion::Info((fs.freereg - 1) as i32);
-    storevar(fs, &lh_v, &mut e);
+    // Get updated lh_v after potential check_conflict updates
+    let updated_lh_v = fs
+        .compiler_state
+        .get_lhs_assign(lh_id)
+        .map(|lh| lh.v.clone())
+        .unwrap_or(lh_v);
+    storevar(fs, &updated_lh_v, &mut e);
 
     Ok(())
 }
