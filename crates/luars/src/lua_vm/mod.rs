@@ -2,24 +2,26 @@
 // Executes compiled bytecode with register-based architecture
 mod call_info;
 mod execute;
+mod lua_context;
 mod lua_error;
 mod lua_state;
 mod opcode;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
-use crate::lua_value::{
-    CFunction, Chunk, LuaString, LuaTable, LuaUserdata, LuaValue,
-    LuaValueKind,
-};
+use crate::lua_value::{Chunk, LuaString, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
+pub use crate::lua_vm::lua_context::LuaContext;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
-use crate::{ObjectPool, lib_registry};
+use crate::{lib_registry, ObjectPool};
 pub use opcode::{Instruction, OpCode};
 use std::rc::Rc;
 
 pub type LuaResult<T> = Result<T, LuaError>;
+/// C Function type - Rust function callable from Lua
+/// Now takes LuaContext instead of LuaVM for better ergonomics
+pub type CFunction = fn(&mut LuaContext) -> LuaResult<usize>;
 
 /// Maximum call stack depth (similar to LUAI_MAXCCALLS in Lua)
 pub const MAX_CALL_DEPTH: usize = 200;
@@ -148,20 +150,24 @@ impl LuaVM {
     }
 
     /// Execute a function with arguments
-    fn execute_function(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+    fn execute_function(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<Vec<LuaValue>> {
         // Push function onto stack
         let base = self.main_state.stack_mut().len();
         self.main_state.stack_mut().push(func.clone());
-        
+
         // Push arguments
         for arg in args {
             self.main_state.stack_mut().push(arg);
         }
-        
+
         // Create initial call frame
         let nargs = self.main_state.stack_mut().len() - base - 1;
         self.main_state.push_frame(func, base, nargs)?;
-        
+
         // Run the VM execution loop
         self.run()
     }
@@ -524,7 +530,7 @@ impl LuaVM {
     #[inline]
     pub fn create_c_closure_inline1(
         &mut self,
-        func: crate::gc::CFunction,
+        func: CFunction,
         upvalue: LuaValue,
     ) -> LuaValue {
         let id = self.object_pool.create_c_closure_inline1(func, upvalue);

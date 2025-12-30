@@ -31,7 +31,7 @@
 
 use crate::ObjectPool;
 use crate::gc::{FunctionId, StringId, TableId, ThreadId, UserdataId};
-use crate::lua_value::CFunction;
+use crate::lua_vm::CFunction;
 
 // ============ Basic type tags (bits 0-3) ============
 // From lua.h

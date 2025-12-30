@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use crate::{Chunk, LuaString, LuaTable, LuaValue, UpvalueId, lua_vm::LuaState};
+use crate::{lua_vm::{CFunction, LuaState}, Chunk, LuaString, LuaTable, LuaValue, UpvalueId};
 
 // Object ages for generational GC (like Lua 5.4)
 // Uses 3 bits (0-7)
@@ -164,10 +164,6 @@ pub struct GcTable {
     pub header: GcHeader,
     pub data: LuaTable,
 }
-
-/// C Function type - Rust function callable from Lua
-pub type CFunction =
-    fn(&mut crate::lua_vm::LuaVM) -> crate::lua_vm::LuaResult<crate::lua_value::MultiValue>;
 
 /// Function body - either Lua bytecode or C function
 pub enum FunctionBody {

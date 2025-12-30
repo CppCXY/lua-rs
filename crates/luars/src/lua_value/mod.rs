@@ -4,8 +4,6 @@ pub mod chunk_serializer;
 mod lua_table;
 mod lua_value;
 
-use crate::LuaVM;
-use crate::lua_vm::LuaResult;
 use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
@@ -137,9 +135,6 @@ impl MultiValue {
         count
     }
 }
-
-/// C Function type - Rust function callable from Lua
-pub type CFunction = fn(&mut LuaVM) -> LuaResult<MultiValue>;
 
 /// Lua string (immutable, interned with cached hash)
 #[derive(Debug, Clone)]

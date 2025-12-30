@@ -42,9 +42,6 @@ impl LuaState {
     /// Maximum call depth (similar to LUAI_MAXCCALLS)
     pub const MAX_CALL_DEPTH: usize = 200;
 
-    /// Initial call stack capacity (Lua uses 1, we use 8 for efficiency)
-    const INITIAL_CALL_STACK: usize = 8;
-
     /// Create a new execution state
     /// 按需分配，而不是预分配 200 个 CallInfo（像 Lua 5.4）
     pub fn new(call_stack_size: usize) -> Self {

@@ -8,9 +8,9 @@
 // 5. Free list for slot reuse
 // 6. GC headers embedded in objects for mark-sweep
 
-use crate::gc::gc_object::{CFunction, FunctionBody};
+use crate::gc::gc_object::FunctionBody;
 use crate::lua_value::{Chunk, LuaUserdata};
-use crate::lua_vm::LuaState;
+use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
     LuaValue, StringId, TableId, ThreadId, UpvalueId, UserdataId,

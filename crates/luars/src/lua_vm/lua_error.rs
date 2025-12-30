@@ -14,14 +14,14 @@ pub enum LuaError {
     Exit,
 }
 
-pub type LuaResult<T> = Result<T, LuaError>;
-
 impl std::fmt::Display for LuaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LuaError::RuntimeError => write!(f, "Runtime Error"),
             LuaError::CompileError => write!(f, "Compile Error"),
-            LuaError::Yield => write!(f, "Coroutine Yield"),            LuaError::StackOverflow => write!(f, "Stack Overflow"),            LuaError::Exit => write!(f, "VM Exit"),
+            LuaError::Yield => write!(f, "Coroutine Yield"),
+            LuaError::StackOverflow => write!(f, "Stack Overflow"),
+            LuaError::Exit => write!(f, "VM Exit"),
         }
     }
 }

@@ -1,8 +1,8 @@
 // Library registration system for Lua standard libraries
 // Provides a clean way to register Rust functions as Lua libraries
 
-use crate::lua_value::{CFunction, LuaValue};
-use crate::lua_vm::{LuaResult, LuaVM};
+use crate::lua_value::LuaValue;
+use crate::lua_vm::{CFunction, LuaResult, LuaVM};
 // use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
