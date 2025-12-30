@@ -101,7 +101,7 @@ pub fn compile_code_with_name(
         first_goto: 0,
         nactvar: 0,
         upval: false,
-        is_loop: false,
+        is_loop: 0,
         in_scope: false, // Port of lparser.c:2012: first block has insidetbc=false
     };
     let block_id = fs.compiler_state.alloc_blockcnt(bl);

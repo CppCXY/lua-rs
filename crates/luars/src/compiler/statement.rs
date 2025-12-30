@@ -161,7 +161,7 @@ fn str_checkname(fs: &mut FuncState) -> Result<String, String> {
 
 // Port of enterblock from lparser.c:640-651
 // Creates a new block and pushes it onto the block stack
-pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: bool) {
+pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: u8) {
     let prev_id = fs.block_cnt_id.take();
 
     // Port of lparser.c:656-664: inherit insidetbc from previous block
@@ -385,7 +385,7 @@ pub fn leaveblock(fs: &mut FuncState) {
         fs.remove_vars(nactvar);
         
         // lparser.c:754-755: has to fix pending breaks?
-        if is_loop {
+        if is_loop == 2 {
             createlabel(fs, "break", 0, false);
         }
         
@@ -422,7 +422,7 @@ pub fn leaveblock(fs: &mut FuncState) {
 // Port of block from lparser.c
 fn block(fs: &mut FuncState) -> Result<(), String> {
     let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
-    enterblock(fs, bl_id, false);
+    enterblock(fs, bl_id, 0);
     statlist(fs)?;
     leaveblock(fs);
     Ok(())
@@ -533,8 +533,25 @@ fn newgotoentry(fs: &mut FuncState, name: String, line: usize) -> usize {
 // Break statement. Semantically equivalent to "goto break"
 fn breakstat(fs: &mut FuncState) -> Result<(), String> {
     let line = fs.lexer.line;
-    // lparser.c:1556: newgotoentry(ls, luaS_newliteral(ls->L, "break"), line);
-    // newgotoentry内部创建JMP和placeholder CLOSE instruction
+    // lparser.c:1602-1613: Find enclosing loop and mark it as having pending breaks
+    let mut found_loop = false;
+    let mut current_bl_id = fs.block_cnt_id;
+    while let Some(bl_id) = current_bl_id {
+        if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
+            if bl.is_loop > 0 {
+                bl.is_loop = 2;  // Signal that block has pending breaks
+                found_loop = true;
+                break;
+            }
+            current_bl_id = bl.previous;
+        } else {
+            break;
+        }
+    }
+    if !found_loop {
+        return Err("break outside loop".to_string());
+    }
+    // lparser.c:1611: newgotoentry(ls, ls->brkn, line);
     newgotoentry(fs, "break".to_string(), line);
     Ok(())
 }
@@ -655,13 +672,13 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         first_goto: 0,
         nactvar: 0,
         upval: false,
-        is_loop: true,
+        is_loop: 1,
         in_scope: true,
     });
-    enterblock(fs, bl_id, true);
+    enterblock(fs, bl_id, 1);
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
-    statlist(fs)?; // Use statlist directly, not block (which would create another enterblock)
+    block(fs)?; // Official Lua uses block(ls), not statlist
     code::jumpto(fs, whileinit);
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkWhile, line)?;
     leaveblock(fs);
@@ -684,10 +701,10 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         first_goto: 0,
         nactvar: 0,
         upval: false,
-        is_loop: true, // loop block
+        is_loop: 1, // loop block
         in_scope: true,
     });
-    enterblock(fs, bl1_id, true);
+    enterblock(fs, bl1_id, 1);
 
     let bl2_id = fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,
@@ -695,10 +712,10 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         first_goto: 0,
         nactvar: 0,
         upval: false,
-        is_loop: false, // scope block
+        is_loop: 0, // scope block
         in_scope: true,
     });
-    enterblock(fs, bl2_id, false);
+    enterblock(fs, bl2_id, 0);
 
     fs.lexer.bump(); // skip REPEAT
     statlist(fs)?; // repeat body
@@ -750,10 +767,10 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         first_goto: 0,
         nactvar: fs.nactvar,
         upval: false,
-        is_loop: true,
+        is_loop: 1,
         in_scope: true,
     });
-    enterblock(fs, bl_id, true);
+    enterblock(fs, bl_id, 1);
 
     fs.lexer.bump(); // skip FOR
     let varname = str_checkname(fs)?;
@@ -836,10 +853,10 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
         first_goto: 0,
         nactvar: fs.nactvar,
         upval: false,
-        is_loop: false, // Important: inner block is NOT a loop block
+        is_loop: 0, // Important: inner block is NOT a loop block
         in_scope: true,
     });
-    enterblock(fs, bl_id, false); // isloop = false
+    enterblock(fs, bl_id, 0); // isloop = 0
 
     // Activate the loop variable (4th variable)
     // lparser.c:1553-1554: adjustlocalvars + luaK_reserveregs
@@ -922,10 +939,10 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
         first_goto: 0,
         nactvar: fs.nactvar,
         upval: false,
-        is_loop: false, // NOT a loop block - this is just for variable scope
+        is_loop: 0, // NOT a loop block - this is just for variable scope
         in_scope: true,
     });
-    enterblock(fs, bl_id, false); // false = not a loop
+    enterblock(fs, bl_id, 0); // 0 = not a loop
 
     // lparser.c:1670: adjustlocalvars(ls, nvars); /* activate declared variables */
     // nvars-3 because we already adjusted 3 internal variables

@@ -814,10 +814,10 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
         first_goto: 0,
         nactvar: child_fs.nactvar,  // Should be 0 at this point
         upval: false,
-        is_loop: false,
+        is_loop: 0,
         in_scope: true,
     });
-    statement::enterblock(&mut child_fs, func_bl_id, false);
+    statement::enterblock(&mut child_fs, func_bl_id, 0);
 
     // Lua 5.5 parlist: Register parameters (fixed parameters first)
     // Count fixed parameters (exclude vararg parameter)

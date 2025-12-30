@@ -109,7 +109,7 @@ pub struct BlockCnt {
     pub first_goto: usize,            // index of first pending goto in this block
     pub nactvar: u8,                  // number of active variables outside the block
     pub upval: bool,                  // true if some variable in block is an upvalue
-    pub is_loop: bool,                // true if 'block' is a loop
+    pub is_loop: u8,                  // 0: not a loop; 1: loop; 2: loop with pending breaks
     pub in_scope: bool,               // true if 'block' is still in scope
 }
 
