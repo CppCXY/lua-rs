@@ -2095,23 +2095,34 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
 
 // Port of codenot from lcode.c:1188-1214
 // static void codenot (FuncState *fs, expdesc *e)
+// Port of removevalues from lcode.c:280-283
+// static void removevalues (FuncState *fs, int list)
+fn removevalues(fs: &mut FuncState, mut list: isize) {
+    const NO_JUMP: isize = -1;
+    while list != NO_JUMP {
+        patchtestreg(fs, list as usize, NO_REG as u8);
+        list = get_jump(fs, list as usize);
+    }
+}
+
+// Port of codenot from lcode.c:1231-1261
 fn codenot(fs: &mut FuncState, e: &mut ExpDesc) {
     discharge_vars(fs, e);
     match e.kind {
         ExpKind::VNIL | ExpKind::VFALSE => {
-            // true == not nil == not false (lcode.c:1190)
+            // true == not nil == not false (lcode.c:1234)
             e.kind = ExpKind::VTRUE;
         }
         ExpKind::VK | ExpKind::VKFLT | ExpKind::VKINT | ExpKind::VKSTR | ExpKind::VTRUE => {
-            // false == not "x" == not 0.5 == not 1 == not true (lcode.c:1194)
+            // false == not "x" == not 0.5 == not 1 == not true (lcode.c:1237)
             e.kind = ExpKind::VFALSE;
         }
         ExpKind::VJMP => {
-            // Negate the condition (lcode.c:1197)
+            // Negate the condition (lcode.c:1241)
             negatecondition(fs, e);
         }
         ExpKind::VRELOC | ExpKind::VNONRELOC => {
-            // Generate NOT instruction (lcode.c:1200-1206)
+            // Generate NOT instruction (lcode.c:1244-1251)
             discharge2anyreg(fs, e);
             free_exp(fs, e);
             let pc = code_abc(fs, OpCode::Not, 0, e.u.info() as u32, 0);
@@ -2120,6 +2131,11 @@ fn codenot(fs: &mut FuncState, e: &mut ExpDesc) {
         }
         _ => {} // Should not happen
     }
+    // Interchange true and false lists (lcode.c:1256)
+    std::mem::swap(&mut e.t, &mut e.f);
+    // Values are useless when negated (lcode.c:1257-1258)
+    removevalues(fs, e.f);
+    removevalues(fs, e.t);
 }
 
 // Simplified implementation of luaK_prefix - generate unary operation
