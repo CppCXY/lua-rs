@@ -930,9 +930,10 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
     //     return k2proto(fs, &kv, &o);  /* cannot collide */
     //   }
     if n == 0.0 {
-        // Use kcache table itself as key (like nilK does)
-        // This prevents collision with integer 0 in the kcache table
-        let key = LuaValue::table(fs.kcache);
+        // Use FuncState pointer as key (like official Lua does)
+        // This prevents collision with integer 0 AND with nil (which uses kcache table as key)
+        let fs_ptr = fs as *const FuncState as *mut std::ffi::c_void;
+        let key = LuaValue::lightuserdata(fs_ptr);
         return add_constant_with_key(fs, key, val);
     }
     
@@ -1778,66 +1779,72 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
             // For ADD: Check if e2 is a small integer constant (isSCint check) - lcode.c:1523
             // For SUB: Check if can negate second operand (finishbinexpneg) - lcode.c:1733-1737
             if op == BinaryOperator::OpAdd {
+                // Port of isSCint: isKint(e) && fitsC(e->u.ival)
+                // isKint checks: (e->k == VKINT && !hasjumps(e))
                 if let ExpKind::VKINT = e2.kind {
-                    let imm_val = e2.u.ival();
-                    // For ADD: check if value fits in sC field (int2sC(i) = i + 127 must be in 0-255)
-                    // So i must be in range -127 to 128
-                    if imm_val >= -127 && imm_val <= 128 {
-                        // Use ADDI instruction
-                        let r1 = exp2anyreg(fs, e1);
-                        let enc_imm = ((imm_val + 127) & 0xff) as u32;
-                        let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
+                    if !e2.has_jumps() {  // Critical: must check for no jumps (isKint requirement)
+                        let imm_val = e2.u.ival();
+                        // For ADD: check if value fits in sC field (int2sC(i) = i + 127 must be in 0-255)
+                        // So i must be in range -127 to 128
+                        if imm_val >= -127 && imm_val <= 128 {
+                            // Use ADDI instruction
+                            let r1 = exp2anyreg(fs, e1);
+                            let enc_imm = ((imm_val + 127) & 0xff) as u32;
+                            let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
 
-                        free_exp(fs, e1);
-                        free_exp(fs, e2);
+                            free_exp(fs, e1);
+                            free_exp(fs, e2);
 
-                        e1.kind = ExpKind::VRELOC;
-                        e1.u = ExpUnion::Info(pc as i32);
+                            e1.kind = ExpKind::VRELOC;
+                            e1.u = ExpUnion::Info(pc as i32);
 
-                        // Generate MMBINI for metamethod fallback
-                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
-                        code_abck(
-                            fs,
-                            OpCode::MmBinI,
-                            r1 as u32,
-                            mm_imm,
-                            TmKind::Add as u32,
-                            flip,
-                        );
-                        return;
+                            // Generate MMBINI for metamethod fallback
+                            let mm_imm = ((imm_val + 127) & 0xff) as u32;
+                            code_abck(
+                                fs,
+                                OpCode::MmBinI,
+                                r1 as u32,
+                                mm_imm,
+                                TmKind::Add as u32,
+                                flip,
+                            );
+                            return;
+                        }
                     }
                 }
             } else if op == BinaryOperator::OpSub {
                 // SUB can be converted to ADDI with negated immediate (finishbinexpneg)
                 // But BOTH original and negated values must fit in range!
                 if let ExpKind::VKINT = e2.kind {
-                    let imm_val = e2.u.ival();
-                    let neg_imm = -imm_val;
-                    // Both values must fit in -127..128 range (sC field capacity)
-                    if imm_val >= -127 && imm_val <= 128 && neg_imm >= -127 && neg_imm <= 128 {
-                        // Use ADDI with negated immediate
-                        let r1 = exp2anyreg(fs, e1);
-                        let enc_imm = ((neg_imm + 127) & 0xff) as u32; // Encode negated value for ADDI
-                        let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
+                    if !e2.has_jumps() {  // Critical: isKint requirement
+                        let imm_val = e2.u.ival();
+                        let neg_imm = -imm_val;
+                        // Both values must fit in -127..128 range (sC field capacity)
+                        if imm_val >= -127 && imm_val <= 128 && neg_imm >= -127 && neg_imm <= 128 {
+                            // Use ADDI with negated immediate
+                            let r1 = exp2anyreg(fs, e1);
+                            let enc_imm = ((neg_imm + 127) & 0xff) as u32; // Encode negated value for ADDI
+                            let pc = code_abc(fs, OpCode::AddI, 0, r1 as u32, enc_imm);
 
-                        free_exp(fs, e1);
-                        free_exp(fs, e2);
+                            free_exp(fs, e1);
+                            free_exp(fs, e2);
 
-                        e1.kind = ExpKind::VRELOC;
-                        e1.u = ExpUnion::Info(pc as i32);
+                            e1.kind = ExpKind::VRELOC;
+                            e1.u = ExpUnion::Info(pc as i32);
 
-                        // Generate MMBINI with ORIGINAL value for metamethod
-                        // (finishbinexpneg corrects the metamethod argument - lcode.c:1476)
-                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
-                        code_abck(
-                            fs,
-                            OpCode::MmBinI,
-                            r1 as u32,
-                            mm_imm,
-                            TmKind::Sub as u32,
-                            flip,
-                        );
-                        return;
+                            // Generate MMBINI with ORIGINAL value for metamethod
+                            // (finishbinexpneg corrects the metamethod argument - lcode.c:1476)
+                            let mm_imm = ((imm_val + 127) & 0xff) as u32;
+                            code_abck(
+                                fs,
+                                OpCode::MmBinI,
+                                r1 as u32,
+                                mm_imm,
+                                TmKind::Sub as u32,
+                                flip,
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -1908,28 +1915,30 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
             } else if op == BinaryOperator::OpShr {
                 // OPR_SHR: if e2 is small int -> SHRI, else regular SHR
                 if let ExpKind::VKINT = e2.kind {
-                    let imm_val = e2.u.ival();
-                    if imm_val >= -127 && imm_val <= 128 {
-                        let r1 = exp2anyreg(fs, e1);
-                        let enc_imm = ((imm_val + 127) & 0xff) as u32;
-                        let pc = code_abc(fs, OpCode::ShrI, 0, r1 as u32, enc_imm);
+                    if !e2.has_jumps() {  // isKint requirement
+                        let imm_val = e2.u.ival();
+                        if imm_val >= -127 && imm_val <= 128 {
+                            let r1 = exp2anyreg(fs, e1);
+                            let enc_imm = ((imm_val + 127) & 0xff) as u32;
+                            let pc = code_abc(fs, OpCode::ShrI, 0, r1 as u32, enc_imm);
 
-                        free_exp(fs, e1);
-                        free_exp(fs, e2);
+                            free_exp(fs, e1);
+                            free_exp(fs, e2);
 
-                        e1.kind = ExpKind::VRELOC;
-                        e1.u = ExpUnion::Info(pc as i32);
+                            e1.kind = ExpKind::VRELOC;
+                            e1.u = ExpUnion::Info(pc as i32);
 
-                        let mm_imm = ((imm_val + 127) & 0xff) as u32;
-                        code_abck(
-                            fs,
-                            OpCode::MmBinI,
-                            r1 as u32,
-                            mm_imm,
-                            TmKind::Shr as u32,
-                            flip,
-                        );
-                        return;
+                            let mm_imm = ((imm_val + 127) & 0xff) as u32;
+                            code_abck(
+                                fs,
+                                OpCode::MmBinI,
+                                r1 as u32,
+                                mm_imm,
+                                TmKind::Shr as u32,
+                                flip,
+                            );
+                            return;
+                        }
                     }
                 }
                 // Fall through to regular codebinexpval
