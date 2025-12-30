@@ -1,11 +1,13 @@
 // Code generation - Port from lcode.c (Lua 5.4.8)
 // This file corresponds to lua-5.5.0/src/lcode.c
+use crate::compiler::expression::{ExpDesc, ExpKind};
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::compiler::tm_kind::TmKind;
 use crate::compiler::{ExpUnion, IndVars};
 use crate::lua_value::LuaValueKind;
 use crate::lua_vm::{Instruction, OpCode};
+use crate::{LuaValue, StringId};
 
 // Port of int2sC from lcode.c (macro)
 // Convert integer to sC format (with OFFSET_sC = 128)
@@ -160,9 +162,6 @@ pub fn code_asj(fs: &mut FuncState, op: OpCode, sj: i32) -> usize {
     fs.pc += 1;
     pc
 }
-
-use crate::compiler::expression::{ExpDesc, ExpKind};
-use crate::{LuaValue, StringId};
 
 // Port of luaK_ret from lcode.c:207-214
 // void luaK_ret (FuncState *fs, int first, int nret)
@@ -922,7 +921,7 @@ fn int_k(fs: &mut FuncState, i: i64) -> usize {
 // Port of luaK_numberK from lcode.c:619-639
 fn number_k(fs: &mut FuncState, n: f64) -> usize {
     let val = LuaValue::float(n);
-    
+
     // Special handling for float 0.0 to avoid collision with integer 0
     // Port of lcode.c:621-624:
     //   if (r == 0) {
@@ -936,15 +935,15 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
         let key = LuaValue::lightuserdata(fs_ptr);
         return add_constant_with_key(fs, key, val);
     }
-    
+
     // Port of lcode.c:626-638: use perturbed key to avoid integer collision
     // const int nbm = l_floatatt(MANT_DIG);  // 53 for double
     // const lua_Number q = l_mathop(ldexp)(l_mathop(1.0), -nbm + 1);  // 2^-52
     // const lua_Number k =  r * (1 + q);  /* key */
     const MANT_DIG: i32 = 53; // mantissa digits for f64
     let q = 2.0_f64.powi(-MANT_DIG + 1); // 2^-52
-    let k = n * (1.0 + q);  // perturbed key
-    
+    let k = n * (1.0 + q); // perturbed key
+
     // Check if perturbed key can be converted to integer (lcode.c:630)
     // If yes, don't use kcache (would collide), just create new entry
     if k.floor() == k && k >= i64::MIN as f64 && k <= i64::MAX as f64 {
@@ -954,18 +953,18 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
         fs.chunk.constants.push(val);
         return idx;
     }
-    
+
     // Use perturbed key for kcache lookup (lcode.c:631-633)
     let key = LuaValue::float(k);
     let idx = add_constant_with_key(fs, key.clone(), val.clone());
-    
+
     // Verify the stored value matches (lcode.c:632)
     if let Some(existing) = fs.chunk.constants.get(idx) {
         if val.raw_equal(existing, fs.pool) {
             return idx;
         }
     }
-    
+
     // Collision detected - create new entry without caching (lcode.c:636)
     let idx = fs.chunk.constants.len();
     fs.chunk.constants.push(val);
@@ -1782,7 +1781,8 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // Port of isSCint: isKint(e) && fitsC(e->u.ival)
                 // isKint checks: (e->k == VKINT && !hasjumps(e))
                 if let ExpKind::VKINT = e2.kind {
-                    if !e2.has_jumps() {  // Critical: must check for no jumps (isKint requirement)
+                    if !e2.has_jumps() {
+                        // Critical: must check for no jumps (isKint requirement)
                         let imm_val = e2.u.ival();
                         // For ADD: check if value fits in sC field (int2sC(i) = i + 127 must be in 0-255)
                         // So i must be in range -127 to 128
@@ -1816,7 +1816,8 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // SUB can be converted to ADDI with negated immediate (finishbinexpneg)
                 // But BOTH original and negated values must fit in range!
                 if let ExpKind::VKINT = e2.kind {
-                    if !e2.has_jumps() {  // Critical: isKint requirement
+                    if !e2.has_jumps() {
+                        // Critical: isKint requirement
                         let imm_val = e2.u.ival();
                         let neg_imm = -imm_val;
                         // Both values must fit in -127..128 range (sC field capacity)
@@ -1915,7 +1916,8 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
             } else if op == BinaryOperator::OpShr {
                 // OPR_SHR: if e2 is small int -> SHRI, else regular SHR
                 if let ExpKind::VKINT = e2.kind {
-                    if !e2.has_jumps() {  // isKint requirement
+                    if !e2.has_jumps() {
+                        // isKint requirement
                         let imm_val = e2.u.ival();
                         if imm_val >= -127 && imm_val <= 128 {
                             let r1 = exp2anyreg(fs, e1);
@@ -2347,7 +2349,7 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     // Lua 5.5 has LUAI_MAXSHORTLEN=40, strings longer than that cannot use SELF optimization
     // (see lcode.c:1333: strisshr check).
     const LUAI_MAXSHORTLEN: usize = 40; // Lua 5.5 short string length limit
-    
+
     // Check if key is a VKSTR (method name string)
     let can_use_self = if key.kind == ExpKind::VKSTR {
         // Check if it's a short string
@@ -2360,7 +2362,7 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     } else {
         false // Not VKSTR
     };
-    
+
     if can_use_self {
         // Method name is a short string - try to convert to VK via exp2K
         // This calls str2k which adds the string to constant table (lcode.c:1333: luaK_exp2K)

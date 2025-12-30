@@ -210,7 +210,7 @@ fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
         // CRITICAL: Use label.stklevel computed when label was created,
         // not reglevel(label.nactvar), because actvar may have been modified by removevars
         let stklevel = label.stklevel;
-        
+
         // Move jump to CLOSE position (pc + 1)
         let jmp_instr = fs.chunk.code[pc];
         fs.chunk.code[pc + 1] = jmp_instr;
@@ -282,19 +282,24 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) {
 
 // Port of solvegotos from lparser.c:696-717 (Lua 5.5)
 // Solve pending gotos when leaving a block
-fn solvegotos_on_leaveblock(fs: &mut FuncState, bl: &BlockCnt, outlevel: u8, goto_levels: &[(usize, u8)]) {
+fn solvegotos_on_leaveblock(
+    fs: &mut FuncState,
+    bl: &BlockCnt,
+    outlevel: u8,
+    goto_levels: &[(usize, u8)],
+) {
     let mut igt = bl.first_goto; // first goto in the finishing block
     let mut level_idx = 0;
-    
+
     while igt < fs.pending_gotos.len() {
         let gt_name = fs.pending_gotos[igt].name.clone();
-        
+
         // Search for a matching label in the current block
         let label_opt = fs.labels[bl.first_label..]
             .iter()
             .find(|lb| lb.name == gt_name)
             .cloned();
-        
+
         if let Some(label) = label_opt {
             // Found a match - close and remove goto
             let bl_upval = bl.upval;
@@ -303,18 +308,18 @@ fn solvegotos_on_leaveblock(fs: &mut FuncState, bl: &BlockCnt, outlevel: u8, got
         } else {
             // Adjust goto for outer block
             // lparser.c:710-711: if block has upvalues and goto escapes scope, mark for close
-            // 
+            //
             // NOTE: Known issue with goto.lua test:
             // When a goto jumps out of a block containing local variables (not upvalues),
             // the official Lua 5.5 somehow generates a CLOSE instruction, but our
             // implementation doesn't because bl.upval is false for regular local variables.
-            // 
+            //
             // The condition `bl.upval && gt_level > outlevel` correctly follows Lua 5.5
             // lparser.c:710-711, but there may be another mechanism in Lua 5.5 that
             // marks bl->upval=true in cases we haven't identified, or the CLOSE is
             // generated through a different path (possibly in closegoto when the label
             // is found in an outer block with upvalues).
-            // 
+            //
             // Removing the bl.upval check causes other tests to fail, so the current
             // implementation matches Lua 5.5 source code but may not match its behavior
             // in all cases.
@@ -328,7 +333,7 @@ fn solvegotos_on_leaveblock(fs: &mut FuncState, bl: &BlockCnt, outlevel: u8, got
                 // Fallback: this shouldn't happen if we computed levels correctly
                 0
             };
-            
+
             if bl.upval && gt_level > outlevel {
                 fs.pending_gotos[igt].close = true;
             }
@@ -337,7 +342,7 @@ fn solvegotos_on_leaveblock(fs: &mut FuncState, bl: &BlockCnt, outlevel: u8, got
             igt += 1; // go to next goto
         }
     }
-    
+
     // lparser.c:716: remove local labels
     fs.labels.truncate(bl.first_label);
 }
@@ -363,7 +368,7 @@ pub fn leaveblock(fs: &mut FuncState) {
 
         // lparser.c:748: level outside block
         let stklevel = fs.reglevel(nactvar);
-        
+
         // Pre-compute reglevel for all pending gotos before removevars
         // This is needed because removevars will remove actvar entries
         let mut goto_levels = Vec::new();
@@ -372,23 +377,23 @@ pub fn leaveblock(fs: &mut FuncState) {
             let gt_level = fs.reglevel(gt_nactvar);
             goto_levels.push((i, gt_level));
         }
-        
+
         // lparser.c:749-750: need a 'close'?
         if has_previous && upval {
             code::code_abc(fs, OpCode::Close, stklevel as u32, 0, 0);
         }
-        
+
         // lparser.c:751: free registers
         fs.freereg = stklevel;
-        
+
         // lparser.c:752: remove block locals
         fs.remove_vars(nactvar);
-        
+
         // lparser.c:754-755: has to fix pending breaks?
         if is_loop == 2 {
             createlabel(fs, "break", 0, false);
         }
-        
+
         // lparser.c:756: solve gotos
         // Need to reconstruct bl for solvegotos_on_leaveblock
         if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
@@ -403,7 +408,7 @@ pub fn leaveblock(fs: &mut FuncState) {
             };
             solvegotos_on_leaveblock(fs, &bl_info, stklevel, &goto_levels);
         }
-        
+
         // lparser.c:757-760: check for undefined gotos at function level
         if !has_previous {
             if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
@@ -413,7 +418,7 @@ pub fn leaveblock(fs: &mut FuncState) {
                 }
             }
         }
-        
+
         // lparser.c:761: current block now is previous one
         fs.block_cnt_id = previous_id;
     }
@@ -440,7 +445,8 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
 
     // Port of lparser.c:2085: Check insidetbc before explist
     // Must capture this before calling explist which may mutate block state
-    let insidetbc = fs.current_block_cnt()
+    let insidetbc = fs
+        .current_block_cnt()
         .map(|bl| bl.in_scope)
         .unwrap_or(false);
 
@@ -515,7 +521,7 @@ fn newgotoentry(fs: &mut FuncState, name: String, line: usize) -> usize {
     let pc = code::jump(fs);
     // lparser.c:666: luaK_codeABC(fs, OP_CLOSE, 0, 1, 0); /* spaceholder, marked as dead */
     code::code_abc(fs, OpCode::Close, 0, 1, 0);
-    
+
     let stklevel = fs.reglevel(fs.nactvar);
     let label = LabelDesc {
         name,
@@ -539,7 +545,7 @@ fn breakstat(fs: &mut FuncState) -> Result<(), String> {
     while let Some(bl_id) = current_bl_id {
         if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
             if bl.is_loop > 0 {
-                bl.is_loop = 2;  // Signal that block has pending breaks
+                bl.is_loop = 2; // Signal that block has pending breaks
                 found_loop = true;
                 break;
             }
@@ -599,17 +605,17 @@ fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), Str
     // test_then_block -> [IF | ELSEIF] cond THEN block
     // lparser.c:1756: luaX_next(ls); /* skip IF or ELSEIF */
     fs.lexer.bump();
-    
+
     // lparser.c:1757: condtrue = cond(ls); /* read condition */
     let condtrue = cond(fs)?;
-    
+
     // lparser.c:1758: checknext(ls, TK_THEN);
     check(fs, LuaTokenKind::TkThen)?;
     fs.lexer.bump();
-    
+
     // lparser.c:1759: block(ls); /* 'then' part */
     block(fs)?;
-    
+
     // lparser.c:1760-1762: if followed by else/elseif, jump over it
     if fs.lexer.current_token() == LuaTokenKind::TkElse
         || fs.lexer.current_token() == LuaTokenKind::TkElseIf
@@ -618,10 +624,10 @@ fn test_then_block(fs: &mut FuncState, escapelist: &mut isize) -> Result<(), Str
         let jmp = code::jump(fs) as isize;
         code::concat(fs, escapelist, jmp);
     }
-    
+
     // lparser.c:1763: luaK_patchtohere(fs, condtrue);
     code::patchtohere(fs, condtrue);
-    
+
     Ok(())
 }
 

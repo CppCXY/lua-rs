@@ -456,7 +456,10 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
                             code::const_to_exp(value, var);
                         }
                     }
-                } else if var.kind == ExpKind::VLOCAL || var.kind == ExpKind::VUPVAL || var.kind == ExpKind::VVARGVAR {
+                } else if var.kind == ExpKind::VLOCAL
+                    || var.kind == ExpKind::VUPVAL
+                    || var.kind == ExpKind::VVARGVAR
+                {
                     // lparser.c:460-462: create upvalue for local, upvalue, or vararg parameter
                     let idx = fs.newupvalue(name, var) as u8;
                     init_exp(var, ExpKind::VUPVAL, idx as i32);
@@ -812,7 +815,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
         previous: None,
         first_label: 0,
         first_goto: 0,
-        nactvar: child_fs.nactvar,  // Should be 0 at this point
+        nactvar: child_fs.nactvar, // Should be 0 at this point
         upval: false,
         is_loop: 0,
         in_scope: true,

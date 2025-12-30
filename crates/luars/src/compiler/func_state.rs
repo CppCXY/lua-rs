@@ -423,13 +423,13 @@ impl<'a> FuncState<'a> {
                 // lparser.c:366-370: local or vararg parameter upvalue
                 let vidx = v.u.var().vidx;
                 let ridx = v.u.var().ridx;
-                
+
                 // Mark the variable in parent function as needing upvalue closure
                 if !prev_ptr.is_null() {
                     let prev = &mut *prev_ptr;
                     crate::compiler::statement::mark_upval(prev, vidx as u8);
                 }
-                
+
                 let prev = &*prev_ptr;
                 let vd = &prev.actvar[vidx as usize];
                 (true, ridx as u8, vd.kind)
