@@ -240,11 +240,13 @@ fn run_repl(vm: &mut LuaVM) {
         match vm.compile(&code_to_run) {
             Ok(chunk) => {
                 match vm.execute(Rc::new(chunk)) {
-                    Ok(result) => {
-                        // Print non-nil results
-                        if !result.is_nil() {
-                            // Use Debug format for display
-                            println!("{:?}", result);
+                    Ok(results) => {
+                        // Print non-nil first result
+                        if let Some(first) = results.into_iter().next() {
+                            if !first.is_nil() {
+                                // Use Debug format for display
+                                println!("{:?}", first);
+                            }
                         }
                         incomplete.clear();
                     }

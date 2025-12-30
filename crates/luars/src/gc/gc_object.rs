@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use crate::{Chunk, LuaString, LuaTable, LuaValue, UpvalueId, lua_value::LuaThread};
+use crate::{Chunk, LuaString, LuaTable, LuaValue, UpvalueId, lua_vm::LuaState};
 
 // Object ages for generational GC (like Lua 5.4)
 // Uses 3 bits (0-7)
@@ -325,5 +325,5 @@ pub struct GcString {
 /// Thread (coroutine) with embedded GC header
 pub struct GcThread {
     pub header: GcHeader,
-    pub data: LuaThread,
+    pub data: LuaState,
 }

@@ -30,12 +30,14 @@ pub fn execute(source: &str) -> LuaResult<LuaValue> {
     let mut vm = LuaVM::new();
     vm.open_libs();
     let chunk = vm.compile(source)?;
-    vm.execute(Rc::new(chunk))
+    let results = vm.execute(Rc::new(chunk))?;
+    Ok(results.into_iter().next().unwrap_or(LuaValue::nil()))
 }
 
 /// Execute Lua code with custom VM instance
 pub fn execute_with_vm(vm: &mut LuaVM, source: &str) -> LuaResult<LuaValue> {
     let chunk = vm.compile(source)?;
     vm.open_libs();
-    vm.execute(Rc::new(chunk))
+    let results = vm.execute(Rc::new(chunk))?;
+    Ok(results.into_iter().next().unwrap_or(LuaValue::nil()))
 }

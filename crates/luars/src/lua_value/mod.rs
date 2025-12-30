@@ -2,7 +2,6 @@
 // 16 bytes, no pointer caching, all GC objects accessed via ID
 pub mod chunk_serializer;
 mod lua_table;
-mod lua_thread;
 mod lua_value;
 
 use crate::LuaVM;
@@ -15,7 +14,6 @@ use std::rc::Rc;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
-pub use lua_thread::*;
 pub use lua_value::{LuaValue, LuaValueKind};
 
 /// Multi-return values from Lua functions

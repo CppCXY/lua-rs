@@ -9,7 +9,8 @@
 // 6. GC headers embedded in objects for mark-sweep
 
 use crate::gc::gc_object::{CFunction, FunctionBody};
-use crate::lua_value::{Chunk, LuaThread, LuaUserdata};
+use crate::lua_value::{Chunk, LuaUserdata};
+use crate::lua_vm::LuaState;
 use crate::{
     FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
     LuaValue, StringId, TableId, ThreadId, UpvalueId, UserdataId,
@@ -1157,7 +1158,7 @@ impl ObjectPool {
     // ==================== Thread Operations ====================
 
     #[inline]
-    pub fn create_thread(&mut self, thread: LuaThread) -> ThreadId {
+    pub fn create_thread(&mut self, thread: LuaState) -> ThreadId {
         let gc_thread = GcThread {
             header: GcHeader::default(),
             data: thread,
@@ -1166,12 +1167,12 @@ impl ObjectPool {
     }
 
     #[inline(always)]
-    pub fn get_thread(&self, id: ThreadId) -> Option<&LuaThread> {
+    pub fn get_thread(&self, id: ThreadId) -> Option<&LuaState> {
         self.threads.get(id.0).map(|gt| &gt.data)
     }
 
     #[inline(always)]
-    pub fn get_thread_mut(&mut self, id: ThreadId) -> Option<&mut LuaThread> {
+    pub fn get_thread_mut(&mut self, id: ThreadId) -> Option<&mut LuaState> {
         self.threads.get_mut(id.0).map(|gt| &mut gt.data)
     }
 

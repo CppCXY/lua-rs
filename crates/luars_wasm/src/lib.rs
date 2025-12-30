@@ -34,7 +34,10 @@ impl LuaWasm {
         let mut vm = self.vm.borrow_mut();
 
         match vm.execute_string(code) {
-            Ok(result) => Ok(vm.value_to_string_raw(&result)),
+            Ok(results) => {
+                let result = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
+                Ok(vm.value_to_string_raw(&result))
+            },
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
         }
     }
@@ -68,7 +71,10 @@ impl LuaWasm {
 
         match vm.compile(&code) {
             Ok(chunk) => match vm.execute(Rc::new(chunk)) {
-                Ok(value) => lua_value_to_js(&vm, &value),
+                Ok(results) => {
+                    let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
+                    lua_value_to_js(&vm, &value)
+                },
                 Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
             },
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),

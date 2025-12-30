@@ -1,0 +1,223 @@
+// Lua execution state (equivalent to lua_State in Lua C API)
+// Represents a single thread/coroutine execution context
+// Multiple LuaStates can share the same LuaVM (global_State)
+
+use crate::gc::UpvalueId;
+use crate::lua_value::LuaValue;
+use crate::lua_vm::{CallInfo, LuaError, LuaResult};
+
+/// Execution state for a Lua thread/coroutine
+/// This is separate from LuaVM (global_State) to support multiple execution contexts
+pub struct LuaState {
+    /// Data stack - stores all values (registers, temporaries, function arguments)
+    /// Layout: [frame0_values...][frame1_values...][frame2_values...]
+    /// Similar to Lua's TValue stack[] in lua_State
+    stack: Vec<LuaValue>,
+
+    /// Call stack - one CallInfo per active function call
+    /// Grows dynamically on demand (like Lua 5.4's linked list approach)
+    /// Similar to Lua's CallInfo *ci in lua_State
+    call_stack: Vec<CallInfo>,
+
+    /// Open upvalues list - upvalues pointing to stack locations
+    /// Must be kept sorted by stack index for correct closure semantics
+    /// Similar to Lua's UpVal *openupval in lua_State
+    open_upvalues: Vec<UpvalueId>,
+
+    /// Error message storage (lightweight error handling)
+    error_msg: String,
+
+    /// Yield values storage (for coroutine yield)
+    yield_values: Vec<LuaValue>,
+
+    /// Hook mask and count (for debug hooks)
+    hook_mask: u8,
+    hook_count: i32,
+}
+
+impl LuaState {
+    /// Initial stack size (similar to BASIC_STACK_SIZE in Lua)
+    const INITIAL_STACK_SIZE: usize = 256;
+
+    /// Maximum call depth (similar to LUAI_MAXCCALLS)
+    pub const MAX_CALL_DEPTH: usize = 200;
+
+    /// Initial call stack capacity (Lua uses 1, we use 8 for efficiency)
+    const INITIAL_CALL_STACK: usize = 8;
+
+    /// Create a new execution state
+    /// 按需分配，而不是预分配 200 个 CallInfo（像 Lua 5.4）
+    pub fn new(call_stack_size: usize) -> Self {
+        Self {
+            stack: Vec::with_capacity(Self::INITIAL_STACK_SIZE),
+            // 初始只分配很小的容量，按需增长（Lua 5.4 初始只有 1 个）
+            call_stack: Vec::with_capacity(call_stack_size),
+            open_upvalues: Vec::new(),
+            error_msg: String::new(),
+            yield_values: Vec::new(),
+            hook_mask: 0,
+            hook_count: 0,
+        }
+    }
+
+    /// Get current call frame (equivalent to Lua's L->ci)
+    #[inline(always)]
+    pub fn current_frame(&self) -> Option<&CallInfo> {
+        self.call_stack.last()
+    }
+
+    /// Get mutable current call frame
+    #[inline(always)]
+    pub fn current_frame_mut(&mut self) -> Option<&mut CallInfo> {
+        self.call_stack.last_mut()
+    }
+
+    /// Get call stack depth
+    #[inline(always)]
+    pub fn call_depth(&self) -> usize {
+        self.call_stack.len()
+    }
+
+    /// Push a new call frame (equivalent to Lua's luaD_precall)
+    /// 按需动态分配 - Lua 5.4 风格
+    pub fn push_frame(&mut self, func: LuaValue, base: usize, nparams: usize) -> LuaResult<()> {
+        // 检查栈深度限制
+        if self.call_stack.len() >= Self::MAX_CALL_DEPTH {
+            return Err(LuaError::StackOverflow);
+        }
+
+        // 动态分配新的 CallInfo（Lua 5.4 也是这样做的）
+        let frame = CallInfo {
+            func,
+            base,
+            top: base + nparams,
+            pc: 0,
+            nresults: -1, // Variable results by default
+            call_status: 0,
+        };
+
+        self.call_stack.push(frame);
+        Ok(())
+    }
+
+    /// Pop call frame (equivalent to Lua's luaD_poscall)
+    pub fn pop_frame(&mut self) -> Option<CallInfo> {
+        self.call_stack.pop()
+    }
+
+    /// Get stack value at absolute index
+    #[inline(always)]
+    pub fn stack_get(&self, index: usize) -> LuaValue {
+        self.stack.get(index).copied().unwrap_or(LuaValue::nil())
+    }
+
+    /// Set stack value at absolute index
+    #[inline(always)]
+    pub fn stack_set(&mut self, index: usize, value: LuaValue) {
+        if index >= self.stack.len() {
+            self.stack.resize(index + 1, LuaValue::nil());
+        }
+        self.stack[index] = value;
+    }
+
+    /// Get register relative to current frame base
+    #[inline(always)]
+    pub fn reg_get(&self, reg: u8) -> LuaValue {
+        if let Some(frame) = self.current_frame() {
+            self.stack_get(frame.base + reg as usize)
+        } else {
+            LuaValue::nil()
+        }
+    }
+
+    /// Set register relative to current frame base
+    #[inline(always)]
+    pub fn reg_set(&mut self, reg: u8, value: LuaValue) {
+        if let Some(frame) = self.current_frame() {
+            let index = frame.base + reg as usize;
+            self.stack_set(index, value);
+        }
+    }
+
+    /// Get mutable reference to stack (for bulk operations)
+    #[inline(always)]
+    pub fn stack_mut(&mut self) -> &mut Vec<LuaValue> {
+        &mut self.stack
+    }
+
+    /// Get open upvalues list
+    #[inline(always)]
+    pub fn open_upvalues(&self) -> &[UpvalueId] {
+        &self.open_upvalues
+    }
+
+    /// Get mutable open upvalues list
+    #[inline(always)]
+    pub fn open_upvalues_mut(&mut self) -> &mut Vec<UpvalueId> {
+        &mut self.open_upvalues
+    }
+
+    /// Set error message
+    #[inline(always)]
+    pub fn set_error(&mut self, msg: String) {
+        self.error_msg = msg;
+    }
+
+    /// Get error message
+    #[inline(always)]
+    pub fn error_msg(&self) -> &str {
+        &self.error_msg
+    }
+
+    /// Clear error state
+    #[inline(always)]
+    pub fn clear_error(&mut self) {
+        self.error_msg.clear();
+        self.yield_values.clear();
+    }
+
+    /// Set yield values
+    #[inline(always)]
+    pub fn set_yield(&mut self, values: Vec<LuaValue>) {
+        self.yield_values = values;
+    }
+
+    /// Take yield values
+    #[inline(always)]
+    pub fn take_yield(&mut self) -> Vec<LuaValue> {
+        std::mem::take(&mut self.yield_values)
+    }
+
+    /// Close upvalues from a given stack index upwards
+    /// This is called when exiting a function or block scope
+    pub fn close_upvalues(&mut self, level: usize, object_pool: &mut crate::ObjectPool) {
+        // Find all open upvalues pointing to indices >= level
+        let mut i = 0;
+        while i < self.open_upvalues.len() {
+            let upval_id = self.open_upvalues[i];
+            if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
+                if let Some(stack_idx) = upval.get_stack_index() {
+                    if stack_idx >= level {
+                        // Close this upvalue - copy stack value to closed storage
+                        let value = self.stack_get(stack_idx);
+                        upval.close(value);
+                        self.open_upvalues.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    /// Get stack reference (for GC tracing)
+    pub fn stack(&self) -> &[LuaValue] {
+        &self.stack
+    }
+}
+
+impl Default for LuaState {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}

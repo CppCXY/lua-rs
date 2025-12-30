@@ -594,7 +594,7 @@ impl GC {
             }
             GcObjectType::Thread => {
                 if let Some(thread) = pool.threads.get(gc_id.index()) {
-                    let stack = thread.data.register_stack.clone();
+                    let stack = thread.data.stack().to_vec();
 
                     if let Some(t) = pool.threads.get_mut(gc_id.index()) {
                         if t.header.is_gray() {
@@ -1280,7 +1280,7 @@ impl GC {
                         let stack_values = {
                             if let Some(thread) = pool.threads.get(id.0) {
                                 if thread.header.is_white() {
-                                    Some(thread.data.register_stack.clone())
+                                    Some(thread.data.stack().to_vec())
                                 } else {
                                     None
                                 }

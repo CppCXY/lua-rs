@@ -1,18 +1,20 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
+mod call_info;
 mod execute;
-mod lua_call_frame;
 mod lua_error;
+mod lua_state;
 mod opcode;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
 use crate::lua_value::{
-    CFunction, Chunk, CoroutineStatus, LuaString, LuaTable, LuaThread, LuaUserdata, LuaValue,
+    CFunction, Chunk, LuaString, LuaTable, LuaUserdata, LuaValue,
     LuaValueKind,
 };
-pub use crate::lua_vm::lua_call_frame::LuaCallFrame;
+pub use crate::lua_vm::call_info::CallInfo;
 pub use crate::lua_vm::lua_error::LuaError;
+pub use crate::lua_vm::lua_state::LuaState;
 use crate::{ObjectPool, lib_registry};
 pub use opcode::{Instruction, OpCode};
 use std::rc::Rc;
@@ -20,74 +22,39 @@ use std::rc::Rc;
 pub type LuaResult<T> = Result<T, LuaError>;
 
 /// Maximum call stack depth (similar to LUAI_MAXCCALLS in Lua)
-/// Using a lower limit because Rust stack space is limited
-pub const MAX_CALL_DEPTH: usize = 64;
+pub const MAX_CALL_DEPTH: usize = 200;
 
+/// Global VM state (equivalent to global_State in Lua C API)
+/// Manages global resources shared by all execution threads/coroutines
 pub struct LuaVM {
-    // Global environment table (_G and _ENV point to this)
+    /// Global environment table (_G and _ENV point to this)
     pub(crate) global: TableId,
 
-    // Registry table (like Lua's LUA_REGISTRYINDEX)
-    // Used to store objects that should be protected from GC but not visible to Lua code
-    // This is a GC root and all values in it are protected
+    /// Registry table (like Lua's LUA_REGISTRYINDEX)
     pub(crate) registry: TableId,
 
-    // Object pool for unified object management (new architecture)
-    // Placed near top for cache locality with hot operations
+    /// Object pool for unified object management
     pub(crate) object_pool: ObjectPool,
 
-    // Garbage collector (cold path - only accessed during actual GC)
+    /// Garbage collector state
     pub(crate) gc: GC,
 
-    // ===== Lightweight Error Storage =====
-    // Store error/yield data here instead of in Result<T, LuaError>
-    // This reduces Result size from ~24 bytes to 1 byte!
-    /// Error message for RuntimeError/CompileError
-    pub(crate) error_message: String,
+    /// Main thread execution state (embedded)
+    pub(crate) main_state: LuaState,
 
-    /// Yield values for coroutine yield
-    pub(crate) yield_values: Vec<LuaValue>,
+    /// String metatable (shared by all strings)
+    pub(crate) string_mt: Option<LuaValue>,
 }
 
 impl LuaVM {
     pub fn new() -> Self {
-        // Pre-allocate call stack with fixed size (like Lua's CallInfo pool)
-        // Vec is pre-filled to MAX_CALL_DEPTH so we can use direct indexing
-        // frame_count tracks the actual number of active frames
-        let mut frames = Vec::with_capacity(MAX_CALL_DEPTH);
-        frames.resize_with(MAX_CALL_DEPTH, LuaCallFrame::default);
-
         let mut vm = LuaVM {
-            global: TableId(0),   // Will be initialized below
-            registry: TableId(1), // Will be initialized below
-            // gc_roots_buffer: Vec::with_capacity(512), // Pre-allocate roots buffer
-            // frames,
-            // frame_count: 0,
-            // register_stack: Vec::with_capacity(256), // Pre-allocate for initial stack
-            // object_pool: ObjectPool::new(),
-            // gc: GC::new(),
-            // return_values: Vec::with_capacity(16),
-            // open_upvalues: Vec::new(),
-            // to_be_closed: Vec::new(),
-            // next_frame_id: 0,
-            // error_handler: None,
-            // #[cfg(feature = "loadlib")]
-            // ffi_state: crate::ffi::FFIState::new(),
-            // current_thread: None,
-            // current_thread_id: None,
-            // current_thread_value: None,
-            // main_thread_value: None, // Will be initialized lazily
-            // string_metatable: None,
-            // c_closure_upvalues_ptr: std::ptr::null(),
-            // c_closure_upvalues_len: 0,
-            // c_closure_inline_upvalue: LuaValue::nil(),
-            // #[cfg(feature = "async")]
-            // async_executor: AsyncExecutor::new(),
-            // Initialize error storage
-            error_message: String::new(),
-            yield_values: Vec::new(),
+            global: TableId(0),
+            registry: TableId(1),
             object_pool: ObjectPool::new(),
             gc: GC::new(),
+            main_state: LuaState::new(6),
+            string_mt: None,
         };
 
         // Initialize registry (like Lua's init_registry)
@@ -169,14 +136,40 @@ impl LuaVM {
         self.gc.gc_estimate = self.gc.total_bytes;
     }
 
-    /// Execute a chunk directly (convenience method)
-    pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<LuaValue> {
-        todo!()
+    /// Execute a chunk in the main thread
+    pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
+        let func = self.create_function(chunk, vec![]);
+        self.execute_function(func, vec![])
     }
 
-    pub fn execute_string(&mut self, source: &str) -> LuaResult<LuaValue> {
+    pub fn execute_string(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.compile(source)?;
         self.execute(Rc::new(chunk))
+    }
+
+    /// Execute a function with arguments
+    fn execute_function(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+        // Push function onto stack
+        let base = self.main_state.stack_mut().len();
+        self.main_state.stack_mut().push(func.clone());
+        
+        // Push arguments
+        for arg in args {
+            self.main_state.stack_mut().push(arg);
+        }
+        
+        // Create initial call frame
+        let nargs = self.main_state.stack_mut().len() - base - 1;
+        self.main_state.push_frame(func, base, nargs)?;
+        
+        // Run the VM execution loop
+        self.run()
+    }
+
+    /// Main VM execution loop (equivalent to luaV_execute)
+    fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
+        // TODO: Implement the actual instruction dispatch loop
+        Ok(vec![])
     }
 
     /// Compile source code using VM's string pool
@@ -196,16 +189,6 @@ impl LuaVM {
         };
 
         Ok(chunk)
-    }
-
-    /// Main execution loop - interprets bytecode instructions
-    /// Lua 5.4 style: CALL pushes frame, RETURN pops frame, loop continues
-    /// No recursion - pure state machine
-    fn run(&mut self) -> LuaResult<LuaValue> {
-        // Delegate to the optimized dispatcher loop
-        // TODO: The full execute module is commented out
-        // For now, return a placeholder to avoid panic
-        todo!()
     }
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
@@ -233,28 +216,14 @@ impl LuaVM {
     pub fn create_thread_value(&mut self, func: LuaValue) -> LuaValue {
         // Only allocate capacity, don't pre-fill (unlike main VM)
         // Coroutines typically have shallow call stacks, so we grow on demand
-        let frames = Vec::with_capacity(Self::INITIAL_COROUTINE_CALL_DEPTH);
+        const INITIAL_COROUTINE_CALL_DEPTH: usize = 16;
+        let _frames: Vec<CallInfo> = Vec::with_capacity(INITIAL_COROUTINE_CALL_DEPTH);
 
         // Start with smaller register stack - grows on demand
-        let mut register_stack = Vec::with_capacity(64);
-        register_stack.push(func);
+        let mut _register_stack = Vec::with_capacity(64);
+        _register_stack.push(func);
 
-        let thread = LuaThread {
-            status: CoroutineStatus::Suspended,
-            frames,
-            frame_count: 0,
-            register_stack,
-            return_values: Vec::new(),
-            open_upvalues: Vec::new(),
-            next_frame_id: 0,
-            error_handler: None,
-            yield_values: Vec::new(),
-            resume_values: Vec::new(),
-            yield_call_reg: None,
-            yield_call_nret: None,
-            yield_pc: None,
-            yield_frame_id: None,
-        };
+        let thread = LuaState::new(1);
 
         // Create thread in ObjectPool and return LuaValue
         let thread_id = self.object_pool.create_thread(thread);
@@ -878,49 +847,22 @@ impl LuaVM {
         )
     }
 
-    // ===== Lightweight Error Handling API =====
+    // ===== Error Handling =====
 
-    /// Set runtime error and return lightweight error enum
-    /// If an error handler is set (via xpcall), it will be called immediately
     pub fn error(&mut self, message: impl Into<String>) -> LuaError {
-        // Simply set the error message - error handling is done by xpcall
-        // when the error propagates back through the Rust call stack.
-        // At that point, the Lua call stack is still intact.
-        self.error_message = message.into();
+        self.main_state.set_error(message.into());
         LuaError::RuntimeError
     }
 
-    /// Set compile error and return lightweight error enum
     #[inline]
     pub fn compile_error(&mut self, message: impl Into<String>) -> LuaError {
-        self.error_message = message.into();
+        self.main_state.set_error(message.into());
         LuaError::CompileError
     }
 
-    /// Set yield values and return lightweight error enum
-    #[inline]
-    pub fn do_yield(&mut self, values: Vec<LuaValue>) -> LuaError {
-        self.yield_values = values;
-        LuaError::Yield
-    }
-
-    /// Get the current error message
     #[inline]
     pub fn get_error_message(&self) -> &str {
-        &self.error_message
-    }
-
-    /// Take the yield values (clears internal storage)
-    #[inline]
-    pub fn take_yield_values(&mut self) -> Vec<LuaValue> {
-        std::mem::take(&mut self.yield_values)
-    }
-
-    /// Clear error state
-    #[inline]
-    pub fn clear_error(&mut self) {
-        self.error_message.clear();
-        self.yield_values.clear();
+        self.main_state.error_msg()
     }
 
     /// Try to get a metamethod from a value
