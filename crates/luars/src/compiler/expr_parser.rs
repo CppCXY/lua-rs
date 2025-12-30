@@ -125,12 +125,17 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         }
         LuaTokenKind::TkString | LuaTokenKind::TkLongString => {
             // String constant - remove quotes
+            // Port of lparser.c:1111: codestring(v, ls->t.seminfo.ts)
+            // DON'T call string_k here - that would add to constant table immediately
+            // Instead, create VKSTR expression and defer adding to constant table until needed
             let text = fs.lexer.current_token_text();
             let string_content = parse_string_token_value(text, fs.lexer.current_token());
             match string_content {
                 Ok(s) => {
-                    let idx = string_k(fs, s);
-                    *v = ExpDesc::new_k(idx);
+                    // Intern string to ObjectPool and get StringId
+                    let (string_id, _) = fs.pool.create_string(&s);
+                    // Create VKSTR expression (not VK!) - will convert to VK when needed
+                    *v = ExpDesc::new_vkstr(string_id);
                 }
                 Err(e) => {
                     return Err(fs.syntax_error(&format!("invalid string literal: {}", e)));
@@ -233,17 +238,12 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
                 // self:method(...) is sugar for self.method(self, ...)
                 // Generate SELF instruction
-                // Create VKSTR expression for the method name
-                // Note: In official Lua, codestring sets e->u.strval = s, then exp2K
-                // calls stringK. But our ExpUnion doesn't have strval, so we call
-                // string_k directly here and create VK instead of VKSTR.
-                let k_idx = string_k(fs, method_name);
-                let mut key = ExpDesc {
-                    kind: ExpKind::VK,
-                    u: ExpUnion::Info(k_idx as i32),
-                    t: -1,
-                    f: -1,
-                };
+                // Create VKSTR expression for the method name (deferred addition to constant table)
+                // This matches official Lua's codestring (lparser.c:160-164)
+                // which creates VKSTR without calling stringK immediately.
+                // The stringK call happens later in luaK_self via luaK_exp2K (lcode.c:1333)
+                let (string_id, _) = fs.pool.create_string(&method_name);
+                let mut key = ExpDesc::new_vkstr(string_id);
                 code::self_op(fs, v, &mut key);
 
                 funcargs(fs, v)?;

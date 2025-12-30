@@ -2320,10 +2320,10 @@ fn is_cint(e: &ExpDesc) -> bool {
     is_kint(e) && e.u.ival() as u64 <= Instruction::MAX_C as u64
 }
 
-// Port of luaK_self from lcode.c:1087-1097
+// Port of luaK_self from lcode.c:1323-1343
 // void luaK_self (FuncState *fs, expdesc *e, expdesc *key)
 pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
-    // Port of luaK_self from lcode.c:1087-1097
+    // Port of luaK_self from lcode.c:1323-1343
     let ereg = exp2anyreg(fs, e);
     free_exp(fs, e);
 
@@ -2333,47 +2333,48 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     reserve_regs(fs, 2); // function and 'self'
 
     // SELF A B C: R(A+1) := R(B); R(A) := R(B)[RK(C)]
-    // Follow Lua 5.5: only emit OP_SELF when method name is a SHORT string constant
-    // in the constant table. Lua 5.5 has LUAI_MAXSHORTLEN=40, strings longer than
-    // that cannot use SELF optimization (see lcode.c:1331: strisshr check).
-    // Note: In our implementation, method names are already converted to VK by expr_parser.rs
-    // (see suffixedexp), so we check for VK instead of VKSTR.
+    // Follow Lua 5.5: key should be VKSTR at this point (lcode.c:1332: lua_assert(key->k == VKSTR))
+    // Only emit OP_SELF when method name is a SHORT string constant.
+    // Lua 5.5 has LUAI_MAXSHORTLEN=40, strings longer than that cannot use SELF optimization
+    // (see lcode.c:1333: strisshr check).
     const LUAI_MAXSHORTLEN: usize = 40; // Lua 5.5 short string length limit
     
-    let can_use_self = if key.kind == ExpKind::VK && key.u.info() >= 0 && (key.u.info() as usize) <= MAXINDEXRK {
-        // Check if the constant is a short string
-        let k_idx = key.u.info() as usize;
-        if let Some(constant) = fs.chunk.constants.get(k_idx) {
-            // Check if constant is a string and its length <= 40
-            if let Some(str_id) = constant.as_string_id() {
-                if let Some(lua_str) = fs.pool.get_string(str_id) {
-                    lua_str.as_str().len() <= LUAI_MAXSHORTLEN
-                } else {
-                    false
-                }
-            } else {
-                false // Not a string constant
-            }
+    // Check if key is a VKSTR (method name string)
+    let can_use_self = if key.kind == ExpKind::VKSTR {
+        // Check if it's a short string
+        let str_id = key.u.str();
+        if let Some(lua_str) = fs.pool.get_string(str_id) {
+            lua_str.as_str().len() <= LUAI_MAXSHORTLEN
         } else {
-            false // Invalid constant index
+            false
         }
     } else {
-        false // Not VK or index out of range
+        false // Not VKSTR
     };
     
     if can_use_self {
-        // Method name is a short string constant in valid K index range
-        // Emit OP_SELF with k = 0 (Lua 5.5 never sets k flag for SELF)
-        code_abck(
-            fs,
-            OpCode::Self_,
-            base as u32,
-            ereg as u32,
-            key.u.info() as u32,
-            false,
-        );
+        // Method name is a short string - try to convert to VK via exp2K
+        // This calls str2k which adds the string to constant table (lcode.c:1333: luaK_exp2K)
+        if exp2k(fs, key) {
+            // Successfully converted to VK and fits in MAXINDEXRK
+            // Emit OP_SELF with k = 0 (Lua 5.5 never sets k flag for SELF)
+            code_abck(
+                fs,
+                OpCode::Self_,
+                base as u32,
+                ereg as u32,
+                key.u.info() as u32,
+                false,
+            );
+        } else {
+            // Constant index too large, fallback to MOVE + GETTABLE
+            exp2anyreg(fs, key);
+            code_abc(fs, OpCode::Move, (base + 1) as u32, ereg as u32, 0);
+            let kc = key.u.info() as u32;
+            code_abc(fs, OpCode::GetTable, base as u32, ereg as u32, kc);
+        }
     } else {
-        // Fallback: put method name in a register and emit MOVE + GETTABLE
+        // Not a short string or not VKSTR - fallback: put method name in a register and emit MOVE + GETTABLE
         exp2anyreg(fs, key);
         code_abc(fs, OpCode::Move, (base + 1) as u32, ereg as u32, 0);
         let kc = key.u.info() as u32;

@@ -184,10 +184,10 @@ impl ExpDesc {
         }
     }
 
-    pub fn new_vkstr(string_id: usize) -> Self {
+    pub fn new_vkstr(string_id: StringId) -> Self {
         ExpDesc {
             kind: ExpKind::VKSTR,
-            u: ExpUnion::Info(string_id as i32),
+            u: ExpUnion::Str(string_id),
             t: -1,
             f: -1,
         }
