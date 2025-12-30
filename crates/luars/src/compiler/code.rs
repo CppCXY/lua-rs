@@ -592,8 +592,7 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
             e.kind = ExpKind::VRELOC;
         }
         ExpKind::VINDEXED => {
-            free_reg(fs, e.u.ind().idx as u8);
-            free_reg(fs, e.u.ind().t as u8);
+            free_regs(fs, e.u.ind().t as u8, e.u.ind().idx as u8);
             e.u = ExpUnion::Info(code_abc(
                 fs,
                 OpCode::GetTable,
@@ -605,8 +604,7 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
         }
         ExpKind::VVARGIND => {
             // Lua 5.5: indexed vararg parameter - generate GETVARG instruction
-            free_reg(fs, e.u.ind().t as u8);
-            free_reg(fs, e.u.ind().idx as u8);
+            free_regs(fs, e.u.ind().t as u8, e.u.ind().idx as u8);
             e.u = ExpUnion::Info(code_abc(
                 fs,
                 OpCode::GetVarg,
@@ -771,6 +769,18 @@ pub fn free_reg(fs: &mut FuncState, reg: u8) {
             "freereg mismatch: expected reg {} to equal freereg {}",
             reg, fs.freereg
         );
+    }
+}
+
+// Port of freeregs from lcode.c:511-520
+// Free two registers in proper order (higher register first)
+pub fn free_regs(fs: &mut FuncState, r1: u8, r2: u8) {
+    if r1 > r2 {
+        free_reg(fs, r1);
+        free_reg(fs, r2);
+    } else {
+        free_reg(fs, r2);
+        free_reg(fs, r1);
     }
 }
 

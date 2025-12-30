@@ -6,10 +6,6 @@ pub struct TokensizeConfig {
 }
 
 impl TokensizeConfig {
-    pub fn support_goto(&self) -> bool {
-        true
-    }
-
     pub fn support_complex_number(&self) -> bool {
         matches!(self.language_level, LuaLanguageLevel::LuaJIT)
     }
@@ -25,16 +21,12 @@ impl TokensizeConfig {
     pub fn support_integer_operation(&self) -> bool {
         true
     }
-
-    pub fn support_global_decl(&self) -> bool {
-        self.language_level >= LuaLanguageLevel::Lua55
-    }
 }
 
 impl Default for TokensizeConfig {
     fn default() -> Self {
         TokensizeConfig {
-            language_level: LuaLanguageLevel::Lua54,
+            language_level: LuaLanguageLevel::Lua55,
         }
     }
 }

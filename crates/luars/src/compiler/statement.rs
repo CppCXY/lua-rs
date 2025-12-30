@@ -73,10 +73,6 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
                 localstat(fs)?;
             }
         }
-        LuaTokenKind::TkGlobal => {
-            // Lua 5.5: global statement
-            globalstatfunc(fs, line)?;
-        }
         LuaTokenKind::TkDbColon => {
             fs.lexer.bump(); // skip ::
             labelstat(fs)?;
@@ -94,7 +90,25 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
             gotostat(fs)?;
         }
         _ => {
-            exprstat(fs)?;
+            let mut is_global_stat = false;
+            if fs.lexer.current_token_text() == "global" {
+                let next = fs.lexer.peek_next_token();
+                if matches!(
+                    next,
+                    LuaTokenKind::TkMul
+                        | LuaTokenKind::TkLt
+                        | LuaTokenKind::TkName
+                        | LuaTokenKind::TkFunction
+                ) {
+                    is_global_stat = true;
+                    // Lua 5.5: global statement
+                    globalstatfunc(fs, line)?;
+                }
+            }
+
+            if !is_global_stat {
+                exprstat(fs)?;
+            }
         }
     }
 
@@ -1314,14 +1328,15 @@ fn check_conflict(fs: &mut FuncState, lh_id: LhsAssignId, v: &ExpDesc) {
 
     // lparser.c:1453-1482: Check all previous assignments and update conflicting nodes
     let mut nodes_to_update: Vec<(LhsAssignId, bool, bool)> = Vec::new(); // (id, update_t, update_idx)
-    
+
     let mut current = Some(lh_id);
     while let Some(node_id) = current {
         if let Some(node) = fs.compiler_state.get_lhs_assign(node_id) {
             let mut update_t = false;
             let mut update_idx = false;
-            
-            if vkisindexed(node.v.kind) {  // assignment to table field?
+
+            if vkisindexed(node.v.kind) {
+                // assignment to table field?
                 // lparser.c:1456-1463: Check if table is an upvalue
                 if node.v.kind == ExpKind::VINDEXUP {
                     // lparser.c:1457-1461: Table is upvalue being assigned
@@ -1330,25 +1345,28 @@ fn check_conflict(fs: &mut FuncState, lh_id: LhsAssignId, v: &ExpDesc) {
                         update_t = true;
                         // lparser.c:1459: lh->v.k = VINDEXSTR
                     }
-                } else {  // lparser.c:1464-1478: table is a register
+                } else {
+                    // lparser.c:1464-1478: table is a register
                     // lparser.c:1465-1468: Is table the local being assigned?
                     if v.kind == ExpKind::VLOCAL && node.v.u.ind().t == v.u.var().ridx {
                         conflict = true;
-                        update_t = true;  // lparser.c:1467: lh->v.u.ind.t = extra
+                        update_t = true; // lparser.c:1467: lh->v.u.ind.t = extra
                     }
                     // lparser.c:1469-1474: Is index the local being assigned?
-                    if node.v.kind == ExpKind::VINDEXED && v.kind == ExpKind::VLOCAL &&
-                       node.v.u.ind().idx == v.u.var().ridx {
+                    if node.v.kind == ExpKind::VINDEXED
+                        && v.kind == ExpKind::VLOCAL
+                        && node.v.u.ind().idx == v.u.var().ridx
+                    {
                         conflict = true;
-                        update_idx = true;  // lparser.c:1472: lh->v.u.ind.idx = extra
+                        update_idx = true; // lparser.c:1472: lh->v.u.ind.idx = extra
                     }
                 }
             }
-            
+
             if update_t || update_idx {
                 nodes_to_update.push((node_id, update_t, update_idx));
             }
-            
+
             current = node.prev;
         } else {
             break;
@@ -1363,7 +1381,7 @@ fn check_conflict(fs: &mut FuncState, lh_id: LhsAssignId, v: &ExpDesc) {
             code::code_abc(fs, OpCode::GetUpval, extra as u32, v.u.info() as u32, 0);
         }
         code::reserve_regs(fs, 1);
-        
+
         // Now update all conflicting nodes to use the safe copy
         for (node_id, update_t, update_idx) in nodes_to_update {
             if let Some(node) = fs.compiler_state.get_lhs_assign_mut(node_id) {
