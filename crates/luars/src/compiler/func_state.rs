@@ -383,7 +383,8 @@ impl<'a> FuncState<'a> {
                         // lparser.c:433: compile-time constant
                         *var = ExpDesc::new_void();
                         var.kind = ExpKind::VCONST;
-                        var.u = ExpUnion::Info((self.first_local + i) as i32);
+                        // Use i (relative index) for per-function actvar array
+                        var.u = ExpUnion::Info(i as i32);
                         return ExpKind::VCONST as i32;
                     } else {
                         // lparser.c:435-439: regular local variable

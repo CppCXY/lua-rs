@@ -1246,14 +1246,21 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
 
     if let Some(value) = const_value {
         // Variable is a compile-time constant
+        // Official Lua lparser.c:1903-1908
+        let ridx = fs.reglevel(fs.nactvar);
         if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
             var_desc.kind = VarKind::RDKCTC;
             var_desc.const_value = Some(value); // Save the constant value
+            // Set register index before adjustlocalvars (lparser.c:1905)
+            var_desc.ridx = ridx as i16;
         }
-        // In Lua C, this is: adjustlocalvars(ls, nvars - 1); fs->nactvar++;
-        // But since nactvar() returns actvar.len(), and adjust_local_vars doesn't change length,
-        // we need to call adjust_local_vars(nvars) to process all variables including the constant
-        fs.adjust_local_vars(nvars);
+        // adjustlocalvars(ls, nvars - 1) - exclude last variable (lparser.c:1906)
+        fs.adjust_local_vars(nvars - 1);
+        // fs->nactvar++ - but count it (lparser.c:1907)
+        fs.nactvar += 1;
+        // NOTE: Don't adjust freereg here! Official Lua doesn't do it either.
+        // The RDKCTC variable has a valid ridx, and when first used, discharge_vars
+        // will load its value to that register. freereg is managed by reserv_regs/adjust_local_vars.
         check_to_close(fs, toclose);
         return Ok(());
     }
