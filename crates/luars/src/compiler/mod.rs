@@ -9,7 +9,7 @@ mod func_state; // FuncState and related structures (lparser.h)
 pub mod parse_literal; // Number parsing utilities
 mod parser; // Lexer/token provider
 mod statement; // Statement parsing (lparser.c)
-mod tm_kind;
+
 
 // Re-exports
 pub use code::*;

@@ -16,6 +16,9 @@
   
   This matches Lua's lvm.c design where everything is pointer-based
 ----------------------------------------------------------------------*/
+mod call;
+mod metamethod;
+use call::FrameAction;
 
 use std::rc::Rc;
 
@@ -24,10 +27,8 @@ use crate::{
     lua_vm::{LuaError, LuaResult, LuaState, OpCode},
     Chunk,
 };
+pub use metamethod::TmKind;
 
-// ============ Submodules ============
-mod call;
-use call::FrameAction;
 
 // ============ Type tag检查宏 (对应 Lua 的 ttis* 宏) ============
 
@@ -1454,6 +1455,51 @@ fn execute_frame(
                     }
                     // else: exit loop (control variable is nil)
                 }
+            }
+            
+            // ============================================================
+            // METAMETHOD OPERATIONS
+            // ============================================================
+            
+            OpCode::MmBin => {
+                // Call metamethod over R[A] and R[B]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                // Save PC before metamethod call
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                
+                // Delegate to metamethod handler
+                metamethod::handle_mmbin(lua_state, base, a, b, c, pc, code)?;
+            }
+            
+            OpCode::MmBinI => {
+                // Call metamethod over R[A] and immediate sB
+                let a = instr.get_a() as usize;
+                let sb = instr.get_sb();
+                let c = instr.get_c() as usize;
+                let k = instr.get_k();
+                
+                // Save PC before metamethod call
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                
+                // Delegate to metamethod handler
+                metamethod::handle_mmbini(lua_state, base, a, sb, c, k, pc, code)?;
+            }
+            
+            OpCode::MmBinK => {
+                // Call metamethod over R[A] and K[B]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                let k = instr.get_k();
+                
+                // Save PC before metamethod call
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                
+                // Delegate to metamethod handler
+                metamethod::handle_mmbink(lua_state, base, a, b, c, k, pc, code, constants)?;
             }
             
             // ============================================================

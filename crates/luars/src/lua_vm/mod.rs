@@ -16,6 +16,7 @@ use crate::{ObjectPool, lib_registry};
 pub use opcode::{Instruction, OpCode};
 use std::ptr::null_mut;
 use std::rc::Rc;
+pub use execute::TmKind;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
