@@ -17,6 +17,7 @@
   This matches Lua's lvm.c design where everything is pointer-based
 ----------------------------------------------------------------------*/
 mod call;
+mod concat;
 mod metamethod;
 use call::FrameAction;
 
@@ -1195,20 +1196,42 @@ fn execute_frame(
             }
             OpCode::NewTable => {
                 // R[A] := {} (new table)
+                // vB = log2(hash size) + 1, vC = array size
                 let a = instr.get_a() as usize;
-                let _vb = instr.get_b() as usize; // log2(hash size) + 1
-                let _vc = instr.get_c() as usize; // array size
+                let vb = instr.get_b() as usize;
+                let mut vc = instr.get_c() as usize;
+                let k = instr.get_k();
 
-                // Create new table
-                let value = lua_state.create_table(0, 0);
+                // Calculate hash size: if vB > 0, hash_size = 2^(vB-1)
+                let hash_size = if vb > 0 {
+                    1usize << (vb - 1)
+                } else {
+                    0
+                };
+
+                // Check for EXTRAARG instruction for larger array sizes
+                if k {
+                    // Next instruction should be EXTRAARG
+                    if pc < code.len() {
+                        let extra_instr = code[pc];
+                        
+                        if extra_instr.get_opcode() == OpCode::ExtraArg {
+                            pc += 1; // Consume EXTRAARG
+                            let extra = extra_instr.get_ax() as usize;
+                            // Add extra to array size: vc += extra * (MAXARG_vC + 1)
+                            // MAXARG_vC is typically 255
+                            vc += extra * 256;
+                        }
+                    }
+                }
+
+                // Create table with pre-allocated sizes
+                let value = lua_state.create_table(vc, hash_size);
 
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     *ra = value;
                 }
-
-                // TODO: Pre-allocate table size based on vB and vC
-                // TODO: Check for EXTRAARG instruction for larger sizes
             }
             OpCode::GetTable => {
                 // R[A] := R[B][R[C]]
@@ -1724,7 +1747,7 @@ fn execute_frame(
                 // Call: ra+3,ra+4,...,ra+2+C := ra(ra+1, ra+2)
                 // ra=iterator, ra+1=state, ra+2=closing, ra+3=control
                 let a = instr.get_a() as usize;
-                let _c = instr.get_c() as usize;
+                let c = instr.get_c() as usize;
 
                 unsafe {
                     let ra = stack_ptr.add(base + a);
@@ -1732,14 +1755,24 @@ fn execute_frame(
                     // Setup call stack:
                     // ra+3: function (copy from ra)
                     // ra+4: arg1 (copy from ra+1, state)
-                    // ra+5: arg2 (copy from ra+2, closing/control)
-                    *ra.add(5) = *ra.add(3); // copy control variable
+                    // ra+5: arg2 (copy from ra+3, control variable)
+                    *ra.add(5) = *ra.add(3); // copy control variable (was ra+2 but swapped)
                     *ra.add(4) = *ra.add(1); // copy state
                     *ra.add(3) = *ra; // copy iterator function
+                }
 
-                    // TODO: Call function at ra+3
-                    // For now, just fall through to TFORLOOP
-                    // The next instruction should be TFORLOOP
+                // Save PC before call
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+
+                // Call iterator function at base+a+3
+                // Arguments: 2 (state and control)
+                // Results: c (number of loop variables)
+                match call::handle_call(lua_state, base, a + 3, 3, c + 1) {
+                    Ok(FrameAction::Continue) => {
+                        // C function completed, results already in place
+                        // Fall through to next instruction (TFORLOOP)
+                    },
+                    other => return other,
                 }
             }
             OpCode::TForLoop => {
@@ -1810,21 +1843,116 @@ fn execute_frame(
             
             OpCode::GetTabUp => {
                 // R[A] := UpValue[B][K[C]:shortstring]
-                let _a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize;
-                let _c = instr.get_c() as usize;
-                // TODO: Implement upvalue table access
-                pc += 1;
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                // Get upvalue B (usually _ENV for global access)
+                if b >= upvalues_vec.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("GETTABUP: invalid upvalue index {}", b)));
+                }
+                
+                let upval_id = upvalues_vec[b];
+                let upvalue = lua_state
+                    .vm_mut()
+                    .object_pool
+                    .get_upvalue(upval_id)
+                    .ok_or(LuaError::RuntimeError)?;
+
+                // Get table value from upvalue
+                let table_value = if upvalue.is_open() {
+                    let stack_idx = upvalue.get_stack_index().unwrap();
+                    lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
+                } else {
+                    upvalue.get_closed_value().unwrap()
+                };
+
+                // Get key from constants (K[C])
+                if c >= constants.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("GETTABUP: invalid constant index {}", c)));
+                }
+                let key = &constants[c];
+
+                // Get value from table[key]
+                let result = if let Some(table_id) = table_value.as_table_id() {
+                    let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
+                    table.raw_get(key).unwrap_or(LuaValue::nil())
+                } else {
+                    // Not a table - return nil (or should trigger metamethod)
+                    LuaValue::nil()
+                };
+
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    *ra = result;
+                }
             }
             
             OpCode::SetTabUp => {
                 // UpValue[A][K[B]:shortstring] := RK(C)
-                let _a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize;
-                let _c = instr.get_c() as usize;
-                let _k = instr.get_k();
-                // TODO: Implement upvalue table set
-                pc += 1;
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                let k = instr.get_k();
+                
+                // Get upvalue A (usually _ENV for global access)
+                if a >= upvalues_vec.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("SETTABUP: invalid upvalue index {}", a)));
+                }
+                
+                let upval_id = upvalues_vec[a];
+                let upvalue = lua_state
+                    .vm_mut()
+                    .object_pool
+                    .get_upvalue(upval_id)
+                    .ok_or(LuaError::RuntimeError)?;
+
+                // Get table value from upvalue
+                let table_value = if upvalue.is_open() {
+                    let stack_idx = upvalue.get_stack_index().unwrap();
+                    lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
+                } else {
+                    upvalue.get_closed_value().unwrap()
+                };
+
+                // Get key from constants (K[B])
+                if b >= constants.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("SETTABUP: invalid constant index {}", b)));
+                }
+                let key = constants[b];
+
+                // Get value (RK: register or constant)
+                let value = if k {
+                    if c >= constants.len() {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("SETTABUP: invalid constant".to_string()));
+                    }
+                    constants[c]
+                } else {
+                    unsafe {
+                        let rc = stack_ptr.add(base + c);
+                        *rc
+                    }
+                };
+
+                // Set table[key] = value
+                if let Some(table_id) = table_value.as_table_id() {
+                    let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table_mut(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
+                    table.raw_set(key, value);
+                }
+                // else: should trigger metamethod, but we skip for now
             }
             
             // ============================================================
@@ -1841,28 +1969,47 @@ fn execute_frame(
                     let ra = stack_ptr.add(base + a);
                     
                     // Get length based on type
-                    if (*rb).is_string() {
-                        // TODO: Get string length from object pool
-                        // For now, placeholder
-                        pc += 1;
-                        setivalue(ra, 0);
-                    } else if (*rb).is_table() {
-                        // TODO: Call __len metamethod if present, else use raw length
-                        pc += 1;
-                        setivalue(ra, 0);
+                    if let Some(string_id) = (*rb).as_string_id() {
+                        // String: get length from object pool
+                        if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
+                            let len = s.as_str().len();
+                            setivalue(ra, len as i64);
+                        } else {
+                            setivalue(ra, 0);
+                        }
+                    } else if let Some(table_id) = (*rb).as_table_id() {
+                        // Table: use raw length (array part length)
+                        // Note: __len metamethod excluded per user request
+                        if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
+                            let len = table.len();
+                            setivalue(ra, len as i64);
+                        } else {
+                            setivalue(ra, 0);
+                        }
                     } else {
-                        // TODO: Try __len metamethod
-                        pc += 1;
+                        // Other types: length is 0
+                        // Note: __len metamethod excluded per user request
+                        setivalue(ra, 0);
                     }
                 }
             }
             
             OpCode::Concat => {
                 // R[A] := R[A].. ... ..R[A + B - 1]
-                let _a = instr.get_a() as usize;
-                let _n = instr.get_b() as usize;
-                // TODO: Implement string concatenation with metamethods
-                pc += 1;
+                // Concatenate B values starting from R[A]
+                // Optimized implementation matching Lua 5.5
+                let a = instr.get_a() as usize;
+                let n = instr.get_b() as usize;
+                
+                match concat::concat_strings(lua_state, stack_ptr, base, a, n) {
+                    Ok(result) => unsafe {
+                        let ra = stack_ptr.add(base + a);
+                        *ra = result;
+                    },
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
             }
             
             // ============================================================
@@ -2148,12 +2295,59 @@ fn execute_frame(
             
             OpCode::SetList => {
                 // R[A][vC+i] := R[A+i], 1 <= i <= vB
-                let _a = instr.get_a() as usize;
-                let _vb = instr.get_vb() as usize;
-                let _vc = instr.get_vc() as usize;
-                let _k = instr.get_k();
-                // TODO: Implement table list initialization
-                pc += 1;
+                // Batch set table elements (used in table constructors)
+                let a = instr.get_a() as usize;
+                let mut vb = instr.get_vb() as usize; // number of elements
+                let mut vc = instr.get_vc() as usize; // starting index offset
+                let k = instr.get_k();
+
+                // Check for EXTRAARG for larger starting indices
+                if k {
+                    if pc < code.len() {
+                        let extra_instr = code[pc];
+                        
+                        if extra_instr.get_opcode() == OpCode::ExtraArg {
+                            pc += 1; // Consume EXTRAARG
+                            let extra = extra_instr.get_ax() as usize;
+                            // Add extra to starting index: vc += extra * (MAXARG_vC + 1)
+                            vc += extra * 256;
+                        }
+                    }
+                }
+
+                // If vB == 0, use all values from ra+1 to top
+                if vb == 0 {
+                    let stack_top = lua_state.stack_len();
+                    let ra = base + a;
+                    vb = if stack_top > ra + 1 {
+                        stack_top - ra - 1
+                    } else {
+                        0
+                    };
+                }
+
+                // Get table from R[A]
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    let table_val = *ra;
+
+                    if let Some(table_id) = table_val.as_table_id() {
+                        let table = lua_state
+                            .vm_mut()
+                            .object_pool
+                            .get_table_mut(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+
+                        // Set elements: table[vc+i] = R[A+i] for i=1..vb
+                        for i in 1..=vb {
+                            let val_ptr = ra.add(i);
+                            let val = *val_ptr;
+                            let index = (vc + i) as i64;
+                            table.set_int(index, val);
+                        }
+                    }
+                    // else: not a table, should error but we skip for now
+                }
             }
             
             // ============================================================
