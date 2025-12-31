@@ -1,12 +1,22 @@
 /*----------------------------------------------------------------------
-  Lua 5.4 Opcode System - Complete 1:1 Port from lopcodes.h
+  Lua 5.5 Opcode System - Complete 1:1 Port from lopcodes.h
 
   Instruction Format (32-bit):
-  - iABC:  [Op(7) | A(8) | k(1) | B(8) | C(8)]
-  - iABx:  [Op(7) | A(8) | Bx(17)]
-  - iAsBx: [Op(7) | A(8) | sBx(signed 17)]
-  - iAx:   [Op(7) | Ax(25)]
-  - isJ:   [Op(7) | sJ(signed 25)]
+  All instructions have an opcode in the first 7 bits.
+  
+        3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0
+        1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
+  iABC          C(8)     |      B(8)     |k|     A(8)      |   Op(7)     |
+  ivABC         vC(10)     |     vB(6)   |k|     A(8)      |   Op(7)     |
+  iABx                Bx(17)               |     A(8)      |   Op(7)     |
+  iAsBx              sBx (signed)(17)      |     A(8)      |   Op(7)     |
+  iAx                           Ax(25)                     |   Op(7)     |
+  isJ                           sJ (signed)(25)            |   Op(7)     |
+
+  ('v' stands for "variant", 's' for "signed", 'x' for "extended".)
+  A signed argument is represented in excess K: The represented value is
+  the written unsigned value minus K, where K is half (rounded down) the
+  maximum value for the corresponding unsigned argument.
 ----------------------------------------------------------------------*/
 
 // ============ Instruction Decoding Macros ============
@@ -424,12 +434,16 @@ mod tests {
     fn test_opcode_mode() {
         assert_eq!(OpCode::Move.get_mode(), OpMode::IABC);
         assert_eq!(OpCode::LoadK.get_mode(), OpMode::IABx);
-        assert_eq!(OpCode::Jmp.get_mode(), OpMode::IsJ); // JMP uses sJ format (signed jump)
+        assert_eq!(OpCode::LoadI.get_mode(), OpMode::IAsBx);
+        assert_eq!(OpCode::Jmp.get_mode(), OpMode::IsJ);
         assert_eq!(OpCode::ExtraArg.get_mode(), OpMode::IAx);
         assert_eq!(OpCode::Add.get_mode(), OpMode::IABC);
-        assert_eq!(OpCode::TForCall.get_mode(), OpMode::IABC); // TFORCALL uses ABC format
-        assert_eq!(OpCode::TForLoop.get_mode(), OpMode::IABx); // TFORLOOP uses ABx format
-        assert_eq!(OpCode::LoadI.get_mode(), OpMode::IAsBx); // LOADI uses signed sBx
+        assert_eq!(OpCode::TForCall.get_mode(), OpMode::IABC);
+        assert_eq!(OpCode::TForLoop.get_mode(), OpMode::IABx);
+        assert_eq!(OpCode::NewTable.get_mode(), OpMode::IvABC); // ivABC format in Lua 5.5
+        assert_eq!(OpCode::SetList.get_mode(), OpMode::IvABC);  // ivABC format in Lua 5.5
+        assert_eq!(OpCode::ErrNNil.get_mode(), OpMode::IABx);   // New in Lua 5.5
+        assert_eq!(OpCode::GetVarg.get_mode(), OpMode::IABC);   // New in Lua 5.5
     }
 
     #[test]

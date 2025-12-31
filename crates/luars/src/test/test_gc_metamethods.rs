@@ -37,9 +37,11 @@ mod tests {
         match vm.execute_string(code) {
             Ok(result) => {
                 println!("Finalized count: {:?}", result);
-                // Should have finalized 2 objects
-                if let Some(count) = result.as_integer() {
-                    assert!(count >= 0, "Finalization tracking works");
+                for value in result {
+                    // Should have finalized 2 objects
+                    if let Some(count) = value.as_integer() {
+                        assert!(count >= 0, "Finalization tracking works");
+                    }
                 }
             }
             Err(e) => panic!("Error: {}", e),
@@ -164,8 +166,10 @@ mod tests {
                 println!("Weak keys+values test result: {:?}", result);
                 // Note: Full weak table support requires more complex mark phase handling
                 // This test just verifies the basic weak mode infrastructure is in place
-                if let Some(count) = result.as_integer() {
-                    assert!(count >= 0, "Weak table infrastructure works");
+                for value in result {
+                    if let Some(count) = value.as_integer() {
+                        assert!(count >= 0, "Weak table infrastructure works");
+                    }
                 }
             }
             Err(e) => panic!("Error: {}", e),

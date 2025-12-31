@@ -2,161 +2,170 @@ mod instruction;
 
 pub use instruction::Instruction;
 
-/// Instruction format modes
+/// Instruction format modes (Lua 5.5)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpMode {
-    IABC,
-    IABx,
-    IAsBx,
-    IAx,
-    IsJ,
+    IABC,   // iABC:  C(8) | B(8) | k(1) | A(8) | Op(7)
+    IvABC,  // ivABC: vC(10) | vB(6) | k(1) | A(8) | Op(7) - variable-size B and C
+    IABx,   // iABx:  Bx(17) | A(8) | Op(7)
+    IAsBx,  // iAsBx: sBx(signed 17) | A(8) | Op(7)
+    IAx,    // iAx:   Ax(25) | Op(7)
+    IsJ,    // isJ:   sJ(signed 25) | Op(7)
 }
 
-/// Complete Lua 5.4 Opcode Set (83 opcodes)
+/// Complete Lua 5.5 Opcode Set (86 opcodes)
+/// Based on lopcodes.h from Lua 5.5.0
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum OpCode {
-    // Load/Move operations
-    Move = 0,   // R[A] := R[B]
-    LoadI,      // R[A] := sBx
-    LoadF,      // R[A] := (lua_Number)sBx
-    LoadK,      // R[A] := K[Bx]
-    LoadKX,     // R[A] := K[extra arg]
-    LoadFalse,  // R[A] := false
-    LFalseSkip, // R[A] := false; pc++
-    LoadTrue,   // R[A] := true
-    LoadNil,    // R[A], R[A+1], ..., R[A+B] := nil
+/*----------------------------------------------------------------------
+  Lua 5.5 Opcode Definitions (matching lopcodes.h)
+  Format: name       args    description
+------------------------------------------------------------------------*/
+    // Load and move operations
+    Move = 0,   // A B      R[A] := R[B]
+    LoadI,      // A sBx    R[A] := sBx
+    LoadF,      // A sBx    R[A] := (lua_Number)sBx
+    LoadK,      // A Bx     R[A] := K[Bx]
+    LoadKX,     // A        R[A] := K[extra arg]
+    LoadFalse,  // A        R[A] := false
+    LFalseSkip, // A        R[A] := false; pc++
+    LoadTrue,   // A        R[A] := true
+    LoadNil,    // A B      R[A], R[A+1], ..., R[A+B] := nil
 
     // Upvalue operations
-    GetUpval, // R[A] := UpValue[B]
-    SetUpval, // UpValue[B] := R[A]
+    GetUpval,   // A B      R[A] := UpValue[B]
+    SetUpval,   // A B      UpValue[B] := R[A]
 
     // Table get operations
-    GetTabUp, // R[A] := UpValue[B][K[C]:string]
-    GetTable, // R[A] := R[B][R[C]]
-    GetI,     // R[A] := R[B][C]
-    GetField, // R[A] := R[B][K[C]:string]
+    GetTabUp,   // A B C    R[A] := UpValue[B][K[C]:shortstring]
+    GetTable,   // A B C    R[A] := R[B][R[C]]
+    GetI,       // A B C    R[A] := R[B][C]
+    GetField,   // A B C    R[A] := R[B][K[C]:shortstring]
 
     // Table set operations
-    SetTabUp, // UpValue[A][K[B]:string] := RK(C)
-    SetTable, // R[A][R[B]] := RK(C)
-    SetI,     // R[A][B] := RK(C)
-    SetField, // R[A][K[B]:string] := RK(C)
+    SetTabUp,   // A B C    UpValue[A][K[B]:shortstring] := RK(C)
+    SetTable,   // A B C    R[A][R[B]] := RK(C)
+    SetI,       // A B C    R[A][B] := RK(C)
+    SetField,   // A B C    R[A][K[B]:shortstring] := RK(C)
 
     // Table creation
-    NewTable, // R[A] := {}
+    NewTable,   // A vB vC k  R[A] := {} (ivABC format)
 
-    // Self call
-    Self_, // R[A+1] := R[B]; R[A] := R[B][RK(C):string]
+    // Self call (method call syntax)
+    Self_,      // A B C    R[A+1] := R[B]; R[A] := R[B][K[C]:shortstring]
 
-    // Arithmetic with immediate/constant
-    AddI,  // R[A] := R[B] + sC
-    AddK,  // R[A] := R[B] + K[C]:number
-    SubK,  // R[A] := R[B] - K[C]:number
-    MulK,  // R[A] := R[B] * K[C]:number
-    ModK,  // R[A] := R[B] % K[C]:number
-    PowK,  // R[A] := R[B] ^ K[C]:number
-    DivK,  // R[A] := R[B] / K[C]:number
-    IDivK, // R[A] := R[B] // K[C]:number
+    // Arithmetic with immediate
+    AddI,       // A B sC   R[A] := R[B] + sC
 
-    // Bitwise with constant
-    BAndK, // R[A] := R[B] & K[C]:integer
-    BOrK,  // R[A] := R[B] | K[C]:integer
-    BXorK, // R[A] := R[B] ~ K[C]:integer
+    // Arithmetic with constant
+    AddK,       // A B C    R[A] := R[B] + K[C]:number
+    SubK,       // A B C    R[A] := R[B] - K[C]:number
+    MulK,       // A B C    R[A] := R[B] * K[C]:number
+    ModK,       // A B C    R[A] := R[B] % K[C]:number
+    PowK,       // A B C    R[A] := R[B] ^ K[C]:number
+    DivK,       // A B C    R[A] := R[B] / K[C]:number
+    IDivK,      // A B C    R[A] := R[B] // K[C]:number
 
-    // Shift operations
-    ShrI, // R[A] := R[B] >> sC
-    ShlI, // R[A] := sC << R[B]
+    // Bitwise operations with constant
+    BAndK,      // A B C    R[A] := R[B] & K[C]:integer
+    BOrK,       // A B C    R[A] := R[B] | K[C]:integer
+    BXorK,      // A B C    R[A] := R[B] ~ K[C]:integer
+
+    // Shift operations with immediate
+    ShlI,       // A B sC   R[A] := sC << R[B]
+    ShrI,       // A B sC   R[A] := R[B] >> sC
 
     // Arithmetic operations (register-register)
-    Add,  // R[A] := R[B] + R[C]
-    Sub,  // R[A] := R[B] - R[C]
-    Mul,  // R[A] := R[B] * R[C]
-    Mod,  // R[A] := R[B] % R[C]
-    Pow,  // R[A] := R[B] ^ R[C]
-    Div,  // R[A] := R[B] / R[C]
-    IDiv, // R[A] := R[B] // R[C]
+    Add,        // A B C    R[A] := R[B] + R[C]
+    Sub,        // A B C    R[A] := R[B] - R[C]
+    Mul,        // A B C    R[A] := R[B] * R[C]
+    Mod,        // A B C    R[A] := R[B] % R[C]
+    Pow,        // A B C    R[A] := R[B] ^ R[C]
+    Div,        // A B C    R[A] := R[B] / R[C]
+    IDiv,       // A B C    R[A] := R[B] // R[C]
 
     // Bitwise operations (register-register)
-    BAnd, // R[A] := R[B] & R[C]
-    BOr,  // R[A] := R[B] | R[C]
-    BXor, // R[A] := R[B] ~ R[C]
-    Shl,  // R[A] := R[B] << R[C]
-    Shr,  // R[A] := R[B] >> R[C]
+    BAnd,       // A B C    R[A] := R[B] & R[C]
+    BOr,        // A B C    R[A] := R[B] | R[C]
+    BXor,       // A B C    R[A] := R[B] ~ R[C]
+    Shl,        // A B C    R[A] := R[B] << R[C]
+    Shr,        // A B C    R[A] := R[B] >> R[C]
 
-    // Metamethod binary operations
-    MmBin,  // call C metamethod over R[A] and R[B]
-    MmBinI, // call C metamethod over R[A] and sB
-    MmBinK, // call C metamethod over R[A] and K[B]
+    // Metamethod fallback operations
+    MmBin,      // A B C    call C metamethod over R[A] and R[B]
+    MmBinI,     // A sB C k call C metamethod over R[A] and sB
+    MmBinK,     // A B C k  call C metamethod over R[A] and K[B]
 
     // Unary operations
-    Unm,  // R[A] := -R[B]
-    BNot, // R[A] := ~R[B]
-    Not,  // R[A] := not R[B]
-    Len,  // R[A] := #R[B]
+    Unm,        // A B      R[A] := -R[B]
+    BNot,       // A B      R[A] := ~R[B]
+    Not,        // A B      R[A] := not R[B]
+    Len,        // A B      R[A] := #R[B] (length operator)
 
-    // Concatenation
-    Concat, // R[A] := R[A].. ... ..R[A + B - 1]
+    // String concatenation
+    Concat,     // A B      R[A] := R[A].. ... ..R[A + B - 1]
 
     // Upvalue management
-    Close, // close all upvalues >= R[A]
-    Tbc,   // mark variable A "to be closed"
+    Close,      // A        close all upvalues >= R[A]
+    Tbc,        // A        mark variable A "to be closed"
 
-    // Jump
-    Jmp, // pc += sJ
+    // Control flow
+    Jmp,        // sJ       pc += sJ
 
-    // Comparison operations
-    Eq, // if ((R[A] == R[B]) ~= k) then pc++
-    Lt, // if ((R[A] <  R[B]) ~= k) then pc++
-    Le, // if ((R[A] <= R[B]) ~= k) then pc++
+    // Comparison operations (register-register)
+    Eq,         // A B k    if ((R[A] == R[B]) ~= k) then pc++
+    Lt,         // A B k    if ((R[A] <  R[B]) ~= k) then pc++
+    Le,         // A B k    if ((R[A] <= R[B]) ~= k) then pc++
 
     // Comparison with constant/immediate
-    EqK, // if ((R[A] == K[B]) ~= k) then pc++
-    EqI, // if ((R[A] == sB) ~= k) then pc++
-    LtI, // if ((R[A] < sB) ~= k) then pc++
-    LeI, // if ((R[A] <= sB) ~= k) then pc++
-    GtI, // if ((R[A] > sB) ~= k) then pc++
-    GeI, // if ((R[A] >= sB) ~= k) then pc++
+    EqK,        // A B k    if ((R[A] == K[B]) ~= k) then pc++
+    EqI,        // A sB k   if ((R[A] == sB) ~= k) then pc++
+    LtI,        // A sB k   if ((R[A] < sB) ~= k) then pc++
+    LeI,        // A sB k   if ((R[A] <= sB) ~= k) then pc++
+    GtI,        // A sB k   if ((R[A] > sB) ~= k) then pc++
+    GeI,        // A sB k   if ((R[A] >= sB) ~= k) then pc++
 
-    // Test operations
-    Test,    // if (not R[A] == k) then pc++
-    TestSet, // if (not R[B] == k) then pc++ else R[A] := R[B]
+    // Conditional tests
+    Test,       // A k      if (not R[A] == k) then pc++
+    TestSet,    // A B k    if (not R[B] == k) then pc++ else R[A] := R[B]
 
-    // Call operations
-    Call,     // R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
-    TailCall, // return R[A](R[A+1], ... ,R[A+B-1])
+    // Function calls
+    Call,       // A B C    R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
+    TailCall,   // A B C k  return R[A](R[A+1], ... ,R[A+B-1])
 
     // Return operations
-    Return,  // return R[A], ... ,R[A+B-2]
-    Return0, // return
-    Return1, // return R[A]
+    Return,     // A B C k  return R[A], ... ,R[A+B-2]
+    Return0,    //          return
+    Return1,    // A        return R[A]
 
-    // For loops
-    ForLoop, // update counters; if loop continues then pc-=Bx;
-    ForPrep, // <check values and prepare counters>; if not to run then pc+=Bx+1;
+    // Numeric for loops
+    ForLoop,    // A Bx     update counters; if loop continues then pc-=Bx;
+    ForPrep,    // A Bx     <check values and prepare counters>; if not to run then pc+=Bx+1;
 
     // Generic for loops
-    TForPrep, // create upvalue for R[A + 3]; pc+=Bx
-    TForCall, // R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2])
-    TForLoop, // if R[A+2] ~= nil then { R[A]=R[A+2]; pc -= Bx }
+    TForPrep,   // A Bx     create upvalue for R[A + 3]; pc+=Bx
+    TForCall,   // A C      R[A+4], ... ,R[A+3+C] := R[A](R[A+1], R[A+2])
+    TForLoop,   // A Bx     if R[A+2] ~= nil then { R[A]=R[A+2]; pc -= Bx }
 
     // Table list initialization
-    SetList, // R[A][C+i] := R[A+i], 1 <= i <= B
+    SetList,    // A vB vC k R[A][vC+i] := R[A+i], 1 <= i <= vB (ivABC format)
 
     // Closure creation
-    Closure, // R[A] := closure(KPROTO[Bx])
+    Closure,    // A Bx     R[A] := closure(KPROTO[Bx])
 
     // Vararg operations
-    Vararg,  // R[A], R[A+1], ..., R[A+C-2] = vararg
-    GetVarg, // R[A] := R[B][R[C]], R[B] is vararg parameter (Lua 5.5)
+    Vararg,     // A B C k  R[A], ..., R[A+C-2] = varargs
+    GetVarg,    // A B C    R[A] := R[B][R[C]], R[B] is vararg parameter (Lua 5.5)
 
-    // Error checking for global variables (Lua 5.5)
-    ErrNNil, // raise error if R[A] ~= nil (K[Bx - 1] is global name)
+    // Error checking for globals (Lua 5.5)
+    ErrNNil,    // A Bx     raise error if R[A] ~= nil (K[Bx - 1] is global name)
 
-    VarargPrep, // (adjust vararg parameters)
+    // Vararg preparation
+    VarargPrep, //          (adjust varargs)
 
-    // Extra argument
-    ExtraArg, // extra (larger) argument for previous opcode
+    // Extra argument for previous instruction
+    ExtraArg,   // Ax       extra (larger) argument for previous opcode
 }
 
 impl OpCode {
@@ -168,26 +177,20 @@ impl OpCode {
     /// Check if instruction uses "top" (IT mode - In Top)
     /// These instructions depend on the value of 'top' from previous instruction
     /// For all other instructions, top should be reset to base + nactvar
-    #[inline(always)]
-    /// Check if this opcode uses "top" from previous instruction (isIT in Lua 5.4)
-    /// These instructions expect top to be set correctly by previous instruction.
-    /// For all other instructions, Lua 5.4 resets top = base before execution.
     ///
-    /// From Lua 5.4 lopcodes.c:
+    /// From Lua 5.5 lopcodes.c:
     /// - CALL: IT=1 (uses top for vararg count)
     /// - TAILCALL: IT=1
     /// - RETURN: IT=1 (uses top for return count)
     /// - SETLIST: IT=1 (uses top for list size)
     /// - VARARGPREP: IT=1 (sets up varargs)
-    ///
-    /// Note: RETURN0, RETURN1, Vararg, Concat are NOT IT instructions in Lua 5.4!
     pub fn uses_top(self) -> bool {
         use OpCode::*;
         matches!(self, Call | TailCall | Return | SetList | VarargPrep)
     }
 
     /// Get the instruction format mode for this opcode
-    /// Based on Lua 5.4 lopcodes.c luaP_opmodes table
+    /// Based on Lua 5.5 lopcodes.c luaP_opmodes table
     pub fn get_mode(self) -> OpMode {
         use OpCode::*;
         match self {
@@ -195,7 +198,7 @@ impl OpCode {
             LoadI | LoadF => OpMode::IAsBx,
 
             // iABx format (unsigned Bx)
-            LoadK | LoadKX | ForLoop | ForPrep | TForPrep | TForLoop | Closure => OpMode::IABx,
+            LoadK | LoadKX | ForLoop | ForPrep | TForPrep | TForLoop | Closure | ErrNNil => OpMode::IABx,
 
             // isJ format (signed jump)
             Jmp => OpMode::IsJ,
@@ -203,7 +206,10 @@ impl OpCode {
             // iAx format
             ExtraArg => OpMode::IAx,
 
-            // iABC format (everything else, including TFORCALL)
+            // ivABC format (variable-size B and C fields)
+            NewTable | SetList => OpMode::IvABC,
+
+            // iABC format (everything else)
             _ => OpMode::IABC,
         }
     }

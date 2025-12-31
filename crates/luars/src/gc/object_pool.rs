@@ -15,6 +15,7 @@ use crate::{
     FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
     LuaValue, StringId, TableId, ThreadId, UpvalueId, UserdataId,
 };
+use std::cell::RefCell;
 use std::rc::Rc;
 
 // ============ Pool Storage ============
@@ -1161,19 +1162,14 @@ impl ObjectPool {
     pub fn create_thread(&mut self, thread: LuaState) -> ThreadId {
         let gc_thread = GcThread {
             header: GcHeader::default(),
-            data: thread,
+            data: Rc::new(RefCell::new(thread)),
         };
         ThreadId(self.threads.alloc(gc_thread))
     }
 
     #[inline(always)]
-    pub fn get_thread(&self, id: ThreadId) -> Option<&LuaState> {
-        self.threads.get(id.0).map(|gt| &gt.data)
-    }
-
-    #[inline(always)]
-    pub fn get_thread_mut(&mut self, id: ThreadId) -> Option<&mut LuaState> {
-        self.threads.get_mut(id.0).map(|gt| &mut gt.data)
+    pub fn get_thread(&self, id: ThreadId) -> Option<Rc<RefCell<LuaState>>> {
+        self.threads.get(id.0).map(|gt| gt.data.clone())
     }
 
     #[inline(always)]

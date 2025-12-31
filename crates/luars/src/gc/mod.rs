@@ -594,7 +594,7 @@ impl GC {
             }
             GcObjectType::Thread => {
                 if let Some(thread) = pool.threads.get(gc_id.index()) {
-                    let stack = thread.data.stack().to_vec();
+                    let stack = thread.data.borrow().stack().to_vec();
 
                     if let Some(t) = pool.threads.get_mut(gc_id.index()) {
                         if t.header.is_gray() {
@@ -1274,13 +1274,13 @@ impl GC {
                         }
                     }
                 }
-                crate::lua_value::LuaValueKind::Thread => {
+                LuaValueKind::Thread => {
                     if let Some(id) = value.as_thread_id() {
                         // Collect stack values first
                         let stack_values = {
                             if let Some(thread) = pool.threads.get(id.0) {
                                 if thread.header.is_white() {
-                                    Some(thread.data.stack().to_vec())
+                                    Some(thread.data.borrow().stack().to_vec())
                                 } else {
                                     None
                                 }

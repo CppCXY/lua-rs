@@ -2,7 +2,6 @@
 // Executes compiled bytecode with register-based architecture
 mod call_info;
 mod execute;
-mod lua_context;
 mod lua_error;
 mod lua_state;
 mod opcode;
@@ -11,17 +10,17 @@ use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
 use crate::lua_value::{Chunk, LuaString, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
-pub use crate::lua_vm::lua_context::LuaContext;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 use crate::{lib_registry, ObjectPool};
 pub use opcode::{Instruction, OpCode};
+use std::ptr::null_mut;
 use std::rc::Rc;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
 /// Now takes LuaContext instead of LuaVM for better ergonomics
-pub type CFunction = fn(&mut LuaContext) -> LuaResult<usize>;
+pub type CFunction = fn(&mut LuaState) -> LuaResult<usize>;
 
 /// Maximum call stack depth (similar to LUAI_MAXCCALLS in Lua)
 pub const MAX_CALL_DEPTH: usize = 200;
@@ -55,9 +54,13 @@ impl LuaVM {
             registry: TableId(1),
             object_pool: ObjectPool::new(),
             gc: GC::new(),
-            main_state: LuaState::new(6),
+            main_state: LuaState::new(6, null_mut()),
             string_mt: None,
         };
+
+        let ptr_vm: *mut LuaVM = &mut vm as *mut LuaVM;
+        // Set LuaVM pointer in main_state
+        vm.main_state.set_vm(ptr_vm);
 
         // Initialize registry (like Lua's init_registry)
         // Registry is a GC root and protects all values stored in it
@@ -214,12 +217,9 @@ impl LuaVM {
 
     // ============ Coroutine Support ============
 
-    /// Initial call depth for coroutines (grows on demand, like Lua's linked list CallInfo)
-    const INITIAL_COROUTINE_CALL_DEPTH: usize = 4;
-
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
     /// OPTIMIZED: Minimal initial allocations - grows on demand
-    pub fn create_thread_value(&mut self, func: LuaValue) -> LuaValue {
+    pub fn create_thread(&mut self, func: LuaValue) -> LuaValue {
         // Only allocate capacity, don't pre-fill (unlike main VM)
         // Coroutines typically have shallow call stacks, so we grow on demand
         const INITIAL_COROUTINE_CALL_DEPTH: usize = 16;
@@ -229,7 +229,7 @@ impl LuaVM {
         let mut _register_stack = Vec::with_capacity(64);
         _register_stack.push(func);
 
-        let thread = LuaState::new(1);
+        let thread = LuaState::new(1, self as *mut LuaVM);
 
         // Create thread in ObjectPool and return LuaValue
         let thread_id = self.object_pool.create_thread(thread);
@@ -264,6 +264,16 @@ impl LuaVM {
     #[inline(always)]
     pub fn table_get(&self, _table_value: &LuaValue, _key: &LuaValue) -> Option<LuaValue> {
         None
+    }
+
+    #[inline(always)]
+    pub fn table_set(
+        &mut self,
+        _lua_table_val: &LuaValue,
+        _key: LuaValue,
+        _value: LuaValue,
+    ) -> bool {
+        false
     }
 
     /// Get value from table with metatable support (__index metamethod)

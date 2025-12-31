@@ -1,6 +1,6 @@
 // ============ GC Header ============
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{lua_vm::{CFunction, LuaState}, Chunk, LuaString, LuaTable, LuaValue, UpvalueId};
 
@@ -321,5 +321,5 @@ pub struct GcString {
 /// Thread (coroutine) with embedded GC header
 pub struct GcThread {
     pub header: GcHeader,
-    pub data: LuaState,
+    pub data: Rc<RefCell<LuaState>>,
 }

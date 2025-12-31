@@ -2,13 +2,17 @@
 // Represents a single thread/coroutine execution context
 // Multiple LuaStates can share the same LuaVM (global_State)
 
+use std::rc::Rc;
+
 use crate::gc::UpvalueId;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
+use crate::{Chunk, LuaVM};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
 pub struct LuaState {
+    vm: *mut LuaVM,
     /// Data stack - stores all values (registers, temporaries, function arguments)
     /// Layout: [frame0_values...][frame1_values...][frame2_values...]
     /// Similar to Lua's TValue stack[] in lua_State
@@ -44,8 +48,9 @@ impl LuaState {
 
     /// Create a new execution state
     /// 按需分配，而不是预分配 200 个 CallInfo（像 Lua 5.4）
-    pub fn new(call_stack_size: usize) -> Self {
+    pub fn new(call_stack_size: usize, vm: *mut LuaVM) -> Self {
         Self {
+            vm,
             stack: Vec::with_capacity(Self::INITIAL_STACK_SIZE),
             // 初始只分配很小的容量，按需增长（Lua 5.4 初始只有 1 个）
             call_stack: Vec::with_capacity(call_stack_size),
@@ -55,6 +60,10 @@ impl LuaState {
             hook_mask: 0,
             hook_count: 0,
         }
+    }
+
+    pub(crate) fn set_vm(&mut self, vm: *mut LuaVM) {
+        self.vm = vm;
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)
@@ -104,8 +113,8 @@ impl LuaState {
 
     /// Get stack value at absolute index
     #[inline(always)]
-    pub fn stack_get(&self, index: usize) -> LuaValue {
-        self.stack.get(index).copied().unwrap_or(LuaValue::nil())
+    pub fn stack_get(&self, index: usize) -> Option<LuaValue> {
+        self.stack.get(index).copied()
     }
 
     /// Set stack value at absolute index
@@ -119,11 +128,11 @@ impl LuaState {
 
     /// Get register relative to current frame base
     #[inline(always)]
-    pub fn reg_get(&self, reg: u8) -> LuaValue {
+    pub fn reg_get(&self, reg: u8) -> Option<LuaValue> {
         if let Some(frame) = self.current_frame() {
             self.stack_get(frame.base + reg as usize)
         } else {
-            LuaValue::nil()
+            None
         }
     }
 
@@ -196,8 +205,9 @@ impl LuaState {
                 if let Some(stack_idx) = upval.get_stack_index() {
                     if stack_idx >= level {
                         // Close this upvalue - copy stack value to closed storage
-                        let value = self.stack_get(stack_idx);
-                        upval.close(value);
+                        if let Some(value) = self.stack_get(stack_idx) {
+                            upval.close(value);
+                        }
                         self.open_upvalues.remove(i);
                         continue;
                     }
@@ -211,10 +221,54 @@ impl LuaState {
     pub fn stack(&self) -> &[LuaValue] {
         &self.stack
     }
+
+    fn vm_mut(&mut self) -> &mut LuaVM {
+        unsafe { &mut *self.vm }
+    }
+    // ===== Object Creation =====
+
+    /// Create table
+    pub fn create_table(&mut self, narr: usize, nrec: usize) -> LuaValue {
+        self.vm_mut().create_table(narr, nrec)
+    }
+
+    /// Create function closure
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvalueId>) -> LuaValue {
+        self.vm_mut().create_function(chunk, upvalues)
+    }
+
+    /// Create/intern string (automatically handles short string interning)
+    pub fn create_string(&mut self, s: &str) -> LuaValue {
+        self.vm_mut().create_string(s)
+    }
+
+    // ===== Global Access =====
+
+    /// Get global variable
+    pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
+        self.vm_mut().get_global(name)
+    }
+
+    /// Set global variable
+    pub fn set_global(&mut self, name: &str, value: LuaValue) {
+        self.vm_mut().set_global(name, value);
+    }
+
+    // ===== Table Operations =====
+
+    /// Get value from table
+    pub fn table_get(&mut self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        self.vm_mut().table_get(table, key)
+    }
+
+    /// Set value in table
+    pub fn table_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
+        self.vm_mut().table_set(table, key, value)
+    }
 }
 
 impl Default for LuaState {
     fn default() -> Self {
-        Self::new(1)
+        Self::new(1, std::ptr::null_mut())
     }
 }
