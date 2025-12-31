@@ -761,6 +761,290 @@ fn execute_with_chunk(
             }
             
             // ============================================================
+            // LOGICAL OPERATIONS
+            // ============================================================
+            
+            OpCode::Not => {
+                // R[A] := not R[B]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    // l_isfalse: nil or false
+                    let is_false = (*rb).tt_ == LUA_VFALSE || (*rb).is_nil();
+                    if is_false {
+                        setbtvalue(ra);
+                    } else {
+                        setbfvalue(ra);
+                    }
+                }
+            }
+            
+            // ============================================================
+            // FOR LOOP OPERATIONS
+            // ============================================================
+            
+            OpCode::ForLoop => {
+                // Numeric for loop
+                // If integer: check counter, decrement, add step, jump back
+                // If float: add step, check limit, jump back
+                let a = instr.get_a() as usize;
+                let bx = instr.get_bx() as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    
+                    // Check if integer loop
+                    if ttisinteger(ra.add(1)) {
+                        // Integer loop
+                        // ra: counter (count of iterations left)
+                        // ra+1: step
+                        // ra+2: control variable (idx)
+                        let count = ivalue(ra) as u64;  // unsigned count
+                        if count > 0 {
+                            // More iterations
+                            let step = ivalue(ra.add(1));
+                            let mut idx = ivalue(ra.add(2));
+                            
+                            // Update counter (decrement)
+                            setivalue(ra, (count - 1) as i64);
+                            
+                            // Update control variable: idx += step
+                            idx = idx.wrapping_add(step);
+                            setivalue(ra.add(2), idx);
+                            
+                            // Jump back
+                            if bx > pc {
+                                lua_state.set_frame_pc(frame_idx, pc as u32);
+                                return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
+                            }
+                            pc -= bx;
+                        }
+                        // else: counter expired, exit loop
+                    } else {
+                        // Float loop
+                        // ra: limit
+                        // ra+1: step  
+                        // ra+2: idx (control variable)
+                        let step = fltvalue(ra.add(1));
+                        let limit = fltvalue(ra);
+                        let mut idx = fltvalue(ra.add(2));
+                        
+                        // idx += step
+                        idx += step;
+                        
+                        // Check if should continue
+                        let should_continue = if step > 0.0 {
+                            idx <= limit
+                        } else {
+                            idx >= limit
+                        };
+                        
+                        if should_continue {
+                            // Update control variable
+                            setfltvalue(ra.add(2), idx);
+                            
+                            // Jump back
+                            if bx > pc {
+                                lua_state.set_frame_pc(frame_idx, pc as u32);
+                                return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
+                            }
+                            pc -= bx;
+                        }
+                        // else: exit loop
+                    }
+                }
+            }
+            
+            OpCode::ForPrep => {
+                // Prepare numeric for loop
+                // Input: ra=init, ra+1=limit, ra+2=step
+                // Output (integer): ra=counter, ra+1=step, ra+2=idx
+                // Output (float): ra=limit, ra+1=step, ra+2=idx
+                let a = instr.get_a() as usize;
+                let bx = instr.get_bx() as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    let pinit = ra;
+                    let plimit = ra.add(1);
+                    let pstep = ra.add(2);
+                    
+                    // Check if integer loop
+                    if ttisinteger(pinit) && ttisinteger(pstep) {
+                        // Integer loop
+                        let init = ivalue(pinit);
+                        let step = ivalue(pstep);
+                        
+                        if step == 0 {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("'for' step is zero".to_string()));
+                        }
+                        
+                        // Get limit (may need conversion)
+                        let mut limit = 0i64;
+                        if ttisinteger(plimit) {
+                            limit = ivalue(plimit);
+                        } else if ttisfloat(plimit) {
+                            let flimit = fltvalue(plimit);
+                            if step < 0 {
+                                limit = flimit.ceil() as i64;
+                            } else {
+                                limit = flimit.floor() as i64;
+                            }
+                        } else {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("'for' limit must be a number".to_string()));
+                        }
+                        
+                        // Check if loop should run
+                        let should_skip = if step > 0 {
+                            init > limit
+                        } else {
+                            init < limit
+                        };
+                        
+                        if should_skip {
+                            // Skip loop
+                            pc += bx + 1;
+                        } else {
+                            // Prepare loop counter
+                            let count = if step > 0 {
+                                ((limit as u64).wrapping_sub(init as u64)) / (step as u64)
+                            } else {
+                                let step_abs = if step == i64::MIN {
+                                    i64::MAX as u64 + 1
+                                } else {
+                                    (-step) as u64
+                                };
+                                ((init as u64).wrapping_sub(limit as u64)) / step_abs
+                            };
+                            
+                            // Setup: ra=counter, ra+1=step, ra+2=idx
+                            setivalue(ra, count as i64);
+                            setivalue(ra.add(1), step);
+                            setivalue(ra.add(2), init);
+                        }
+                    } else {
+                        // Float loop
+                        let mut init = 0.0;
+                        let mut limit = 0.0;
+                        let mut step = 0.0;
+                        
+                        if !tonumberns(plimit, &mut limit) {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("'for' limit must be a number".to_string()));
+                        }
+                        if !tonumberns(pstep, &mut step) {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("'for' step must be a number".to_string()));
+                        }
+                        if !tonumberns(pinit, &mut init) {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("'for' initial value must be a number".to_string()));
+                        }
+                        
+                        if step == 0.0 {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("'for' step is zero".to_string()));
+                        }
+                        
+                        // Check if loop should run
+                        let should_skip = if step > 0.0 {
+                            limit < init
+                        } else {
+                            init < limit
+                        };
+                        
+                        if should_skip {
+                            // Skip loop
+                            pc += bx + 1;
+                        } else {
+                            // Setup: ra=limit, ra+1=step, ra+2=idx
+                            setfltvalue(ra, limit);
+                            setfltvalue(ra.add(1), step);
+                            setfltvalue(ra.add(2), init);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::TForPrep => {
+                // Prepare generic for loop
+                // Before: ra=iterator, ra+1=state, ra+2=control, ra+3=closing
+                // After: ra=iterator, ra+1=state, ra+2=closing(tbc), ra+3=control
+                // Then jump to loop end (where TFORCALL is)
+                let a = instr.get_a() as usize;
+                let bx = instr.get_bx() as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    
+                    // Swap control and closing variables
+                    let temp = *ra.add(3);  // closing
+                    *ra.add(3) = *ra.add(2);  // control -> closing position
+                    *ra.add(2) = temp;  // closing -> control position
+                    
+                    // TODO: Mark ra+2 as to-be-closed if not nil
+                    // For now, skip TBC handling
+                    
+                    // Jump to loop end (+ Bx)
+                    pc += bx;
+                }
+            }
+            
+            OpCode::TForCall => {
+                // Generic for loop call
+                // Call: ra+3,ra+4,...,ra+2+C := ra(ra+1, ra+2)
+                // ra=iterator, ra+1=state, ra+2=closing, ra+3=control
+                let a = instr.get_a() as usize;
+                let _c = instr.get_c() as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    
+                    // Setup call stack:
+                    // ra+3: function (copy from ra)
+                    // ra+4: arg1 (copy from ra+1, state)
+                    // ra+5: arg2 (copy from ra+2, closing/control)
+                    *ra.add(5) = *ra.add(3);  // copy control variable
+                    *ra.add(4) = *ra.add(1);  // copy state
+                    *ra.add(3) = *ra;         // copy iterator function
+                    
+                    // TODO: Call function at ra+3
+                    // For now, just fall through to TFORLOOP
+                    // The next instruction should be TFORLOOP
+                }
+            }
+            
+            OpCode::TForLoop => {
+                // Generic for loop test
+                // If ra+3 != nil then ra+2 = ra+3 and jump back
+                let a = instr.get_a() as usize;
+                let bx = instr.get_bx() as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    
+                    // Check if ra+3 (new control value) is not nil
+                    if !(*ra.add(3)).is_nil() {
+                        // Continue loop: update control variable and jump back
+                        *ra.add(2) = *ra.add(3);
+                        
+                        if bx > pc {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("TFORLOOP: invalid jump".to_string()));
+                        }
+                        pc -= bx;
+                    }
+                    // else: exit loop (control variable is nil)
+                }
+            }
+            
+            // ============================================================
             // UNIMPLEMENTED OPCODES
             // ============================================================
             
