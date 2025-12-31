@@ -223,9 +223,6 @@ pub fn handle_mmbink(
 
 /// Try binary metamethod
 /// Corresponds to luaT_trybinTM in ltm.c
-///
-/// NOTE: This is a simplified implementation
-/// Full implementation requires proper function call mechanism
 fn try_bin_tm(
     lua_state: &mut LuaState,
     _p1: LuaValue,
@@ -233,13 +230,14 @@ fn try_bin_tm(
     tm: TmKind,
 ) -> LuaResult<LuaValue> {
     // TODO: Implement proper metamethod lookup and call
-    // For now, just return an error
-    // Proper implementation needs:
-    // 1. Get metatable from p1 or p2
+    // For now, just return an error since we don't have metamethod support yet
+    // Full implementation needs:
+    // 1. Get metatable from p1 or p2 via vm_mut().get_metatable()
     // 2. Lookup metamethod by name in metatable
     // 3. If found, call it with (p1, p2) as arguments
     // 4. Return result
-
+    
+    // No metamethod found, return error
     let msg = match tm {
         TmKind::Band | TmKind::Bor | TmKind::Bxor | TmKind::Shl | TmKind::Shr | TmKind::Bnot => {
             "attempt to perform bitwise operation on non-number values"

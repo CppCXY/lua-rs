@@ -47,6 +47,10 @@ pub struct CallInfo {
     /// Call status flags (CIST_*)
     /// Equivalent to Lua's CallInfo.callstatus
     pub call_status: u8,
+
+    /// Number of extra arguments in vararg functions
+    /// Equivalent to Lua's CallInfo.u.l.nextraargs
+    pub nextraargs: i32,
 }
 
 impl CallInfo {
@@ -59,6 +63,7 @@ impl CallInfo {
             pc: 0,
             nresults: -1,
             call_status: call_status::CIST_LUA,
+            nextraargs: 0,
         }
     }
 
@@ -71,6 +76,7 @@ impl CallInfo {
             pc: 0,
             nresults: -1,
             call_status: call_status::CIST_C,
+            nextraargs: 0,
         }
     }
 
@@ -108,6 +114,7 @@ impl Default for CallInfo {
             pc: 0,
             nresults: -1,
             call_status: 0,
+            nextraargs: 0,
         }
     }
 }

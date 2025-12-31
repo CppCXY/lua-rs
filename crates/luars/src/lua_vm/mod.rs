@@ -10,6 +10,7 @@ use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
 use crate::lua_value::{Chunk, LuaString, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
+use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 use crate::{ObjectPool, lib_registry};
@@ -178,7 +179,7 @@ impl LuaVM {
 
     /// Main VM execution loop (equivalent to luaV_execute)
     fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
-        // TODO: Implement the actual instruction dispatch loop
+        lua_execute(&mut self.main_state)?;
         Ok(vec![])
     }
 

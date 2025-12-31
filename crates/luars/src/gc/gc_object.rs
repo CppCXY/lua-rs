@@ -307,6 +307,13 @@ impl GcUpvalue {
         self.closed_value = value;
     }
 
+    /// Close upvalue with given value (used during stack unwinding)
+    #[inline]
+    pub unsafe fn close_with_value(&mut self, value: LuaValue) {
+        self.closed_value = value;
+        self.is_open = false;
+    }
+
     /// Get closed value reference directly without Option
     /// SAFETY: Must only be called when upvalue is in Closed state
     #[inline(always)]

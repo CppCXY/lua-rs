@@ -1139,6 +1139,31 @@ impl ObjectPool {
         unsafe { self.upvalues.get_mut_unchecked(id.0) }
     }
 
+    /// Iterator over all upvalues
+    pub fn iter_upvalues(&self) -> impl Iterator<Item = (UpvalueId, &GcUpvalue)> {
+        self.upvalues
+            .iter()
+            .map(|(idx, upval)| (UpvalueId(idx), upval))
+    }
+
+    /// Create upvalue from LuaUpvalue
+    pub fn create_upvalue(&mut self, upvalue: std::rc::Rc<crate::lua_value::LuaUpvalue>) -> UpvalueId {
+        // Check if open and get stack index
+        let (is_open, stack_index, closed_value) = if upvalue.is_open() {
+            (true, upvalue.get_stack_index().unwrap_or(0), LuaValue::nil())
+        } else {
+            (false, 0, upvalue.get_closed_value().unwrap_or(LuaValue::nil()))
+        };
+
+        let gc_uv = GcUpvalue {
+            header: GcHeader::default(),
+            stack_index,
+            closed_value,
+            is_open,
+        };
+        UpvalueId(self.upvalues.alloc(gc_uv))
+    }
+
     // ==================== Userdata Operations ====================
 
     #[inline]

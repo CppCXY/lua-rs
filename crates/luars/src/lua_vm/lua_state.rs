@@ -100,6 +100,7 @@ impl LuaState {
             pc: 0,
             nresults: -1, // Variable results by default
             call_status: 0,
+            nextraargs: 0,
         };
 
         self.call_stack.push(frame);
@@ -283,6 +284,62 @@ impl LuaState {
     pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
         unsafe { &mut *self.vm }
     }
+
+    // ===== Call Frame Management =====
+
+    /// Get current CallInfo by index
+    #[inline(always)]
+    pub fn get_call_info(&self, idx: usize) -> &CallInfo {
+        &self.call_stack[idx]
+    }
+
+    /// Get mutable CallInfo by index
+    #[inline(always)]
+    pub fn get_call_info_mut(&mut self, idx: usize) -> &mut CallInfo {
+        &mut self.call_stack[idx]
+    }
+
+    /// Set stack top to new position
+    #[inline(always)]
+    pub fn set_top(&mut self, new_top: usize) {
+        if new_top > self.stack.len() {
+            self.stack.resize(new_top, LuaValue::nil());
+        }
+        // Note: We don't shrink the stack here for performance
+    }
+
+    /// Pop the current call frame
+    #[inline]
+    pub fn pop_call_frame(&mut self) {
+        if !self.call_stack.is_empty() {
+            self.call_stack.pop();
+        }
+    }
+
+    /// Get return values from stack
+    /// Returns values from stack_base to stack_base + count
+    pub fn get_return_values(&self, stack_base: usize, count: usize) -> Vec<LuaValue> {
+        let mut results = Vec::with_capacity(count);
+        for i in 0..count {
+            if let Some(val) = self.stack_get(stack_base + i) {
+                results.push(val);
+            } else {
+                results.push(LuaValue::nil());
+            }
+        }
+        results
+    }
+
+    /// Get all return values from stack starting at stack_base
+    pub fn get_all_return_values(&self, stack_base: usize) -> Vec<LuaValue> {
+        let count = if self.stack.len() > stack_base {
+            self.stack.len() - stack_base
+        } else {
+            0
+        };
+        self.get_return_values(stack_base, count)
+    }
+
     // ===== Object Creation =====
 
     /// Create table

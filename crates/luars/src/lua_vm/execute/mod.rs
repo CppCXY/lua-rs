@@ -17,8 +17,11 @@
   This matches Lua's lvm.c design where everything is pointer-based
 ----------------------------------------------------------------------*/
 mod call;
+mod closure_handler;
 mod concat;
 mod metamethod;
+mod return_handler;
+
 use call::FrameAction;
 
 use std::rc::Rc;
@@ -1075,27 +1078,30 @@ fn execute_frame(
             }
             OpCode::Return => {
                 // return R[A], ..., R[A+B-2]
-                let _a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize;
-                let _c = instr.get_c() as usize;
-                let _k = instr.get_k();
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                let k = instr.get_k();
 
-                // TODO: Handle variable returns, close upvalues
                 // Update PC before returning
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return Ok(FrameAction::Return);
+                
+                return return_handler::handle_return(
+                    lua_state, stack_ptr, base, frame_idx, a, b, c, k
+                );
             }
             OpCode::Return0 => {
                 // return (no values)
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return Ok(FrameAction::Return);
+                return return_handler::handle_return0(lua_state, frame_idx);
             }
             OpCode::Return1 => {
                 // return R[A]
-                let _a = instr.get_a() as usize;
-                // TODO: copy return value to caller
+                let a = instr.get_a() as usize;
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return Ok(FrameAction::Return);
+                return return_handler::handle_return1(
+                    lua_state, stack_ptr, base, frame_idx, a
+                );
             }
             OpCode::GetUpval => {
                 // R[A] := UpValue[B]
@@ -1174,16 +1180,8 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let close_from = base + a;
 
-                // TODO: Implement upvalue closing
-                // This requires tracking open upvalues in LuaState
-                // For now, this is a no-op
-                // Proper implementation needs:
-                // 1. List of open upvalues in LuaState
-                // 2. Close all upvalues with stack_index >= close_from
-                // 3. Copy stack value to upvalue storage
-                // 4. Mark upvalue as closed
-
-                let _ = close_from; // Suppress unused warning
+                // Close upvalues at or above this level
+                closure_handler::close_upvalues_at_level(lua_state, close_from)?;
             }
             OpCode::Tbc => {
                 // Mark variable as to-be-closed
@@ -2356,49 +2354,219 @@ fn execute_frame(
             
             OpCode::Closure => {
                 // R[A] := closure(KPROTO[Bx])
-                let _a = instr.get_a() as usize;
-                let _bx = instr.get_bx() as usize;
-                // TODO: Implement closure creation
-                pc += 1;
+                let a = instr.get_a() as usize;
+                let bx = instr.get_bx() as usize;
+                
+                // Create closure from child prototype
+                closure_handler::handle_closure(
+                    lua_state,
+                    stack_ptr,
+                    base,
+                    a,
+                    bx,
+                    &chunk,
+                    &upvalues_vec,
+                )?;
             }
             
             OpCode::Vararg => {
                 // R[A], ..., R[A+C-2] = varargs
-                let _a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize;
-                let _c = instr.get_c() as usize;
-                let _k = instr.get_k();
-                // TODO: Implement vararg handling
-                pc += 1;
+                // Based on lvm.c:1936 and ltm.c:338 luaT_getvarargs
+                let a = instr.get_a() as usize;
+                let _b = instr.get_b() as usize;  // vatab register (if k flag set)
+                let c = instr.get_c() as usize;
+                let _k = instr.get_k();  // whether B specifies vararg table register
+                
+                // n = number of results wanted (C-1), -1 means all
+                let wanted = if c == 0 {
+                    -1  // Get all varargs
+                } else {
+                    (c - 1) as i32
+                };
+                
+                // Get nextraargs from CallInfo
+                let call_info = lua_state.get_call_info(frame_idx);
+                let nextra = call_info.nextraargs as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if nextra == 0 {
+                        // No varargs - fill with nil
+                        if wanted < 0 {
+                            // Getting all but there are none - stack top doesn't change
+                        } else {
+                            // Fill wanted slots with nil
+                            for i in 0..(wanted as usize) {
+                                setnilvalue(ra.add(i));
+                            }
+                        }
+                    } else if wanted < 0 {
+                        // Get all varargs
+                        // varargs are stored after fixed parameters in the current frame
+                        // They start at base - nextra (before the actual base)
+                        if nextra > 0 && base >= nextra {
+                            let vararg_start = base - nextra;
+                            for i in 0..nextra {
+                                let src = stack_ptr.add(vararg_start + i);
+                                let dst = ra.add(i);
+                                *dst = *src;
+                            }
+                            // Adjust stack top to include all varargs
+                            let new_top = base + a + nextra;
+                            lua_state.set_top(new_top);
+                        }
+                    } else {
+                        // Get exactly 'wanted' varargs
+                        let to_copy = if wanted as usize > nextra {
+                            nextra
+                        } else {
+                            wanted as usize
+                        };
+                        
+                        // Copy available varargs
+                        if nextra > 0 && base >= nextra && to_copy > 0 {
+                            let vararg_start = base - nextra;
+                            for i in 0..to_copy {
+                                let src = stack_ptr.add(vararg_start + i);
+                                let dst = ra.add(i);
+                                *dst = *src;
+                            }
+                        }
+                        
+                        // Fill remaining with nil
+                        for i in to_copy..(wanted as usize) {
+                            setnilvalue(ra.add(i));
+                        }
+                    }
+                }
             }
             
             OpCode::GetVarg => {
-                // R[A] := R[B][R[C]], R[B] is vararg parameter
-                let _a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize;
-                let _c = instr.get_c() as usize;
-                // TODO: Implement vararg access
-                pc += 1;
+                // R[A] := varargs[R[C]]
+                // Based on lvm.c:1943 and ltm.c:292 luaT_getvararg
+                // This is for accessing individual vararg elements or the count
+                let a = instr.get_a() as usize;
+                let _b = instr.get_b() as usize;  // unused in Lua 5.5
+                let c = instr.get_c() as usize;
+                
+                // Get nextraargs from CallInfo
+                let call_info = lua_state.get_call_info(frame_idx);
+                let nextra = call_info.nextraargs as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    let rc = stack_ptr.add(base + c);
+                    
+                    // Check if R[C] is string "n" (get vararg count)
+                    if let Some(string_id) = (*rc).as_string_id() {
+                        if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
+                            if s.as_str() == "n" {
+                                // Return vararg count
+                                setivalue(ra, nextra as i64);
+                                pc += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    
+                    // Check if R[C] is an integer (vararg index, 1-based)
+                    if ttisinteger(rc) {
+                        let index = ivalue(rc);
+                        
+                        // Check if index is valid (1 <= index <= nextraargs)
+                        if nextra > 0 && index >= 1 && (index as usize) <= nextra && base >= nextra {
+                            // Get value from varargs
+                            // varargs are stored before base
+                            let vararg_start = base - nextra;
+                            let src = stack_ptr.add(vararg_start + (index as usize) - 1);
+                            *ra = *src;
+                        } else {
+                            // Out of bounds or no varargs: return nil
+                            setnilvalue(ra);
+                        }
+                    } else {
+                        // Not integer or "n": return nil
+                        setnilvalue(ra);
+                    }
+                }
             }
             
             OpCode::ErrNNil => {
-                // raise error if R[A] ~= nil
-                let _a = instr.get_a() as usize;
-                let _bx = instr.get_bx() as usize;
-                // TODO: Implement error checking for non-nil globals
-                pc += 1;
+                // Raise error if R[A] is not nil (global already defined)
+                // Based on lvm.c:1949 and ldebug.c:817 luaG_errnnil
+                // This is used by the compiler to detect duplicate global definitions
+                let a = instr.get_a() as usize;
+                let bx = instr.get_bx() as usize;
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    
+                    // If value is not nil, it means the global is already defined
+                    if !(*ra).is_nil() {
+                        // Get global name from constants if bx > 0
+                        let global_name = if bx > 0 && bx - 1 < constants.len() {
+                            if let Some(string_id) = constants[bx - 1].as_string_id() {
+                                lua_state.vm_mut().object_pool
+                                    .get_string(string_id)
+                                    .map(|s| s.as_str().to_string())
+                                    .unwrap_or_else(|| "?".to_string())
+                            } else {
+                                "?".to_string()
+                            }
+                        } else {
+                            "?".to_string()
+                        };
+                        
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error(format!(
+                            "global '{}' already defined",
+                            global_name
+                        )));
+                    }
+                }
             }
             
             OpCode::VarargPrep => {
                 // Adjust varargs (prepare vararg function)
-                // TODO: Implement vararg preparation
-                pc += 1;
+                // Based on lvm.c:1955 and ltm.c:272 luaT_adjustvarargs
+                let c = instr.get_c() as usize; // number of fixed parameters
+                
+                // Calculate total arguments and extra arguments
+                let call_info = lua_state.get_call_info(frame_idx);
+                let func_pos = call_info.base;
+                let stack_top = lua_state.stack_len();
+                
+                // Total arguments = stack_top - func_pos - 1 (exclude function itself)
+                let totalargs = if stack_top > func_pos {
+                    stack_top - func_pos - 1
+                } else {
+                    0
+                };
+                
+                let nfixparams = c; // C field contains number of fixed parameters
+                let nextra = if totalargs > nfixparams {
+                    totalargs - nfixparams
+                } else {
+                    0
+                };
+                
+                // Store nextra in CallInfo for later use by VARARG/GETVARG
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                call_info.nextraargs = nextra as i32;
+                
+                // Adjust base to account for varargs
+                // In Lua 5.5, varargs are placed BEFORE the function on the stack
+                // We need to ensure proper stack layout
             }
             
             OpCode::ExtraArg => {
                 // Extra argument for previous opcode
-                // Usually handled by previous instruction
-                pc += 1;
+                // This instruction should never be executed directly
+                // It's always consumed by the previous instruction (NEWTABLE, SETLIST, etc.)
+                // If we reach here, it's a compiler error
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                return Err(lua_state.error("unexpected EXTRAARG instruction".to_string()));
             }
         }
     }
