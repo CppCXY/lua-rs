@@ -165,8 +165,9 @@ impl LuaState {
 
     /// Set error message
     #[inline(always)]
-    pub fn set_error(&mut self, msg: String) {
+    pub fn error(&mut self, msg: String) -> LuaError {
         self.error_msg = msg;
+        LuaError::RuntimeError
     }
 
     /// Get error message
@@ -222,7 +223,56 @@ impl LuaState {
         &self.stack
     }
 
-    fn vm_mut(&mut self) -> &mut LuaVM {
+    /// Get mutable pointer to stack for VM execution
+    /// 
+    /// # Safety
+    /// Caller must ensure stack is not reallocated during pointer usage
+    #[inline(always)]
+    pub fn stack_ptr_mut(&mut self) -> *mut LuaValue {
+        self.stack.as_mut_ptr()
+    }
+
+    /// Get stack length
+    #[inline(always)]
+    pub fn stack_len(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Grow stack to accommodate more values
+    /// Must be called BEFORE execution if frame might exceed current capacity
+    pub fn grow_stack(&mut self, needed: usize) {
+        if self.stack.len() < needed {
+            self.stack.resize(needed, LuaValue::nil());
+        }
+    }
+
+    /// Get frame base by index
+    #[inline(always)]
+    pub fn get_frame_base(&self, frame_idx: usize) -> usize {
+        self.call_stack.get(frame_idx).map(|f| f.base).unwrap_or(0)
+    }
+
+    /// Get frame PC by index
+    #[inline(always)]
+    pub fn get_frame_pc(&self, frame_idx: usize) -> u32 {
+        self.call_stack.get(frame_idx).map(|f| f.pc).unwrap_or(0)
+    }
+
+    /// Get frame function by index
+    #[inline(always)]
+    pub fn get_frame_func(&self, frame_idx: usize) -> Option<LuaValue> {
+        self.call_stack.get(frame_idx).map(|f| f.func)
+    }
+
+    /// Set frame PC by index
+    #[inline(always)]
+    pub fn set_frame_pc(&mut self, frame_idx: usize, pc: u32) {
+        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+            frame.pc = pc;
+        }
+    }
+
+    pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
         unsafe { &mut *self.vm }
     }
     // ===== Object Creation =====

@@ -166,13 +166,13 @@ impl Value {
 /// Corresponds to struct TValue in lobject.h
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct TValue {
+pub struct LuaValue {
     pub value_: Value, // 8 bytes
     pub tt_: u8,       // 1 byte type tag
                        // 7 bytes padding for 16-byte alignment
 }
 
-impl TValue {
+impl LuaValue {
     // ============ Constructors ============
 
     #[inline(always)]
@@ -744,7 +744,7 @@ impl TValue {
 
     // ============ Equality ============
 
-    pub fn raw_equal(&self, other: &TValue, pool: &ObjectPool) -> bool {
+    pub fn raw_equal(&self, other: &LuaValue, pool: &ObjectPool) -> bool {
         // Fast path: if type tags differ, not equal
         if self.tt_ != other.tt_ {
             return false;
@@ -863,14 +863,14 @@ pub enum LuaValueKind {
 
 // ============ Traits ============
 
-impl Default for TValue {
+impl Default for LuaValue {
     #[inline(always)]
     fn default() -> Self {
         Self::nil()
     }
 }
 
-impl PartialEq for TValue {
+impl PartialEq for LuaValue {
     fn eq(&self, other: &Self) -> bool {
         // Quick check: if tags differ, not equal
         if self.tt_ != other.tt_ {
@@ -897,9 +897,9 @@ impl PartialEq for TValue {
     }
 }
 
-impl Eq for TValue {}
+impl Eq for LuaValue {}
 
-impl std::fmt::Debug for TValue {
+impl std::fmt::Debug for LuaValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind() {
             LuaValueKind::Nil => write!(f, "nil"),
@@ -916,7 +916,7 @@ impl std::fmt::Debug for TValue {
     }
 }
 
-impl std::fmt::Display for TValue {
+impl std::fmt::Display for LuaValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind() {
             LuaValueKind::Nil => write!(f, "nil"),
@@ -940,7 +940,7 @@ impl std::fmt::Display for TValue {
     }
 }
 
-impl std::hash::Hash for TValue {
+impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.tt_.hash(state);
         // Hash the value based on type
@@ -962,22 +962,19 @@ impl std::hash::Hash for TValue {
     }
 }
 
-// ============ Type alias for compatibility ============
-pub type LuaValue = TValue;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_size() {
-        assert_eq!(std::mem::size_of::<TValue>(), 16);
+        assert_eq!(std::mem::size_of::<LuaValue>(), 16);
         assert_eq!(std::mem::size_of::<Value>(), 8);
     }
 
     #[test]
     fn test_nil() {
-        let v = TValue::nil();
+        let v = LuaValue::nil();
         assert!(v.ttisnil());
         assert!(v.ttisstrictnil());
         assert!(v.is_falsy());
@@ -986,7 +983,7 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let v = TValue::empty();
+        let v = LuaValue::empty();
         assert!(v.ttisnil()); // empty is a nil variant
         assert!(v.ttisempty());
         assert!(!v.ttisstrictnil());
@@ -994,8 +991,8 @@ mod tests {
 
     #[test]
     fn test_boolean() {
-        let t = TValue::boolean(true);
-        let f = TValue::boolean(false);
+        let t = LuaValue::boolean(true);
+        let f = LuaValue::boolean(false);
 
         assert!(t.ttisboolean());
         assert!(f.ttisboolean());
@@ -1009,19 +1006,19 @@ mod tests {
 
     #[test]
     fn test_integer() {
-        let v = TValue::integer(42);
+        let v = LuaValue::integer(42);
         assert!(v.ttisnumber());
         assert!(v.ttisinteger());
         assert_eq!(v.ivalue(), 42);
         assert_eq!(v.nvalue(), 42.0);
 
-        let neg = TValue::integer(-100);
+        let neg = LuaValue::integer(-100);
         assert_eq!(neg.ivalue(), -100);
     }
 
     #[test]
     fn test_float() {
-        let v = TValue::float(3.14);
+        let v = LuaValue::float(3.14);
         assert!(v.ttisnumber());
         assert!(v.ttisfloat());
         assert!((v.fltvalue() - 3.14).abs() < f64::EPSILON);
@@ -1030,12 +1027,12 @@ mod tests {
 
     #[test]
     fn test_string() {
-        let v = TValue::string(StringId::short(123));
+        let v = LuaValue::string(StringId::short(123));
         assert!(v.ttisstring());
         assert!(v.ttisshrstring());
         assert_eq!(v.tsvalue(), StringId::short(123));
 
-        let lng = TValue::lngstring(StringId::long(456));
+        let lng = LuaValue::lngstring(StringId::long(456));
         assert!(lng.ttisstring());
         assert!(lng.ttislngstring());
         assert_eq!(lng.tsvalue(), StringId::long(456));
@@ -1043,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_table() {
-        let v = TValue::table(TableId(789));
+        let v = LuaValue::table(TableId(789));
         assert!(v.ttistable());
         assert!(v.iscollectable());
         assert_eq!(v.hvalue(), TableId(789));
@@ -1051,11 +1048,11 @@ mod tests {
 
     #[test]
     fn test_equality() {
-        assert_eq!(TValue::nil(), TValue::nil());
-        assert_eq!(TValue::integer(42), TValue::integer(42));
-        assert_ne!(TValue::integer(42), TValue::integer(43));
-        assert_eq!(TValue::table(TableId(1)), TValue::table(TableId(1)));
-        assert_ne!(TValue::table(TableId(1)), TValue::table(TableId(2)));
+        assert_eq!(LuaValue::nil(), LuaValue::nil());
+        assert_eq!(LuaValue::integer(42), LuaValue::integer(42));
+        assert_ne!(LuaValue::integer(42), LuaValue::integer(43));
+        assert_eq!(LuaValue::table(TableId(1)), LuaValue::table(TableId(1)));
+        assert_ne!(LuaValue::table(TableId(1)), LuaValue::table(TableId(2)));
     }
 
     #[test]
@@ -1069,10 +1066,10 @@ mod tests {
 
     #[test]
     fn test_collectable_bit() {
-        let nil = TValue::nil();
-        let int = TValue::integer(42);
-        let str = TValue::string(StringId::short(1));
-        let tbl = TValue::table(TableId(1));
+        let nil = LuaValue::nil();
+        let int = LuaValue::integer(42);
+        let str = LuaValue::string(StringId::short(1));
+        let tbl = LuaValue::table(TableId(1));
 
         assert!(!nil.iscollectable());
         assert!(!int.iscollectable());

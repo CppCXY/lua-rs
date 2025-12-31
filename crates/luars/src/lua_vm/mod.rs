@@ -862,13 +862,13 @@ impl LuaVM {
     // ===== Error Handling =====
 
     pub fn error(&mut self, message: impl Into<String>) -> LuaError {
-        self.main_state.set_error(message.into());
+        self.main_state.error(message.into());
         LuaError::RuntimeError
     }
 
     #[inline]
     pub fn compile_error(&mut self, message: impl Into<String>) -> LuaError {
-        self.main_state.set_error(message.into());
+        self.main_state.error(message.into());
         LuaError::CompileError
     }
 
