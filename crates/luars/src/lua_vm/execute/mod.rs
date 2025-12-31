@@ -132,6 +132,31 @@ unsafe fn tonumberns(v: *const LuaValue, out: &mut f64) -> bool {
     }
 }
 
+/// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
+#[inline(always)]
+fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
+    if v.tt_ == LUA_VNUMFLT {
+        unsafe { *out = v.value_.n; }
+        true
+    } else if v.tt_ == LUA_VNUMINT {
+        unsafe { *out = v.value_.i as f64; }
+        true
+    } else {
+        false
+    }
+}
+
+/// tointeger - 从LuaValue引用获取整数 (用于常量)
+#[inline(always)]
+fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
+    if v.tt_ == LUA_VNUMINT {
+        unsafe { *out = v.value_.i; }
+        true
+    } else {
+        false
+    }
+}
+
 /// Main VM execution entry point
 /// 
 /// Executes bytecode starting from current PC in the active call frame
@@ -613,6 +638,264 @@ fn execute_frame(
             }
             
             // ============================================================
+            // CONSTANT OPERAND ARITHMETIC (K variants)
+            // ============================================================
+            
+            OpCode::AddK => {
+                // op_arithK(L, l_addi, luai_numadd)
+                // R[A] := R[B] + K[C]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);  // K[C]
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i2 = 0i64;
+                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                        let i1 = ivalue(v1);
+                        pc += 1;
+                        setivalue(ra, i1.wrapping_add(i2));
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(ra, n1 + n2);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::SubK => {
+                // R[A] := R[B] - K[C]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i2 = 0i64;
+                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                        let i1 = ivalue(v1);
+                        pc += 1;
+                        setivalue(ra, i1.wrapping_sub(i2));
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(ra, n1 - n2);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::MulK => {
+                // R[A] := R[B] * K[C]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i2 = 0i64;
+                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                        let i1 = ivalue(v1);
+                        pc += 1;
+                        setivalue(ra, i1.wrapping_mul(i2));
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(ra, n1 * n2);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::ModK => {
+                // R[A] := R[B] % K[C]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i2 = 0i64;
+                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                        let i1 = ivalue(v1);
+                        if i2 != 0 {
+                            pc += 1;
+                            let result = i1 - (i1 / i2) * i2;
+                            setivalue(ra, result);
+                        }
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                            if n2 != 0.0 {
+                                pc += 1;
+                                setfltvalue(ra, n1 - (n1 / n2).floor() * n2);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            OpCode::PowK => {
+                // R[A] := R[B] ^ K[C] (always float)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                        pc += 1;
+                        setfltvalue(ra, n1.powf(n2));
+                    }
+                }
+            }
+            
+            OpCode::DivK => {
+                // R[A] := R[B] / K[C] (float division)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                        pc += 1;
+                        setfltvalue(ra, n1 / n2);
+                    }
+                }
+            }
+            
+            OpCode::IDivK => {
+                // R[A] := R[B] // K[C] (floor division)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i2 = 0i64;
+                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                        let i1 = ivalue(v1);
+                        if i2 != 0 {
+                            pc += 1;
+                            let result = if (i1 ^ i2) >= 0 {
+                                i1 / i2
+                            } else {
+                                (i1 / i2) - if i1 % i2 != 0 { 1 } else { 0 }
+                            };
+                            setivalue(ra, result);
+                        }
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                            if n2 != 0.0 {
+                                pc += 1;
+                                setfltvalue(ra, (n1 / n2).floor());
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // ============================================================
+            // CONSTANT OPERAND BITWISE (K variants)
+            // ============================================================
+            
+            OpCode::BAndK => {
+                // R[A] := R[B] & K[C]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(ra, i1 & i2);
+                    }
+                }
+            }
+            
+            OpCode::BOrK => {
+                // R[A] := R[B] | K[C]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(ra, i1 | i2);
+                    }
+                }
+            }
+            
+            OpCode::BXorK => {
+                // R[A] := R[B] ^ K[C] (bitwise xor)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = constants.get_unchecked(c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(ra, i1 ^ i2);
+                    }
+                }
+            }
+            
+            // ============================================================
             // BITWISE OPERATIONS
             // ============================================================
             
@@ -734,6 +1017,274 @@ fn execute_frame(
                         setivalue(ra, !ib);
                     }
                     // else: metamethod
+                }
+            }
+            
+            // ============================================================
+            // IMMEDIATE OPERAND ARITHMETIC (I variants)
+            // ============================================================
+            
+            OpCode::SubI => {
+                // op_arithI(L, l_subi, luai_numsub)
+                // R[A] := R[B] - sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(v1) {
+                        let iv1 = ivalue(v1);
+                        pc += 1;
+                        setivalue(ra, iv1.wrapping_sub(sc as i64));
+                    }
+                    else if ttisfloat(v1) {
+                        let nb = fltvalue(v1);
+                        pc += 1;
+                        setfltvalue(ra, nb - (sc as f64));
+                    }
+                }
+            }
+            
+            OpCode::MulI => {
+                // op_arithI(L, l_muli, luai_nummul)
+                // R[A] := R[B] * sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(v1) {
+                        let iv1 = ivalue(v1);
+                        pc += 1;
+                        setivalue(ra, iv1.wrapping_mul(sc as i64));
+                    }
+                    else if ttisfloat(v1) {
+                        let nb = fltvalue(v1);
+                        pc += 1;
+                        setfltvalue(ra, nb * (sc as f64));
+                    }
+                }
+            }
+            
+            OpCode::ModI => {
+                // op_arithI with mod operation
+                // R[A] := R[B] % sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(v1) {
+                        let iv1 = ivalue(v1);
+                        let imm = sc as i64;
+                        if imm != 0 {
+                            pc += 1;
+                            // Lua mod: a % b = a - floor(a/b)*b
+                            let result = iv1 - (iv1 / imm) * imm;
+                            setivalue(ra, result);
+                        }
+                        // else: metamethod/error
+                    }
+                    else if ttisfloat(v1) {
+                        let nb = fltvalue(v1);
+                        let fimm = sc as f64;
+                        if fimm != 0.0 {
+                            pc += 1;
+                            setfltvalue(ra, nb - (nb / fimm).floor() * fimm);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::PowI => {
+                // op_arithI with pow (always float)
+                // R[A] := R[B] ^ sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut n1 = 0.0;
+                    if tonumberns(v1, &mut n1) {
+                        let fimm = sc as f64;
+                        pc += 1;
+                        setfltvalue(ra, n1.powf(fimm));
+                    }
+                }
+            }
+            
+            OpCode::DivI => {
+                // Float division with immediate
+                // R[A] := R[B] / sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut n1 = 0.0;
+                    if tonumberns(v1, &mut n1) {
+                        let fimm = sc as f64;
+                        pc += 1;
+                        setfltvalue(ra, n1 / fimm);
+                    }
+                }
+            }
+            
+            OpCode::IDivI => {
+                // Floor division with immediate
+                // R[A] := R[B] // sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(v1) {
+                        let iv1 = ivalue(v1);
+                        let imm = sc as i64;
+                        if imm != 0 {
+                            pc += 1;
+                            let result = if (iv1 ^ imm) >= 0 {
+                                iv1 / imm
+                            } else {
+                                (iv1 / imm) - if iv1 % imm != 0 { 1 } else { 0 }
+                            };
+                            setivalue(ra, result);
+                        }
+                    }
+                    else if ttisfloat(v1) {
+                        let nb = fltvalue(v1);
+                        let fimm = sc as f64;
+                        if fimm != 0.0 {
+                            pc += 1;
+                            setfltvalue(ra, (nb / fimm).floor());
+                        }
+                    }
+                }
+            }
+            
+            // ============================================================
+            // IMMEDIATE OPERAND BITWISE (I variants)
+            // ============================================================
+            
+            OpCode::BAndI => {
+                // R[A] := R[B] & sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut ib = 0i64;
+                    if tointegerns(v1, &mut ib) {
+                        pc += 1;
+                        setivalue(ra, ib & (sc as i64));
+                    }
+                }
+            }
+            
+            OpCode::BOrI => {
+                // R[A] := R[B] | sC
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut ib = 0i64;
+                    if tointegerns(v1, &mut ib) {
+                        pc += 1;
+                        setivalue(ra, ib | (sc as i64));
+                    }
+                }
+            }
+            
+            OpCode::BXorI => {
+                // R[A] := R[B] ^ sC  (bitwise xor)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut ib = 0i64;
+                    if tointegerns(v1, &mut ib) {
+                        pc += 1;
+                        setivalue(ra, ib ^ (sc as i64));
+                    }
+                }
+            }
+            
+            OpCode::ShlI => {
+                // R[A] := sC << R[B]  (注意: Lua 5.5 SHLI 是 immediate << register!)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut ib = 0i64;
+                    if tointegerns(rb, &mut ib) {
+                        pc += 1;
+                        // luaV_shiftl(ic, ib) - shift ic left by ib
+                        let ic = sc as i64;
+                        let result = if ib >= 0 {
+                            ic << ib.min(63)
+                        } else {
+                            (ic as u64 >> (-ib).min(63)) as i64
+                        };
+                        setivalue(ra, result);
+                    }
+                }
+            }
+            
+            OpCode::ShrI => {
+                // R[A] := R[B] >> sC (arithmetic right shift)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let sc = instr.get_sc();
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut ib = 0i64;
+                    if tointegerns(rb, &mut ib) {
+                        pc += 1;
+                        // luaV_shiftl(ib, -ic)
+                        let ic = -(sc as i64);  // negative for right shift
+                        let result = if ic >= 0 {
+                            ib << ic.min(63)
+                        } else {
+                            (ib as u64 >> (-ic).min(63)) as i64
+                        };
+                        setivalue(ra, result);
+                    }
                 }
             }
             
