@@ -20,15 +20,118 @@
 use std::rc::Rc;
 
 use crate::{
-    lua_value::LuaValue,
+    lua_value::{LuaValue, LUA_VNUMINT, LUA_VNUMFLT, LUA_VFALSE, LUA_VTRUE},
     lua_vm::{LuaError, LuaResult, LuaState, OpCode},
     Chunk,
 };
+
+// ============ Type tag检查宏 (对应 Lua 的 ttis* 宏) ============
+
+/// ttisinteger - 检查是否是整数 (最快的类型检查)
+#[inline(always)]
+unsafe fn ttisinteger(v: *const LuaValue) -> bool {
+    unsafe { (*v).tt_ == LUA_VNUMINT }
+}
+
+/// ttisfloat - 检查是否是浮点数
+#[inline(always)]
+unsafe fn ttisfloat(v: *const LuaValue) -> bool {
+    unsafe { (*v).tt_ == LUA_VNUMFLT }
+}
+
+/// ttisnumber - 检查是否是任意数字 (整数或浮点)
+#[inline(always)]
+unsafe fn ttisnumber(v: *const LuaValue) -> bool {
+    unsafe { (*v).tt_ == LUA_VNUMINT || (*v).tt_ == LUA_VNUMFLT }
+}
+
+// ============ 值访问宏 (对应 Lua 的 ivalue/fltvalue) ============
+
+/// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)
+#[inline(always)]
+unsafe fn ivalue(v: *const LuaValue) -> i64 {
+    unsafe { (*v).value_.i }
+}
+
+/// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
+#[inline(always)]
+unsafe fn fltvalue(v: *const LuaValue) -> f64 {
+    unsafe { (*v).value_.n }
+}
+
+/// setivalue - 设置整数值
+#[inline(always)]
+unsafe fn setivalue(v: *mut LuaValue, i: i64) {
+    unsafe {
+        (*v).value_.i = i;
+        (*v).tt_ = LUA_VNUMINT;
+    }
+}
+
+/// setfltvalue - 设置浮点值
+#[inline(always)]
+unsafe fn setfltvalue(v: *mut LuaValue, n: f64) {
+    unsafe {
+        (*v).value_.n = n;
+        (*v).tt_ = LUA_VNUMFLT;
+    }
+}
+
+/// setbfvalue - 设置false
+#[inline(always)]
+unsafe fn setbfvalue(v: *mut LuaValue) {
+    unsafe { (*v) = LuaValue::boolean(false); }
+}
+
+/// setbtvalue - 设置true
+#[inline(always)]
+unsafe fn setbtvalue(v: *mut LuaValue) {
+    unsafe { (*v) = LuaValue::boolean(true); }
+}
+
+/// setnilvalue - 设置nil
+#[inline(always)]
+unsafe fn setnilvalue(v: *mut LuaValue) {
+    unsafe { *v = LuaValue::nil(); }
+}
+
+// ============ 类型转换辅助函数 ============
+
+/// tointegerns - 尝试转换为整数 (不抛出错误)
+/// 对应 Lua 的 tointegerns 宏
+#[inline(always)]
+unsafe fn tointegerns(v: *const LuaValue, out: &mut i64) -> bool {
+    unsafe {
+        if ttisinteger(v) {
+            *out = ivalue(v);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// tonumberns - 尝试转换为浮点数 (不抛出错误)
+#[inline(always)]
+unsafe fn tonumberns(v: *const LuaValue, out: &mut f64) -> bool {
+    unsafe {
+        if ttisfloat(v) {
+            *out = fltvalue(v);
+            true
+        } else if ttisinteger(v) {
+            *out = ivalue(v) as f64;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Main VM execution entry point
 /// 
 /// Executes bytecode starting from current PC in the active call frame
 /// Returns when function returns or error occurs
+#[allow(unused)]
 pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
     // Get current call frame - must exist
     let frame_idx = lua_state.call_depth().checked_sub(1)
@@ -87,13 +190,9 @@ fn execute_with_chunk(
     
     // Main interpreter loop
     loop {
-        // Bounds check for PC
-        if pc >= code.len() {
-            return Err(lua_state.error("PC out of bounds".to_string()));
-        }
-        
         // Fetch instruction and advance PC
-        let instr = code[pc];
+        // NOTE: No bounds check - compiler guarantees valid bytecode
+        let instr = unsafe { *code.get_unchecked(pc) };
         pc += 1;
         
         // Dispatch instruction
@@ -105,19 +204,14 @@ fn execute_with_chunk(
             
             OpCode::Move => {
                 // R[A] := R[B]
+                // setobjs2s(L, ra, RB(i))
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 
                 unsafe {
-                    let src_idx = base + b;
-                    let dst_idx = base + a;
-                    
-                    if src_idx < stack_len && dst_idx < stack_len {
-                        *stack_ptr.add(dst_idx) = *stack_ptr.add(src_idx);
-                    } else {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error(format!("MOVE: register out of bounds")));
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    let rb = stack_ptr.add(base + b);
+                    *ra = *rb;  // Direct copy (setobjs2s)
                 }
             }
             
@@ -131,10 +225,8 @@ fn execute_with_chunk(
                 let sbx = instr.get_sbx();
                 
                 unsafe {
-                    let idx = base + a;
-                    if idx < stack_len {
-                        *stack_ptr.add(idx) = LuaValue::integer(sbx as i64);
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    setivalue(ra, sbx as i64);
                 }
             }
             
@@ -144,10 +236,8 @@ fn execute_with_chunk(
                 let sbx = instr.get_sbx();
                 
                 unsafe {
-                    let idx = base + a;
-                    if idx < stack_len {
-                        *stack_ptr.add(idx) = LuaValue::number(sbx as f64);
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    setfltvalue(ra, sbx as f64);
                 }
             }
             
@@ -162,15 +252,14 @@ fn execute_with_chunk(
                 }
                 
                 unsafe {
-                    let idx = base + a;
-                    if idx < stack_len {
-                        *stack_ptr.add(idx) = constants[bx];
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    let rb = &constants[bx];
+                    *ra = *rb;  // setobj2s
                 }
             }
             
             OpCode::LoadKX => {
-                // R[A] := K[extra_arg]
+                // R[A] := K[extra_arg]; pc++
                 let a = instr.get_a() as usize;
                 
                 if pc >= code.len() {
@@ -179,7 +268,7 @@ fn execute_with_chunk(
                 }
                 
                 let extra = code[pc];
-                pc += 1;
+                pc += 1;  // Consume EXTRAARG
                 
                 if extra.get_opcode() != OpCode::ExtraArg {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
@@ -193,70 +282,62 @@ fn execute_with_chunk(
                 }
                 
                 unsafe {
-                    let idx = base + a;
-                    if idx < stack_len {
-                        *stack_ptr.add(idx) = constants[ax];
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    let rb = &constants[ax];
+                    *ra = *rb;  // setobj2s
                 }
             }
             
             OpCode::LoadFalse => {
                 // R[A] := false
                 let a = instr.get_a() as usize;
-                
                 unsafe {
-                    let idx = base + a;
-                    if idx < stack_len {
-                        *stack_ptr.add(idx) = LuaValue::boolean(false);
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    setbfvalue(ra);
                 }
             }
             
             OpCode::LFalseSkip => {
                 // R[A] := false; pc++
                 let a = instr.get_a() as usize;
-                
                 unsafe {
-                    let idx = base + a;
-                    if idx < stack_len {
-                        *stack_ptr.add(idx) = LuaValue::boolean(false);
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    setbfvalue(ra);
                 }
-                pc += 1;
+                pc += 1;  // Skip next instruction
             }
             
             OpCode::LoadTrue => {
                 // R[A] := true
                 let a = instr.get_a() as usize;
-                
                 unsafe {
-                    let idx = base + a;
-                    if idx < stack_len {
-                        *stack_ptr.add(idx) = LuaValue::boolean(true);
-                    }
+                    let ra = stack_ptr.add(base + a);
+                    setbtvalue(ra);
                 }
             }
             
             OpCode::LoadNil => {
                 // R[A], R[A+1], ..., R[A+B] := nil
                 let a = instr.get_a() as usize;
-                let b = instr.get_b() as usize;
+                let mut b = instr.get_b() as usize;
                 
                 unsafe {
-                    for i in 0..=b {
-                        let idx = base + a + i;
-                        if idx < stack_len {
-                            *stack_ptr.add(idx) = LuaValue::nil();
-                        }
+                    let mut ra = stack_ptr.add(base + a);
+                    loop {
+                        setnilvalue(ra);
+                        if b == 0 { break; }
+                        b -= 1;
+                        ra = ra.add(1);
                     }
                 }
             }
             
             // ============================================================
-            // ARITHMETIC - Integer Fast Path
+            // ARITHMETIC - Lua 5.5 Style (pc++ on success)
             // ============================================================
             
             OpCode::Add => {
+                // op_arith(L, l_addi, luai_numadd)
                 // R[A] := R[B] + R[C]
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
@@ -272,30 +353,32 @@ fn execute_with_chunk(
                         return Err(lua_state.error("ADD: register out of bounds".to_string()));
                     }
                     
-                    let vb = &*stack_ptr.add(idx_b);
-                    let vc = &*stack_ptr.add(idx_c);
+                    let v1 = stack_ptr.add(idx_b);
+                    let v2 = stack_ptr.add(idx_c);
+                    let ra = stack_ptr.add(idx_a);
                     
-                    // Try integer addition first (fast path)
-                    let result = if vb.is_integer() && vc.is_integer() {
-                        let x = vb.as_integer().unwrap();
-                        let y = vc.as_integer().unwrap();
-                        LuaValue::integer(x.wrapping_add(y))
-                    } else if vb.is_number() && vc.is_number() {
-                        // Float arithmetic
-                        let x = vb.as_number().unwrap();
-                        let y = vc.as_number().unwrap();
-                        LuaValue::number(x + y)
-                    } else {
-                        // TODO: metamethods (__add)
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error("ADD: invalid operands for arithmetic".to_string()));
-                    };
-                    
-                    *stack_ptr.add(idx_a) = result;
+                    // Fast path: both integers
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        pc += 1;  // Skip metamethod on success
+                        setivalue(ra, i1.wrapping_add(i2));
+                    }
+                    // Slow path: try float conversion
+                    else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            pc += 1;  // Skip metamethod on success
+                            setfltvalue(ra, n1 + n2);
+                        }
+                        // else: fall through to MMBIN (next instruction)
+                    }
                 }
             }
             
             OpCode::AddI => {
+                // op_arithI(L, l_addi, luai_numadd)
                 // R[A] := R[B] + sC
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
@@ -310,21 +393,322 @@ fn execute_with_chunk(
                         return Err(lua_state.error("ADDI: register out of bounds".to_string()));
                     }
                     
-                    let vb = &*stack_ptr.add(idx_b);
+                    let v1 = stack_ptr.add(idx_b);
+                    let ra = stack_ptr.add(idx_a);
                     
-                    // Try integer addition first (fast path)
-                    let result = if vb.is_integer() {
-                        let x = vb.as_integer().unwrap();
-                        LuaValue::integer(x.wrapping_add(sc as i64))
-                    } else if vb.is_number() {
-                        let x = vb.as_number().unwrap();
-                        LuaValue::number(x + sc as f64)
+                    // Fast path: integer
+                    if ttisinteger(v1) {
+                        let iv1 = ivalue(v1);
+                        pc += 1;  // Skip metamethod on success
+                        setivalue(ra, iv1.wrapping_add(sc as i64));
+                    }
+                    // Slow path: float
+                    else if ttisfloat(v1) {
+                        let nb = fltvalue(v1);
+                        let fimm = sc as f64;
+                        pc += 1;  // Skip metamethod on success
+                        setfltvalue(ra, nb + fimm);
+                    }
+                    // else: fall through to MMBINI (next instruction)
+                }
+            }
+            
+            OpCode::Sub => {
+                // op_arith(L, l_subi, luai_numsub)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        pc += 1;
+                        setivalue(ra, i1.wrapping_sub(i2));
                     } else {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error("ADDI: invalid operand type".to_string()));
-                    };
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(ra, n1 - n2);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::Mul => {
+                // op_arith(L, l_muli, luai_nummul)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
                     
-                    *stack_ptr.add(idx_a) = result;
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        pc += 1;
+                        setivalue(ra, i1.wrapping_mul(i2));
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(ra, n1 * n2);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::Div => {
+                // op_arithf(L, luai_numdiv) - 浮点除法
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                        pc += 1;
+                        setfltvalue(ra, n1 / n2);
+                    }
+                }
+            }
+            
+            OpCode::IDiv => {
+                // op_arith(L, luaV_idiv, luai_numidiv) - 整数除法
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        if i2 != 0 {
+                            pc += 1;
+                            setivalue(ra, i1.div_euclid(i2));
+                        }
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(ra, (n1 / n2).floor());
+                        }
+                    }
+                }
+            }
+            
+            OpCode::Mod => {
+                // op_arith(L, luaV_mod, luaV_modf)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        if i2 != 0 {
+                            pc += 1;
+                            setivalue(ra, i1.rem_euclid(i2));
+                        }
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(ra, n1 - (n1 / n2).floor() * n2);
+                        }
+                    }
+                }
+            }
+            
+            OpCode::Pow => {
+                // op_arithf(L, luai_numpow)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                        pc += 1;
+                        setfltvalue(ra, n1.powf(n2));
+                    }
+                }
+            }
+            
+            OpCode::Unm => {
+                // 取负: -value
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    if ttisinteger(rb) {
+                        let ib = ivalue(rb);
+                        setivalue(ra, ib.wrapping_neg());
+                    } else {
+                        let mut nb = 0.0;
+                        if tonumberns(rb, &mut nb) {
+                            setfltvalue(ra, -nb);
+                        }
+                        // else: metamethod
+                    }
+                }
+            }
+            
+            // ============================================================
+            // BITWISE OPERATIONS
+            // ============================================================
+            
+            OpCode::BAnd => {
+                // op_bitwise(L, l_band)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(ra, i1 & i2);
+                    }
+                }
+            }
+            
+            OpCode::BOr => {
+                // op_bitwise(L, l_bor)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(ra, i1 | i2);
+                    }
+                }
+            }
+            
+            OpCode::BXor => {
+                // op_bitwise(L, l_bxor)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(ra, i1 ^ i2);
+                    }
+                }
+            }
+            
+            OpCode::Shl => {
+                // op_bitwise(L, luaV_shiftl)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        // Lua wraps shift amount to 0-63
+                        let shift = (i2 & 63) as u32;
+                        setivalue(ra, i1.wrapping_shl(shift));
+                    }
+                }
+            }
+            
+            OpCode::Shr => {
+                // op_bitwise(L, luaV_shiftr)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        // Lua wraps shift amount to 0-63
+                        let shift = (i2 & 63) as u32;
+                        setivalue(ra, (i1 as u64).wrapping_shr(shift) as i64);
+                    }
+                }
+            }
+            
+            OpCode::BNot => {
+                // 按位非: ~value
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    
+                    let mut ib = 0i64;
+                    if tointegerns(rb, &mut ib) {
+                        setivalue(ra, !ib);
+                    }
+                    // else: metamethod
                 }
             }
             
