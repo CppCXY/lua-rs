@@ -20,10 +20,14 @@
 use std::rc::Rc;
 
 use crate::{
-    lua_value::{LuaValue, LUA_VNUMINT, LUA_VNUMFLT, LUA_VFALSE, LUA_VTRUE},
+    lua_value::{LuaValue, LUA_VNUMINT, LUA_VNUMFLT, LUA_VFALSE},
     lua_vm::{LuaError, LuaResult, LuaState, OpCode},
     Chunk,
 };
+
+// ============ Submodules ============
+mod call;
+use call::FrameAction;
 
 // ============ Type tag检查宏 (对应 Lua 的 ttis* 宏) ============
 
@@ -131,46 +135,66 @@ unsafe fn tonumberns(v: *const LuaValue, out: &mut f64) -> bool {
 /// 
 /// Executes bytecode starting from current PC in the active call frame
 /// Returns when function returns or error occurs
+/// 
+/// Architecture: Lua-style single loop, NOT recursive calls
+/// - CALL: push frame, reload chunk/upvalues, continue loop
+/// - RETURN: pop frame, reload chunk/upvalues, continue loop
+/// - TAILCALL: replace frame, reload chunk/upvalues, continue loop
 #[allow(unused)]
 pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
-    // Get current call frame - must exist
-    let frame_idx = lua_state.call_depth().checked_sub(1)
-        .ok_or(LuaError::RuntimeError)?;
-    
-    // Extract function and chunk BEFORE entering unsafe
-    let func_value = lua_state.get_frame_func(frame_idx)
-        .ok_or(LuaError::RuntimeError)?;
-    
-    let Some(func_id) = func_value.as_function_id() else {
-        return Err(lua_state.error("Current frame is not a Lua function".to_string()));
-    };
+    // Main execution loop - continues until all frames are popped
+    'vm_loop: loop {
+        // Get current call frame
+        let frame_idx = match lua_state.call_depth().checked_sub(1) {
+            Some(idx) => idx,
+            None => return Ok(()), // No more frames, VM done
+        };
+        
+        // Load current function's chunk and upvalues
+        let (chunk, upvalues_vec) = {
+            let func_value = lua_state.get_frame_func(frame_idx)
+                .ok_or(LuaError::RuntimeError)?;
+            
+            let Some(func_id) = func_value.as_function_id() else {
+                return Err(lua_state.error("Current frame is not a Lua function".to_string()));
+            };
 
-    let gc_function = lua_state.vm_mut().object_pool.get_function_mut(func_id)
-        .ok_or(LuaError::RuntimeError)?;
+            let gc_function = lua_state.vm_mut().object_pool.get_function_mut(func_id)
+                .ok_or(LuaError::RuntimeError)?;
 
-    let Some(chunk_rc) = gc_function.chunk() else {
-        return Err(lua_state.error("Function has no chunk".to_string()));
-    };
-    
-    // Clone Rc to avoid holding mutable borrow
-    let chunk_rc: Rc<Chunk> = chunk_rc.clone();
-    
-    // Now execute with the chunk
-    execute_with_chunk(lua_state, frame_idx, chunk_rc)
+            let Some(chunk_rc) = gc_function.chunk() else {
+                return Err(lua_state.error("Function has no chunk".to_string()));
+            };
+            
+            (chunk_rc.clone(), Rc::new(gc_function.upvalues.clone()))
+        };
+        
+        // Execute this frame until CALL/RETURN/TAILCALL
+        match execute_frame(lua_state, frame_idx, chunk, upvalues_vec)? {
+            FrameAction::Return => {
+                // Pop frame and continue with caller (or exit if no caller)
+                lua_state.pop_frame();
+                // Loop continues with caller's frame
+            }
+            FrameAction::Call => {
+                // New frame was pushed, loop continues with callee's frame
+                continue 'vm_loop;
+            }
+            FrameAction::TailCall => {
+                // Current frame was replaced, loop continues with new function
+                continue 'vm_loop;
+            }
+        }
+    }
 }
 
-/// Execute with a given chunk - uses pointer-based access
-/// 
-/// # Safety
-/// This function uses raw pointers extensively:
-/// - stack_ptr: points into lua_state.stack (must not reallocate during execution)
-/// - call_info_ptr: points to current CallInfo (must remain valid)
-/// - Chunk is Rc-cloned so it won't be dropped
-fn execute_with_chunk(
+/// Execute a single frame until it calls another function or returns
+fn execute_frame(
     lua_state: &mut LuaState,
     frame_idx: usize,
     chunk: Rc<Chunk>,
-) -> LuaResult<()> {
+    upvalues_vec: Rc<Vec<crate::UpvalueId>>,
+) -> LuaResult<FrameAction> {
     // SAFETY: Get raw pointers to avoid borrow checker
     // These pointers remain valid because:
     // 1. Stack won't reallocate during execution (we pre-grow it)
@@ -743,13 +767,13 @@ fn execute_with_chunk(
                 // TODO: Handle variable returns, close upvalues
                 // Update PC before returning
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return Ok(());
+                return Ok(FrameAction::Return);
             }
             
             OpCode::Return0 => {
                 // return (no values)
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return Ok(());
+                return Ok(FrameAction::Return);
             }
             
             OpCode::Return1 => {
@@ -757,7 +781,395 @@ fn execute_with_chunk(
                 let _a = instr.get_a() as usize;
                 // TODO: copy return value to caller
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return Ok(());
+                return Ok(FrameAction::Return);
+            }
+            
+            // ============================================================
+            // UPVALUE OPERATIONS
+            // ============================================================
+            
+            OpCode::GetUpval => {
+                // R[A] := UpValue[B]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                
+                // 优化：直接使用缓存的upvalues_vec，避免查找function
+                if b >= upvalues_vec.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("GETUPVAL: invalid upvalue index {}", b)));
+                }
+                
+                let upval_id = upvalues_vec[b];
+                let upvalue = lua_state.vm_mut().object_pool.get_upvalue(upval_id)
+                    .ok_or(LuaError::RuntimeError)?;
+                
+                // Get value from upvalue
+                let value = if upvalue.is_open() {
+                    // Open: read from stack
+                    let stack_idx = upvalue.get_stack_index().unwrap();
+                    lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
+                } else {
+                    // Closed: read from upvalue storage
+                    upvalue.get_closed_value().unwrap()
+                };
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    *ra = value;
+                }
+            }
+            
+            OpCode::SetUpval => {
+                // UpValue[B] := R[A]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                
+                // Get value to set
+                let value = unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    *ra
+                };
+                
+                // 优化：直接使用缓存的upvalues_vec
+                if b >= upvalues_vec.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("SETUPVAL: invalid upvalue index {}", b)));
+                }
+                
+                let upval_id = upvalues_vec[b];
+                
+                // Set value in upvalue
+                let upvalue = lua_state.vm_mut().object_pool.get_upvalue_mut(upval_id)
+                    .ok_or(LuaError::RuntimeError)?;
+                
+                if upvalue.is_open() {
+                    // Open: write to stack
+                    let stack_idx = upvalue.get_stack_index().unwrap();
+                    lua_state.stack_set(stack_idx, value);
+                } else {
+                    // Closed: write to upvalue storage
+                    unsafe {
+                        upvalue.set_closed_value_unchecked(value);
+                    }
+                }
+                
+                // TODO: GC barrier (luaC_barrier)
+            }
+            
+            OpCode::Close => {
+                // Close all upvalues >= R[A]
+                let a = instr.get_a() as usize;
+                let close_from = base + a;
+                
+                // TODO: Implement upvalue closing
+                // This requires tracking open upvalues in LuaState
+                // For now, this is a no-op
+                // Proper implementation needs:
+                // 1. List of open upvalues in LuaState
+                // 2. Close all upvalues with stack_index >= close_from
+                // 3. Copy stack value to upvalue storage
+                // 4. Mark upvalue as closed
+                
+                let _ = close_from; // Suppress unused warning
+            }
+            
+            OpCode::Tbc => {
+                // Mark variable as to-be-closed
+                let _a = instr.get_a() as usize;
+                
+                // TODO: Implement to-be-closed variables
+                // This is for the <close> attribute in Lua 5.4+
+                // Needs tracking in stack/upvalue system
+                // For now, this is a no-op
+            }
+            
+            // ============================================================
+            // TABLE OPERATIONS
+            // ============================================================
+            
+            OpCode::NewTable => {
+                // R[A] := {} (new table)
+                let a = instr.get_a() as usize;
+                let _vb = instr.get_b() as usize; // log2(hash size) + 1
+                let _vc = instr.get_c() as usize; // array size
+                
+                // Create new table
+                let value = lua_state.create_table(0, 0);
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    *ra = value;
+                }
+                
+                // TODO: Pre-allocate table size based on vB and vC
+                // TODO: Check for EXTRAARG instruction for larger sizes
+            }
+            
+            OpCode::GetTable => {
+                // R[A] := R[B][R[C]]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let rc = stack_ptr.add(base + c);
+                    
+                    // Fast path for table with integer key
+                    if let Some(table_id) = (*rb).as_table_id() {
+                        if ttisinteger(rc) {
+                            let key = ivalue(rc);
+                            let table = lua_state.vm_mut().object_pool.get_table(table_id)
+                                .ok_or(LuaError::RuntimeError)?;
+                            
+                            let result = table.get_int(key).unwrap_or(LuaValue::nil());
+                            let ra = stack_ptr.add(base + a);
+                            *ra = result;
+                        } else {
+                            // General case: use key as LuaValue
+                            let key = *rc;
+                            let table = lua_state.vm_mut().object_pool.get_table(table_id)
+                                .ok_or(LuaError::RuntimeError)?;
+                            
+                            let result = table.raw_get(&key).unwrap_or(LuaValue::nil());
+                            let ra = stack_ptr.add(base + a);
+                            *ra = result;
+                        }
+                    } else {
+                        // Not a table - should trigger metamethod
+                        // For now, return nil
+                        let ra = stack_ptr.add(base + a);
+                        setnilvalue(ra);
+                    }
+                }
+            }
+            
+            OpCode::GetI => {
+                // R[A] := R[B][C] (integer key)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    
+                    if let Some(table_id) = (*rb).as_table_id() {
+                        let table = lua_state.vm_mut().object_pool.get_table(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        
+                        let result = table.get_int(c as i64).unwrap_or(LuaValue::nil());
+                        let ra = stack_ptr.add(base + a);
+                        *ra = result;
+                    } else {
+                        // Not a table - should trigger metamethod
+                        let ra = stack_ptr.add(base + a);
+                        setnilvalue(ra);
+                    }
+                }
+            }
+            
+            OpCode::GetField => {
+                // R[A] := R[B][K[C]:string]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                if c >= constants.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("GETFIELD: invalid constant index {}", c)));
+                }
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let key = &constants[c];
+                    
+                    if let Some(table_id) = (*rb).as_table_id() {
+                        let table = lua_state.vm_mut().object_pool.get_table(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        
+                        let result = table.raw_get(key).unwrap_or(LuaValue::nil());
+                        let ra = stack_ptr.add(base + a);
+                        *ra = result;
+                    } else {
+                        // Not a table
+                        let ra = stack_ptr.add(base + a);
+                        setnilvalue(ra);
+                    }
+                }
+            }
+            
+            OpCode::SetTable => {
+                // R[A][R[B]] := RK(C)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                let k = instr.get_k();
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    let rb = stack_ptr.add(base + b);
+                    
+                    // Get value (RK: register or constant)
+                    let value = if k {
+                        if c >= constants.len() {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("SETTABLE: invalid constant".to_string()));
+                        }
+                        constants[c]
+                    } else {
+                        let rc = stack_ptr.add(base + c);
+                        *rc
+                    };
+                    
+                    if let Some(table_id) = (*ra).as_table_id() {
+                        let key = *rb;
+                        
+                        // Fast path for integer key
+                        if ttisinteger(rb) {
+                            let int_key = ivalue(rb);
+                            let table = lua_state.vm_mut().object_pool.get_table_mut(table_id)
+                                .ok_or(LuaError::RuntimeError)?;
+                            table.set_int(int_key, value);
+                        } else {
+                            let table = lua_state.vm_mut().object_pool.get_table_mut(table_id)
+                                .ok_or(LuaError::RuntimeError)?;
+                            table.raw_set(key, value);
+                        }
+                    }
+                    // else: should trigger metamethod
+                }
+            }
+            
+            OpCode::SetI => {
+                // R[A][B] := RK(C) (integer key)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                let k = instr.get_k();
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    
+                    // Get value (RK: register or constant)
+                    let value = if k {
+                        if c >= constants.len() {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("SETI: invalid constant".to_string()));
+                        }
+                        constants[c]
+                    } else {
+                        let rc = stack_ptr.add(base + c);
+                        *rc
+                    };
+                    
+                    if let Some(table_id) = (*ra).as_table_id() {
+                        let table = lua_state.vm_mut().object_pool.get_table_mut(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        table.set_int(b as i64, value);
+                    }
+                    // else: should trigger metamethod
+                }
+            }
+            
+            OpCode::SetField => {
+                // R[A][K[B]:string] := RK(C)
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                let k = instr.get_k();
+                
+                if b >= constants.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("SETFIELD: invalid constant index {}", b)));
+                }
+                
+                unsafe {
+                    let ra = stack_ptr.add(base + a);
+                    let key = &constants[b];
+                    
+                    // Get value (RK: register or constant)
+                    let value = if k {
+                        if c >= constants.len() {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("SETFIELD: invalid constant".to_string()));
+                        }
+                        constants[c]
+                    } else {
+                        let rc = stack_ptr.add(base + c);
+                        *rc
+                    };
+                    
+                    if let Some(table_id) = (*ra).as_table_id() {
+                        let table = lua_state.vm_mut().object_pool.get_table_mut(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        table.raw_set(*key, value);
+                    }
+                    // else: should trigger metamethod
+                }
+            }
+            
+            OpCode::Self_ => {
+                // R[A+1] := R[B]; R[A] := R[B][K[C]:string]
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                if c >= constants.len() {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(lua_state.error(format!("SELF: invalid constant index {}", c)));
+                }
+                
+                unsafe {
+                    let rb = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
+                    let ra1 = ra.add(1);
+                    
+                    // R[A+1] := R[B] (save object)
+                    *ra1 = *rb;
+                    
+                    // R[A] := R[B][K[C]] (get method)
+                    let key = &constants[c];
+                    
+                    if let Some(table_id) = (*rb).as_table_id() {
+                        let table = lua_state.vm_mut().object_pool.get_table(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        
+                        let result = table.raw_get(key).unwrap_or(LuaValue::nil());
+                        *ra = result;
+                    } else {
+                        // Not a table - should trigger metamethod
+                        setnilvalue(ra);
+                    }
+                }
+            }
+            
+            // ============================================================
+            // FUNCTION CALL OPERATIONS
+            // ============================================================
+            
+            OpCode::Call => {
+                // R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                let c = instr.get_c() as usize;
+                
+                // Save PC before call
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                
+                // Delegate to call handler - returns FrameAction
+                return call::handle_call(lua_state, frame_idx, base, a, b, c);
+            }
+            
+            OpCode::TailCall => {
+                // Tail call optimization: return R[A](R[A+1], ... ,R[A+B-1])
+                let a = instr.get_a() as usize;
+                let b = instr.get_b() as usize;
+                
+                // Save PC before call
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                
+                // Delegate to tailcall handler (returns FrameAction)
+                return call::handle_tailcall(lua_state, frame_idx, base, a, b);
             }
             
             // ============================================================
