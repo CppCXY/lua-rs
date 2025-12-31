@@ -174,7 +174,8 @@ fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
 /// Returns when function returns or error occurs
 ///
 /// Architecture: Lua-style single loop, NOT recursive calls
-/// - CALL: push frame, reload chunk/upvalues, continue loop
+/// - CALL (Lua): push frame, reload chunk/upvalues, continue loop
+/// - CALL (C): execute directly, return immediately (no frame push)
 /// - RETURN: pop frame, reload chunk/upvalues, continue loop
 /// - TAILCALL: replace frame, reload chunk/upvalues, continue loop
 #[allow(unused)]
@@ -194,7 +195,7 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
                 .ok_or(LuaError::RuntimeError)?;
 
             let Some(func_id) = func_value.as_function_id() else {
-                return Err(lua_state.error("Current frame is not a Lua function".to_string()));
+                return Err(lua_state.error("Current frame is not a function".to_string()));
             };
 
             let gc_function = lua_state
@@ -203,8 +204,15 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
                 .get_function_mut(func_id)
                 .ok_or(LuaError::RuntimeError)?;
 
+            // Check if this is a Lua function
+            // C functions should not reach here because they execute synchronously
+            // in handle_call and return FrameAction::Return immediately
+            if !gc_function.is_lua_function() {
+                return Err(lua_state.error("Unexpected C function in main VM loop".to_string()));
+            }
+
             let Some(chunk_rc) = gc_function.chunk() else {
-                return Err(lua_state.error("Function has no chunk".to_string()));
+                return Err(lua_state.error("Lua function has no chunk".to_string()));
             };
 
             (chunk_rc.clone(), Rc::new(gc_function.upvalues.clone()))
@@ -219,10 +227,16 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
             }
             FrameAction::Call => {
                 // New frame was pushed, loop continues with callee's frame
+                // Note: C functions don't push frames, they execute and return Continue
                 continue 'vm_loop;
             }
             FrameAction::TailCall => {
                 // Current frame was replaced, loop continues with new function
+                continue 'vm_loop;
+            }
+            FrameAction::Continue => {
+                // C function executed in current frame, continue with same frame
+                // Just loop back to execute_frame with the same frame
                 continue 'vm_loop;
             }
         }
@@ -1464,7 +1478,10 @@ fn execute_frame(
                 lua_state.set_frame_pc(frame_idx, pc as u32);
 
                 // Delegate to call handler - returns FrameAction
-                return call::handle_call(lua_state, frame_idx, base, a, b, c);
+                match call::handle_call(lua_state, frame_idx, base, a, b, c) {
+                    Ok(FrameAction::Continue) => {},
+                    other => return other,
+                }
             }
             OpCode::TailCall => {
                 // Tail call optimization: return R[A](R[A+1], ... ,R[A+B-1])
@@ -1475,7 +1492,10 @@ fn execute_frame(
                 lua_state.set_frame_pc(frame_idx, pc as u32);
 
                 // Delegate to tailcall handler (returns FrameAction)
-                return call::handle_tailcall(lua_state, frame_idx, base, a, b);
+                match call::handle_tailcall(lua_state, frame_idx, base, a, b) {
+                    Ok(FrameAction::Continue) => {},
+                    other => return other,
+                }
             }
             OpCode::Not => {
                 // R[A] := not R[B]
