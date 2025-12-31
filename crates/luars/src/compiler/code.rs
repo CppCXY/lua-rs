@@ -88,10 +88,7 @@ pub fn const_to_exp(value: LuaValue, e: &mut ExpDesc) {
 // Port of luaK_codeABC from lcode.c:397-402
 // int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize {
-    let mut instr = (op as u32) << Instruction::POS_OP;
-    Instruction::set_a(&mut instr, a);
-    Instruction::set_b(&mut instr, b);
-    Instruction::set_c(&mut instr, c);
+    let instr = Instruction::create_abc(op, a, b, c);
     let pc = fs.pc;
 
     fs.chunk.code.push(instr);
@@ -103,9 +100,7 @@ pub fn code_abc(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32) -> usize
 // Port of luaK_codeABx from lcode.c:409-414
 // int luaK_codeABx (FuncState *fs, OpCode o, int a, unsigned int bc)
 pub fn code_abx(fs: &mut FuncState, op: OpCode, a: u32, bx: u32) -> usize {
-    let mut instr = (op as u32) << Instruction::POS_OP;
-    Instruction::set_a(&mut instr, a);
-    Instruction::set_bx(&mut instr, bx);
+    let instr = Instruction::create_abx(op, a, bx);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
     fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline (lcode.c:390)
@@ -116,10 +111,7 @@ pub fn code_abx(fs: &mut FuncState, op: OpCode, a: u32, bx: u32) -> usize {
 // Port of codeAsBx from lcode.c:419-424
 // static int codeAsBx (FuncState *fs, OpCode o, int a, int bc)
 pub fn code_asbx(fs: &mut FuncState, op: OpCode, a: u32, sbx: i32) -> usize {
-    let mut instr = (op as u32) << Instruction::POS_OP;
-    Instruction::set_a(&mut instr, a);
-    let bx = (sbx + Instruction::OFFSET_SBX) as u32;
-    Instruction::set_bx(&mut instr, bx);
+    let instr = Instruction::create_asbx(op, a, sbx);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
     fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline
@@ -130,11 +122,7 @@ pub fn code_asbx(fs: &mut FuncState, op: OpCode, a: u32, sbx: i32) -> usize {
 // Port of luaK_codeABCk from lcode.c:397-402
 // int luaK_codeABCk (FuncState *fs, OpCode o, int a, int b, int c, int k)
 pub fn code_abck(fs: &mut FuncState, op: OpCode, a: u32, b: u32, c: u32, k: bool) -> usize {
-    let mut instr = (op as u32) << Instruction::POS_OP;
-    Instruction::set_a(&mut instr, a);
-    Instruction::set_b(&mut instr, b);
-    Instruction::set_c(&mut instr, c);
-    Instruction::set_k(&mut instr, k);
+    let instr = Instruction::create_abck(op, a, b, c, k);
     let pc = fs.pc;
     fs.chunk.code.push(instr);
     fs.chunk.line_info.push(fs.lexer.lastline as u32); // Use lastline
@@ -191,7 +179,7 @@ pub fn finish(fs: &mut FuncState) {
 
     for i in 0..fs.pc {
         let instr = &mut fs.chunk.code[i];
-        let opcode = OpCode::from(Instruction::get_opcode(*instr));
+        let opcode = OpCode::from(instr.get_opcode());
 
         match opcode {
             OpCode::Return0 | OpCode::Return1 => {
@@ -199,17 +187,17 @@ pub fn finish(fs: &mut FuncState) {
                 // Only convert when needclose OR use_hidden_vararg (PF_VAHID)
                 if needclose || use_hidden_vararg {
                     // Convert to RETURN
-                    let a = Instruction::get_a(*instr);
+                    let a = instr.get_a();
                     // For RETURN0, B=1 (0 returns + 1); for RETURN1, B=2 (1 return + 1)
                     let b = if opcode == OpCode::Return0 { 1 } else { 2 };
                     let mut new_instr = Instruction::create_abck(OpCode::Return, a, b, 0, false);
 
                     // lcode.c:1948-1950: Set k and C fields
                     if needclose {
-                        Instruction::set_k(&mut new_instr, true);
+                        new_instr.set_k(true);
                     }
                     if use_hidden_vararg {
-                        Instruction::set_c(&mut new_instr, (num_params + 1) as u32);
+                        new_instr.set_c((num_params + 1) as u32);
                     }
 
                     *instr = new_instr;
@@ -218,10 +206,10 @@ pub fn finish(fs: &mut FuncState) {
             OpCode::Return | OpCode::TailCall => {
                 // lcode.c:1948-1950: Set k and C fields for existing RETURN/TAILCALL
                 if needclose {
-                    Instruction::set_k(instr, true);
+                    instr.set_k(true);
                 }
                 if use_hidden_vararg {
-                    Instruction::set_c(instr, (num_params + 1) as u32);
+                    instr.set_c((num_params + 1) as u32);
                 }
             }
             OpCode::GetVarg => {
@@ -229,7 +217,7 @@ pub fn finish(fs: &mut FuncState) {
                 // If function has a vararg table (PF_VATAB), convert to GETTABLE
                 if needs_vararg_table {
                     let pc = &mut fs.chunk.code[i];
-                    Instruction::set_opcode(pc, OpCode::GetTable);
+                    pc.set_opcode(OpCode::GetTable);
                 }
             }
             OpCode::Vararg => {
@@ -237,7 +225,7 @@ pub fn finish(fs: &mut FuncState) {
                 // If function has a vararg table (PF_VATAB), set k flag
                 if needs_vararg_table {
                     let pc = &mut fs.chunk.code[i];
-                    Instruction::set_k(pc, true);
+                    pc.set_k(true);
                 }
             }
             OpCode::Jmp => {
@@ -251,7 +239,7 @@ pub fn finish(fs: &mut FuncState) {
 }
 
 // Helper for finish: find final target of a jump chain
-fn finaltarget(code: &[u32], mut pc: usize) -> usize {
+fn finaltarget(code: &[Instruction], mut pc: usize) -> usize {
     let mut count = 0;
     while count < 100 {
         // Prevent infinite loops
@@ -259,10 +247,10 @@ fn finaltarget(code: &[u32], mut pc: usize) -> usize {
             break;
         }
         let instr = code[pc];
-        if OpCode::from(Instruction::get_opcode(instr)) != OpCode::Jmp {
+        if OpCode::from(instr.get_opcode()) != OpCode::Jmp {
             break;
         }
-        let offset = Instruction::get_sj(instr) as isize;
+        let offset = instr.get_sj() as isize;
         if offset == -1 {
             break;
         }
@@ -284,7 +272,7 @@ fn fixjump_at(fs: &mut FuncState, pc: usize, target: usize) {
     }
 
     let instr = &mut fs.chunk.code[pc];
-    Instruction::set_sj(instr, offset as i32);
+    instr.set_sj(offset as i32);
 }
 
 // Port of luaK_jump from lcode.c:200-202
@@ -361,7 +349,7 @@ fn get_jump(fs: &FuncState, pc: usize) -> isize {
         return -1;
     }
     let instr = fs.chunk.code[pc];
-    let offset = Instruction::get_sj(instr);
+    let offset = instr.get_sj();
     if offset == -1 {
         -1
     } else {
@@ -382,7 +370,7 @@ pub fn fix_jump(fs: &mut FuncState, pc: usize, target: usize) {
         return;
     }
     let instr = &mut fs.chunk.code[pc];
-    Instruction::set_sj(instr, offset as i32);
+    instr.set_sj(offset as i32);
 }
 
 // Port of need_value from lcode.c:900-908
@@ -393,7 +381,7 @@ fn need_value(fs: &FuncState, mut list: isize) -> bool {
     while list != NO_JUMP {
         let control_pc = get_jump_control(fs, list as usize);
         let i = fs.chunk.code[control_pc];
-        let op = OpCode::from(Instruction::get_opcode(i));
+        let op = OpCode::from(i.get_opcode());
         if op != OpCode::TestSet {
             return true;
         }

@@ -37,7 +37,7 @@ impl LuaWasm {
             Ok(results) => {
                 let result = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
                 Ok(vm.value_to_string_raw(&result))
-            },
+            }
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
         }
     }
@@ -74,7 +74,7 @@ impl LuaWasm {
                 Ok(results) => {
                     let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
                     lua_value_to_js(&vm, &value)
-                },
+                }
                 Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
             },
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),

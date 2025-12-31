@@ -4,7 +4,7 @@ mod call_info;
 mod execute;
 mod lua_error;
 mod lua_state;
-mod opcode;
+pub mod opcode;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
@@ -12,7 +12,7 @@ use crate::lua_value::{Chunk, LuaString, LuaTable, LuaUserdata, LuaValue, LuaVal
 pub use crate::lua_vm::call_info::CallInfo;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
-use crate::{lib_registry, ObjectPool};
+use crate::{ObjectPool, lib_registry};
 pub use opcode::{Instruction, OpCode};
 use std::ptr::null_mut;
 use std::rc::Rc;
@@ -538,11 +538,7 @@ impl LuaVM {
     /// Create a C closure with a single inline upvalue (fast path)
     /// This avoids all upvalue indirection and allocation overhead
     #[inline]
-    pub fn create_c_closure_inline1(
-        &mut self,
-        func: CFunction,
-        upvalue: LuaValue,
-    ) -> LuaValue {
+    pub fn create_c_closure_inline1(&mut self, func: CFunction, upvalue: LuaValue) -> LuaValue {
         let id = self.object_pool.create_c_closure_inline1(func, upvalue);
         self.gc.track_object(GcId::FunctionId(id), 128);
         LuaValue::function(id)

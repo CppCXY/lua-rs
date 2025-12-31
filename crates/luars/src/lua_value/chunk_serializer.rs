@@ -2,6 +2,7 @@
 // Custom binary format for lua-rs bytecode
 
 use super::{Chunk, LuaValue, UpvalueDesc};
+use crate::Instruction;
 use crate::gc::ObjectPool;
 use std::io::{Cursor, Read};
 use std::rc::Rc;
@@ -121,7 +122,7 @@ fn write_chunk(
     // Write code
     write_u32(buf, chunk.code.len() as u32);
     for &instr in &chunk.code {
-        write_u32(buf, instr);
+        write_u32(buf, instr.as_u32());
     }
 
     // Write constants
@@ -179,7 +180,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
     // Write code
     write_u32(buf, chunk.code.len() as u32);
     for &instr in &chunk.code {
-        write_u32(buf, instr);
+        write_u32(buf, instr.as_u32());
     }
 
     // Write constants (without pool, strings become nil)
@@ -238,7 +239,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
     for _ in 0..code_len {
-        code.push(read_u32(cursor)?);
+        code.push(Instruction::from_u32(read_u32(cursor)?));
     }
 
     // Read constants
@@ -410,7 +411,7 @@ fn read_chunk_with_strings(
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
     for _ in 0..code_len {
-        code.push(read_u32(cursor)?);
+        code.push(Instruction::from_u32(read_u32(cursor)?));
     }
 
     // Read constants with string collection

@@ -479,7 +479,8 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
                 let pc = e.u.info() as usize;
                 if pc < fs.chunk.code.len() {
                     let instr = &mut fs.chunk.code[pc];
-                    *instr = (*instr & !0x7F) | (OpCode::TailCall as u32);
+                    *instr =
+                        Instruction::from_u32((instr.as_u32() & !0x7F) | (OpCode::TailCall as u32));
                 }
             }
             nret = -1; // LUA_MULTRET

@@ -3,7 +3,7 @@
 
   Instruction Format (32-bit):
   All instructions have an opcode in the first 7 bits.
-  
+
         3 3 2 2 2 2 2 2 2 2 2 2 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0
         1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0
   iABC          C(8)     |      B(8)     |k|     A(8)      |   Op(7)     |
@@ -25,96 +25,25 @@
 
 use crate::OpCode;
 
-#[macro_export]
-macro_rules! get_op {
-    ($instr:expr) => {
-        OpCode::from_u8((($instr) & 0x7F) as u8)
-    };
-}
-
-/// Get A field (bits 7-14, 8 bits)
-#[macro_export]
-macro_rules! get_a {
-    ($instr:expr) => {
-        ((($instr) >> 7) & 0xFF) as usize
-    };
-}
-
-/// Get B field (bits 16-23, 8 bits)
-#[macro_export]
-macro_rules! get_b {
-    ($instr:expr) => {
-        ((($instr) >> 16) & 0xFF) as usize
-    };
-}
-
-/// Get C field (bits 24-31, 8 bits)
-#[macro_export]
-macro_rules! get_c {
-    ($instr:expr) => {
-        ((($instr) >> 24) & 0xFF) as usize
-    };
-}
-
-/// Get k flag (bit 15, 1 bit)
-#[macro_export]
-macro_rules! get_k {
-    ($instr:expr) => {
-        ((($instr) >> 15) & 1) != 0
-    };
-}
-
-/// Get Bx field (bits 15-31, 17 bits, unsigned)
-#[macro_export]
-macro_rules! get_bx {
-    ($instr:expr) => {
-        (($instr) >> 15) as usize
-    };
-}
-
-/// Get sBx field (bits 15-31, 17 bits, signed with offset 0xFFFF)
-#[macro_export]
-macro_rules! get_sbx {
-    ($instr:expr) => {
-        ((($instr) >> 15) as i32) - 0xFFFF
-    };
-}
-
-/// Get Ax field (bits 7-31, 25 bits, unsigned)
-#[macro_export]
-macro_rules! get_ax {
-    ($instr:expr) => {
-        (($instr) >> 7) as usize
-    };
-}
-
-/// Get sJ field (bits 7-31, 25 bits, signed with offset 0xFFFFFF)
-#[macro_export]
-macro_rules! get_sj {
-    ($instr:expr) => {
-        ((($instr) >> 7) as i32) - 0xFFFFFF
-    };
-}
-
-/// Get sB field (signed B, offset 128)
-#[macro_export]
-macro_rules! get_sb {
-    ($instr:expr) => {
-        (((($instr) >> 16) & 0xFF) as i32) - 128
-    };
-}
-
-/// Get sC field (signed C, offset 127)
-#[macro_export]
-macro_rules! get_sc {
-    ($instr:expr) => {
-        (((($instr) >> 24) & 0xFF) as i32) - 127
-    };
-}
-
-pub struct Instruction;
+/// Zero-cost abstraction for Lua 5.5 instruction encoding
+/// Internally stores a 32-bit instruction following Lua 5.5 format
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Instruction(u32);
 
 impl Instruction {
+    /// Create an Instruction from a raw u32 value
+    #[inline(always)]
+    pub const fn from_u32(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Get the raw u32 value of this instruction
+    #[inline(always)]
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
     // Size of each field
     pub const SIZE_OP: u32 = 7;
     pub const SIZE_A: u32 = 8;
@@ -170,163 +99,172 @@ impl Instruction {
 
     // Get/Set opcode
     #[inline(always)]
-    pub fn get_opcode(i: u32) -> OpCode {
-        let op_byte = ((i >> Self::POS_OP) & Self::mask1(Self::SIZE_OP, 0)) as u8;
+    pub fn get_opcode(self) -> OpCode {
+        let op_byte = ((self.0 >> Self::POS_OP) & Self::mask1(Self::SIZE_OP, 0)) as u8;
         OpCode::from_u8(op_byte)
     }
 
     #[inline(always)]
-    pub fn set_opcode(i: &mut u32, op: OpCode) {
-        *i = (*i & Self::mask0(Self::SIZE_OP, Self::POS_OP))
+    pub fn set_opcode(&mut self, op: OpCode) {
+        self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
             | ((op as u32) << Self::POS_OP & Self::mask1(Self::SIZE_OP, Self::POS_OP));
     }
 
     // Generic argument getter
     #[inline(always)]
-    fn get_arg(i: u32, pos: u32, size: u32) -> u32 {
-        (i >> pos) & Self::mask1(size, 0)
+    fn get_arg(&self, pos: u32, size: u32) -> u32 {
+        (self.0 >> pos) & Self::mask1(size, 0)
     }
 
     // Generic argument setter
     #[inline(always)]
-    fn set_arg(i: &mut u32, v: u32, pos: u32, size: u32) {
-        *i = (*i & Self::mask0(size, pos)) | ((v << pos) & Self::mask1(size, pos));
+    fn set_arg(&mut self, v: u32, pos: u32, size: u32) {
+        self.0 = (self.0 & Self::mask0(size, pos)) | ((v << pos) & Self::mask1(size, pos));
     }
 
     // Field accessors
     #[inline(always)]
-    pub fn get_a(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_A, Self::SIZE_A)
+    pub fn get_a(self) -> u32 {
+        self.get_arg(Self::POS_A, Self::SIZE_A)
     }
 
     #[inline(always)]
-    pub fn set_a(i: &mut u32, v: u32) {
-        Self::set_arg(i, v, Self::POS_A, Self::SIZE_A);
+    pub fn set_a(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_A, Self::SIZE_A);
     }
 
     #[inline(always)]
-    pub fn get_b(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_B, Self::SIZE_B)
+    pub fn get_b(self) -> u32 {
+        self.get_arg(Self::POS_B, Self::SIZE_B)
     }
 
     #[inline(always)]
-    pub fn get_sb(i: u32) -> i32 {
-        Self::get_b(i) as i32 - Self::OFFSET_SB
+    pub fn get_sb(self) -> i32 {
+        self.get_b() as i32 - Self::OFFSET_SB
     }
 
     #[inline(always)]
-    pub fn set_b(i: &mut u32, v: u32) {
-        Self::set_arg(i, v, Self::POS_B, Self::SIZE_B);
+    pub fn set_b(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_B, Self::SIZE_B);
     }
 
     #[inline(always)]
-    pub fn get_c(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_C, Self::SIZE_C)
+    pub fn get_c(self) -> u32 {
+        self.get_arg(Self::POS_C, Self::SIZE_C)
     }
 
     #[inline(always)]
-    pub fn get_sc(i: u32) -> i32 {
-        Self::get_c(i) as i32 - Self::OFFSET_SC
+    pub fn get_sc(self) -> i32 {
+        self.get_c() as i32 - Self::OFFSET_SC
     }
 
     #[inline(always)]
-    pub fn set_c(i: &mut u32, v: u32) {
-        Self::set_arg(i, v, Self::POS_C, Self::SIZE_C);
+    pub fn set_c(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_C, Self::SIZE_C);
     }
 
     #[inline(always)]
-    pub fn get_k(i: u32) -> bool {
-        Self::get_arg(i, Self::POS_K, Self::SIZE_K) != 0
+    pub fn get_k(self) -> bool {
+        self.get_arg(Self::POS_K, Self::SIZE_K) != 0
     }
 
     #[inline(always)]
-    pub fn set_k(i: &mut u32, v: bool) {
-        Self::set_arg(i, if v { 1 } else { 0 }, Self::POS_K, Self::SIZE_K);
+    pub fn set_k(&mut self, v: bool) {
+        self.set_arg(if v { 1 } else { 0 }, Self::POS_K, Self::SIZE_K);
     }
 
     #[inline(always)]
-    pub fn get_bx(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_BX, Self::SIZE_BX)
+    pub fn get_bx(self) -> u32 {
+        self.get_arg(Self::POS_BX, Self::SIZE_BX)
     }
 
     #[inline(always)]
-    pub fn get_sbx(i: u32) -> i32 {
-        Self::get_bx(i) as i32 - Self::OFFSET_SBX
+    pub fn get_sbx(self) -> i32 {
+        self.get_bx() as i32 - Self::OFFSET_SBX
     }
 
     #[inline(always)]
-    pub fn set_bx(i: &mut u32, v: u32) {
-        Self::set_arg(i, v, Self::POS_BX, Self::SIZE_BX);
+    pub fn set_bx(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_BX, Self::SIZE_BX);
     }
 
     #[inline(always)]
-    pub fn get_ax(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_AX, Self::SIZE_AX)
+    pub fn get_ax(self) -> u32 {
+        self.get_arg(Self::POS_AX, Self::SIZE_AX)
     }
 
     #[inline(always)]
-    pub fn set_ax(i: &mut u32, v: u32) {
-        Self::set_arg(i, v, Self::POS_AX, Self::SIZE_AX);
+    pub fn set_ax(&mut self, v: u32) {
+        self.set_arg(v, Self::POS_AX, Self::SIZE_AX);
     }
 
     #[inline(always)]
-    pub fn get_sj(i: u32) -> i32 {
-        Self::get_arg(i, Self::POS_SJ, Self::SIZE_SJ) as i32 - Self::OFFSET_SJ
+    pub fn get_sj(self) -> i32 {
+        self.get_arg(Self::POS_SJ, Self::SIZE_SJ) as i32 - Self::OFFSET_SJ
     }
 
     #[inline(always)]
-    pub fn set_sj(i: &mut u32, v: i32) {
-        Self::set_arg(i, (v + Self::OFFSET_SJ) as u32, Self::POS_SJ, Self::SIZE_SJ);
+    pub fn set_sj(&mut self, v: i32) {
+        self.set_arg((v + Self::OFFSET_SJ) as u32, Self::POS_SJ, Self::SIZE_SJ);
     }
 
     // Get vB and vC fields for vABCk format instructions (like NEWTABLE, SETLIST)
     #[inline(always)]
-    pub fn get_vb(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_V_B, Self::SIZE_V_B)
+    pub fn get_vb(self) -> u32 {
+        self.get_arg(Self::POS_V_B, Self::SIZE_V_B)
     }
 
     #[inline(always)]
-    pub fn get_vc(i: u32) -> u32 {
-        Self::get_arg(i, Self::POS_V_C, Self::SIZE_V_C)
+    pub fn get_vc(self) -> u32 {
+        self.get_arg(Self::POS_V_C, Self::SIZE_V_C)
     }
 
     // Instruction creation
-    pub fn create_abc(op: OpCode, a: u32, b: u32, c: u32) -> u32 {
-        ((op as u32) << Self::POS_OP) | (a << Self::POS_A) | (b << Self::POS_B) | (c << Self::POS_C)
+    pub fn create_abc(op: OpCode, a: u32, b: u32, c: u32) -> Self {
+        Self(
+            ((op as u32) << Self::POS_OP)
+                | (a << Self::POS_A)
+                | (b << Self::POS_B)
+                | (c << Self::POS_C),
+        )
     }
 
-    pub fn create_abck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> u32 {
-        ((op as u32) << Self::POS_OP)
-            | (a << Self::POS_A)
-            | ((if k { 1 } else { 0 }) << Self::POS_K)
-            | (b << Self::POS_B)
-            | (c << Self::POS_C)
+    pub fn create_abck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> Self {
+        Self(
+            ((op as u32) << Self::POS_OP)
+                | (a << Self::POS_A)
+                | ((if k { 1 } else { 0 }) << Self::POS_K)
+                | (b << Self::POS_B)
+                | (c << Self::POS_C),
+        )
     }
 
     // Create instruction in vABCk format (variable-size B and C fields)
     // Used for instructions like NEWTABLE where C field is 10 bits instead of 8
-    pub fn create_vabck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> u32 {
-        ((op as u32) << Self::POS_OP)
-            | (a << Self::POS_A)
-            | ((if k { 1 } else { 0 }) << Self::POS_K)
-            | (b << Self::POS_V_B)
-            | (c << Self::POS_V_C)
+    pub fn create_vabck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> Self {
+        Self(
+            ((op as u32) << Self::POS_OP)
+                | (a << Self::POS_A)
+                | ((if k { 1 } else { 0 }) << Self::POS_K)
+                | (b << Self::POS_V_B)
+                | (c << Self::POS_V_C),
+        )
     }
 
-    pub fn create_abx(op: OpCode, a: u32, bx: u32) -> u32 {
-        ((op as u32) << Self::POS_OP) | (a << Self::POS_A) | (bx << Self::POS_BX)
+    pub fn create_abx(op: OpCode, a: u32, bx: u32) -> Self {
+        Self(((op as u32) << Self::POS_OP) | (a << Self::POS_A) | (bx << Self::POS_BX))
     }
 
-    pub fn create_asbx(op: OpCode, a: u32, sbx: i32) -> u32 {
+    pub fn create_asbx(op: OpCode, a: u32, sbx: i32) -> Self {
         Self::create_abx(op, a, (sbx + Self::OFFSET_SBX) as u32)
     }
 
-    pub fn create_ax(op: OpCode, ax: u32) -> u32 {
-        ((op as u32) << Self::POS_OP) | (ax << Self::POS_AX)
+    pub fn create_ax(op: OpCode, ax: u32) -> Self {
+        Self(((op as u32) << Self::POS_OP) | (ax << Self::POS_AX))
     }
 
-    pub fn create_sj(op: OpCode, sj: i32) -> u32 {
-        ((op as u32) << Self::POS_OP) | (((sj + Self::OFFSET_SJ) as u32) << Self::POS_SJ)
+    pub fn create_sj(op: OpCode, sj: i32) -> Self {
+        Self(((op as u32) << Self::POS_OP) | (((sj + Self::OFFSET_SJ) as u32) << Self::POS_SJ))
     }
 
     // Helper: RK(x) - if k then K[x] else R[x]
@@ -340,24 +278,24 @@ impl Instruction {
         x & !(1 << (Self::SIZE_B - 1))
     }
 
-    // Convenience aliases
+    // Convenience aliases for backwards compatibility
     #[inline(always)]
-    pub fn encode_abc(op: OpCode, a: u32, b: u32, c: u32) -> u32 {
+    pub fn encode_abc(op: OpCode, a: u32, b: u32, c: u32) -> Self {
         Self::create_abc(op, a, b, c)
     }
 
     #[inline(always)]
-    pub fn encode_abck(op: OpCode, a: u32, b: u32, c: u32, k: u32) -> u32 {
+    pub fn encode_abck(op: OpCode, a: u32, b: u32, c: u32, k: u32) -> Self {
         Self::create_abck(op, a, b, c, k != 0)
     }
 
     #[inline(always)]
-    pub fn encode_abx(op: OpCode, a: u32, bx: u32) -> u32 {
+    pub fn encode_abx(op: OpCode, a: u32, bx: u32) -> Self {
         Self::create_abx(op, a, bx)
     }
 
     #[inline(always)]
-    pub fn encode_asbx(op: OpCode, a: u32, sbx: i32) -> u32 {
+    pub fn encode_asbx(op: OpCode, a: u32, sbx: i32) -> Self {
         Self::create_asbx(op, a, sbx)
     }
 }
@@ -371,50 +309,50 @@ mod tests {
     #[test]
     fn test_instruction_abc() {
         let instr = Instruction::create_abc(OpCode::Move, 1, 2, 3);
-        assert_eq!(Instruction::get_opcode(instr), OpCode::Move);
-        assert_eq!(Instruction::get_a(instr), 1);
-        assert_eq!(Instruction::get_b(instr), 2);
-        assert_eq!(Instruction::get_c(instr), 3);
+        assert_eq!(instr.get_opcode(), OpCode::Move);
+        assert_eq!(instr.get_a(), 1);
+        assert_eq!(instr.get_b(), 2);
+        assert_eq!(instr.get_c(), 3);
     }
 
     #[test]
     fn test_instruction_abck() {
         let instr = Instruction::create_abck(OpCode::Add, 5, 10, 20, true);
-        assert_eq!(Instruction::get_opcode(instr), OpCode::Add);
-        assert_eq!(Instruction::get_a(instr), 5);
-        assert_eq!(Instruction::get_b(instr), 10);
-        assert_eq!(Instruction::get_c(instr), 20);
-        assert_eq!(Instruction::get_k(instr), true);
+        assert_eq!(instr.get_opcode(), OpCode::Add);
+        assert_eq!(instr.get_a(), 5);
+        assert_eq!(instr.get_b(), 10);
+        assert_eq!(instr.get_c(), 20);
+        assert_eq!(instr.get_k(), true);
     }
 
     #[test]
     fn test_instruction_abx() {
         let instr = Instruction::create_abx(OpCode::LoadK, 3, 100);
-        assert_eq!(Instruction::get_opcode(instr), OpCode::LoadK);
-        assert_eq!(Instruction::get_a(instr), 3);
-        assert_eq!(Instruction::get_bx(instr), 100);
+        assert_eq!(instr.get_opcode(), OpCode::LoadK);
+        assert_eq!(instr.get_a(), 3);
+        assert_eq!(instr.get_bx(), 100);
     }
 
     #[test]
     fn test_instruction_asbx() {
         let instr = Instruction::create_asbx(OpCode::ForLoop, 2, -50);
-        assert_eq!(Instruction::get_opcode(instr), OpCode::ForLoop);
-        assert_eq!(Instruction::get_a(instr), 2);
-        assert_eq!(Instruction::get_sbx(instr), -50);
+        assert_eq!(instr.get_opcode(), OpCode::ForLoop);
+        assert_eq!(instr.get_a(), 2);
+        assert_eq!(instr.get_sbx(), -50);
     }
 
     #[test]
     fn test_instruction_ax() {
         let instr = Instruction::create_ax(OpCode::ExtraArg, 0xFFFFFF);
-        assert_eq!(Instruction::get_opcode(instr), OpCode::ExtraArg);
-        assert_eq!(Instruction::get_ax(instr), 0xFFFFFF);
+        assert_eq!(instr.get_opcode(), OpCode::ExtraArg);
+        assert_eq!(instr.get_ax(), 0xFFFFFF);
     }
 
     #[test]
     fn test_instruction_sj() {
         let instr = Instruction::create_sj(OpCode::Jmp, 1000);
-        assert_eq!(Instruction::get_opcode(instr), OpCode::Jmp);
-        assert_eq!(Instruction::get_sj(instr), 1000);
+        assert_eq!(instr.get_opcode(), OpCode::Jmp);
+        assert_eq!(instr.get_sj(), 1000);
     }
 
     #[test]
@@ -425,9 +363,9 @@ mod tests {
         let max_c = Instruction::MAX_C;
 
         let instr = Instruction::create_abc(OpCode::Move, max_a, max_b, max_c);
-        assert_eq!(Instruction::get_a(instr), max_a);
-        assert_eq!(Instruction::get_b(instr), max_b);
-        assert_eq!(Instruction::get_c(instr), max_c);
+        assert_eq!(instr.get_a(), max_a);
+        assert_eq!(instr.get_b(), max_b);
+        assert_eq!(instr.get_c(), max_c);
     }
 
     #[test]
@@ -441,44 +379,44 @@ mod tests {
         assert_eq!(OpCode::TForCall.get_mode(), OpMode::IABC);
         assert_eq!(OpCode::TForLoop.get_mode(), OpMode::IABx);
         assert_eq!(OpCode::NewTable.get_mode(), OpMode::IvABC); // ivABC format in Lua 5.5
-        assert_eq!(OpCode::SetList.get_mode(), OpMode::IvABC);  // ivABC format in Lua 5.5
-        assert_eq!(OpCode::ErrNNil.get_mode(), OpMode::IABx);   // New in Lua 5.5
-        assert_eq!(OpCode::GetVarg.get_mode(), OpMode::IABC);   // New in Lua 5.5
+        assert_eq!(OpCode::SetList.get_mode(), OpMode::IvABC); // ivABC format in Lua 5.5
+        assert_eq!(OpCode::ErrNNil.get_mode(), OpMode::IABx); // New in Lua 5.5
+        assert_eq!(OpCode::GetVarg.get_mode(), OpMode::IABC); // New in Lua 5.5
     }
 
     #[test]
     fn test_set_fields() {
         let mut instr = Instruction::create_abc(OpCode::Move, 1, 2, 3);
 
-        Instruction::set_a(&mut instr, 10);
-        assert_eq!(Instruction::get_a(instr), 10);
-        assert_eq!(Instruction::get_b(instr), 2);
-        assert_eq!(Instruction::get_c(instr), 3);
+        instr.set_a(10);
+        assert_eq!(instr.get_a(), 10);
+        assert_eq!(instr.get_b(), 2);
+        assert_eq!(instr.get_c(), 3);
 
-        Instruction::set_b(&mut instr, 20);
-        assert_eq!(Instruction::get_b(instr), 20);
+        instr.set_b(20);
+        assert_eq!(instr.get_b(), 20);
 
-        Instruction::set_c(&mut instr, 30);
-        assert_eq!(Instruction::get_c(instr), 30);
+        instr.set_c(30);
+        assert_eq!(instr.get_c(), 30);
 
-        assert_eq!(Instruction::get_opcode(instr), OpCode::Move);
+        assert_eq!(instr.get_opcode(), OpCode::Move);
     }
 
     #[test]
     fn test_signed_arguments() {
         // Test sBx (signed Bx)
         let instr_neg = Instruction::create_asbx(OpCode::ForLoop, 0, -100);
-        assert_eq!(Instruction::get_sbx(instr_neg), -100);
+        assert_eq!(instr_neg.get_sbx(), -100);
 
         let instr_pos = Instruction::create_asbx(OpCode::ForLoop, 0, 100);
-        assert_eq!(Instruction::get_sbx(instr_pos), 100);
+        assert_eq!(instr_pos.get_sbx(), 100);
 
         // Test sJ (signed jump)
         let jmp_neg = Instruction::create_sj(OpCode::Jmp, -500);
-        assert_eq!(Instruction::get_sj(jmp_neg), -500);
+        assert_eq!(jmp_neg.get_sj(), -500);
 
         let jmp_pos = Instruction::create_sj(OpCode::Jmp, 500);
-        assert_eq!(Instruction::get_sj(jmp_pos), 500);
+        assert_eq!(jmp_pos.get_sj(), 500);
     }
 
     #[test]
@@ -487,11 +425,12 @@ mod tests {
         let instr = Instruction::create_abck(OpCode::Add, 10, 20, 30, true);
 
         // Manual bit extraction to verify positions
-        let op_bits = instr & 0x7F; // bits 0-6
-        let a_bits = (instr >> 7) & 0xFF; // bits 7-14
-        let k_bits = (instr >> 15) & 0x1; // bit 15
-        let b_bits = (instr >> 16) & 0xFF; // bits 16-23
-        let c_bits = (instr >> 24) & 0xFF; // bits 24-31
+        let raw = instr.as_u32();
+        let op_bits = raw & 0x7F; // bits 0-6
+        let a_bits = (raw >> 7) & 0xFF; // bits 7-14
+        let k_bits = (raw >> 15) & 0x1; // bit 15
+        let b_bits = (raw >> 16) & 0xFF; // bits 16-23
+        let c_bits = (raw >> 24) & 0xFF; // bits 24-31
 
         assert_eq!(op_bits, OpCode::Add as u32);
         assert_eq!(a_bits, 10);
@@ -501,9 +440,9 @@ mod tests {
 
         // Test with k=false
         let instr2 = Instruction::create_abck(OpCode::Add, 5, 15, 25, false);
-        let k2_bits = (instr2 >> 15) & 0x1;
+        let k2_bits = (instr2.as_u32() >> 15) & 0x1;
         assert_eq!(k2_bits, 0);
-        assert_eq!(Instruction::get_k(instr2), false);
+        assert_eq!(instr2.get_k(), false);
     }
 
     #[test]
@@ -543,36 +482,36 @@ mod tests {
     fn test_signed_b_field() {
         // Test sB field (signed B, range -128 to 127)
         let pos_instr = Instruction::create_abc(OpCode::EqI, 0, 128 + 10, 0);
-        assert_eq!(Instruction::get_sb(pos_instr), 10);
+        assert_eq!(pos_instr.get_sb(), 10);
 
         let neg_instr = Instruction::create_abc(OpCode::EqI, 0, 128 - 10, 0);
-        assert_eq!(Instruction::get_sb(neg_instr), -10);
+        assert_eq!(neg_instr.get_sb(), -10);
 
         let zero_instr = Instruction::create_abc(OpCode::EqI, 0, 128, 0);
-        assert_eq!(Instruction::get_sb(zero_instr), 0);
+        assert_eq!(zero_instr.get_sb(), 0);
     }
 
     #[test]
     fn test_signed_c_field() {
         // Test sC field (signed C, range -127 to 128)
         let pos_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127 + 10);
-        assert_eq!(Instruction::get_sc(pos_instr), 10);
+        assert_eq!(pos_instr.get_sc(), 10);
 
         let neg_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127 - 10);
-        assert_eq!(Instruction::get_sc(neg_instr), -10);
+        assert_eq!(neg_instr.get_sc(), -10);
 
         let zero_instr = Instruction::create_abc(OpCode::ShrI, 0, 0, 127);
-        assert_eq!(Instruction::get_sc(zero_instr), 0);
+        assert_eq!(zero_instr.get_sc(), 0);
     }
 
     #[test]
     fn test_return_instruction_k_bit() {
         // RETURN instruction should have k=1 for final return
         let ret = Instruction::create_abck(OpCode::Return, 12, 2, 1, true);
-        assert_eq!(Instruction::get_opcode(ret), OpCode::Return);
-        assert_eq!(Instruction::get_a(ret), 12);
-        assert_eq!(Instruction::get_b(ret), 2);
-        assert_eq!(Instruction::get_c(ret), 1);
-        assert_eq!(Instruction::get_k(ret), true);
+        assert_eq!(ret.get_opcode(), OpCode::Return);
+        assert_eq!(ret.get_a(), 12);
+        assert_eq!(ret.get_b(), 2);
+        assert_eq!(ret.get_c(), 1);
+        assert_eq!(ret.get_k(), true);
     }
 }

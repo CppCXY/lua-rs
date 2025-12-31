@@ -163,17 +163,17 @@ fn dump_chunk(
     );
 
     for (pc, &instr) in chunk.code.iter().enumerate() {
-        let opcode = Instruction::get_opcode(instr);
-        let a = Instruction::get_a(instr);
-        let b = Instruction::get_b(instr);
-        let c = Instruction::get_c(instr);
-        let bx = Instruction::get_bx(instr);
-        let ax = Instruction::get_ax(instr);
-        let sbx = Instruction::get_sbx(instr);
-        let k = Instruction::get_k(instr);
+        let opcode = instr.get_opcode();
+        let a = instr.get_a();
+        let b = instr.get_b();
+        let c = instr.get_c();
+        let bx = instr.get_bx();
+        let ax = instr.get_ax();
+        let sbx = instr.get_sbx();
+        let k = instr.get_k();
         // For vABCk format instructions, also get vB and vC
-        let vb = Instruction::get_vb(instr);
-        let vc = Instruction::get_vc(instr);
+        let vb = instr.get_vb();
+        let vc = instr.get_vc();
         // Get line number for this instruction (luac format)
         let line = if pc < chunk.line_info.len() {
             chunk.line_info[pc]
@@ -184,7 +184,7 @@ fn dump_chunk(
         let detail = match opcode {
             OpCode::VarargPrep => format!("VARARGPREP {}", a),
             OpCode::Vararg => {
-                let k_flag = Instruction::get_k(instr);
+                let k_flag = instr.get_k();
                 if k_flag {
                     format!("VARARG {} {} {}k", a, b, c)
                 } else {
@@ -228,7 +228,7 @@ fn dump_chunk(
             OpCode::Add => format!("ADD {} {} {}", a, b, c),
             OpCode::AddI => {
                 // ADDI uses signed 8-bit immediate in sC field
-                let sc = Instruction::get_sc(instr);
+                let sc = instr.get_sc();
                 format!("ADDI {} {} {}", a, b, sc)
             }
             OpCode::AddK => format!("ADDK {} {} {}", a, b, c),
@@ -255,7 +255,7 @@ fn dump_chunk(
             OpCode::Return0 => format!("RETURN0"),
             OpCode::Return1 => format!("RETURN1 {}", a),
             OpCode::Closure => format!("CLOSURE {} {}", a, bx),
-            OpCode::Jmp => format!("JMP {}", Instruction::get_sj(instr)),
+            OpCode::Jmp => format!("JMP {}", instr.get_sj()),
             OpCode::Eq => format!("EQ {} {} {}", a, b, k as u32),
             OpCode::Lt => format!("LT {} {} {}", a, b, k as u32),
             OpCode::Le => format!("LE {} {} {}", a, b, k as u32),
@@ -351,11 +351,11 @@ fn dump_chunk(
             OpCode::BOrK => format!("BORK {} {} {}", a, b, c),
             OpCode::BXorK => format!("BXORK {} {} {}", a, b, c),
             OpCode::ShrI => {
-                let sc = Instruction::get_sc(instr);
+                let sc = instr.get_sc();
                 format!("SHRI {} {} {}", a, b, sc)
             }
             OpCode::ShlI => {
-                let sc = Instruction::get_sc(instr);
+                let sc = instr.get_sc();
                 format!("SHLI {} {} {}", a, b, sc)
             }
 
@@ -636,7 +636,7 @@ fn dump_chunk(
             }
             OpCode::Jmp => {
                 // Show jump target: "to X" where X is the target instruction (1-based)
-                let sj = Instruction::get_sj(instr);
+                let sj = instr.get_sj();
                 let target = (pc as isize + sj as isize + 1) as usize + 1; // +1 for 1-based indexing
                 format!(" ; to {}", target)
             }

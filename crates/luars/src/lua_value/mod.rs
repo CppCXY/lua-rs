@@ -14,6 +14,8 @@ use std::rc::Rc;
 pub use lua_table::LuaTable;
 pub use lua_value::{LuaValue, LuaValueKind};
 
+use crate::Instruction;
+
 /// Multi-return values from Lua functions
 /// OPTIMIZED: Compact enum representation (32 bytes)
 /// - Empty: no return values
@@ -383,7 +385,7 @@ pub struct UpvalueDesc {
 /// Compiled chunk (bytecode + metadata)
 #[derive(Debug, Clone)]
 pub struct Chunk {
-    pub code: Vec<u32>,
+    pub code: Vec<Instruction>,
     pub constants: Vec<LuaValue>,
     pub locals: Vec<String>,
     pub upvalue_count: usize,

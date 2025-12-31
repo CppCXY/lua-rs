@@ -2,7 +2,10 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use crate::{lua_vm::{CFunction, LuaState}, Chunk, LuaString, LuaTable, LuaValue, UpvalueId};
+use crate::{
+    Chunk, LuaString, LuaTable, LuaValue, UpvalueId,
+    lua_vm::{CFunction, LuaState},
+};
 
 // Object ages for generational GC (like Lua 5.4)
 // Uses 3 bits (0-7)
