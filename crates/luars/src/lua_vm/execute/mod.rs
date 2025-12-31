@@ -1478,7 +1478,7 @@ fn execute_frame(
                 lua_state.set_frame_pc(frame_idx, pc as u32);
 
                 // Delegate to call handler - returns FrameAction
-                match call::handle_call(lua_state, frame_idx, base, a, b, c) {
+                match call::handle_call(lua_state, base, a, b, c) {
                     Ok(FrameAction::Continue) => {},
                     other => return other,
                 }
@@ -1492,7 +1492,7 @@ fn execute_frame(
                 lua_state.set_frame_pc(frame_idx, pc as u32);
 
                 // Delegate to tailcall handler (returns FrameAction)
-                match call::handle_tailcall(lua_state, frame_idx, base, a, b) {
+                match call::handle_tailcall(lua_state, base, a, b) {
                     Ok(FrameAction::Continue) => {},
                     other => return other,
                 }

@@ -23,7 +23,6 @@ pub enum FrameAction {
 #[inline]
 pub fn handle_call(
     lua_state: &mut LuaState,
-    _frame_idx: usize,
     base: usize,
     a: usize,
     b: usize,
@@ -143,26 +142,70 @@ fn call_c_function(
     lua_state.pop_frame();
 
     // Move results from call_base to func_idx (Lua's moveresults)
-    // TODO: 这里需要实现完整的 moveresults 逻辑，处理 nresults 的各种情况
-    // 现在简化版本：直接移动结果
-    let actual_nresults = if nresults >= 0 {
-        nresults as usize
-    } else {
-        n // MULTRET: use actual return count
-    };
-
-    for i in 0..actual_nresults {
-        let val = if i < n {
-            lua_state
-                .stack_get(call_base + i)
-                .unwrap_or(LuaValue::nil())
-        } else {
-            LuaValue::nil() // Pad with nil
-        };
-        lua_state.stack_set(func_idx + i, val);
-    }
+    // Implements Lua's moveresults logic from ldo.c
+    move_results(lua_state, func_idx, call_base, n, nresults);
 
     Ok(())
+}
+
+/// Move function results to the correct position
+/// Implements Lua's moveresults and genmoveresults logic
+/// 
+/// Parameters:
+/// - res: target position (where results should be moved to)
+/// - first_result: position of first result on stack
+/// - nres: number of actual results
+/// - wanted: number of results wanted (-1 for MULTRET)
+fn move_results(
+    lua_state: &mut LuaState,
+    res: usize,
+    first_result: usize,
+    nres: usize,
+    wanted: i32,
+) {
+    // Handle common cases separately (like Lua's switch)
+    match wanted {
+        0 => {
+            // No values needed - do nothing
+            return;
+        }
+        1 => {
+            // One value needed
+            if nres == 0 {
+                // No results - set nil
+                lua_state.stack_set(res, LuaValue::nil());
+            } else {
+                // At least one result - move it
+                let val = lua_state.stack_get(first_result).unwrap_or(LuaValue::nil());
+                lua_state.stack_set(res, val);
+            }
+            return;
+        }
+        -1 => {
+            // MULTRET - want all results
+            for i in 0..nres {
+                let val = lua_state.stack_get(first_result + i).unwrap_or(LuaValue::nil());
+                lua_state.stack_set(res + i, val);
+            }
+            return;
+        }
+        _ => {
+            // General case: specific number of results (2+)
+            let wanted = wanted as usize;
+            let copy_count = nres.min(wanted);
+            
+            // Move actual results
+            for i in 0..copy_count {
+                let val = lua_state.stack_get(first_result + i).unwrap_or(LuaValue::nil());
+                lua_state.stack_set(res + i, val);
+            }
+            
+            // Pad with nil if needed
+            for i in copy_count..wanted {
+                lua_state.stack_set(res + i, LuaValue::nil());
+            }
+        }
+    }
 }
 
 /// Handle TAILCALL opcode - Lua style (replace frame, don't recurse)
@@ -170,7 +213,6 @@ fn call_c_function(
 #[inline]
 pub fn handle_tailcall(
     lua_state: &mut LuaState,
-    _frame_idx: usize,
     base: usize,
     a: usize,
     b: usize,
@@ -255,7 +297,61 @@ pub fn handle_tailcall(
         } else {
             Err(lua_state.error("TAILCALL: unknown function type".to_string()))
         }
+    } else if func.is_cfunction() {
+        // Light C function tail call (direct, not from object pool)
+        call_c_function_tailcall(lua_state, func_idx, nargs, base)?;
+        Ok(FrameAction::Continue)
     } else {
         Err(lua_state.error("TAILCALL: attempt to call a non-function".to_string()))
     }
+}
+
+/// Handle C function in tail call position
+/// Results are moved to frame base for proper return
+fn call_c_function_tailcall(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    nargs: usize,
+    base: usize,
+) -> LuaResult<()> {
+    // Get the function
+    let func = lua_state
+        .stack_get(func_idx)
+        .ok_or_else(|| lua_state.error("C function not found".to_string()))?;
+
+    // Get the C function pointer
+    let c_func: CFunction = if func.is_cfunction() {
+        unsafe {
+            let func_ptr = func.value_.f as usize;
+            std::mem::transmute(func_ptr)
+        }
+    } else if let Some(func_id) = func.as_function_id() {
+        let gc_func = lua_state
+            .vm_mut()
+            .object_pool
+            .get_function(func_id)
+            .ok_or(LuaError::RuntimeError)?;
+        gc_func
+            .c_function()
+            .ok_or_else(|| lua_state.error("Not a C function".to_string()))?
+    } else {
+        return Err(lua_state.error("Not a callable value".to_string()));
+    };
+
+    let call_base = func_idx + 1;
+
+    // Push temporary frame for C function
+    lua_state.push_frame(func, call_base, nargs)?;
+
+    // Call the C function
+    let n = c_func(lua_state)?;
+
+    // Pop the frame
+    lua_state.pop_frame();
+
+    // For tail call, move results to frame base (not func_idx)
+    // This is because we're returning from the current frame
+    move_results(lua_state, base, call_base, n, -1);
+
+    Ok(())
 }
