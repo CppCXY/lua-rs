@@ -57,17 +57,6 @@ pub enum OpCode {
 
     // Arithmetic with immediate
     AddI, // A B sC   R[A] := R[B] + sC
-    SubI, // A B sC   R[A] := R[B] - sC
-    MulI, // A B sC   R[A] := R[B] * sC
-    ModI, // A B sC   R[A] := R[B] % sC
-    PowI, // A B sC   R[A] := R[B] ^ sC
-    DivI, // A B sC   R[A] := R[B] / sC
-    IDivI, // A B sC  R[A] := R[B] // sC
-
-    // Bitwise with immediate
-    BAndI, // A B sC   R[A] := R[B] & sC
-    BOrI,  // A B sC   R[A] := R[B] | sC
-    BXorI, // A B sC   R[A] := R[B] ~ sC
 
     // Arithmetic with constant
     AddK,  // A B C    R[A] := R[B] + K[C]:number
