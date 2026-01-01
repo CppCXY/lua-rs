@@ -146,7 +146,10 @@ impl LuaVM {
 
     /// Execute a chunk in the main thread
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
-        let func = self.create_function(chunk, vec![]);
+        // Main chunk needs _ENV upvalue pointing to global table
+        // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
+        let env_upvalue_id = self.create_upvalue_closed(LuaValue::table(self.global));
+        let func = self.create_function(chunk, vec![env_upvalue_id]);
         self.execute_function(func, vec![])
     }
 
@@ -163,7 +166,9 @@ impl LuaVM {
     ) -> LuaResult<Vec<LuaValue>> {
         // Push function onto stack
         let main_state = &mut self.main_state;
-        let base = main_state.stack_mut().len();
+        let func_idx = main_state.stack_mut().len();  // Function will be at this index
+        let nargs = args.len();  // Save length before moving args
+        
         main_state.stack_mut().push(func.clone());
 
         // Push arguments
@@ -172,7 +177,8 @@ impl LuaVM {
         }
 
         // Create initial call frame
-        let nargs = main_state.stack_mut().len() - base - 1;
+        // base points to first argument (func_idx + 1), following Lua convention
+        let base = func_idx + 1;
         main_state.push_frame(func, base, nargs)?;
 
         // Run the VM execution loop

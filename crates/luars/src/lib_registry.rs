@@ -178,14 +178,14 @@ impl Default for LibraryRegistry {
 
 /// Create a standard Lua 5.4 library registry with all standard libraries
 pub fn create_standard_registry() -> LibraryRegistry {
-    let registry = LibraryRegistry::new();
+    let mut registry = LibraryRegistry::new();
 
     // // Register package library FIRST so package.loaded exists
     // // before other libraries try to register themselves
     // registry.register(stdlib::package::create_package_lib());
 
-    // // Register all other standard libraries
-    // registry.register(stdlib::basic::create_basic_lib());
+    // Register all other standard libraries
+    registry.register(crate::stdlib::basic::create_basic_lib());
     // registry.register(stdlib::string::create_string_lib());
     // registry.register(stdlib::table::create_table_lib());
     // registry.register(stdlib::math::create_math_lib());
