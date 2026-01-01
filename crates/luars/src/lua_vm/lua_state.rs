@@ -92,6 +92,10 @@ impl LuaState {
     pub fn push_frame(&mut self, func: LuaValue, base: usize, nparams: usize) -> LuaResult<()> {
         // 检查栈深度限制
         if self.call_stack.len() >= self.safe_option.max_call_depth {
+            self.error(format!(
+                "call stack overflow: exceeded maximum depth of {}",
+                self.safe_option.max_call_depth
+            ));
             return Err(LuaError::StackOverflow);
         }
 
@@ -123,17 +127,19 @@ impl LuaState {
 
     /// Set stack value at absolute index
     #[inline(always)]
-    pub fn stack_set(&mut self, index: usize, value: LuaValue) {
+    pub fn stack_set(&mut self, index: usize, value: LuaValue) -> LuaResult<()> {
         if index >= self.safe_option.max_stack_size {
-            panic!(
-                "Stack overflow: index {} exceeds maximum stack size {}",
+            self.error(format!(
+                "stack overflow: attempted to set index {} exceeding maximum {}",
                 index, self.safe_option.max_stack_size
-            );
+            ));
+            return Err(LuaError::StackOverflow);
         }
         if index >= self.stack.len() {
             self.stack.resize(index + 1, LuaValue::nil());
         }
         self.stack[index] = value;
+        Ok(())
     }
 
     /// Get register relative to current frame base
@@ -148,11 +154,13 @@ impl LuaState {
 
     /// Set register relative to current frame base
     #[inline(always)]
-    pub fn reg_set(&mut self, reg: u8, value: LuaValue) {
+    pub fn reg_set(&mut self, reg: u8, value: LuaValue) -> LuaResult<()> {
         if let Some(frame) = self.current_frame() {
             let index = frame.base + reg as usize;
-            self.stack_set(index, value);
+            self.stack_set(index, value)?;
         }
+
+        Ok(())
     }
 
     /// Get mutable reference to stack (for bulk operations)
@@ -252,16 +260,19 @@ impl LuaState {
     /// Grow stack to accommodate needed size (similar to luaD_growstack in Lua)
     /// Stack can grow dynamically up to MAX_STACK_SIZE
     /// C functions can call this, which means Vec may reallocate
-    pub fn grow_stack(&mut self, needed: usize) {
+    pub fn grow_stack(&mut self, needed: usize) -> LuaResult<()> {
         if needed > self.safe_option.max_stack_size {
-            panic!(
-                "Stack overflow: needed {} exceeds maximum {}",
+            self.error(format!(
+                "stack overflow: attempted to grow stack to {} exceeding maximum {}",
                 needed, self.safe_option.max_stack_size
-            );
+            ));
+            return Err(LuaError::StackOverflow);
         }
         if self.stack.len() < needed {
             self.stack.resize(needed, LuaValue::nil());
         }
+
+        Ok(())
     }
 
     /// Get frame base by index

@@ -1163,7 +1163,7 @@ fn execute_frame(
                 if upvalue.is_open() {
                     // Open: write to stack
                     let stack_idx = upvalue.get_stack_index().unwrap();
-                    lua_state.stack_set(stack_idx, value);
+                    lua_state.stack_set(stack_idx, value)?;
                 } else {
                     // Closed: write to upvalue storage
                     unsafe {

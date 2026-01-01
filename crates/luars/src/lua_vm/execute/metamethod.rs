@@ -88,7 +88,7 @@ pub fn handle_mmbin(
     let result = try_bin_tm(lua_state, v1, v2, tm)?;
 
     // Store result
-    lua_state.stack_set(base + result_reg, result);
+    lua_state.stack_set(base + result_reg, result)?;
 
     Ok(())
 }
@@ -150,7 +150,7 @@ pub fn handle_mmbini(
     };
 
     // Store result
-    lua_state.stack_set(base + result_reg, result);
+    lua_state.stack_set(base + result_reg, result)?;
 
     Ok(())
 }
@@ -216,7 +216,7 @@ pub fn handle_mmbink(
     };
 
     // Store result
-    lua_state.stack_set(base + result_reg, result);
+    lua_state.stack_set(base + result_reg, result)?;
 
     Ok(())
 }

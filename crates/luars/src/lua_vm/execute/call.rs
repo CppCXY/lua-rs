@@ -143,14 +143,14 @@ fn call_c_function(
 
     // Move results from call_base to func_idx (Lua's moveresults)
     // Implements Lua's moveresults logic from ldo.c
-    move_results(lua_state, func_idx, call_base, n, nresults);
+    move_results(lua_state, func_idx, call_base, n, nresults)?;
 
     Ok(())
 }
 
 /// Move function results to the correct position
 /// Implements Lua's moveresults and genmoveresults logic
-/// 
+///
 /// Parameters:
 /// - res: target position (where results should be moved to)
 /// - first_result: position of first result on stack
@@ -162,50 +162,53 @@ fn move_results(
     first_result: usize,
     nres: usize,
     wanted: i32,
-) {
+) -> LuaResult<()> {
     // Handle common cases separately (like Lua's switch)
     match wanted {
         0 => {
             // No values needed - do nothing
-            return;
         }
         1 => {
             // One value needed
             if nres == 0 {
                 // No results - set nil
-                lua_state.stack_set(res, LuaValue::nil());
+                lua_state.stack_set(res, LuaValue::nil())?;
             } else {
                 // At least one result - move it
                 let val = lua_state.stack_get(first_result).unwrap_or(LuaValue::nil());
-                lua_state.stack_set(res, val);
+                lua_state.stack_set(res, val)?;
             }
-            return;
         }
         -1 => {
             // MULTRET - want all results
             for i in 0..nres {
-                let val = lua_state.stack_get(first_result + i).unwrap_or(LuaValue::nil());
-                lua_state.stack_set(res + i, val);
+                let val = lua_state
+                    .stack_get(first_result + i)
+                    .unwrap_or(LuaValue::nil());
+                lua_state.stack_set(res + i, val)?;
             }
-            return;
         }
         _ => {
             // General case: specific number of results (2+)
             let wanted = wanted as usize;
             let copy_count = nres.min(wanted);
-            
+
             // Move actual results
             for i in 0..copy_count {
-                let val = lua_state.stack_get(first_result + i).unwrap_or(LuaValue::nil());
-                lua_state.stack_set(res + i, val);
+                let val = lua_state
+                    .stack_get(first_result + i)
+                    .unwrap_or(LuaValue::nil());
+                lua_state.stack_set(res + i, val)?;
             }
-            
+
             // Pad with nil if needed
             for i in copy_count..wanted {
-                lua_state.stack_set(res + i, LuaValue::nil());
+                lua_state.stack_set(res + i, LuaValue::nil())?;
             }
         }
     }
+
+    Ok(())
 }
 
 /// Handle TAILCALL opcode - Lua style (replace frame, don't recurse)
@@ -245,12 +248,11 @@ pub fn handle_tailcall(
 
             for (i, arg) in args.into_iter().enumerate() {
                 let dst_idx = base + i;
-                lua_state.stack_set(dst_idx, arg);
+                lua_state.stack_set(dst_idx, arg)?;
             }
 
             // Replace function at base
-            lua_state.stack_set(base - 1, func);
-
+            lua_state.stack_set(base - 1, func)?;
             // Update frame function and reset PC (reusing current frame)
             // Don't pop/push - just modify the existing frame
             // TODO: Need set_frame_func that updates the current frame's function
@@ -268,7 +270,7 @@ pub fn handle_tailcall(
             loop {
                 match lua_state.stack_get(func_idx + i) {
                     Some(result) if i == 0 || !result.is_nil() => {
-                        lua_state.stack_set(base + i, result);
+                        lua_state.stack_set(base + i, result)?;
                         i += 1;
                     }
                     _ => break,
@@ -286,7 +288,7 @@ pub fn handle_tailcall(
             loop {
                 match lua_state.stack_get(func_idx + i) {
                     Some(result) if i == 0 || !result.is_nil() => {
-                        lua_state.stack_set(base + i, result);
+                        lua_state.stack_set(base + i, result)?;
                         i += 1;
                     }
                     _ => break,
@@ -351,7 +353,7 @@ fn call_c_function_tailcall(
 
     // For tail call, move results to frame base (not func_idx)
     // This is because we're returning from the current frame
-    move_results(lua_state, base, call_base, n, -1);
+    move_results(lua_state, base, call_base, n, -1)?;
 
     Ok(())
 }

@@ -7,7 +7,7 @@
   - OP_RETURN: Generic return with N values
   - OP_RETURN0: Optimized no-value return
   - OP_RETURN1: Optimized single-value return
-  
+
   Key operations:
   1. Move return values to caller's expected position
   2. Close upvalues if needed (k flag)
@@ -25,7 +25,7 @@ use super::call::FrameAction;
 
 /// Handle OP_RETURN instruction
 /// Returns N values from R[A] to R[A+B-2]
-/// 
+///
 /// Based on lvm.c:1763-1783
 pub fn handle_return(
     lua_state: &mut LuaState,
@@ -42,11 +42,7 @@ pub fn handle_return(
         // Return all values from R[A] to top
         let top = lua_state.stack_len();
         let ra_pos = base + a;
-        if top > ra_pos {
-            top - ra_pos
-        } else {
-            0
-        }
+        if top > ra_pos { top - ra_pos } else { 0 }
     } else {
         b - 1
     };
@@ -64,7 +60,7 @@ pub fn handle_return(
     }
 
     // Move return values to correct position
-    // Caller expects results at ci->func (function slot) 
+    // Caller expects results at ci->func (function slot)
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = call_info.base; // Use base as the position for return values
     let wanted_results = if call_info.nresults < 0 {
@@ -72,7 +68,7 @@ pub fn handle_return(
     } else {
         call_info.nresults as usize
     };
-    
+
     // Copy results from R[A]..R[A+nres-1] to func_pos..func_pos+nres-1
     unsafe {
         for i in 0..nres {
@@ -88,7 +84,7 @@ pub fn handle_return(
     // Fill with nil if caller wants more results than we have
     if wanted_results > nres {
         for i in nres..wanted_results {
-            lua_state.stack_set(func_pos + i, LuaValue::nil());
+            lua_state.stack_set(func_pos + i, LuaValue::nil())?;
         }
         lua_state.set_top(func_pos + wanted_results);
         nres = wanted_results;
@@ -108,12 +104,9 @@ pub fn handle_return(
 }
 
 /// Handle OP_RETURN0 instruction (optimized for no return values)
-/// 
+///
 /// Based on lvm.c:1784-1800
-pub fn handle_return0(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-) -> LuaResult<FrameAction> {
+pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<FrameAction> {
     // Get caller's expected results
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = call_info.base;
@@ -126,7 +119,7 @@ pub fn handle_return0(
     // Fill with nil if caller expects results
     if wanted_results > 0 {
         for i in 0..wanted_results {
-            lua_state.stack_set(func_pos + i, LuaValue::nil());
+            lua_state.stack_set(func_pos + i, LuaValue::nil())?;
         }
         lua_state.set_top(func_pos + wanted_results);
     } else {
@@ -145,7 +138,7 @@ pub fn handle_return0(
 }
 
 /// Handle OP_RETURN1 instruction (optimized for single return value)
-/// 
+///
 /// Based on lvm.c:1801-1827
 pub fn handle_return1(
     lua_state: &mut LuaState,
@@ -174,11 +167,11 @@ pub fn handle_return1(
         lua_state.set_top(func_pos);
     } else {
         // Set the first result
-        lua_state.stack_set(func_pos, return_val);
+        lua_state.stack_set(func_pos, return_val)?;
 
         // Fill remaining with nil if caller wants more
         for i in 1..wanted_results {
-            lua_state.stack_set(func_pos + i, LuaValue::nil());
+            lua_state.stack_set(func_pos + i, LuaValue::nil())?;
         }
         lua_state.set_top(func_pos + wanted_results);
     }
