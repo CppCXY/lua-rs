@@ -165,7 +165,7 @@ impl LuaState {
 
     /// Get mutable reference to stack (for bulk operations)
     #[inline(always)]
-    pub fn stack_mut(&mut self) -> &mut Vec<LuaValue> {
+    pub(crate) fn stack_mut(&mut self) -> &mut Vec<LuaValue> {
         &mut self.stack
     }
 
@@ -246,7 +246,7 @@ impl LuaState {
     /// # Safety
     /// Caller must ensure stack is not reallocated during pointer usage
     #[inline(always)]
-    pub fn stack_ptr_mut(&mut self) -> *mut LuaValue {
+    pub(crate) fn stack_ptr_mut(&mut self) -> *mut LuaValue {
         self.stack.as_mut_ptr()
     }
 
@@ -431,6 +431,18 @@ impl LuaState {
 
         // Arguments are from base to top-1
         if top > base { top - base } else { 0 }
+    }
+
+    pub fn push_value(&mut self, value: LuaValue) -> LuaResult<()> {
+        if self.stack.len() >= self.safe_option.max_stack_size {
+            self.error(format!(
+                "stack overflow: attempted to push value exceeding maximum {}",
+                self.safe_option.max_stack_size
+            ));
+            return Err(LuaError::StackOverflow);
+        }
+        self.stack.push(value);
+        Ok(())
     }
 
     // ===== Object Creation =====

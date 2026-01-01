@@ -135,7 +135,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let result = l.vm_mut().create_string(type_name);
-    l.stack_mut().push(result);
+    l.push_value(result)?;
     Ok(1)
 }
 
@@ -207,7 +207,7 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
         _ => LuaValue::nil(),
     };
 
-    l.stack_mut().push(result);
+    l.push_value(result)?;
     Ok(1)
 }
 
@@ -313,7 +313,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
 
     // Fast path: if already a string, return it directly
     if value.is_string() {
-        l.stack_mut().push(value);
+        l.push_value(value)?;
         return Ok(1);
     }
 
@@ -337,7 +337,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         vm.create_string(&value_str)
     };
     
-    l.stack_mut().push(result);
+    l.push_value(result)?;
     Ok(1)
 }
 
@@ -356,7 +356,7 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(s) = vm.object_pool.get_string(string_id) {
             if s.as_str() == "#" {
                 let result = LuaValue::integer(vararg_count as i64);
-                l.stack_mut().push(result);
+                l.push_value(result)?;
                 return Ok(1);
             }
         }
@@ -404,9 +404,9 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
 
     // Return iterator function, table, and 0 (3 values)
     let iter_func = LuaValue::cfunction(ipairs_next);
-    l.stack_mut().push(iter_func);
-    l.stack_mut().push(table_val);
-    l.stack_mut().push(LuaValue::integer(0));
+    l.push_value(iter_func)?;
+    l.push_value(table_val)?;
+    l.push_value(LuaValue::integer(0))?;
     Ok(3)
 }
 
@@ -428,12 +428,12 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
             if let Some(table) = vm.object_pool.get_table(table_id) {
                 if let Some(value) = table.get_int(next_index) {
                     // Return (next_index, value)
-                    l.stack_mut().push(LuaValue::integer(next_index));
-                    l.stack_mut().push(value);
+                    l.push_value(LuaValue::integer(next_index))?;
+                    l.push_value(value)?;
                     return Ok(2);
                 }
                 // Reached end of array - return nil
-                l.stack_mut().push(LuaValue::nil());
+                l.push_value(LuaValue::nil())?;
                 return Ok(1);
             }
         }
@@ -457,9 +457,9 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 
     // Return next function, table, and nil (3 values)
     let next_func = LuaValue::cfunction(lua_next);
-    l.stack_mut().push(next_func);
-    l.stack_mut().push(table_val);
-    l.stack_mut().push(LuaValue::nil());
+    l.push_value(next_func)?;
+    l.push_value(table_val)?;
+    l.push_value(LuaValue::nil())?;
     Ok(3)
 }
 
@@ -511,22 +511,22 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
                     if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
                         if let Some(protected) = mt_table.raw_get(&metatable_key) {
                             if !protected.is_nil() {
-                                l.stack_mut().push(protected);
+                                l.push_value(protected)?;
                                 return Ok(1);
                             }
                         }
                     }
                 }
-                l.stack_mut().push(mt);
+                l.push_value(mt)?;
                 Ok(1)
             } else {
-                l.stack_mut().push(LuaValue::nil());
+                l.push_value(LuaValue::nil())?;
                 Ok(1)
             }
         }
         LuaValueKind::String => {
             // TODO: Implement shared string metatable
-            l.stack_mut().push(LuaValue::nil());
+            l.push_value(LuaValue::nil())?;
             Ok(1)
         }
         LuaValueKind::Userdata => {
@@ -541,23 +541,23 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
                             if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
                                 if let Some(protected) = mt_table.raw_get(&metatable_key) {
                                     if !protected.is_nil() {
-                                        l.stack_mut().push(protected);
+                                        l.push_value(protected)?;
                                         return Ok(1);
                                     }
                                 }
                             }
                         }
-                        l.stack_mut().push(mt);
+                        l.push_value(mt)?;
                         return Ok(1);
                     }
                 }
             }
-            l.stack_mut().push(LuaValue::nil());
+            l.push_value(LuaValue::nil())?;
             Ok(1)
         }
         // TODO: Support metatables for other types (numbers, etc.)
         _ => {
-            l.stack_mut().push(LuaValue::nil());
+            l.push_value(LuaValue::nil())?;
             Ok(1)
         }
     }
@@ -624,7 +624,7 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Return the original table
-    l.stack_mut().push(table.clone());
+    l.push_value(table.clone())?;
     Ok(1)
 }
 
@@ -639,7 +639,7 @@ fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
         let vm = l.vm_mut();
         if let Some(table_ref) = vm.object_pool.get_table(table_id) {
             let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
-            l.stack_mut().push(value);
+            l.push_value(value)?;
             return Ok(1);
         }
     }
@@ -659,7 +659,7 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
         let vm = l.vm_mut();
         if let Some(table_ref) = vm.object_pool.get_table_mut(table_id) {
             table_ref.raw_set(key, value);
-            l.stack_mut().push(table);
+            l.push_value(table)?;
             return Ok(1);
         }
     }
@@ -700,7 +700,7 @@ fn lua_rawlen(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    l.stack_mut().push(LuaValue::integer(len));
+    l.push_value(LuaValue::integer(len))?;
     Ok(1)
 }
 
@@ -710,7 +710,7 @@ fn lua_rawequal(l: &mut LuaState) -> LuaResult<usize> {
     let v2 = l.get_arg(2).unwrap_or(LuaValue::nil());
 
     let result = v1 == v2;
-    l.stack_mut().push(LuaValue::boolean(result));
+    l.push_value(LuaValue::boolean(result))?;
     Ok(1)
 }
 
@@ -731,29 +731,29 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
     match opt.as_str() {
         "collect" => {
             vm.collect_garbage();
-            l.stack_mut().push(LuaValue::integer(0));
+            l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "count" => {
             // Return a dummy value for now
-            l.stack_mut().push(LuaValue::integer(0));
+            l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "stop" => {
             // Set GC debt to very negative value to prevent collection
             vm.gc.gc_debt = isize::MIN / 2;
-            l.stack_mut().push(LuaValue::integer(0));
+            l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "restart" => {
             // Reset GC debt to trigger collection
             vm.gc.gc_debt = 0;
-            l.stack_mut().push(LuaValue::integer(0));
+            l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "step" | "setpause" | "setstepmul" | "isrunning" => {
             // Simplified: just return 0
-            l.stack_mut().push(LuaValue::integer(0));
+            l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         _ => Err(l.error(format!("collectgarbage: invalid option '{}'", opt))),
@@ -825,14 +825,14 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             let upvalues = vec![env_upvalue_id];
 
             let func = vm.create_function(Rc::new(chunk), upvalues);
-            l.stack_mut().push(func);
+            l.push_value(func)?;
             Ok(1)
         }
         Err(e) => {
             // Return nil and error message
             let err_msg = vm.create_string(&format!("load error: {}", e));
-            l.stack_mut().push(LuaValue::nil());
-            l.stack_mut().push(err_msg);
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
             Ok(2)
         }
     }
@@ -859,8 +859,8 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         Ok(c) => c,
         Err(e) => {
             let err_msg = vm.create_string(&format!("cannot open {}: {}", filename_str, e));
-            l.stack_mut().push(LuaValue::nil());
-            l.stack_mut().push(err_msg);
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
             return Ok(2);
         }
     };
@@ -873,13 +873,13 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             let env_upvalue_id = vm.create_upvalue_closed(LuaValue::table(vm.global));
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
-            l.stack_mut().push(func);
+            l.push_value(func)?;
             Ok(1)
         }
         Err(e) => {
             let err_msg = vm.create_string(&format!("load error: {}", e));
-            l.stack_mut().push(LuaValue::nil());
-            l.stack_mut().push(err_msg);
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
             Ok(2)
         }
     }

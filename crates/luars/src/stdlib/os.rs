@@ -2,29 +2,29 @@
 // Implements: clock, date, difftime, execute, exit, getenv, remove, rename,
 // setlocale, time, tmpname
 
-use crate::lib_registry::LibraryModule;
-use crate::lib_registry::get_arg;
-use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::LuaResult;
-use crate::lua_vm::LuaVM;
+use crate::lib_registry::{LibraryEntry, LibraryModule};
+use crate::lua_value::LuaValue;
+use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_os_lib() -> LibraryModule {
-    crate::lib_module!("os", {
-        "clock" => os_clock,
-        "time" => os_time,
-        "date" => os_date,
-        "difftime" => os_difftime,
-        "execute" => os_execute,
-        "exit" => os_exit,
-        "getenv" => os_getenv,
-        "remove" => os_remove,
-        "rename" => os_rename,
-        "setlocale" => os_setlocale,
-        "tmpname" => os_tmpname,
-    })
+    let mut module = LibraryModule::new("os");
+    
+    module.entries.push(("clock", LibraryEntry::Function(os_clock)));
+    module.entries.push(("time", LibraryEntry::Function(os_time)));
+    module.entries.push(("date", LibraryEntry::Function(os_date)));
+    module.entries.push(("difftime", LibraryEntry::Function(os_difftime)));
+    module.entries.push(("execute", LibraryEntry::Function(os_execute)));
+    module.entries.push(("exit", LibraryEntry::Function(os_exit)));
+    module.entries.push(("getenv", LibraryEntry::Function(os_getenv)));
+    module.entries.push(("remove", LibraryEntry::Function(os_remove)));
+    module.entries.push(("rename", LibraryEntry::Function(os_rename)));
+    module.entries.push(("setlocale", LibraryEntry::Function(os_setlocale)));
+    module.entries.push(("tmpname", LibraryEntry::Function(os_tmpname)));
+    
+    module
 }
 
-fn os_clock(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn os_clock(l: &mut LuaState) -> LuaResult<usize> {
     use std::time::Instant;
 
     // Use a thread-local static to track start time
@@ -40,10 +40,11 @@ fn os_clock(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
         start_ref.unwrap().elapsed().as_secs_f64()
     });
 
-    Ok(MultiValue::single(LuaValue::float(elapsed)))
+    l.push_value(LuaValue::float(elapsed))?;
+    Ok(1)
 }
 
-fn os_time(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn os_time(l: &mut LuaState) -> LuaResult<usize> {
     use std::time::SystemTime;
 
     let timestamp = SystemTime::now()
@@ -51,10 +52,11 @@ fn os_time(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
         .unwrap()
         .as_secs();
 
-    Ok(MultiValue::single(LuaValue::integer(timestamp as i64)))
+    l.push_value(LuaValue::integer(timestamp as i64))?;
+    Ok(1)
 }
 
-fn os_date(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn os_date(l: &mut LuaState) -> LuaResult<usize> {
     // Stub: return current timestamp as string
     use std::time::SystemTime;
 
@@ -64,35 +66,37 @@ fn os_date(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         .as_secs();
 
     let date_str = format!("timestamp: {}", timestamp);
-    let result = vm.create_string(&date_str);
-    Ok(MultiValue::single(result))
+    let result = l.vm_mut().create_string(&date_str);
+    l.push_value(result)?;
+    Ok(1)
 }
 
-fn os_exit(_vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn os_exit(_l: &mut LuaState) -> LuaResult<usize> {
     std::process::exit(0);
 }
 
-fn os_difftime(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let t2 = get_arg(vm, 1)
+fn os_difftime(l: &mut LuaState) -> LuaResult<usize> {
+    let t2 = l.get_arg(1)
         .and_then(|v| v.as_integer())
-        .ok_or_else(|| vm.error("difftime: argument 1 must be a number".to_string()))?;
-    let t1 = get_arg(vm, 2)
+        .ok_or_else(|| l.error("difftime: argument 1 must be a number".to_string()))?;
+    let t1 = l.get_arg(2)
         .and_then(|v| v.as_integer())
-        .ok_or_else(|| vm.error("difftime: argument 2 must be a number".to_string()))?;
+        .ok_or_else(|| l.error("difftime: argument 2 must be a number".to_string()))?;
 
     let diff = t2 - t1;
-    Ok(MultiValue::single(LuaValue::integer(diff)))
+    l.push_value(LuaValue::integer(diff))?;
+    Ok(1)
 }
 
-fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
     use std::process::Command;
 
-    let cmd_opt = get_arg(vm, 1).and_then(|v| {
+    let cmd_opt = l.get_arg(1).and_then(|v| {
         if v.is_nil() {
             None
         } else {
             v.as_string_id().and_then(|id| {
-                vm.object_pool
+                l.vm_mut().object_pool
                     .get_string(id)
                     .map(|s| s.as_str().to_string())
             })
@@ -102,7 +106,8 @@ fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     // If no command given, check if shell is available
     let Some(cmd) = cmd_opt else {
         // Return true to indicate shell is available
-        return Ok(MultiValue::single(LuaValue::boolean(true)));
+        l.push_value(LuaValue::boolean(true))?;
+        return Ok(1);
     };
 
     // Platform-specific command execution
@@ -115,100 +120,118 @@ fn os_execute(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     match output {
         Ok(result) => {
             let exit_code = result.status.code().unwrap_or(-1);
-            Ok(MultiValue::multiple(vec![
-                LuaValue::boolean(result.status.success()),
-                vm.create_string("exit"),
-                LuaValue::integer(exit_code as i64),
-            ]))
+            let exit_str = l.vm_mut().create_string("exit");
+            l.push_value(LuaValue::boolean(result.status.success()))?;
+            l.push_value(exit_str)?;
+            l.push_value(LuaValue::integer(exit_code as i64))?;
+            Ok(3)
         }
-        Err(_) => Ok(MultiValue::multiple(vec![
-            LuaValue::nil(),
-            vm.create_string("exit"),
-            LuaValue::integer(-1),
-        ])),
+        Err(_) => {
+            let exit_str = l.vm_mut().create_string("exit");
+            l.push_value(LuaValue::nil())?;
+            l.push_value(exit_str)?;
+            l.push_value(LuaValue::integer(-1))?;
+            Ok(3)
+        }
     }
 }
 
-fn os_getenv(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let varname = get_arg(vm, 1)
+fn os_getenv(l: &mut LuaState) -> LuaResult<usize> {
+    let varname = l.get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            vm.object_pool
+            l.vm_mut().object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or_else(|| vm.error("getenv: argument 1 must be a string".to_string()))?;
+        .ok_or_else(|| l.error("getenv: argument 1 must be a string".to_string()))?;
 
     match std::env::var(varname.as_str()) {
         Ok(value) => {
-            let result = vm.create_string(&value);
-            Ok(MultiValue::single(result))
+            let result = l.vm_mut().create_string(&value);
+            l.push_value(result)?;
+            Ok(1)
         }
-        Err(_) => Ok(MultiValue::single(LuaValue::nil())),
+        Err(_) => {
+            l.push_value(LuaValue::nil())?;
+            Ok(1)
+        }
     }
 }
 
-fn os_remove(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let filename = get_arg(vm, 1)
+fn os_remove(l: &mut LuaState) -> LuaResult<usize> {
+    let filename = l.get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            vm.object_pool
+            l.vm_mut().object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or_else(|| vm.error("remove: argument 1 must be a string".to_string()))?;
+        .ok_or_else(|| l.error("remove: argument 1 must be a string".to_string()))?;
 
     match std::fs::remove_file(filename.as_str()) {
-        Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
+        Ok(_) => {
+            l.push_value(LuaValue::boolean(true))?;
+            Ok(1)
+        }
         Err(e) => {
-            let err_msg = vm.create_string(&format!("{}", e));
-            Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]))
+            let err_msg = l.vm_mut().create_string(&format!("{}", e));
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
+            Ok(2)
         }
     }
 }
 
-fn os_rename(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let oldname = get_arg(vm, 1)
+fn os_rename(l: &mut LuaState) -> LuaResult<usize> {
+    let oldname = l.get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            vm.object_pool
+            l.vm_mut().object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or_else(|| vm.error("rename: argument 1 must be a string".to_string()))?;
-    let newname = get_arg(vm, 2)
+        .ok_or_else(|| l.error("rename: argument 1 must be a string".to_string()))?;
+    let newname = l.get_arg(2)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            vm.object_pool
+            l.vm_mut().object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
-        .ok_or_else(|| vm.error("rename: argument 2 must be a string".to_string()))?;
+        .ok_or_else(|| l.error("rename: argument 2 must be a string".to_string()))?;
+        
     match std::fs::rename(oldname.as_str(), newname.as_str()) {
-        Ok(_) => Ok(MultiValue::single(LuaValue::boolean(true))),
+        Ok(_) => {
+            l.push_value(LuaValue::boolean(true))?;
+            Ok(1)
+        }
         Err(e) => {
-            let err_msg = vm.create_string(&format!("{}", e));
-            Ok(MultiValue::multiple(vec![LuaValue::nil(), err_msg]))
+            let err_msg = l.vm_mut().create_string(&format!("{}", e));
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
+            Ok(2)
         }
     }
 }
 
-fn os_setlocale(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn os_setlocale(l: &mut LuaState) -> LuaResult<usize> {
     // Stub implementation - just return the requested locale or "C"
-    let locale = get_arg(vm, 1)
+    let locale = l.get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            vm.object_pool
+            l.vm_mut().object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
         .unwrap_or_else(|| "C".to_string());
 
-    let result = vm.create_string(&locale);
-    Ok(MultiValue::single(result))
+    let result = l.vm_mut().create_string(&locale);
+    l.push_value(result)?;
+    Ok(1)
 }
 
-fn os_tmpname(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn os_tmpname(l: &mut LuaState) -> LuaResult<usize> {
     use std::time::SystemTime;
 
     let timestamp = SystemTime::now()
@@ -217,6 +240,7 @@ fn os_tmpname(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         .as_nanos();
 
     let tmpname = format!("/tmp/lua_tmp_{}", timestamp);
-    let result = vm.create_string(&tmpname);
-    Ok(MultiValue::single(result))
+    let result = l.vm_mut().create_string(&tmpname);
+    l.push_value(result)?;
+    Ok(1)
 }
