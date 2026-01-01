@@ -27,7 +27,9 @@ use call::FrameAction;
 use std::rc::Rc;
 
 use crate::{
-    Chunk, UpvalueId, lua_value::{LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT, LuaValue}, lua_vm::{LuaError, LuaResult, LuaState, OpCode}
+    Chunk, UpvalueId,
+    lua_value::{LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT, LuaValue},
+    lua_vm::{LuaError, LuaResult, LuaState, OpCode},
 };
 pub use metamethod::TmKind;
 
@@ -252,18 +254,22 @@ fn execute_frame(
     chunk: Rc<Chunk>,
     upvalues_vec: Vec<UpvalueId>,
 ) -> LuaResult<FrameAction> {
-    // SAFETY: Get raw pointers to avoid borrow checker
-    // These pointers remain valid because:
-    // 1. Stack won't reallocate during execution (we pre-grow it)
-    // 2. CallInfo won't move (we access by index, not direct pointer)
-    // 3. Chunk is Rc-cloned (won't be dropped)
-
-    let stack_ptr = lua_state.stack_ptr_mut();
-    let stack_len = lua_state.stack_len();
-
     // Cache values in locals (will be in CPU registers)
     let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
     let base = lua_state.get_frame_base(frame_idx);
+
+    // PRE-GROW STACK: Ensure enough space for this frame
+    // This prevents reallocation during normal instruction execution
+    let needed_size = base + chunk.max_stack_size;
+    lua_state.grow_stack(needed_size)?;
+
+    // SAFETY: Get raw pointer after grow_stack
+    // This pointer may become invalid after operations that:
+    // - Create tables/strings/closures (may trigger GC)
+    // - Call functions (may grow stack)
+    // - Concatenate strings (may allocate)
+    // After such operations, we must refresh stack_ptr
+    let mut stack_ptr = lua_state.stack_ptr_mut();
 
     // Constants and code pointers (avoid repeated dereferencing)
     let constants = &chunk.constants;
@@ -406,18 +412,9 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
 
                 unsafe {
-                    let idx_b = base + b;
-                    let idx_c = base + c;
-                    let idx_a = base + a;
-
-                    if idx_b >= stack_len || idx_c >= stack_len || idx_a >= stack_len {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error("ADD: register out of bounds".to_string()));
-                    }
-
-                    let v1 = stack_ptr.add(idx_b);
-                    let v2 = stack_ptr.add(idx_c);
-                    let ra = stack_ptr.add(idx_a);
+                    let v1 = stack_ptr.add(base + b);
+                    let v2 = stack_ptr.add(base + c);
+                    let ra = stack_ptr.add(base + a);
 
                     // Fast path: both integers
                     if ttisinteger(v1) && ttisinteger(v2) {
@@ -446,16 +443,8 @@ fn execute_frame(
                 let sc = instr.get_sc();
 
                 unsafe {
-                    let idx_b = base + b;
-                    let idx_a = base + a;
-
-                    if idx_b >= stack_len || idx_a >= stack_len {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error("ADDI: register out of bounds".to_string()));
-                    }
-
-                    let v1 = stack_ptr.add(idx_b);
-                    let ra = stack_ptr.add(idx_a);
+                    let v1 = stack_ptr.add(base + b);
+                    let ra = stack_ptr.add(base + a);
 
                     // Fast path: integer
                     if ttisinteger(v1) {
@@ -1083,9 +1072,9 @@ fn execute_frame(
 
                 // Update PC before returning
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                
+
                 return return_handler::handle_return(
-                    lua_state, stack_ptr, base, frame_idx, a, b, c, k
+                    lua_state, stack_ptr, base, frame_idx, a, b, c, k,
                 );
             }
             OpCode::Return0 => {
@@ -1097,9 +1086,7 @@ fn execute_frame(
                 // return R[A]
                 let a = instr.get_a() as usize;
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return return_handler::handle_return1(
-                    lua_state, stack_ptr, base, frame_idx, a
-                );
+                return return_handler::handle_return1(lua_state, stack_ptr, base, frame_idx, a);
             }
             OpCode::GetUpval => {
                 // R[A] := UpValue[B]
@@ -1199,18 +1186,14 @@ fn execute_frame(
                 let k = instr.get_k();
 
                 // Calculate hash size: if vB > 0, hash_size = 2^(vB-1)
-                let hash_size = if vb > 0 {
-                    1usize << (vb - 1)
-                } else {
-                    0
-                };
+                let hash_size = if vb > 0 { 1usize << (vb - 1) } else { 0 };
 
                 // Check for EXTRAARG instruction for larger array sizes
                 if k {
                     // Next instruction should be EXTRAARG
                     if pc < code.len() {
                         let extra_instr = code[pc];
-                        
+
                         if extra_instr.get_opcode() == OpCode::ExtraArg {
                             pc += 1; // Consume EXTRAARG
                             let extra = extra_instr.get_ax() as usize;
@@ -1223,6 +1206,9 @@ fn execute_frame(
 
                 // Create table with pre-allocated sizes
                 let value = lua_state.create_table(vc, hash_size);
+
+                // IMPORTANT: create_table may trigger GC, refresh stack_ptr
+                stack_ptr = lua_state.stack_ptr_mut();
 
                 unsafe {
                     let ra = stack_ptr.add(base + a);
@@ -1498,7 +1484,10 @@ fn execute_frame(
 
                 // Delegate to call handler - returns FrameAction
                 match call::handle_call(lua_state, base, a, b, c) {
-                    Ok(FrameAction::Continue) => {},
+                    Ok(FrameAction::Continue) => {
+                        // IMPORTANT: function call may grow stack, refresh stack_ptr
+                        stack_ptr = lua_state.stack_ptr_mut();
+                    }
                     other => return other,
                 }
             }
@@ -1512,7 +1501,10 @@ fn execute_frame(
 
                 // Delegate to tailcall handler (returns FrameAction)
                 match call::handle_tailcall(lua_state, base, a, b) {
-                    Ok(FrameAction::Continue) => {},
+                    Ok(FrameAction::Continue) => {
+                        // IMPORTANT: tail call may grow stack, refresh stack_ptr
+                        stack_ptr = lua_state.stack_ptr_mut();
+                    }
                     other => return other,
                 }
             }
@@ -1765,9 +1757,11 @@ fn execute_frame(
                 // Results: c (number of loop variables)
                 match call::handle_call(lua_state, base, a + 3, 3, c + 1) {
                     Ok(FrameAction::Continue) => {
+                        // IMPORTANT: iterator call may grow stack, refresh stack_ptr
+                        stack_ptr = lua_state.stack_ptr_mut();
                         // C function completed, results already in place
                         // Fall through to next instruction (TFORLOOP)
-                    },
+                    }
                     other => return other,
                 }
             }
@@ -1832,23 +1826,22 @@ fn execute_frame(
                 // Delegate to metamethod handler
                 metamethod::handle_mmbink(lua_state, base, a, b, c, k, pc, code, constants)?;
             }
-            
+
             // ============================================================
             // UPVALUE TABLE ACCESS
             // ============================================================
-            
             OpCode::GetTabUp => {
                 // R[A] := UpValue[B][K[C]:shortstring]
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
-                
+
                 // Get upvalue B (usually _ENV for global access)
                 if b >= upvalues_vec.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("GETTABUP: invalid upvalue index {}", b)));
                 }
-                
+
                 let upval_id = upvalues_vec[b];
                 let upvalue = lua_state
                     .vm_mut()
@@ -1889,20 +1882,20 @@ fn execute_frame(
                     *ra = result;
                 }
             }
-            
+
             OpCode::SetTabUp => {
                 // UpValue[A][K[B]:shortstring] := RK(C)
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
-                
+
                 // Get upvalue A (usually _ENV for global access)
                 if a >= upvalues_vec.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("SETTABUP: invalid upvalue index {}", a)));
                 }
-                
+
                 let upval_id = upvalues_vec[a];
                 let upvalue = lua_state
                     .vm_mut()
@@ -1950,20 +1943,19 @@ fn execute_frame(
                 }
                 // else: should trigger metamethod, but we skip for now
             }
-            
+
             // ============================================================
             // LENGTH AND CONCATENATION
             // ============================================================
-            
             OpCode::Len => {
                 // R[A] := #R[B]
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
-                
+
                 unsafe {
                     let rb = stack_ptr.add(base + b);
                     let ra = stack_ptr.add(base + a);
-                    
+
                     // Get length based on type
                     if let Some(string_id) = (*rb).as_string_id() {
                         // String: get length from object pool
@@ -1989,39 +1981,43 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::Concat => {
                 // R[A] := R[A].. ... ..R[A + B - 1]
                 // Concatenate B values starting from R[A]
                 // Optimized implementation matching Lua 5.5
                 let a = instr.get_a() as usize;
                 let n = instr.get_b() as usize;
-                
+
                 match concat::concat_strings(lua_state, stack_ptr, base, a, n) {
-                    Ok(result) => unsafe {
-                        let ra = stack_ptr.add(base + a);
-                        *ra = result;
-                    },
+                    Ok(result) => {
+                        // IMPORTANT: concat may allocate strings and trigger GC, refresh stack_ptr
+                        stack_ptr = lua_state.stack_ptr_mut();
+
+                        unsafe {
+                            let ra = stack_ptr.add(base + a);
+                            *ra = result;
+                        }
+                    }
                     Err(err) => {
                         return Err(err);
                     }
                 }
             }
-            
+
             // ============================================================
             // COMPARISON OPERATIONS (register-register)
             // ============================================================
-            
             OpCode::Eq => {
                 // if ((R[A] == R[B]) ~= k) then pc++
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let rb = stack_ptr.add(base + b);
-                    
+
                     // Simple equality check (TODO: metamethod)
                     let cond = (*ra) == (*rb);
                     if cond != k {
@@ -2031,17 +2027,17 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::Lt => {
                 // if ((R[A] < R[B]) ~= k) then pc++
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let rb = stack_ptr.add(base + b);
-                    
+
                     let cond = if ttisinteger(ra) && ttisinteger(rb) {
                         ivalue(ra) < ivalue(rb)
                     } else if ttisnumber(ra) && ttisnumber(rb) {
@@ -2053,7 +2049,7 @@ fn execute_frame(
                     } else {
                         false // TODO: metamethod
                     };
-                    
+
                     if cond != k {
                         pc += 2;
                     } else {
@@ -2061,17 +2057,17 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::Le => {
                 // if ((R[A] <= R[B]) ~= k) then pc++
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let rb = stack_ptr.add(base + b);
-                    
+
                     let cond = if ttisinteger(ra) && ttisinteger(rb) {
                         ivalue(ra) <= ivalue(rb)
                     } else if ttisnumber(ra) && ttisnumber(rb) {
@@ -2083,7 +2079,7 @@ fn execute_frame(
                     } else {
                         false // TODO: metamethod
                     };
-                    
+
                     if cond != k {
                         pc += 2;
                     } else {
@@ -2091,21 +2087,20 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             // ============================================================
             // COMPARISON WITH CONSTANT/IMMEDIATE
             // ============================================================
-            
             OpCode::EqK => {
                 // if ((R[A] == K[B]) ~= k) then pc++
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let kb = constants.get(b).unwrap();
-                    
+
                     // Raw equality (no metamethods for constants)
                     let cond = (*ra) == *kb;
                     if cond != k {
@@ -2115,16 +2110,16 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::EqI => {
                 // if ((R[A] == sB) ~= k) then pc++
                 let a = instr.get_a() as usize;
                 let sb = instr.get_sb();
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     let cond = if ttisinteger(ra) {
                         ivalue(ra) == (sb as i64)
                     } else if ttisfloat(ra) {
@@ -2132,7 +2127,7 @@ fn execute_frame(
                     } else {
                         false
                     };
-                    
+
                     if cond != k {
                         pc += 2;
                     } else {
@@ -2140,16 +2135,16 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::LtI => {
                 // if ((R[A] < sB) ~= k) then pc++
                 let a = instr.get_a() as usize;
                 let im = instr.get_sb();
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     let cond = if ttisinteger(ra) {
                         ivalue(ra) < (im as i64)
                     } else if ttisfloat(ra) {
@@ -2157,7 +2152,7 @@ fn execute_frame(
                     } else {
                         false // TODO: metamethod
                     };
-                    
+
                     if cond != k {
                         pc += 2;
                     } else {
@@ -2165,16 +2160,16 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::LeI => {
                 // if ((R[A] <= sB) ~= k) then pc++
                 let a = instr.get_a() as usize;
                 let im = instr.get_sb();
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     let cond = if ttisinteger(ra) {
                         ivalue(ra) <= (im as i64)
                     } else if ttisfloat(ra) {
@@ -2182,7 +2177,7 @@ fn execute_frame(
                     } else {
                         false // TODO: metamethod
                     };
-                    
+
                     if cond != k {
                         pc += 2;
                     } else {
@@ -2190,16 +2185,16 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::GtI => {
                 // if ((R[A] > sB) ~= k) then pc++ (implemented as !(A <= B))
                 let a = instr.get_a() as usize;
                 let im = instr.get_sb();
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     let cond = if ttisinteger(ra) {
                         ivalue(ra) > (im as i64)
                     } else if ttisfloat(ra) {
@@ -2207,7 +2202,7 @@ fn execute_frame(
                     } else {
                         false // TODO: metamethod
                     };
-                    
+
                     if cond != k {
                         pc += 2;
                     } else {
@@ -2215,16 +2210,16 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::GeI => {
                 // if ((R[A] >= sB) ~= k) then pc++ (implemented as !(A < B))
                 let a = instr.get_a() as usize;
                 let im = instr.get_sb();
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     let cond = if ttisinteger(ra) {
                         ivalue(ra) >= (im as i64)
                     } else if ttisfloat(ra) {
@@ -2232,7 +2227,7 @@ fn execute_frame(
                     } else {
                         false // TODO: metamethod
                     };
-                    
+
                     if cond != k {
                         pc += 2;
                     } else {
@@ -2240,23 +2235,23 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             // ============================================================
             // CONDITIONAL TESTS
             // ============================================================
-            
             OpCode::Test => {
                 // if (not R[A] == k) then pc++
                 let a = instr.get_a() as usize;
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     // l_isfalse: nil or false
-                    let is_false = (*ra).is_nil() || ((*ra).is_boolean() && (*ra).tt_ == LUA_VFALSE);
+                    let is_false =
+                        (*ra).is_nil() || ((*ra).is_boolean() && (*ra).tt_ == LUA_VFALSE);
                     let cond = !is_false;
-                    
+
                     if cond != k {
                         pc += 2; // skip next jump
                     } else {
@@ -2264,17 +2259,18 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::TestSet => {
                 // if (not R[B] == k) then pc++ else R[A] := R[B]
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
-                
+
                 unsafe {
                     let rb = stack_ptr.add(base + b);
-                    let is_false = (*rb).is_nil() || ((*rb).is_boolean() && (*rb).tt_ == LUA_VFALSE);
-                    
+                    let is_false =
+                        (*rb).is_nil() || ((*rb).is_boolean() && (*rb).tt_ == LUA_VFALSE);
+
                     if is_false == k {
                         pc += 2; // skip next jump
                     } else {
@@ -2284,11 +2280,10 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             // ============================================================
             // TABLE OPERATIONS
             // ============================================================
-            
             OpCode::SetList => {
                 // R[A][vC+i] := R[A+i], 1 <= i <= vB
                 // Batch set table elements (used in table constructors)
@@ -2301,7 +2296,7 @@ fn execute_frame(
                 if k {
                     if pc < code.len() {
                         let extra_instr = code[pc];
-                        
+
                         if extra_instr.get_opcode() == OpCode::ExtraArg {
                             pc += 1; // Consume EXTRAARG
                             let extra = extra_instr.get_ax() as usize;
@@ -2345,16 +2340,15 @@ fn execute_frame(
                     // else: not a table, should error but we skip for now
                 }
             }
-            
+
             // ============================================================
             // CLOSURE AND VARARG
             // ============================================================
-            
             OpCode::Closure => {
                 // R[A] := closure(KPROTO[Bx])
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
-                
+
                 // Create closure from child prototype
                 closure_handler::handle_closure(
                     lua_state,
@@ -2365,30 +2359,33 @@ fn execute_frame(
                     &chunk,
                     &upvalues_vec,
                 )?;
+
+                // IMPORTANT: closure creation may trigger GC, refresh stack_ptr
+                stack_ptr = lua_state.stack_ptr_mut();
             }
-            
+
             OpCode::Vararg => {
                 // R[A], ..., R[A+C-2] = varargs
                 // Based on lvm.c:1936 and ltm.c:338 luaT_getvarargs
                 let a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize;  // vatab register (if k flag set)
+                let _b = instr.get_b() as usize; // vatab register (if k flag set)
                 let c = instr.get_c() as usize;
-                let _k = instr.get_k();  // whether B specifies vararg table register
-                
+                let _k = instr.get_k(); // whether B specifies vararg table register
+
                 // n = number of results wanted (C-1), -1 means all
                 let wanted = if c == 0 {
-                    -1  // Get all varargs
+                    -1 // Get all varargs
                 } else {
                     (c - 1) as i32
                 };
-                
+
                 // Get nextraargs from CallInfo
                 let call_info = lua_state.get_call_info(frame_idx);
                 let nextra = call_info.nextraargs as usize;
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     if nextra == 0 {
                         // No varargs - fill with nil
                         if wanted < 0 {
@@ -2421,7 +2418,7 @@ fn execute_frame(
                         } else {
                             wanted as usize
                         };
-                        
+
                         // Copy available varargs
                         if nextra > 0 && base >= nextra && to_copy > 0 {
                             let vararg_start = base - nextra;
@@ -2431,7 +2428,7 @@ fn execute_frame(
                                 *dst = *src;
                             }
                         }
-                        
+
                         // Fill remaining with nil
                         for i in to_copy..(wanted as usize) {
                             setnilvalue(ra.add(i));
@@ -2439,23 +2436,23 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::GetVarg => {
                 // R[A] := varargs[R[C]]
                 // Based on lvm.c:1943 and ltm.c:292 luaT_getvararg
                 // This is for accessing individual vararg elements or the count
                 let a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize;  // unused in Lua 5.5
+                let _b = instr.get_b() as usize; // unused in Lua 5.5
                 let c = instr.get_c() as usize;
-                
+
                 // Get nextraargs from CallInfo
                 let call_info = lua_state.get_call_info(frame_idx);
                 let nextra = call_info.nextraargs as usize;
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let rc = stack_ptr.add(base + c);
-                    
+
                     // Check if R[C] is string "n" (get vararg count)
                     if let Some(string_id) = (*rc).as_string_id() {
                         if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
@@ -2467,13 +2464,14 @@ fn execute_frame(
                             }
                         }
                     }
-                    
+
                     // Check if R[C] is an integer (vararg index, 1-based)
                     if ttisinteger(rc) {
                         let index = ivalue(rc);
-                        
+
                         // Check if index is valid (1 <= index <= nextraargs)
-                        if nextra > 0 && index >= 1 && (index as usize) <= nextra && base >= nextra {
+                        if nextra > 0 && index >= 1 && (index as usize) <= nextra && base >= nextra
+                        {
                             // Get value from varargs
                             // varargs are stored before base
                             let vararg_start = base - nextra;
@@ -2489,23 +2487,25 @@ fn execute_frame(
                     }
                 }
             }
-            
+
             OpCode::ErrNNil => {
                 // Raise error if R[A] is not nil (global already defined)
                 // Based on lvm.c:1949 and ldebug.c:817 luaG_errnnil
                 // This is used by the compiler to detect duplicate global definitions
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
-                
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
-                    
+
                     // If value is not nil, it means the global is already defined
                     if !(*ra).is_nil() {
                         // Get global name from constants if bx > 0
                         let global_name = if bx > 0 && bx - 1 < constants.len() {
                             if let Some(string_id) = constants[bx - 1].as_string_id() {
-                                lua_state.vm_mut().object_pool
+                                lua_state
+                                    .vm_mut()
+                                    .object_pool
                                     .get_string(string_id)
                                     .map(|s| s.as_str().to_string())
                                     .unwrap_or_else(|| "?".to_string())
@@ -2515,49 +2515,48 @@ fn execute_frame(
                         } else {
                             "?".to_string()
                         };
-                        
+
                         lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error(format!(
-                            "global '{}' already defined",
-                            global_name
-                        )));
+                        return Err(
+                            lua_state.error(format!("global '{}' already defined", global_name))
+                        );
                     }
                 }
             }
-            
+
             OpCode::VarargPrep => {
                 // Adjust varargs (prepare vararg function)
                 // Based on lvm.c:1955 and ltm.c:272 luaT_adjustvarargs
                 let c = instr.get_c() as usize; // number of fixed parameters
-                
+
                 // Calculate total arguments and extra arguments
                 let call_info = lua_state.get_call_info(frame_idx);
                 let func_pos = call_info.base;
                 let stack_top = lua_state.stack_len();
-                
+
                 // Total arguments = stack_top - func_pos - 1 (exclude function itself)
                 let totalargs = if stack_top > func_pos {
                     stack_top - func_pos - 1
                 } else {
                     0
                 };
-                
+
                 let nfixparams = c; // C field contains number of fixed parameters
                 let nextra = if totalargs > nfixparams {
                     totalargs - nfixparams
                 } else {
                     0
                 };
-                
+
                 // Store nextra in CallInfo for later use by VARARG/GETVARG
                 let call_info = lua_state.get_call_info_mut(frame_idx);
                 call_info.nextraargs = nextra as i32;
-                
+
                 // Adjust base to account for varargs
                 // In Lua 5.5, varargs are placed BEFORE the function on the stack
                 // We need to ensure proper stack layout
             }
-            
+
             OpCode::ExtraArg => {
                 // Extra argument for previous opcode
                 // This instruction should never be executed directly
