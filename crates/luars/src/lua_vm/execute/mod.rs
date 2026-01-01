@@ -27,9 +27,7 @@ use call::FrameAction;
 use std::rc::Rc;
 
 use crate::{
-    Chunk,
-    lua_value::{LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT, LuaValue},
-    lua_vm::{LuaError, LuaResult, LuaState, OpCode},
+    Chunk, UpvalueId, lua_value::{LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT, LuaValue}, lua_vm::{LuaError, LuaResult, LuaState, OpCode}
 };
 pub use metamethod::TmKind;
 
@@ -219,7 +217,7 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
                 return Err(lua_state.error("Lua function has no chunk".to_string()));
             };
 
-            (chunk_rc.clone(), Rc::new(gc_function.upvalues.clone()))
+            (chunk_rc.clone(), gc_function.upvalues.clone())
         };
 
         // Execute this frame until CALL/RETURN/TAILCALL
@@ -252,7 +250,7 @@ fn execute_frame(
     lua_state: &mut LuaState,
     frame_idx: usize,
     chunk: Rc<Chunk>,
-    upvalues_vec: Rc<Vec<crate::UpvalueId>>,
+    upvalues_vec: Vec<UpvalueId>,
 ) -> LuaResult<FrameAction> {
     // SAFETY: Get raw pointers to avoid borrow checker
     // These pointers remain valid because:

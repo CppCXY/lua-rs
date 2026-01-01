@@ -14,10 +14,10 @@ use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 use crate::{ObjectPool, lib_registry};
+pub use execute::TmKind;
 pub use opcode::{Instruction, OpCode};
 use std::ptr::null_mut;
 use std::rc::Rc;
-pub use execute::TmKind;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
@@ -45,22 +45,23 @@ pub struct LuaVM {
     /// Main thread execution state (embedded)
     pub(crate) main_state: LuaState,
 
+    #[allow(unused)]
     /// String metatable (shared by all strings)
     pub(crate) string_mt: Option<LuaValue>,
 }
 
 impl LuaVM {
-    pub fn new() -> Self {
-        let mut vm = LuaVM {
+    pub fn new() -> Box<Self> {
+        let mut vm = Box::new(LuaVM {
             global: TableId(0),
             registry: TableId(1),
             object_pool: ObjectPool::new(),
             gc: GC::new(),
             main_state: LuaState::new(6, null_mut()),
             string_mt: None,
-        };
+        });
 
-        let ptr_vm: *mut LuaVM = &mut vm as *mut LuaVM;
+        let ptr_vm = vm.as_mut() as *mut LuaVM;
         // Set LuaVM pointer in main_state
         vm.main_state.set_vm(ptr_vm);
 
@@ -161,17 +162,18 @@ impl LuaVM {
         args: Vec<LuaValue>,
     ) -> LuaResult<Vec<LuaValue>> {
         // Push function onto stack
-        let base = self.main_state.stack_mut().len();
-        self.main_state.stack_mut().push(func.clone());
+        let main_state = &mut self.main_state;
+        let base = main_state.stack_mut().len();
+        main_state.stack_mut().push(func.clone());
 
         // Push arguments
         for arg in args {
-            self.main_state.stack_mut().push(arg);
+            main_state.stack_mut().push(arg);
         }
 
         // Create initial call frame
-        let nargs = self.main_state.stack_mut().len() - base - 1;
-        self.main_state.push_frame(func, base, nargs)?;
+        let nargs = main_state.stack_mut().len() - base - 1;
+        main_state.push_frame(func, base, nargs)?;
 
         // Run the VM execution loop
         self.run()
@@ -955,7 +957,7 @@ impl LuaVM {
         // }
 
         // trace
-        todo!()
+        format!("stack trace {}", error_msg)
     }
 
     /// Execute a function with protected call (pcall semantics)

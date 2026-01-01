@@ -2,7 +2,7 @@
 
 // #[cfg(feature = "async")]
 // pub mod async_lib;
-// pub mod basic;
+pub mod basic;
 // pub mod coroutine;
 // pub mod debug;
 // #[cfg(feature = "loadlib")]

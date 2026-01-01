@@ -5,7 +5,7 @@
 
   Implements:
   - OP_CLOSURE: Create closure from prototype
-  
+
   Key operations:
   1. Get child Proto from current function's child_protos[Bx]
   2. Create new LuaFunction/Closure
@@ -16,15 +16,14 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
-    gc::FunctionId,
-    lua_value::{LuaValue, UpvalueDesc},
+    lua_value::LuaValue,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
 use std::rc::Rc;
 
 /// Handle OP_CLOSURE instruction
 /// Create a closure from prototype Bx and store in R[A]
-/// 
+///
 /// Based on lvm.c:1929-1934 and pushclosure (lvm.c:834-849)
 pub fn handle_closure(
     lua_state: &mut LuaState,
@@ -54,7 +53,7 @@ pub fn handle_closure(
             // Capture local variable from current stack frame
             // desc.index is relative to base
             let stack_index = base + desc.index as usize;
-            
+
             // Find or create open upvalue for this stack position
             find_or_create_upvalue(lua_state, stack_index)?
         } else {

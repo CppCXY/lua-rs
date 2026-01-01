@@ -340,6 +340,76 @@ impl LuaState {
         self.get_return_values(stack_base, count)
     }
 
+    // ===== Function Argument Access =====
+
+    /// Get all arguments for the current C function call
+    /// Returns arguments starting from index 1 (index 0 is the function itself)
+    pub fn get_args(&self) -> Vec<LuaValue> {
+        if self.call_stack.is_empty() {
+            return Vec::new();
+        }
+        
+        let frame = &self.call_stack[self.call_stack.len() - 1];
+        let base = frame.base;
+        let top = frame.top;
+        
+        // Arguments are from base+1 to top (base is the function itself)
+        let arg_count = if top > base + 1 {
+            top - base - 1
+        } else {
+            0
+        };
+        
+        let mut args = Vec::with_capacity(arg_count);
+        for i in 0..arg_count {
+            if let Some(val) = self.stack_get(base + 1 + i) {
+                args.push(val);
+            } else {
+                args.push(LuaValue::nil());
+            }
+        }
+        args
+    }
+
+    /// Get a specific argument (1-based index, Lua convention)
+    /// Returns None if index is out of bounds
+    pub fn get_arg(&self, index: usize) -> Option<LuaValue> {
+        if index == 0 || self.call_stack.is_empty() {
+            return None;
+        }
+        
+        let frame = &self.call_stack[self.call_stack.len() - 1];
+        let base = frame.base;
+        let top = frame.top;
+        
+        // Arguments are 1-based: arg 1 is at base+1, arg 2 is at base+2, etc.
+        let stack_index = base + index;
+        
+        if stack_index < top {
+            self.stack_get(stack_index)
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of arguments for the current function call
+    pub fn arg_count(&self) -> usize {
+        if self.call_stack.is_empty() {
+            return 0;
+        }
+        
+        let frame = &self.call_stack[self.call_stack.len() - 1];
+        let base = frame.base;
+        let top = frame.top;
+        
+        // Arguments are from base+1 to top
+        if top > base + 1 {
+            top - base - 1
+        } else {
+            0
+        }
+    }
+
     // ===== Object Creation =====
 
     /// Create table

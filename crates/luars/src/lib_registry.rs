@@ -202,70 +202,31 @@ pub fn create_standard_registry() -> LibraryRegistry {
     registry
 }
 
-/// Helper to get function arguments from VM registers
-pub fn get_args(_vm: &LuaVM) -> Vec<LuaValue> {
-    // let frame = vm.current_frame();
-    // let base_ptr = frame.base_ptr as usize;
-    // let top = frame.top as usize;
-
-    // // Skip register 0 (the function itself), collect from 1 to top
-    // (1..top).map(|i| vm.register_stack[base_ptr + i]).collect()
-    todo!()
-}
-
-/// Iterate over all arguments without allocation
-/// Returns an iterator that yields (1-based index, value) pairs
-#[inline(always)]
-pub fn args_iter(_vm: &LuaVM) {
-    // let frame = vm.current_frame();
-    // let base_ptr = frame.base_ptr as usize;
-    // let top = frame.top as usize;
-
-    // (1..top).map(move |i| (i, vm.register_stack[base_ptr + i]))
-    todo!()
+/// Helper to get function arguments from VM
+#[inline]
+pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
+    vm.main_state.get_args()
 }
 
 /// Helper to get a specific argument
-/// 1 based index
+/// 1-based index (Lua convention)
 #[inline(always)]
-pub fn get_arg(_vm: &LuaVM, _index: usize) -> Option<LuaValue> {
-    // let frame = vm.current_frame();
-    // let base_ptr = frame.base_ptr as usize;
-    // let top = frame.top as usize;
-
-    // // Arguments use 1-based indexing (Lua convention)
-    // // Register 0 is the function itself
-    // // get_arg(1) returns register[base_ptr + 1] (first argument)
-    // // get_arg(2) returns register[base_ptr + 2] (second argument)
-    // let reg_offset = index;
-    // if reg_offset < top {
-    //     let reg_index = base_ptr + reg_offset;
-    //     if reg_index < vm.register_stack.len() {
-    //         Some(vm.register_stack[reg_index])
-    //     } else {
-    //         None
-    //     }
-    // } else {
-    //     None
-    // }
-    todo!()
+pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
+    vm.main_state.get_arg(index)
 }
 
 /// Helper to require an argument
-/// 1 based index
+/// 1-based index
 #[inline]
 pub fn require_arg(vm: &mut LuaVM, index: usize, func_name: &str) -> LuaResult<LuaValue> {
-    let Some(arg) = get_arg(vm, index) else {
-        return Err(vm.error(format!("{}() requires argument {}", func_name, index + 1)));
+    let Some(arg) = vm.main_state.get_arg(index) else {
+        return Err(vm.error(format!("{}() requires argument {}", func_name, index)));
     };
     Ok(arg)
 }
 
 /// Helper to get argument count
 #[inline(always)]
-pub fn arg_count(_vm: &LuaVM) -> usize {
-    // let frame = vm.current_frame();
-    // // Subtract 1 for the function itself
-    // frame.top.saturating_sub(1) as usize
-    todo!()
+pub fn arg_count(vm: &LuaVM) -> usize {
+    vm.main_state.arg_count()
 }

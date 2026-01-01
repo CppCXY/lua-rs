@@ -1,6 +1,4 @@
 use luars::{LuaVM, LuaValue};
-use std::cell::RefCell;
-use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 // Set panic hook for better error messages in WASM
@@ -12,7 +10,7 @@ pub fn init() {
 /// Lua VM wrapper for WASM
 #[wasm_bindgen]
 pub struct LuaWasm {
-    vm: Rc<RefCell<LuaVM>>,
+    vm: Box<LuaVM>,
 }
 
 #[wasm_bindgen]
@@ -24,19 +22,17 @@ impl LuaWasm {
         vm.open_libs();
 
         Ok(LuaWasm {
-            vm: Rc::new(RefCell::new(vm)),
+            vm,
         })
     }
 
     /// Execute Lua code and return the result as a string
     #[wasm_bindgen]
-    pub fn execute(&self, code: &str) -> Result<String, JsValue> {
-        let mut vm = self.vm.borrow_mut();
-
-        match vm.execute_string(code) {
+    pub fn execute(&mut self, code: &str) -> Result<String, JsValue> {
+        match self.vm.execute_string(code) {
             Ok(results) => {
                 let result = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
-                Ok(vm.value_to_string_raw(&result))
+                Ok(self.vm.value_to_string_raw(&result))
             }
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
         }
@@ -44,20 +40,18 @@ impl LuaWasm {
 
     /// Set a global variable in Lua
     #[wasm_bindgen(js_name = setGlobal)]
-    pub fn set_global(&self, name: &str, value: JsValue) -> Result<(), JsValue> {
-        let mut vm = self.vm.borrow_mut();
+    pub fn set_global(&mut self, name: &str, value: JsValue) -> Result<(), JsValue> {
         let lua_value =
-            js_value_to_lua(&mut vm, &value).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-        vm.set_global(name, lua_value);
+            js_value_to_lua(&mut *self.vm, &value).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        self.vm.set_global(name, lua_value);
         Ok(())
     }
 
     /// Get a global variable from Lua
     #[wasm_bindgen(js_name = getGlobal)]
-    pub fn get_global(&self, name: &str) -> Result<JsValue, JsValue> {
-        let mut vm = self.vm.borrow_mut();
-        if let Some(lua_value) = vm.get_global(name) {
-            lua_value_to_js(&vm, &lua_value)
+    pub fn get_global(&mut self, name: &str) -> Result<JsValue, JsValue> {
+        if let Some(lua_value) = self.vm.get_global(name) {
+            lua_value_to_js(&self.vm, &lua_value)
         } else {
             Ok(JsValue::NULL)
         }
@@ -65,15 +59,14 @@ impl LuaWasm {
 
     /// Evaluate a Lua expression and return the result as JsValue
     #[wasm_bindgen]
-    pub fn eval(&self, expr: &str) -> Result<JsValue, JsValue> {
+    pub fn eval(&mut self, expr: &str) -> Result<JsValue, JsValue> {
         let code = format!("return {}", expr);
-        let mut vm = self.vm.borrow_mut();
 
-        match vm.compile(&code) {
-            Ok(chunk) => match vm.execute(Rc::new(chunk)) {
+        match self.vm.compile(&code) {
+            Ok(chunk) => match self.vm.execute(std::rc::Rc::new(chunk)) {
                 Ok(results) => {
                     let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
-                    lua_value_to_js(&vm, &value)
+                    lua_value_to_js(&self.vm, &value)
                 }
                 Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
             },
@@ -85,7 +78,7 @@ impl LuaWasm {
     /// Note: This is a simplified version - full JS callback support requires additional work
     #[wasm_bindgen(js_name = registerFunction)]
     pub fn register_function(
-        &self,
+        &mut self,
         name: String,
         _callback: js_sys::Function,
     ) -> Result<(), JsValue> {
@@ -100,12 +93,11 @@ impl LuaWasm {
             name
         );
 
-        let mut vm = self.vm.borrow_mut();
-        let chunk = vm
+        let chunk = self.vm
             .compile(&code)
             .map_err(|e| JsValue::from_str(&format!("Failed to register function: {:?}", e)))?;
 
-        vm.execute(Rc::new(chunk))
+        self.vm.execute(std::rc::Rc::new(chunk))
             .map_err(|e| JsValue::from_str(&format!("Failed to execute registration: {:?}", e)))?;
 
         Ok(())
