@@ -207,11 +207,11 @@ pub fn concat_strings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lua_vm::LuaVM;
+    use crate::lua_vm::{LuaVM, safe_option::SafeOption};
 
     #[test]
     fn test_concat_empty() {
-        let mut vm = LuaVM::new();
+        let mut vm = LuaVM::new(SafeOption::default());
         let state = &mut vm.main_state;
         let stack_ptr = state.stack_ptr_mut();
         // Empty concat should return empty string
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_concat_single() {
-        let mut vm = LuaVM::new();
+        let mut vm = LuaVM::new(SafeOption::default());
         vm.open_libs();
         
         // Test single string
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_concat_numbers() {
-        let mut vm = LuaVM::new();
+        let mut vm = LuaVM::new(SafeOption::default());
         vm.open_libs();
         
         // Test number concatenation

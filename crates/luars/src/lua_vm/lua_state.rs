@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use crate::gc::UpvalueId;
 use crate::lua_value::LuaValue;
+use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
 use crate::{Chunk, LuaVM};
 
@@ -37,24 +38,19 @@ pub struct LuaState {
     /// Hook mask and count (for debug hooks)
     hook_mask: u8,
     hook_count: i32,
+
+    safe_option: SafeOption,
 }
 
 impl LuaState {
     /// Basic stack size (similar to BASIC_STACK_SIZE in Lua = 2*LUA_MINSTACK = 40)
     const BASIC_STACK_SIZE: usize = 40;
 
-    /// Maximum stack size (similar to LUAI_MAXSTACK in Lua)
-    pub const MAX_STACK_SIZE: usize = 1_000_000;
-
-    /// Maximum call depth (similar to LUAI_MAXCCALLS)
-    pub const MAX_CALL_DEPTH: usize = 200;
-
     /// Create a new execution state
     /// 按需分配，而不是预分配 200 个 CallInfo（像 Lua 5.4）
-    pub fn new(call_stack_size: usize, vm: *mut LuaVM) -> Self {
+    pub fn new(call_stack_size: usize, vm: *mut LuaVM, safe_option: SafeOption) -> Self {
         // Start with BASIC_STACK_SIZE, will grow dynamically up to MAX_STACK_SIZE
         let stack = Vec::with_capacity(Self::BASIC_STACK_SIZE);
-        
         Self {
             vm,
             stack,
@@ -65,6 +61,7 @@ impl LuaState {
             yield_values: Vec::new(),
             hook_mask: 0,
             hook_count: 0,
+            safe_option,
         }
     }
 
@@ -94,7 +91,7 @@ impl LuaState {
     /// 按需动态分配 - Lua 5.4 风格
     pub fn push_frame(&mut self, func: LuaValue, base: usize, nparams: usize) -> LuaResult<()> {
         // 检查栈深度限制
-        if self.call_stack.len() >= Self::MAX_CALL_DEPTH {
+        if self.call_stack.len() >= self.safe_option.max_call_depth {
             return Err(LuaError::StackOverflow);
         }
 
@@ -127,8 +124,11 @@ impl LuaState {
     /// Set stack value at absolute index
     #[inline(always)]
     pub fn stack_set(&mut self, index: usize, value: LuaValue) {
-        if index >= Self::MAX_STACK_SIZE {
-            panic!("Stack overflow: index {} exceeds maximum stack size {}", index, Self::MAX_STACK_SIZE);
+        if index >= self.safe_option.max_stack_size {
+            panic!(
+                "Stack overflow: index {} exceeds maximum stack size {}",
+                index, self.safe_option.max_stack_size
+            );
         }
         if index >= self.stack.len() {
             self.stack.resize(index + 1, LuaValue::nil());
@@ -234,7 +234,7 @@ impl LuaState {
     }
 
     /// Get mutable pointer to stack for VM execution
-    /// 
+    ///
     /// # Safety
     /// Caller must ensure stack is not reallocated during pointer usage
     #[inline(always)]
@@ -253,8 +253,11 @@ impl LuaState {
     /// Stack can grow dynamically up to MAX_STACK_SIZE
     /// C functions can call this, which means Vec may reallocate
     pub fn grow_stack(&mut self, needed: usize) {
-        if needed > Self::MAX_STACK_SIZE {
-            panic!("Stack overflow: needed {} exceeds maximum {}", needed, Self::MAX_STACK_SIZE);
+        if needed > self.safe_option.max_stack_size {
+            panic!(
+                "Stack overflow: needed {} exceeds maximum {}",
+                needed, self.safe_option.max_stack_size
+            );
         }
         if self.stack.len() < needed {
             self.stack.resize(needed, LuaValue::nil());
@@ -286,7 +289,7 @@ impl LuaState {
             frame.pc = pc;
         }
     }
-    
+
     /// Set frame function by index (for tail calls)
     #[inline(always)]
     pub fn set_frame_func(&mut self, frame_idx: usize, func: LuaValue) {
@@ -362,20 +365,16 @@ impl LuaState {
         if self.call_stack.is_empty() {
             return Vec::new();
         }
-        
+
         let frame = &self.call_stack[self.call_stack.len() - 1];
         let base = frame.base;
         let top = frame.top;
-        
+
         // Arguments are from base to top-1 (NOT base+1!)
         // In Lua, the function itself is NOT part of the frame's stack
         // The frame starts at the first argument
-        let arg_count = if top > base {
-            top - base
-        } else {
-            0
-        };
-        
+        let arg_count = if top > base { top - base } else { 0 };
+
         let mut args = Vec::with_capacity(arg_count);
         for i in 0..arg_count {
             if let Some(val) = self.stack_get(base + i) {
@@ -393,15 +392,15 @@ impl LuaState {
         if index == 0 || self.call_stack.is_empty() {
             return None;
         }
-        
+
         let frame = &self.call_stack[self.call_stack.len() - 1];
         let base = frame.base;
         let top = frame.top;
-        
+
         // Arguments are 1-based: arg 1 is at base, arg 2 is at base+1, etc.
         // (NOT base+1, because C function frame.base already points to first arg)
         let stack_index = base + index - 1;
-        
+
         if stack_index < top {
             self.stack_get(stack_index)
         } else {
@@ -414,17 +413,13 @@ impl LuaState {
         if self.call_stack.is_empty() {
             return 0;
         }
-        
+
         let frame = &self.call_stack[self.call_stack.len() - 1];
         let base = frame.base;
         let top = frame.top;
-        
+
         // Arguments are from base to top-1
-        if top > base {
-            top - base
-        } else {
-            0
-        }
+        if top > base { top - base } else { 0 }
     }
 
     // ===== Object Creation =====
@@ -471,6 +466,6 @@ impl LuaState {
 
 impl Default for LuaState {
     fn default() -> Self {
-        Self::new(1, std::ptr::null_mut())
+        Self::new(1, std::ptr::null_mut(), SafeOption::default())
     }
 }

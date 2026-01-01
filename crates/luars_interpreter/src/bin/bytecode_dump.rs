@@ -1,4 +1,4 @@
-use luars::lua_vm::{Instruction, OpCode};
+use luars::lua_vm::{Instruction, OpCode, SafeOption};
 use luars::{Chunk, LuaVM};
 use std::env;
 use std::fs;
@@ -20,7 +20,7 @@ fn main() {
         std::process::exit(0);
     };
 
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
 
     // Create chunk name with @ prefix like Lua
     let chunk_name = if filename.starts_with('@') {

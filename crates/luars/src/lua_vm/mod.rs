@@ -5,6 +5,7 @@ mod execute;
 mod lua_error;
 mod lua_state;
 pub mod opcode;
+mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
@@ -13,6 +14,7 @@ pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
+pub use crate::lua_vm::safe_option::SafeOption;
 use crate::{ObjectPool, lib_registry};
 pub use execute::TmKind;
 pub use opcode::{Instruction, OpCode};
@@ -48,17 +50,20 @@ pub struct LuaVM {
     #[allow(unused)]
     /// String metatable (shared by all strings)
     pub(crate) string_mt: Option<LuaValue>,
+
+    pub(crate) safe_option: SafeOption,
 }
 
 impl LuaVM {
-    pub fn new() -> Box<Self> {
+    pub fn new(option: SafeOption) -> Box<Self> {
         let mut vm = Box::new(LuaVM {
             global: TableId(0),
             registry: TableId(1),
             object_pool: ObjectPool::new(),
             gc: GC::new(),
-            main_state: LuaState::new(6, null_mut()),
+            main_state: LuaState::new(6, null_mut(), option.clone()),
             string_mt: None,
+            safe_option: option,
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;
@@ -166,9 +171,9 @@ impl LuaVM {
     ) -> LuaResult<Vec<LuaValue>> {
         // Push function onto stack
         let main_state = &mut self.main_state;
-        let func_idx = main_state.stack_mut().len();  // Function will be at this index
-        let nargs = args.len();  // Save length before moving args
-        
+        let func_idx = main_state.stack_mut().len(); // Function will be at this index
+        let nargs = args.len(); // Save length before moving args
+
         main_state.stack_mut().push(func.clone());
 
         // Push arguments
@@ -239,7 +244,7 @@ impl LuaVM {
         let mut _register_stack = Vec::with_capacity(64);
         _register_stack.push(func);
 
-        let thread = LuaState::new(1, self as *mut LuaVM);
+        let thread = LuaState::new(1, self as *mut LuaVM, self.safe_option.clone());
 
         // Create thread in ObjectPool and return LuaValue
         let thread_id = self.object_pool.create_thread(thread);

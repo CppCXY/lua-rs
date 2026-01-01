@@ -24,10 +24,12 @@ pub use lua_value::{Chunk, LuaFunction, LuaString, LuaTable, LuaValue, MultiValu
 pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
 use std::rc::Rc;
 
+use crate::lua_vm::SafeOption;
+
 /// Main entry point for executing Lua code
 pub fn execute(source: &str) -> LuaResult<LuaValue> {
     // Create VM and compile using its string pool
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let chunk = vm.compile(source)?;
     let results = vm.execute(Rc::new(chunk))?;

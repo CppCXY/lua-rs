@@ -5,7 +5,7 @@ use crate::*;
 
 #[test]
 fn test_local_variable_scope() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -22,7 +22,7 @@ fn test_local_variable_scope() {
 
 #[test]
 fn test_global_variable() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -36,7 +36,7 @@ fn test_global_variable() {
 
 #[test]
 fn test_multiple_assignment() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -51,7 +51,7 @@ fn test_multiple_assignment() {
 
 #[test]
 fn test_swap_variables() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -67,7 +67,7 @@ fn test_swap_variables() {
 
 #[test]
 fn test_vararg_function() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -89,7 +89,7 @@ fn test_vararg_function() {
 
 #[test]
 fn test_table_constructor_array() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -103,7 +103,7 @@ fn test_table_constructor_array() {
 
 #[test]
 fn test_table_constructor_hash() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -116,7 +116,7 @@ fn test_table_constructor_hash() {
 
 #[test]
 fn test_table_constructor_mixed() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -130,7 +130,7 @@ fn test_table_constructor_mixed() {
 
 #[test]
 fn test_table_constructor_expression_key() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -146,7 +146,7 @@ fn test_table_constructor_expression_key() {
 
 #[test]
 fn test_simple_function() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -162,7 +162,7 @@ fn test_simple_function() {
 
 #[test]
 fn test_function_as_table_method() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -184,7 +184,7 @@ fn test_function_as_table_method() {
 
 #[test]
 fn test_while_loop() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -202,7 +202,7 @@ fn test_while_loop() {
 
 #[test]
 fn test_repeat_until() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -220,7 +220,7 @@ fn test_repeat_until() {
 
 #[test]
 fn test_numeric_for() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -236,7 +236,7 @@ fn test_numeric_for() {
 
 #[test]
 fn test_numeric_for_with_step() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -252,7 +252,7 @@ fn test_numeric_for_with_step() {
 
 #[test]
 fn test_break_statement() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -271,7 +271,7 @@ fn test_break_statement() {
 
 #[test]
 fn test_nested_loops() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -291,7 +291,7 @@ fn test_nested_loops() {
 
 #[test]
 fn test_if_elseif_else() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -314,7 +314,7 @@ fn test_if_elseif_else() {
 
 #[test]
 fn test_truthiness() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -332,7 +332,7 @@ fn test_truthiness() {
 
 #[test]
 fn test_and_operator() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -347,7 +347,7 @@ fn test_and_operator() {
 
 #[test]
 fn test_or_operator() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -361,7 +361,7 @@ fn test_or_operator() {
 
 #[test]
 fn test_not_operator() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -376,7 +376,7 @@ fn test_not_operator() {
 
 #[test]
 fn test_short_circuit_evaluation() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -396,7 +396,7 @@ fn test_short_circuit_evaluation() {
 
 #[test]
 fn test_type_function() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -415,7 +415,7 @@ fn test_type_function() {
 
 #[test]
 fn test_pcall_success() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -432,7 +432,7 @@ fn test_pcall_success() {
 
 #[test]
 fn test_pcall_error() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -451,7 +451,7 @@ fn test_pcall_error() {
 
 #[test]
 fn test_ipairs() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -468,7 +468,7 @@ fn test_ipairs() {
 
 #[test]
 fn test_pairs() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -487,7 +487,7 @@ fn test_pairs() {
 
 #[test]
 fn test_tonumber() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -502,7 +502,7 @@ fn test_tonumber() {
 
 #[test]
 fn test_tostring() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -518,7 +518,7 @@ fn test_tostring() {
 
 #[test]
 fn test_string_concatenation() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -531,7 +531,7 @@ fn test_string_concatenation() {
 
 #[test]
 fn test_string_length() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -547,7 +547,7 @@ fn test_string_length() {
 
 #[test]
 fn test_table_insert() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -563,7 +563,7 @@ fn test_table_insert() {
 
 #[test]
 fn test_table_remove() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -579,7 +579,7 @@ fn test_table_remove() {
 
 #[test]
 fn test_table_concat() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -595,7 +595,7 @@ fn test_table_concat() {
 
 #[test]
 fn test_simple_upvalue() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -615,7 +615,7 @@ fn test_simple_upvalue() {
 
 #[test]
 fn test_nil_in_table() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -635,7 +635,7 @@ fn test_nil_in_table() {
 
 #[test]
 fn test_equality_comparison() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"
@@ -653,7 +653,7 @@ fn test_equality_comparison() {
 
 #[test]
 fn test_relational_comparison() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(
         r#"

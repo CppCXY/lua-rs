@@ -3,7 +3,7 @@ use crate::*;
 
 #[test]
 fn test_package_loaded() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -20,7 +20,7 @@ fn test_package_loaded() {
 
 #[test]
 fn test_package_preload() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -41,7 +41,7 @@ fn test_package_preload() {
 
 #[test]
 fn test_package_path() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -56,7 +56,7 @@ fn test_package_path() {
 
 #[test]
 fn test_package_cpath() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -71,7 +71,7 @@ fn test_package_cpath() {
 
 #[test]
 fn test_package_config() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -93,7 +93,7 @@ fn test_package_config() {
 
 #[test]
 fn test_package_searchers() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -111,7 +111,7 @@ fn test_package_searchers() {
 
 #[test]
 fn test_package_searchpath() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -127,7 +127,7 @@ fn test_package_searchpath() {
 
 #[test]
 fn test_require_preload() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -154,7 +154,7 @@ fn test_require_preload() {
 
 #[test]
 fn test_require_cache() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -179,7 +179,7 @@ fn test_require_cache() {
 
 #[test]
 fn test_require_error() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(
@@ -195,7 +195,7 @@ fn test_require_error() {
 
 #[test]
 fn test_require_return_value() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     let result = vm.execute_string(

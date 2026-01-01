@@ -1,4 +1,5 @@
 use luars::LuaVM;
+use luars::lua_vm::SafeOption;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -290,7 +291,7 @@ fn main() {
     }
 
     // Create VM
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     // Setup arg table

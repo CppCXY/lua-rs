@@ -1,9 +1,10 @@
 #[cfg(test)]
 use crate::lua_vm::LuaVM;
+use crate::lua_vm::SafeOption;
 
 #[test]
 fn test_xpcall_simple() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     // Test 1: Basic xpcall without upvalues
@@ -42,7 +43,7 @@ fn test_xpcall_simple() {
 
 #[test]
 fn test_xpcall_concat() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
 
     // Test: Handler with string concatenation
