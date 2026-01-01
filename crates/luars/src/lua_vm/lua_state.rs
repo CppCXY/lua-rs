@@ -462,6 +462,10 @@ impl LuaState {
         self.vm_mut().create_string(s)
     }
 
+    pub fn create_string_owned(&mut self, s: String) -> LuaValue {
+        self.vm_mut().create_string_owned(s)
+    }
+
     // ===== Global Access =====
 
     /// Get global variable

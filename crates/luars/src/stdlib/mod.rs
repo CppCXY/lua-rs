@@ -11,6 +11,6 @@ pub mod basic;
 // pub mod math;
 pub mod os;
 // pub mod package;
-// pub mod string;
+pub mod string;
 // pub mod table;
 // pub mod utf8;
