@@ -135,15 +135,22 @@ fn call_c_function(
     // Push temporary frame for C function
     lua_state.push_frame(func, call_base, nargs)?;
 
+    let top_before = lua_state.stack_len();
+
     // Call the C function (it returns number of results)
     let n = c_func(lua_state)?;
+
+    let top_after = lua_state.stack_len();
 
     // Pop the frame
     lua_state.pop_frame();
 
-    // Move results from call_base to func_idx (Lua's moveresults)
+    // Results are from top_before to top_after-1
+    let first_result = top_after - n;
+
+    // Move results from first_result to func_idx (Lua's moveresults)
     // Implements Lua's moveresults logic from ldo.c
-    move_results(lua_state, func_idx, call_base, n, nresults)?;
+    move_results(lua_state, func_idx, first_result, n, nresults)?;
 
     Ok(())
 }
