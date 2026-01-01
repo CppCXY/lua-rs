@@ -3,6 +3,7 @@
 
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{CFunction, LuaResult, LuaVM};
+use crate::stdlib;
 // use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
@@ -185,12 +186,12 @@ pub fn create_standard_registry() -> LibraryRegistry {
     // registry.register(stdlib::package::create_package_lib());
 
     // Register all other standard libraries
-    registry.register(crate::stdlib::basic::create_basic_lib());
-    // registry.register(stdlib::string::create_string_lib());
+    registry.register(stdlib::basic::create_basic_lib());
+    registry.register(stdlib::string::create_string_lib());
     // registry.register(stdlib::table::create_table_lib());
     // registry.register(stdlib::math::create_math_lib());
     // registry.register(stdlib::io::create_io_lib());
-    // registry.register(stdlib::os::create_os_lib());
+    registry.register(stdlib::os::create_os_lib());
     // registry.register(stdlib::utf8::create_utf8_lib());
     // registry.register(stdlib::coroutine::create_coroutine_lib());
     // registry.register(stdlib::debug::create_debug_lib());

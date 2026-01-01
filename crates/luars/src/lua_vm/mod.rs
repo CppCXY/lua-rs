@@ -277,18 +277,29 @@ impl LuaVM {
     /// This is the correct behavior for Lua bytecode instructions
     /// Only use table_get_with_meta when you explicitly need __index metamethod
     #[inline(always)]
-    pub fn table_get(&self, _table_value: &LuaValue, _key: &LuaValue) -> Option<LuaValue> {
-        None
+    pub fn table_get(&self, table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        let table_id = table_value.as_table_id()?;
+        let table = self.object_pool.get_table(table_id)?;
+        table.raw_get(key)
     }
 
     #[inline(always)]
     pub fn table_set(
         &mut self,
-        _lua_table_val: &LuaValue,
-        _key: LuaValue,
-        _value: LuaValue,
+        lua_table_val: &LuaValue,
+        key: LuaValue,
+        value: LuaValue,
     ) -> bool {
-        false
+        let Some(table_id) = lua_table_val.as_table_id() else {
+            return false;
+        };
+        let Some(table) = self.object_pool.get_table_mut(table_id) else {
+            return false;
+        };
+        table.raw_set(key, value.clone());
+        // Write barrier for GC
+        self.gc_barrier_back_table(table_id, &value);
+        true
     }
 
     /// Get value from table with metatable support (__index metamethod)
@@ -296,11 +307,96 @@ impl LuaVM {
     /// For raw access without metamethods, use table_get_raw() instead
     pub fn table_get_with_meta(
         &mut self,
-        _table_value: &LuaValue,
-        _key: &LuaValue,
+        table_value: &LuaValue,
+        key: &LuaValue,
     ) -> Option<LuaValue> {
+        // First try raw get
+        let table_id = table_value.as_table_id()?;
+        
+        // Try to get value directly from table
+        if let Some(value) = self.table_get_raw(table_value, key) {
+            return Some(value);
+        }
+        
+        // Value not found, check for __index metamethod
+        let metatable = {
+            let table = self.object_pool.get_table(table_id)?;
+            table.get_metatable()
+        };
+        
+        if let Some(mt) = metatable {
+            // Try to get __index metamethod
+            let index_key = self.create_string("__index");
+            if let Some(index_mm) = self.table_get_raw(&mt, &index_key) {
+                if index_mm.is_table() {
+                    // __index is a table, do lookup in it
+                    return self.table_get_with_meta(&index_mm, key);
+                } else if index_mm.is_function() || index_mm.is_cfunction() {
+                    // __index is a function, call it
+                    // For now, we'll skip function call to avoid complexity
+                    // TODO: Implement function call for __index
+                    return None;
+                }
+            }
+        }
+        
         None
     }
+
+        /// Set value in table with metatable support (__newindex metamethod)
+    /// Use this for SETTABLE, SETFIELD, SETI instructions
+    /// For raw set without metamethods, use table_set_raw() instead
+    pub fn table_set_with_meta(
+        &mut self,
+        lua_table_val: LuaValue,
+        key: LuaValue,
+        value: LuaValue,
+    ) -> LuaResult<()> {
+        // Use ObjectPool lookup
+        let Some(table_id) = lua_table_val.as_table_id() else {
+            return Err(self.error("table_set: not a table".to_string()));
+        };
+
+        // Check if key already exists in table
+        let key_exists = if let Some(table) = self.object_pool.get_table(table_id) {
+            table.raw_get(&key).is_some()
+        } else {
+            return Err(self.error("invalid table".to_string()));
+        };
+        
+        if key_exists {
+            // Key exists, just set it directly
+            self.table_set_raw(&lua_table_val, key, value);
+            return Ok(());
+        }
+        
+        // Key doesn't exist, check for __newindex metamethod
+        let metatable = if let Some(table) = self.object_pool.get_table(table_id) {
+            table.get_metatable()
+        } else {
+            return Err(self.error("invalid table".to_string()));
+        };
+        
+        if let Some(mt) = metatable {
+            let newindex_key = self.create_string("__newindex");
+            if let Some(newindex_mm) = self.table_get_raw(&mt, &newindex_key) {
+                if newindex_mm.is_table() {
+                    // __newindex is a table, set in that table
+                    return self.table_set_with_meta(newindex_mm, key, value);
+                } else if newindex_mm.is_function() || newindex_mm.is_cfunction() {
+                    // __newindex is a function, call it
+                    // For now, we'll skip function call to avoid complexity
+                    // TODO: Implement function call for __newindex
+                    return Ok(());
+                }
+            }
+        }
+        
+        // No metamethod or metamethod didn't handle it, do raw set
+        self.table_set_raw(&lua_table_val, key, value);
+        Ok(())
+    }
+
 
     /// Get value from userdata with metatable support
     /// Handles __index metamethod
@@ -324,22 +420,6 @@ impl LuaVM {
         None
     }
 
-    /// Set value in table with metatable support (__newindex metamethod)
-    /// Use this for SETTABLE, SETFIELD, SETI instructions
-    /// For raw set without metamethods, use table_set_raw() instead
-    pub fn table_set_with_meta(
-        &mut self,
-        lua_table_val: LuaValue,
-        _key: LuaValue,
-        _value: LuaValue,
-    ) -> LuaResult<()> {
-        // Use ObjectPool lookup
-        let Some(table_id) = lua_table_val.as_table_id() else {
-            return Err(self.error("table_set: not a table".to_string()));
-        };
-
-        Ok(())
-    }
 
     /// Call a Lua value (function or CFunction) with the given arguments
     /// Returns the first return value, or None if the call fails
