@@ -175,7 +175,7 @@ fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
 /// Main VM execution entry point
 ///
 /// Executes bytecode starting from current PC in the active call frame
-/// Returns when function returns or error occurs
+/// Returns when all frames are popped (depth reaches 0)
 ///
 /// Architecture: Lua-style single loop, NOT recursive calls
 /// - CALL (Lua): push frame, reload chunk/upvalues, continue loop
@@ -184,13 +184,23 @@ fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
 /// - TAILCALL: replace frame, reload chunk/upvalues, continue loop
 #[allow(unused)]
 pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
-    // Main execution loop - continues until all frames are popped
+    lua_execute_until(lua_state, 0)
+}
+
+/// Execute until call depth reaches target_depth
+/// Used for protected calls (pcall) to execute only the called function
+/// without affecting caller frames
+pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
+    // Main execution loop - continues until frames are popped to target depth
     'vm_loop: loop {
-        // Get current call frame
-        let frame_idx = match lua_state.call_depth().checked_sub(1) {
-            Some(idx) => idx,
-            None => return Ok(()), // No more frames, VM done
-        };
+        // Check if we've reached target depth
+        let current_depth = lua_state.call_depth();
+        if current_depth <= target_depth {
+            return Ok(()); // Reached target depth, stop execution
+        }
+        
+        // Get current call frame index
+        let frame_idx = current_depth - 1;
 
         // Load current function's chunk and upvalues
         let (chunk, upvalues_vec) = {
@@ -225,9 +235,8 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
         // Execute this frame until CALL/RETURN/TAILCALL
         match execute_frame(lua_state, frame_idx, chunk, upvalues_vec)? {
             FrameAction::Return => {
-                // Pop frame and continue with caller (or exit if no caller)
-                lua_state.pop_frame();
-                // Loop continues with caller's frame
+                // Frame was already popped by handle_return, just continue with caller
+                // Loop continues with caller's frame (or exits if no caller)
             }
             FrameAction::Call => {
                 // New frame was pushed, loop continues with callee's frame

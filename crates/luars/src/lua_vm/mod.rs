@@ -11,7 +11,7 @@ use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
 use crate::lua_value::{Chunk, LuaString, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
-use crate::lua_vm::execute::lua_execute;
+use crate::lua_vm::execute::{lua_execute, lua_execute_until};
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
@@ -170,30 +170,43 @@ impl LuaVM {
         args: Vec<LuaValue>,
     ) -> LuaResult<Vec<LuaValue>> {
         // Push function onto stack
-        let main_state = &mut self.main_state;
-        let func_idx = main_state.stack_mut().len(); // Function will be at this index
+        let func_idx = self.main_state.stack_mut().len(); // Function will be at this index
         let nargs = args.len(); // Save length before moving args
 
-        main_state.stack_mut().push(func.clone());
+        self.main_state.stack_mut().push(func.clone());
 
         // Push arguments
         for arg in args {
-            main_state.stack_mut().push(arg);
+            self.main_state.stack_mut().push(arg);
         }
 
         // Create initial call frame
         // base points to first argument (func_idx + 1), following Lua convention
         let base = func_idx + 1;
-        main_state.push_frame(func, base, nargs)?;
+        self.main_state.push_frame(func, base, nargs)?;
 
         // Run the VM execution loop
-        self.run()
+        let results = self.run()?;
+        
+        // Clear the stack for next execution
+        self.main_state.stack_truncate(0);
+        
+        Ok(results)
     }
 
     /// Main VM execution loop (equivalent to luaV_execute)
     fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
         lua_execute(&mut self.main_state)?;
-        Ok(vec![])
+        
+        // Collect all values remaining on stack as return values
+        let mut results = Vec::new();
+        for i in 0..self.main_state.stack_len() {
+            if let Some(val) = self.main_state.stack_get(i) {
+                results.push(val);
+            }
+        }
+        
+        Ok(results)
     }
 
     /// Compile source code using VM's string pool

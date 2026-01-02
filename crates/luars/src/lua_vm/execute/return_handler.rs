@@ -60,9 +60,13 @@ pub fn handle_return(
     }
 
     // Move return values to correct position
-    // Caller expects results at ci->func (function slot)
+    // Caller expects results at ci->func (function slot), which is base-1
     let call_info = lua_state.get_call_info(frame_idx);
-    let func_pos = call_info.base; // Use base as the position for return values
+    let func_pos = if call_info.base > 0 {
+        call_info.base - 1  // Function is at base-1
+    } else {
+        0
+    };
     let wanted_results = if call_info.nresults < 0 {
         nres // LUA_MULTRET: return all results
     } else {
@@ -109,7 +113,11 @@ pub fn handle_return(
 pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<FrameAction> {
     // Get caller's expected results
     let call_info = lua_state.get_call_info(frame_idx);
-    let func_pos = call_info.base;
+    let func_pos = if call_info.base > 0 {
+        call_info.base - 1
+    } else {
+        0
+    };
     let wanted_results = if call_info.nresults < 0 {
         0 // LUA_MULTRET for return0 means 0
     } else {
@@ -155,7 +163,11 @@ pub fn handle_return1(
 
     // Get caller's expected results
     let call_info = lua_state.get_call_info(frame_idx);
-    let func_pos = call_info.base;
+    let func_pos = if call_info.base > 0 {
+        call_info.base - 1
+    } else {
+        0
+    };
     let wanted_results = if call_info.nresults < 0 {
         1 // LUA_MULTRET for return1 means 1
     } else {

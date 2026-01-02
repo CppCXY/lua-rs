@@ -740,8 +740,8 @@ impl LuaState {
                 return Ok((false, vec![err_str]));
             }
             
-            // Execute via lua_execute
-            let result = crate::lua_vm::execute::lua_execute(self);
+            // Execute via lua_execute_until - only execute the new frame
+            let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
             
             match result {
                 Ok(()) => {
@@ -823,7 +823,7 @@ impl LuaState {
         }
         
         // Execute
-        let result = crate::lua_vm::execute::lua_execute(self);
+        let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
         
         match result {
             Ok(()) => {
@@ -897,7 +897,7 @@ impl LuaState {
         }
         
         // Execute
-        let result = crate::lua_vm::execute::lua_execute(self);
+        let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
         
         match result {
             Ok(()) => {
@@ -948,7 +948,7 @@ impl LuaState {
                 }
                 
                 // Execute error handler
-                let handler_result = crate::lua_vm::execute::lua_execute(self);
+                let handler_result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
                 
                 match handler_result {
                     Ok(()) => {
