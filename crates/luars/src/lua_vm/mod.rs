@@ -164,7 +164,7 @@ impl LuaVM {
     }
 
     /// Execute a function with arguments
-    fn execute_function(
+    pub(crate) fn execute_function(
         &mut self,
         func: LuaValue,
         args: Vec<LuaValue>,
@@ -251,25 +251,25 @@ impl LuaVM {
         LuaValue::thread(thread_id)
     }
 
-    /// Resume a coroutine using ThreadId-based LuaValue
-    /// ULTRA-OPTIMIZED: Minimized object_pool lookups using raw pointers
+    /// Resume a coroutine - DEPRECATED: Use thread_state.resume() instead
+    /// This method is kept for backward compatibility but delegates to LuaState
     pub fn resume_thread(
         &mut self,
         thread_val: LuaValue,
-        _args: Vec<LuaValue>,
+        args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Get ThreadId from LuaValue
         let Some(thread_id) = thread_val.as_thread_id() else {
             return Err(self.error("invalid thread".to_string()));
         };
 
-        todo!()
-    }
+        // Get thread's Rc<RefCell<LuaState>>
+        let Some(thread_rc) = self.object_pool.get_thread(thread_id) else {
+            return Err(self.error("thread not found".to_string()));
+        };
 
-    /// Yield from current coroutine
-    /// Returns Err(LuaError::Yield) which will be caught by run() loop
-    pub fn yield_thread(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
-        todo!()
+        // Borrow mutably and delegate to LuaState::resume
+        thread_rc.borrow_mut().resume(args)
     }
 
     /// Fast table get - NO metatable support!
@@ -414,23 +414,6 @@ impl LuaVM {
         None
     }
 
-    /// Get value from string with metatable support
-    /// Handles __index metamethod for strings
-    pub fn string_get(&mut self, _string_val: &LuaValue, _key: &LuaValue) -> Option<LuaValue> {
-        None
-    }
-
-
-    /// Call a Lua value (function or CFunction) with the given arguments
-    /// Returns the first return value, or None if the call fails
-    pub fn call_metamethod(
-        &mut self,
-        _func: &LuaValue,
-        _args: &[LuaValue],
-    ) -> LuaResult<Option<LuaValue>> {
-        todo!()
-    }
-
     /// Create a new table and register it with GC
     /// Create a string and register it with GC
     /// For short strings (�?4 bytes), use interning (global deduplication)
@@ -519,14 +502,14 @@ impl LuaVM {
 
         if is_collectable {
             // Forward barrier: mark the value if upvalue is old
-            let uv_gc_id = crate::gc::GcId::UpvalueId(upvalue_id);
+            let uv_gc_id = GcId::UpvalueId(upvalue_id);
 
             // Get value's GcId for forward barrier
             if let Some(value_gc_id) = match value.kind() {
-                LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
-                LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
-                LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
-                LuaValueKind::String => value.as_string_id().map(crate::gc::GcId::StringId),
+                LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
+                LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
+                LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
+                LuaValueKind::String => value.as_string_id().map(GcId::StringId),
                 _ => None,
             } {
                 self.gc
@@ -1008,86 +991,39 @@ impl LuaVM {
         }
     }
 
+    // ============ Protected Call (pcall/xpcall) ============
+    // DEPRECATED: These methods are kept for backward compatibility
+    // New code should use LuaState::pcall/xpcall directly
+
     /// Execute a function with protected call (pcall semantics)
+    /// DEPRECATED: Use lua_state.pcall() instead
     /// Note: Yields are NOT caught by pcall - they propagate through
     pub fn protected_call(
         &mut self,
         func: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // // Save current state
-        // let initial_frame_count = self.frame_count;
-
-        // // Try to call the function
-        // let result = self.call_function_internal(func, args);
-
-        // match result {
-        //     Ok(return_values) => {
-        //         // Success: return true and the return values
-        //         Ok((true, return_values))
-        //     }
-        //     Err(LuaError::Yield) => {
-        //         // Yield is not an error - propagate it
-        //         Err(LuaError::Yield)
-        //     }
-        //     Err(_) => {
-        //         // Real error: clean up frames and return false with error message
-        //         // Simply clear all open upvalues to avoid dangling references
-        //         self.open_upvalues.clear();
-
-        //         // Now pop the frames
-        //         while self.frame_count > initial_frame_count {
-        //             self.pop_frame_discard();
-        //         }
-
-        //         // Return error - take the message to avoid allocation
-        //         let msg = std::mem::take(&mut self.error_message);
-        //         let error_str = self.create_string(&msg);
-
-        //         Ok((false, vec![error_str]))
-        //     }
-        // }
-        todo!()
+        // Delegate to main_state
+        self.main_state.pcall(func, args)
     }
 
     /// ULTRA-OPTIMIZED pcall for CFunction calls
+    /// DEPRECATED: Use lua_state.pcall_stack_based() instead
     /// Works directly on the stack without any Vec allocations
-    /// Args are read from caller's stack and results are written directly to return_values
-    /// Returns: (success, result_count) where results are in self.return_values
+    /// Returns: (success, result_count) where results are on stack
     #[inline]
     pub fn protected_call_stack_based(
         &mut self,
-        func: LuaValue,
-        arg_base: usize,  // Where args start in stack (caller's base + 1)
-        arg_count: usize, // Number of arguments
+        func_idx: usize,
+        arg_count: usize,
     ) -> LuaResult<(bool, usize)> {
-        // // Save current state
-        // let initial_frame_count = self.frame_count;
-
-        // // Call function directly without Vec allocation
-        // let result = self.call_function_stack_based(func, arg_base, arg_count);
-
-        // match result {
-        //     Ok(result_count) => Ok((true, result_count)),
-        //     Err(LuaError::Yield) => Err(LuaError::Yield),
-        //     Err(_) => {
-        //         // Error path: clean up and return error message
-        //         self.open_upvalues.clear();
-        //         while self.frame_count > initial_frame_count {
-        //             self.pop_frame_discard();
-        //         }
-        //         let msg = std::mem::take(&mut self.error_message);
-        //         let error_str = self.create_string(&msg);
-        //         self.return_values.clear();
-        //         self.return_values.push(error_str);
-        //         Ok((false, 1))
-        //     }
-        // }
-        todo!()
+        // Delegate to main_state
+        self.main_state.pcall_stack_based(func_idx, arg_count)
     }
 
     /// Protected call with error handler (xpcall semantics)
-    /// The error handler is registered and will be called by error() when an error occurs
+    /// DEPRECATED: Use lua_state.xpcall() instead
+    /// The error handler is called if an error occurs
     /// Note: Yields are NOT caught by xpcall - they propagate through
     pub fn protected_call_with_handler(
         &mut self,
@@ -1095,47 +1031,7 @@ impl LuaVM {
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // let initial_frame_count = self.frame_count;
-
-        // // Call the function
-        // let result = self.call_function_internal(func, args);
-
-        // match result {
-        //     Ok(values) => Ok((true, values)),
-        //     Err(LuaError::Yield) => Err(LuaError::Yield),
-        //     Err(_) => {
-        //         // Error occurred - call the error handler NOW while the stack is still intact
-        //         // This allows debug.traceback() to see the full call stack
-        //         let error_msg = self.error_message.clone();
-        //         let err_value = self.create_string(&error_msg);
-
-        //         let handled_msg = match self.call_function_internal(err_handler, vec![err_value]) {
-        //             Ok(handler_results) => {
-        //                 // Error handler succeeded, use its return value as the error message
-        //                 if let Some(result) = handler_results.first() {
-        //                     self.value_to_string_raw(result)
-        //                 } else {
-        //                     error_msg
-        //                 }
-        //             }
-        //             Err(_) => {
-        //                 // Error handler itself failed
-        //                 format!("error in error handling: {}", error_msg)
-        //             }
-        //         };
-
-        //         // NOW clean up frames created by the failed function call
-        //         while self.frame_count > initial_frame_count {
-        //             let frame = self.pop_frame().unwrap();
-        //             // Close upvalues belonging to this frame
-        //             self.close_upvalues_from(frame.base_ptr as usize);
-        //         }
-
-        //         // Return the handled error message
-        //         let err_str = self.create_string(&handled_msg);
-        //         Ok((false, vec![err_str]))
-        //     }
-        // }
-        todo!()
+        // Delegate to main_state
+        self.main_state.xpcall(func, args, err_handler)
     }
 }

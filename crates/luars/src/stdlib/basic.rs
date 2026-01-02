@@ -468,17 +468,67 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// pcall(f [, arg1, ...]) - Protected call
-/// TODO: Implement protected_call_stack_based on LuaVM
 fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
-    // Temporary simplified implementation
-    Err(l.error("pcall() not yet implemented".to_string()))
+    // Get function (first argument)
+    let func = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'pcall' (value expected)".to_string()))?;
+    
+    // Collect remaining arguments
+    let mut args = Vec::new();
+    let arg_count = l.arg_count();
+    for i in 2..=arg_count {
+        if let Some(arg) = l.get_arg(i) {
+            args.push(arg);
+        }
+    }
+    
+    // Call pcall
+    let (success, results) = l.pcall(func, args)?;
+    
+    // Push success status
+    l.push_value(LuaValue::boolean(success))?;
+    
+    // Push results and count them
+    let result_count = results.len();
+    for result in results {
+        l.push_value(result)?;
+    }
+    
+    Ok(1 + result_count)
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
-/// TODO: Implement protected_call_with_handler on LuaVM
 fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
-    // Temporary simplified implementation
-    Err(l.error("xpcall() not yet implemented".to_string()))
+    // Get function (first argument)
+    let func = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'xpcall' (value expected)".to_string()))?;
+    
+    // Get error handler (second argument)
+    let err_handler = l.get_arg(2)
+        .ok_or_else(|| l.error("bad argument #2 to 'xpcall' (value expected)".to_string()))?;
+    
+    // Collect remaining arguments
+    let mut args = Vec::new();
+    let arg_count = l.arg_count();
+    for i in 3..=arg_count {
+        if let Some(arg) = l.get_arg(i) {
+            args.push(arg);
+        }
+    }
+    
+    // Call xpcall
+    let (success, results) = l.xpcall(func, args, err_handler)?;
+    
+    // Push success status
+    l.push_value(LuaValue::boolean(success))?;
+    
+    // Push results and count them
+    let result_count = results.len();
+    for result in results {
+        l.push_value(result)?;
+    }
+    
+    Ok(1 + result_count)
 }
 
 /// getmetatable(object) - Get metatable
