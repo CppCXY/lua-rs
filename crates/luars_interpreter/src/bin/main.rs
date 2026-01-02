@@ -168,7 +168,7 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
                     // Generate traceback for uncaught runtime errors
                     let error_msg = vm.get_error_message();
                     let traceback = vm.generate_traceback(error_msg);
-                    Err(format!("Runtime Error: {}", traceback))
+                    Err(traceback.to_string())
                 }
             }
         }

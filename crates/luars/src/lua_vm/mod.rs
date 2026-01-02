@@ -999,56 +999,13 @@ impl LuaVM {
 
     /// Generate a stack traceback string
     pub fn generate_traceback(&self, error_msg: &str) -> String {
-        // let mut trace = format!("{}\nstack traceback:", error_msg);
-
-        // // Iterate through active call frames from innermost to outermost (most recent first)
-        // // frame_count is the number of active frames
-        // if self.frame_count == 0 {
-        //     return trace;
-        // }
-
-        // // Traverse from innermost (frame_count - 1) to outermost (0)
-        // for i in (0..self.frame_count).rev() {
-        //     let frame = &self.frames[i];
-
-        //     // Get source location info
-        //     let (source, line) = if frame.is_lua() {
-        //         // Get function ID and chunk info
-        //         if let Some(func_id) = frame.get_function_id() {
-        //             if let Some(func) = self.object_pool.get_function(func_id) {
-        //                 if let Some(chunk) = func.chunk() {
-        //                     let source_str = chunk.source_name.as_deref().unwrap_or("?");
-
-        //                     // Get line number from pc (pc points to next instruction, so use pc-1)
-        //                     let pc = frame.pc.saturating_sub(1) as usize;
-        //                     let line_str =
-        //                         if !chunk.line_info.is_empty() && pc < chunk.line_info.len() {
-        //                             chunk.line_info[pc].to_string()
-        //                         } else {
-        //                             "?".to_string()
-        //                         };
-
-        //                     (source_str.to_string(), line_str)
-        //                 } else {
-        //                     // C closure with upvalues
-        //                     ("[C closure]".to_string(), "?".to_string())
-        //                 }
-        //             } else {
-        //                 ("?".to_string(), "?".to_string())
-        //             }
-        //         } else {
-        //             ("?".to_string(), "?".to_string())
-        //         }
-        //     } else {
-        //         // C function
-        //         ("[C]".to_string(), "?".to_string())
-        //     };
-
-        //     trace.push_str(&format!("\n\t{}:{}: in function", source, line));
-        // }
-
-        // trace
-        format!("stack trace {}", error_msg)
+        // Delegate to LuaState's generate_traceback
+        let traceback = self.main_state.generate_traceback();
+        if !traceback.is_empty() {
+            format!("{}\nstack traceback:\n{}", error_msg, traceback)
+        } else {
+            error_msg.to_string()
+        }
     }
 
     /// Execute a function with protected call (pcall semantics)
