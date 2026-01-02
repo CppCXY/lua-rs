@@ -1179,30 +1179,42 @@ fn execute_frame(
             }
             OpCode::NewTable => {
                 // R[A] := {} (new table)
-                // vB = log2(hash size) + 1, vC = array size
+                // This instruction uses ivABC format:
+                // vB (6 bits) = log2(hash size) + 1
+                // vC (10 bits) = array size
                 let a = instr.get_a() as usize;
-                let vb = instr.get_b() as usize;
-                let mut vc = instr.get_c() as usize;
+                let vb = instr.get_vb() as usize;  // Use get_vb() for ivABC format
+                let mut vc = instr.get_vc() as usize;  // Use get_vc() for ivABC format
                 let k = instr.get_k();
 
                 // Calculate hash size: if vB > 0, hash_size = 2^(vB-1)
-                let hash_size = if vb > 0 { 1usize << (vb - 1) } else { 0 };
+                // vB is 6 bits, so max value is 63
+                let hash_size = if vb > 0 {
+                    if vb > 31 {  // Safety check to prevent overflow on 32-bit systems
+                        0
+                    } else {
+                        1usize << (vb - 1)
+                    }
+                } else {
+                    0
+                };
 
                 // Check for EXTRAARG instruction for larger array sizes
+                // If k is set, the EXTRAARG contains additional array size
                 if k {
-                    // Next instruction should be EXTRAARG
                     if pc < code.len() {
                         let extra_instr = code[pc];
-
                         if extra_instr.get_opcode() == OpCode::ExtraArg {
-                            pc += 1; // Consume EXTRAARG
                             let extra = extra_instr.get_ax() as usize;
                             // Add extra to array size: vc += extra * (MAXARG_vC + 1)
-                            // MAXARG_vC is typically 255
-                            vc += extra * 256;
+                            // MAXARG_vC is 10 bits = 1023, so + 1 = 1024
+                            vc += extra * 1024;
                         }
                     }
                 }
+                
+                // ALWAYS skip the next instruction (EXTRAARG), as per Lua 5.4+ spec
+                pc += 1;
 
                 // Create table with pre-allocated sizes
                 let value = lua_state.create_table(vc, hash_size);
