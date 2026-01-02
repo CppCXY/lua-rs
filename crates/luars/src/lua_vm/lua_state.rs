@@ -99,6 +99,17 @@ impl LuaState {
             return Err(LuaError::StackOverflow);
         }
 
+        // Determine call status based on function type
+        use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
+        let call_status = if func.is_cfunction() || func.as_function_id().and_then(|id| {
+            let vm = unsafe { &*self.vm };
+            vm.object_pool.get_function(id).and_then(|f| f.c_function())
+        }).is_some() {
+            CIST_C
+        } else {
+            CIST_LUA
+        };
+
         // 动态分配新的 CallInfo（Lua 5.4 也是这样做的）
         let frame = CallInfo {
             func,
@@ -106,7 +117,7 @@ impl LuaState {
             top: base + nparams,
             pc: 0,
             nresults: -1, // Variable results by default
-            call_status: 0,
+            call_status,
             nextraargs: 0,
         };
 
@@ -181,10 +192,46 @@ impl LuaState {
         &mut self.open_upvalues
     }
 
-    /// Set error message
+    /// Set error message (without traceback - will be added later by top-level handler)
     #[inline(always)]
     pub fn error(&mut self, msg: String) -> LuaError {
-        self.error_msg = msg;
+        // Try to get current source location for the error
+        let location = if let Some(ci) = self.call_stack.last() {
+            if ci.is_lua() {
+                if let Some(func_id) = ci.func.as_function_id() {
+                    let vm = unsafe { &*self.vm };
+                    if let Some(func_obj) = vm.object_pool.get_function(func_id) {
+                        if let Some(chunk) = func_obj.chunk() {
+                            let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                                chunk.line_info[ci.pc as usize - 1] as usize
+                            } else if !chunk.line_info.is_empty() {
+                                chunk.line_info[0] as usize
+                            } else {
+                                0
+                            };
+                            if line > 0 {
+                                format!("{}:{}: ", source, line)
+                            } else {
+                                format!("{}: ", source)
+                            }
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        
+        self.error_msg = format!("{}{}", location, msg);
         LuaError::RuntimeError
     }
 
@@ -199,6 +246,65 @@ impl LuaState {
     pub fn clear_error(&mut self) {
         self.error_msg.clear();
         self.yield_values.clear();
+    }
+
+    /// Generate a Lua-style stack traceback
+    /// Similar to luaL_traceback in lauxlib.c
+    pub fn generate_traceback(&self) -> String {
+        let mut result = String::new();
+        let vm = unsafe { &*self.vm };
+        
+        // Iterate through call stack from newest to oldest
+        for (level, ci) in self.call_stack.iter().rev().enumerate() {
+            if level >= 20 {
+                result.push_str("\t...\n");
+                break;
+            }
+            
+            // Get function info
+            if ci.is_lua() {
+                // Lua function - get source and line info
+                if let Some(func_id) = ci.func.as_function_id() {
+                    if let Some(func_obj) = vm.object_pool.get_function(func_id) {
+                        if let Some(chunk) = func_obj.chunk() {
+                            let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                            
+                            // Get current line number from PC
+                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                                chunk.line_info[ci.pc as usize - 1] as usize
+                            } else if !chunk.line_info.is_empty() {
+                                chunk.line_info[0] as usize
+                            } else {
+                                0
+                            };
+                            
+                            if level == 0 {
+                                // Current function (where error occurred)
+                                if line > 0 {
+                                    result.push_str(&format!("\t{}:{}: in main chunk\n", source, line));
+                                } else {
+                                    result.push_str(&format!("\t{}: in main chunk\n", source));
+                                }
+                            } else {
+                                // Called functions
+                                if line > 0 {
+                                    result.push_str(&format!("\t{}:{}: in function\n", source, line));
+                                } else {
+                                    result.push_str(&format!("\t{}: in function\n", source));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+                result.push_str("\t[?]: in function\n");
+            } else if ci.is_c() {
+                // C function
+                result.push_str("\t[C]: in function\n");
+            }
+        }
+        
+        result
     }
 
     /// Set yield values

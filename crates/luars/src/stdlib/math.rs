@@ -3,9 +3,10 @@
 // log, max, min, modf, rad, random, randomseed, sin, sqrt, tan, tointeger,
 // type, ult, pi, huge, maxinteger, mininteger
 
-use crate::lib_registry::{LibraryModule, get_arg, require_arg};
-use crate::lua_value::{LuaValue, LuaValueKind, MultiValue};
-use crate::lua_vm::{LuaResult, LuaVM};
+use crate::lib_registry::LibraryModule;
+use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::lua_vm::LuaState;
+use crate::lua_vm::LuaResult;
 
 pub fn create_math_lib() -> LibraryModule {
     let mut module = crate::lib_module!("math", {
@@ -43,227 +44,221 @@ pub fn create_math_lib() -> LibraryModule {
     module
 }
 
-/// OPTIMIZED: Get number without allocating error message on success path
-#[inline(always)]
-fn get_number_fast(vm: &LuaVM, idx: usize) -> Option<f64> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-
-    if idx < top {
-        let value = vm.register_stack[base_ptr + idx];
-        value.as_number()
-    } else {
-        None
-    }
-}
-
-fn get_number(vm: &mut LuaVM, idx: usize, func_name: &str) -> LuaResult<f64> {
-    if let Some(n) = get_number_fast(vm, idx) {
-        Ok(n)
-    } else {
-        Err(vm.error(format!(
-            "bad argument #{} to '{}' (number expected)",
-            idx, func_name
-        )))
-    }
-}
-
-fn math_abs(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-
-    if top <= 1 {
-        return Err(vm.error("bad argument #1 to 'abs' (number expected)".to_string()));
-    }
-
-    let value = vm.register_stack[base_ptr + 1];
+fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
+    let value = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'abs' (number expected)".to_string()))?;
 
     // Fast path: preserve integer type
     if let Some(i) = value.as_integer() {
-        return Ok(MultiValue::single(LuaValue::integer(i.abs())));
+        l.push_value(LuaValue::integer(i.abs()))?;
+        return Ok(1);
     }
 
     if let Some(f) = value.as_float() {
-        return Ok(MultiValue::single(LuaValue::float(f.abs())));
+        l.push_value(LuaValue::float(f.abs()))?;
+        return Ok(1);
     }
 
-    Err(vm.error("bad argument #1 to 'abs' (number expected)".to_string()))
+    Err(l.error("bad argument #1 to 'abs' (number expected)".to_string()))
 }
 
-fn math_acos(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.acos")?;
-    Ok(MultiValue::single(LuaValue::float(x.acos())))
+fn math_acos(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'acos' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'acos' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.acos()))?;
+    Ok(1)
 }
 
-fn math_asin(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.asin")?;
-    Ok(MultiValue::single(LuaValue::float(x.asin())))
+fn math_asin(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'asin' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'asin' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.asin()))?;
+    Ok(1)
 }
 
-fn math_atan(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let y = get_number(vm, 1, "math.atan")?;
-    let x = get_arg(vm, 2).and_then(|v| v.as_number()).unwrap_or(1.0);
-    Ok(MultiValue::single(LuaValue::float(y.atan2(x))))
+fn math_atan(l: &mut LuaState) -> LuaResult<usize> {
+    let y = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'atan' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'atan' (number expected)".to_string()))?;
+    let x = l.get_arg(2).and_then(|v| v.as_number()).unwrap_or(1.0);
+    l.push_value(LuaValue::float(y.atan2(x)))?;
+    Ok(1)
 }
 
-fn math_ceil(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-
-    if top <= 1 {
-        return Err(vm.error("bad argument #1 to 'ceil' (number expected)".to_string()));
-    }
-
-    let value = vm.register_stack[base_ptr + 1];
+fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
+    let value = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'ceil' (number expected)".to_string()))?;
 
     // Fast path: integers are already ceil'd
     if let Some(i) = value.as_integer() {
-        return Ok(MultiValue::single(LuaValue::integer(i)));
+        l.push_value(LuaValue::integer(i))?;
+        return Ok(1);
     }
 
     if let Some(f) = value.as_float() {
-        return Ok(MultiValue::single(LuaValue::integer(f.ceil() as i64)));
+        l.push_value(LuaValue::integer(f.ceil() as i64))?;
+        return Ok(1);
     }
 
-    Err(vm.error("bad argument #1 to 'ceil' (number expected)".to_string()))
+    Err(l.error("bad argument #1 to 'ceil' (number expected)".to_string()))
 }
 
-fn math_cos(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.cos")?;
-    Ok(MultiValue::single(LuaValue::float(x.cos())))
+fn math_cos(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'cos' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'cos' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.cos()))?;
+    Ok(1)
 }
 
-fn math_deg(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.deg")?;
-    Ok(MultiValue::single(LuaValue::float(x.to_degrees())))
+fn math_deg(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'deg' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'deg' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.to_degrees()))?;
+    Ok(1)
 }
 
-fn math_exp(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.exp")?;
-    Ok(MultiValue::single(LuaValue::float(x.exp())))
+fn math_exp(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'exp' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'exp' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.exp()))?;
+    Ok(1)
 }
 
-fn math_floor(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-
-    if top <= 1 {
-        return Err(vm.error("bad argument #1 to 'floor' (number expected)".to_string()));
-    }
-
-    let value = vm.register_stack[base_ptr + 1];
+fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
+    let value = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'floor' (number expected)".to_string()))?;
 
     // Fast path: integers are already floor'd
     if let Some(i) = value.as_integer() {
-        return Ok(MultiValue::single(LuaValue::integer(i)));
+        l.push_value(LuaValue::integer(i))?;
+        return Ok(1);
     }
 
     if let Some(f) = value.as_float() {
-        return Ok(MultiValue::single(LuaValue::integer(f.floor() as i64)));
+        l.push_value(LuaValue::integer(f.floor() as i64))?;
+        return Ok(1);
     }
 
-    Err(vm.error("bad argument #1 to 'floor' (number expected)".to_string()))
+    Err(l.error("bad argument #1 to 'floor' (number expected)".to_string()))
 }
 
-fn math_fmod(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.fmod")?;
-    let y = get_number(vm, 2, "math.fmod")?;
-    Ok(MultiValue::single(LuaValue::float(x % y)))
+fn math_fmod(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?;
+    let y = l.get_arg(2)
+        .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x % y))?;
+    Ok(1)
 }
 
-fn math_log(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.log")?;
-    let base = get_arg(vm, 2).and_then(|v| v.as_number());
+fn math_log(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'log' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'log' (number expected)".to_string()))?;
+    let base = l.get_arg(2).and_then(|v| v.as_number());
 
     let result = if let Some(b) = base { x.log(b) } else { x.ln() };
 
-    Ok(MultiValue::single(LuaValue::float(result)))
+    l.push_value(LuaValue::float(result))?;
+    Ok(1)
 }
 
-/// OPTIMIZED: Direct stack access without get_arg overhead
-fn math_max(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-    let argc = top.saturating_sub(1);
+fn math_max(l: &mut LuaState) -> LuaResult<usize> {
+    let argc = l.arg_count();
 
     if argc == 0 {
-        return Err(vm.error("bad argument to 'math.max' (value expected)".to_string()));
+        return Err(l.error("bad argument to 'max' (value expected)".to_string()));
     }
 
-    // Get first argument directly
-    let first = vm.register_stack[base_ptr + 1];
-    let mut max_val = first
-        .as_number()
-        .ok_or_else(|| vm.error("bad argument to 'math.max' (number expected)".to_string()))?;
+    // Get first argument
+    let first = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
+    let mut max_val = first.as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
     let mut max_arg = first;
 
-    // Compare with rest - direct stack access
+    // Compare with rest
     for i in 2..=argc {
-        let arg = vm.register_stack[base_ptr + i];
-        let val = arg
-            .as_number()
-            .ok_or_else(|| vm.error("bad argument to 'math.max' (number expected)".to_string()))?;
+        let arg = l.get_arg(i)
+            .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
+        let val = arg.as_number()
+            .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
         if val > max_val {
             max_val = val;
             max_arg = arg;
         }
     }
 
-    Ok(MultiValue::single(max_arg))
+    l.push_value(max_arg)?;
+    Ok(1)
 }
 
-/// OPTIMIZED: Direct stack access without get_arg overhead
-fn math_min(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-    let argc = top.saturating_sub(1);
+fn math_min(l: &mut LuaState) -> LuaResult<usize> {
+    let argc = l.arg_count();
 
     if argc == 0 {
-        return Err(vm.error("bad argument to 'math.min' (value expected)".to_string()));
+        return Err(l.error("bad argument to 'min' (value expected)".to_string()));
     }
 
-    // Get first argument directly
-    let first = vm.register_stack[base_ptr + 1];
-    let mut min_val = first
-        .as_number()
-        .ok_or_else(|| vm.error("bad argument to 'math.min' (number expected)".to_string()))?;
+    // Get first argument
+    let first = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
+    let mut min_val = first.as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
     let mut min_arg = first;
 
-    // Compare with rest - direct stack access
+    // Compare with rest
     for i in 2..=argc {
-        let arg = vm.register_stack[base_ptr + i];
-        let val = arg
-            .as_number()
-            .ok_or_else(|| vm.error("bad argument to 'math.min' (number expected)".to_string()))?;
+        let arg = l.get_arg(i)
+            .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
+        let val = arg.as_number()
+            .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
         if val < min_val {
             min_val = val;
             min_arg = arg;
         }
     }
 
-    Ok(MultiValue::single(min_arg))
+    l.push_value(min_arg)?;
+    Ok(1)
 }
 
-fn math_modf(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.modf")?;
+fn math_modf(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'modf' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'modf' (number expected)".to_string()))?;
     let int_part = x.trunc();
     let frac_part = x - int_part;
 
-    Ok(MultiValue::multiple(vec![
-        LuaValue::float(int_part),
-        LuaValue::float(frac_part),
-    ]))
+    l.push_value(LuaValue::float(int_part))?;
+    l.push_value(LuaValue::float(frac_part))?;
+    Ok(2)
 }
 
-fn math_rad(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.rad")?;
-    Ok(MultiValue::single(LuaValue::float(x.to_radians())))
+fn math_rad(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'rad' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'rad' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.to_radians()))?;
+    Ok(1)
 }
 
 /// Thread-local random state using xorshift64 algorithm
@@ -286,41 +281,53 @@ fn xorshift64() -> u64 {
     })
 }
 
-fn math_random(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let frame = vm.current_frame();
-    let top = frame.top as usize;
-    let argc = top.saturating_sub(1);
+fn math_random(l: &mut LuaState) -> LuaResult<usize> {
+    let argc = l.arg_count();
 
     // Generate random u64 and convert to [0, 1) float
     let rand_u64 = xorshift64();
     let random = (rand_u64 >> 11) as f64 / (1u64 << 53) as f64;
 
     match argc {
-        0 => Ok(MultiValue::single(LuaValue::float(random))),
+        0 => {
+            l.push_value(LuaValue::float(random))?;
+            Ok(1)
+        }
         1 => {
-            let m = get_number(vm, 1, "math.random")? as i64;
+            let m = l.get_arg(1)
+                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))?
+                .as_number()
+                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))? as i64;
             if m < 1 {
-                return Err(vm.error("bad argument #1 to 'random' (interval is empty)".to_string()));
+                return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
             let result = (random * m as f64).floor() as i64 + 1;
-            Ok(MultiValue::single(LuaValue::integer(result)))
+            l.push_value(LuaValue::integer(result))?;
+            Ok(1)
         }
         _ => {
-            let m = get_number(vm, 1, "math.random")? as i64;
-            let n = get_number(vm, 2, "math.random")? as i64;
+            let m = l.get_arg(1)
+                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))?
+                .as_number()
+                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))? as i64;
+            let n = l.get_arg(2)
+                .ok_or_else(|| l.error("bad argument #2 to 'random' (number expected)".to_string()))?
+                .as_number()
+                .ok_or_else(|| l.error("bad argument #2 to 'random' (number expected)".to_string()))? as i64;
             if m > n {
-                return Err(vm.error("bad argument #1 to 'random' (interval is empty)".to_string()));
+                return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
             let range = (n - m + 1) as f64;
             let result = m + (random * range).floor() as i64;
-            Ok(MultiValue::single(LuaValue::integer(result)))
+            l.push_value(LuaValue::integer(result))?;
+            Ok(1)
         }
     }
 }
 
-fn math_randomseed(vm: &mut LuaVM) -> LuaResult<MultiValue> {
+fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
     // Lua 5.4: math.randomseed() with no args uses time-based seed
-    let seed = if let Some(arg) = get_arg(vm, 1) {
+    let seed = if let Some(arg) = l.get_arg(1) {
         if arg.is_nil() {
             // Use time-based seed
             std::time::SystemTime::now()
@@ -331,7 +338,7 @@ fn math_randomseed(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             n as u64
         } else {
             return Err(
-                vm.error("bad argument #1 to 'math.randomseed' (number expected)".to_string())
+                l.error("bad argument #1 to 'randomseed' (number expected)".to_string())
             );
         }
     } else {
@@ -354,29 +361,41 @@ fn math_randomseed(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     });
 
     // Lua 5.4 returns two values from randomseed
-    Ok(MultiValue::multiple(vec![
-        LuaValue::integer((seed >> 32) as i64),
-        LuaValue::integer((seed & 0xFFFFFFFF) as i64),
-    ]))
+    l.push_value(LuaValue::integer((seed >> 32) as i64))?;
+    l.push_value(LuaValue::integer((seed & 0xFFFFFFFF) as i64))?;
+    Ok(2)
 }
 
-fn math_sin(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.sin")?;
-    Ok(MultiValue::single(LuaValue::float(x.sin())))
+fn math_sin(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'sin' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'sin' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.sin()))?;
+    Ok(1)
 }
 
-fn math_sqrt(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.sqrt")?;
-    Ok(MultiValue::single(LuaValue::float(x.sqrt())))
+fn math_sqrt(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'sqrt' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'sqrt' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.sqrt()))?;
+    Ok(1)
 }
 
-fn math_tan(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let x = get_number(vm, 1, "math.tan")?;
-    Ok(MultiValue::single(LuaValue::float(x.tan())))
+fn math_tan(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'tan' (number expected)".to_string()))?
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'tan' (number expected)".to_string()))?;
+    l.push_value(LuaValue::float(x.tan()))?;
+    Ok(1)
 }
 
-fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let val = require_arg(vm, 1, "math.tointeger")?;
+fn math_tointeger(l: &mut LuaState) -> LuaResult<usize> {
+    let val = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'tointeger' (value expected)".to_string()))?;
 
     let result = if let Some(i) = val.as_integer() {
         LuaValue::integer(i)
@@ -384,6 +403,7 @@ fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         float_to_integer(f)
     } else if let Some(s_id) = val.as_string_id() {
         // Try to parse string as integer
+        let vm = l.vm_mut();
         if let Some(s) = vm.object_pool.get_string(s_id) {
             let s_str = s.as_str().trim();
             if let Ok(i) = s_str.parse::<i64>() {
@@ -401,7 +421,8 @@ fn math_tointeger(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         LuaValue::nil()
     };
 
-    Ok(MultiValue::single(result))
+    l.push_value(result)?;
+    Ok(1)
 }
 
 /// Convert a float to integer if it's an exact integer within i64 range
@@ -442,29 +463,37 @@ fn float_to_integer(f: f64) -> LuaValue {
     }
 }
 
-fn math_type(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let val = require_arg(vm, 1, "math.type")?;
+fn math_type(l: &mut LuaState) -> LuaResult<usize> {
+    let val = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'type' (value expected)".to_string()))?;
 
     let type_str = match val.kind() {
         LuaValueKind::Integer => "integer",
         LuaValueKind::Float => "float",
-        _ => return Ok(MultiValue::single(LuaValue::nil())),
+        _ => {
+            l.push_value(LuaValue::nil())?;
+            return Ok(1);
+        }
     };
 
-    let result = vm.create_string(type_str);
-    Ok(MultiValue::single(result))
+    let result = l.create_string(type_str);
+    l.push_value(result)?;
+    Ok(1)
 }
 
-fn math_ult(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let m_value = require_arg(vm, 1, "math.ult")?;
+fn math_ult(l: &mut LuaState) -> LuaResult<usize> {
+    let m_value = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'ult' (integer expected)".to_string()))?;
     let Some(m) = m_value.as_integer() else {
-        return Err(vm.error("bad argument #1 to 'math.ult' (integer expected)".to_string()));
+        return Err(l.error("bad argument #1 to 'ult' (integer expected)".to_string()));
     };
-    let n_value = require_arg(vm, 2, "math.ult")?;
+    let n_value = l.get_arg(2)
+        .ok_or_else(|| l.error("bad argument #2 to 'ult' (integer expected)".to_string()))?;
     let Some(n) = n_value.as_integer() else {
-        return Err(vm.error("bad argument #2 to 'math.ult' (integer expected)".to_string()));
+        return Err(l.error("bad argument #2 to 'ult' (integer expected)".to_string()));
     };
     // Unsigned less than
     let result = (m as u64) < (n as u64);
-    Ok(MultiValue::single(LuaValue::boolean(result)))
+    l.push_value(LuaValue::boolean(result))?;
+    Ok(1)
 }

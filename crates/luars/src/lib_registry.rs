@@ -189,7 +189,7 @@ pub fn create_standard_registry() -> LibraryRegistry {
     registry.register(stdlib::basic::create_basic_lib());
     registry.register(stdlib::string::create_string_lib());
     // registry.register(stdlib::table::create_table_lib());
-    // registry.register(stdlib::math::create_math_lib());
+    registry.register(stdlib::math::create_math_lib());
     // registry.register(stdlib::io::create_io_lib());
     registry.register(stdlib::os::create_os_lib());
     // registry.register(stdlib::utf8::create_utf8_lib());

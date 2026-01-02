@@ -8,7 +8,7 @@ pub mod basic;
 // #[cfg(feature = "loadlib")]
 // pub mod ffi;
 // pub mod io;
-// pub mod math;
+pub mod math;
 pub mod os;
 // pub mod package;
 pub mod string;
