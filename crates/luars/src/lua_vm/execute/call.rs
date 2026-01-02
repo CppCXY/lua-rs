@@ -29,9 +29,23 @@ pub fn handle_call(
     c: usize,
 ) -> LuaResult<FrameAction> {
     let nargs = if b == 0 {
-        // Variable args: use stack top
-        // TODO: 需要从stack top计算参数数量
-        0
+        // Variable args: use current frame's top
+        // Arguments are from base+a+1 to current frame's top
+        let func_idx = base + a;
+        let first_arg = func_idx + 1;
+        
+        // Get current frame's top (not global stack top!)
+        let frame_top = if let Some(frame) = lua_state.current_frame() {
+            frame.top
+        } else {
+            lua_state.stack_len()  // Fallback to global top
+        };
+        
+        if frame_top > first_arg {
+            frame_top - first_arg
+        } else {
+            0
+        }
     } else {
         b - 1
     };
@@ -152,6 +166,20 @@ fn call_c_function(
     // Implements Lua's moveresults logic from ldo.c
     move_results(lua_state, func_idx, first_result, n, nresults)?;
 
+    // Update caller frame's top to reflect the actual number of results
+    // This is crucial for nested calls - the outer call needs to know
+    // where the returned values end
+    let final_nresults = if nresults == -1 {
+        n  // MULTRET: all results
+    } else {
+        nresults as usize  // Fixed number (may be 0)
+    };
+    
+    let new_top = func_idx + final_nresults;
+    if let Some(frame) = lua_state.current_frame_mut() {
+        frame.top = new_top;
+    }
+
     Ok(())
 }
 
@@ -227,7 +255,25 @@ pub fn handle_tailcall(
     a: usize,
     b: usize,
 ) -> LuaResult<FrameAction> {
-    let nargs = if b == 0 { 0 } else { b - 1 };
+    let nargs = if b == 0 {
+        // Variable args: use current frame's top
+        let func_idx = base + a;
+        let first_arg = func_idx + 1;
+        
+        let frame_top = if let Some(frame) = lua_state.current_frame() {
+            frame.top
+        } else {
+            lua_state.stack_len()
+        };
+        
+        if frame_top > first_arg {
+            frame_top - first_arg
+        } else {
+            0
+        }
+    } else {
+        b - 1
+    };
 
     // Get function to call
     let func_idx = base + a;
