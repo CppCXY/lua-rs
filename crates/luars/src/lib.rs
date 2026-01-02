@@ -11,7 +11,6 @@ pub mod gc;
 pub mod lib_registry;
 #[cfg(feature = "async")]
 pub mod lua_async;
-pub mod lua_pattern;
 pub mod lua_value;
 pub mod lua_vm;
 pub mod stdlib;

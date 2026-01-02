@@ -304,8 +304,9 @@ fn match_impl(
 
 #[cfg(test)]
 mod tests {
+    use crate::stdlib::string::pattern::parse_pattern;
+
     use super::*;
-    use crate::lua_pattern::parser::parse_pattern;
 
     #[test]
     fn test_simple_match() {

@@ -1,9 +1,10 @@
 // String library
 // Implements: byte, char, dump, find, format, gmatch, gsub, len, lower,
 // match, pack, packsize, rep, reverse, sub, unpack, upper
+mod pattern;
+mod string_format;
 
 use crate::lib_registry::{LibraryEntry, LibraryModule, get_arg, get_args, require_arg};
-use crate::lua_pattern;
 use crate::lua_value::{LuaValue, MultiValue};
 use crate::lua_vm::{LuaResult, LuaState, LuaVM};
 
@@ -40,7 +41,7 @@ pub fn create_string_lib() -> LibraryModule {
         .push(("sub", LibraryEntry::Function(string_sub)));
     module
         .entries
-        .push(("format", LibraryEntry::Function(string_format)));
+        .push(("format", LibraryEntry::Function(string_format::string_format)));
 
     // TODO: Convert remaining functions
     // module.entries.push(("find", LibraryEntry::Function(string_find)));
@@ -416,406 +417,6 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-/// string.format(formatstring, ...) - Format string (simplified)
-fn string_format(l: &mut LuaState) -> LuaResult<usize> {
-    let format_str_value = l.get_arg(1).ok_or_else(|| {
-        l.error("bad argument #1 to 'string.format' (string expected)".to_string())
-    })?;
-    let Some(string_id) = format_str_value.as_string_id() else {
-        return Err(l.error("bad argument #1 to 'string.format' (string expected)".to_string()));
-    };
-
-    // Collect all arguments first to avoid borrow conflicts
-    let args = l.get_args();
-
-    // Copy the format string to avoid holding a borrow on vm throughout the loop
-    let format = {
-        let vm = l.vm_mut();
-        let Some(format_str) = vm.object_pool.get_string(string_id) else {
-            return Err(l.error("bad argument #1 to 'string.format' (string expected)".to_string()));
-        };
-        format_str.as_str().to_string()
-    }; // vm borrow ends here
-
-    let mut result = String::new();
-    let mut arg_index = 1; // Index into args vec (0-based, args[0] is format string, args[1] is first arg)
-    let mut chars = format.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            if chars.peek().is_some() {
-                // Parse format flags and width
-                let mut flags = String::new();
-                let mut has_format_char = false;
-
-                // Collect format specifier (flags, width, precision)
-                while let Some(&c) = chars.peek() {
-                    if c == '-'
-                        || c == '+'
-                        || c == ' '
-                        || c == '#'
-                        || c == '0'
-                        || c.is_numeric()
-                        || c == '.'
-                    {
-                        flags.push(c);
-                        chars.next();
-                    } else {
-                        has_format_char = true;
-                        break;
-                    }
-                }
-
-                if !has_format_char {
-                    return Err(l.error("incomplete format string".to_string()));
-                }
-
-                let format_char = chars.next().unwrap();
-
-                match format_char {
-                    '%' => {
-                        result.push('%');
-                    }
-                    'c' => {
-                        // Character
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val.as_integer().ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (number expected)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        if num >= 0 && num <= 255 {
-                            result.push(num as u8 as char);
-                        } else {
-                            return Err(l.error(format!(
-                                "bad argument #{} to 'format' (invalid value for '%%c')",
-                                arg_index + 1
-                            )));
-                        }
-                        arg_index += 1;
-                    }
-                    'd' | 'i' => {
-                        // Integer
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_integer()
-                            .or_else(|| val.as_number().map(|n| n as i64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-                        result.push_str(&format!("{}", num));
-                        arg_index += 1;
-                    }
-                    'o' => {
-                        // Octal
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_integer()
-                            .or_else(|| val.as_number().map(|n| n as i64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-                        result.push_str(&format!("{:o}", num));
-                        arg_index += 1;
-                    }
-                    'u' => {
-                        // Unsigned integer
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_integer()
-                            .or_else(|| val.as_number().map(|n| n as i64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-                        result.push_str(&format!("{}", num as u64));
-                        arg_index += 1;
-                    }
-                    'x' => {
-                        // Lowercase hexadecimal
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_integer()
-                            .or_else(|| val.as_number().map(|n| n as i64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-                        result.push_str(&format!("{:x}", num));
-                        arg_index += 1;
-                    }
-                    'X' => {
-                        // Uppercase hexadecimal
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_integer()
-                            .or_else(|| val.as_number().map(|n| n as i64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-                        result.push_str(&format!("{:X}", num));
-                        arg_index += 1;
-                    }
-                    'e' => {
-                        // Scientific notation (lowercase)
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_number()
-                            .or_else(|| val.as_integer().map(|i| i as f64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-                        result.push_str(&format!("{:e}", num));
-                        arg_index += 1;
-                    }
-                    'E' => {
-                        // Scientific notation (uppercase)
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_number()
-                            .or_else(|| val.as_integer().map(|i| i as f64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-                        result.push_str(&format!("{:E}", num));
-                        arg_index += 1;
-                    }
-                    'f' => {
-                        // Floating point
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_number()
-                            .or_else(|| val.as_integer().map(|i| i as f64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-
-                        // Parse precision from flags (e.g., ".2")
-                        if let Some(dot_pos) = flags.find('.') {
-                            let precision_str = &flags[dot_pos + 1..];
-                            if let Ok(precision) = precision_str.parse::<usize>() {
-                                result.push_str(&format!(
-                                    "{:.precision$}",
-                                    num,
-                                    precision = precision
-                                ));
-                            } else {
-                                result.push_str(&format!("{}", num));
-                            }
-                        } else {
-                            result.push_str(&format!("{}", num));
-                        }
-                        arg_index += 1;
-                    }
-                    'g' => {
-                        // Automatic format (lowercase) - use shorter of %e or %f
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_number()
-                            .or_else(|| val.as_integer().map(|i| i as f64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-
-                        // Use scientific notation for very large or very small numbers
-                        if num.abs() < 0.0001 || num.abs() >= 1e10 {
-                            result.push_str(&format!("{:e}", num));
-                        } else {
-                            result.push_str(&format!("{}", num));
-                        }
-                        arg_index += 1;
-                    }
-                    'G' => {
-                        // Automatic format (uppercase) - use shorter of %E or %f
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let num = val
-                            .as_number()
-                            .or_else(|| val.as_integer().map(|i| i as f64))
-                            .ok_or_else(|| {
-                                l.error(format!(
-                                    "bad argument #{} to 'format' (number expected)",
-                                    arg_index + 1
-                                ))
-                            })?;
-
-                        // Use scientific notation for very large or very small numbers
-                        if num.abs() < 0.0001 || num.abs() >= 1e10 {
-                            result.push_str(&format!("{:E}", num));
-                        } else {
-                            result.push_str(&format!("{}", num));
-                        }
-                        arg_index += 1;
-                    }
-                    's' => {
-                        // String
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-
-                        // Need to get string from object pool
-                        let s = if let Some(str_id) = val.as_string_id() {
-                            let vm = l.vm_mut();
-                            vm.object_pool
-                                .get_string(str_id)
-                                .map(|s| s.as_str().to_string())
-                                .unwrap_or_else(|| "[invalid string]".to_string())
-                        } else if let Some(n) = val.as_integer() {
-                            n.to_string()
-                        } else if let Some(n) = val.as_number() {
-                            n.to_string()
-                        } else {
-                            // Use simple type_name for non-string values
-                            let vm = l.vm_mut();
-                            vm.value_to_string_raw(&val)
-                        };
-
-                        result.push_str(&s);
-                        arg_index += 1;
-                    }
-                    'q' => {
-                        // Quoted string
-                        let val = args.get(arg_index).ok_or_else(|| {
-                            l.error(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_index + 1
-                            ))
-                        })?;
-                        let Some(str_id) = val.as_string_id() else {
-                            return Err(l.error(format!(
-                                "bad argument #{} to 'format' (string expected)",
-                                arg_index + 1
-                            )));
-                        };
-
-                        let s_str = {
-                            let vm = l.vm_mut();
-                            let Some(s) = vm.object_pool.get_string(str_id) else {
-                                return Err(l.error(format!(
-                                    "bad argument #{} to 'format' (string expected)",
-                                    arg_index + 1
-                                )));
-                            };
-                            s.as_str().to_string()
-                        }; // vm borrow ends here
-
-                        result.push('"');
-                        for ch in s_str.chars() {
-                            match ch {
-                                '"' => result.push_str("\\\""),
-                                '\\' => result.push_str("\\\\"),
-                                '\n' => result.push_str("\\n"),
-                                '\r' => result.push_str("\\r"),
-                                '\t' => result.push_str("\\t"),
-                                _ if ch.is_control() => result.push_str(&format!("\\{}", ch as u8)),
-                                _ => result.push(ch),
-                            }
-                        }
-                        result.push('"');
-                        arg_index += 1;
-                    }
-                    _ => {
-                        return Err(
-                            l.error(format!("invalid option '%{}' to 'format'", format_char))
-                        );
-                    }
-                }
-            } else {
-                return Err(l.error("incomplete format string".to_string()));
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    let result_str = l.create_string_owned(result);
-    l.push_value(result_str)?;
-    Ok(1)
-}
-
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
 /// ULTRA-OPTIMIZED: Avoid string cloning in hot path
 fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
@@ -875,7 +476,7 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let s_owned = s_str.to_string();
 
         // Pattern matching - parse and check if it's a simple literal
-        match lua_pattern::parse_pattern(&pattern_owned) {
+        match pattern::parse_pattern(&pattern_owned) {
             Ok(parsed_pattern) => {
                 // Fast path: if pattern is just a literal string, use plain search
                 if let Some(literal) = parsed_pattern.as_literal_string() {
@@ -896,7 +497,7 @@ fn string_find(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 } else {
                     // Complex pattern - use full pattern matcher
                     if let Some((start, end, captures)) =
-                        lua_pattern::find(&s_owned, &parsed_pattern, start_pos)
+                        pattern::find(&s_owned, &parsed_pattern, start_pos)
                     {
                         let mut results = vec![
                             LuaValue::integer((start + 1) as i64),
@@ -942,9 +543,9 @@ fn string_match(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
     let text = s_str[start_pos..].to_string();
 
-    match lua_pattern::parse_pattern(&pattern_str) {
+    match pattern::parse_pattern(&pattern_str) {
         Ok(pattern) => {
-            if let Some((start, end, captures)) = crate::lua_pattern::find(&text, &pattern, 0) {
+            if let Some((start, end, captures)) = pattern::find(&text, &pattern, 0) {
                 if captures.is_empty() {
                     // No captures, return the matched portion
                     let matched = text[start..end].to_string();
@@ -993,7 +594,7 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         .and_then(|v| v.as_integer())
         .map(|n| n as usize);
 
-    let pattern = match lua_pattern::parse_pattern(&pattern_str) {
+    let pattern = match pattern::parse_pattern(&pattern_str) {
         Ok(p) => p,
         Err(e) => return Err(vm.error(format!("invalid pattern: {}", e))),
     };
@@ -1014,7 +615,7 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             };
             repl.as_str().to_string()
         };
-        match lua_pattern::gsub(&s_str, &pattern, &repl_str, max) {
+        match pattern::gsub(&s_str, &pattern, &repl_str, max) {
             Ok((result_str, count)) => {
                 let result = vm.create_string(&result_str);
                 Ok(MultiValue::multiple(vec![
@@ -1040,7 +641,7 @@ fn string_gsub(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 fn gsub_with_function(
     vm: &mut LuaVM,
     text: &str,
-    pattern: &crate::lua_pattern::Pattern,
+    pattern: &pattern::Pattern,
     func: LuaValue,
     max: Option<usize>,
 ) -> LuaResult<MultiValue> {
@@ -1057,7 +658,7 @@ fn gsub_with_function(
             }
         }
 
-        if let Some((end_pos, captures)) = crate::lua_pattern::try_match(pattern, &text_chars, pos)
+        if let Some((end_pos, captures)) = pattern::try_match(pattern, &text_chars, pos)
         {
             count += 1;
 
@@ -1124,7 +725,7 @@ fn gsub_with_function(
 fn gsub_with_table(
     vm: &mut LuaVM,
     text: &str,
-    pattern: &crate::lua_pattern::Pattern,
+    pattern: &pattern::Pattern,
     table: LuaValue,
     max: Option<usize>,
 ) -> LuaResult<MultiValue> {
@@ -1141,7 +742,7 @@ fn gsub_with_table(
             }
         }
 
-        if let Some((end_pos, captures)) = lua_pattern::try_match(pattern, &text_chars, pos) {
+        if let Some((end_pos, captures)) = pattern::try_match(pattern, &text_chars, pos) {
             count += 1;
 
             // Get the key for table lookup
@@ -1272,13 +873,13 @@ fn gmatch_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     };
 
     // Parse pattern
-    let pattern = match lua_pattern::parse_pattern(&pattern_str_owned) {
+    let pattern = match pattern::parse_pattern(&pattern_str_owned) {
         Ok(p) => p,
         Err(e) => return Err(vm.error(format!("invalid pattern: {}", e))),
     };
 
     // Find next match
-    if let Some((start, end, captures)) = lua_pattern::find(&s_str, &pattern, position) {
+    if let Some((start, end, captures)) = pattern::find(&s_str, &pattern, position) {
         // Update position for next iteration
         let next_pos = if end > start { end } else { end + 1 };
         if let Some(state_ref) = vm.object_pool.get_table_mut(table_id) {
