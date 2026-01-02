@@ -3,11 +3,12 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaState, LuaResult, LuaError};
+use crate::lua_vm::{LuaState, LuaResult};
 
 pub fn create_table_lib() -> LibraryModule {
     crate::lib_module!("table", {
         "concat" => table_concat,
+        "create" => table_create,
         "insert" => table_insert,
         "move" => table_move,
         "pack" => table_pack,
@@ -15,6 +16,43 @@ pub fn create_table_lib() -> LibraryModule {
         "sort" => table_sort,
         "unpack" => table_unpack,
     })
+}
+
+/// table.create(narray [, nhash]) - Create a pre-allocated table (Lua 5.5)
+fn table_create(l: &mut LuaState) -> LuaResult<usize> {
+    let narray = l.get_arg(1)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0);
+    
+    let nhash = l.get_arg(2)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0);
+
+    // Validate arguments
+    if narray < 0 {
+        return Err(l.error("bad argument #1 to 'create' (array size must be non-negative)".to_string()));
+    }
+    if nhash < 0 {
+        return Err(l.error("bad argument #2 to 'create' (hash size must be non-negative)".to_string()));
+    }
+
+    // Check for overflow (INT_MAX in Lua is i32::MAX)
+    if narray > i32::MAX as i64 {
+        return Err(l.error("bad argument #1 to 'create' (array size too large)".to_string()));
+    }
+    if nhash > i32::MAX as i64 {
+        return Err(l.error("bad argument #2 to 'create' (hash size too large)".to_string()));
+    }
+
+    // Create table with pre-allocated sizes
+    let table_val = {
+        let vm = l.vm_mut();
+        let table = vm.object_pool.create_table(narray as usize, nhash as usize);
+        LuaValue::table(table)
+    };
+
+    l.push_value(table_val)?;
+    Ok(1)
 }
 
 /// table.concat(list [, sep [, i [, j]]]) - Concatenate table elements

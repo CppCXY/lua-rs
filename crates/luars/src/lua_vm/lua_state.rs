@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use crate::gc::UpvalueId;
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaValue, LuaUserdata, LuaString};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
 use crate::{Chunk, LuaVM};
@@ -572,6 +572,22 @@ impl LuaState {
         self.vm_mut().create_string_owned(s)
     }
 
+    /// Create userdata
+    pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
+        self.vm_mut().create_userdata(data)
+    }
+
+    /// Get userdata reference
+    pub fn get_userdata(&self, value: &LuaValue) -> Option<&LuaUserdata> {
+        let vm = unsafe { &*self.vm };
+        vm.get_userdata(value)
+    }
+
+    /// Get mutable userdata reference
+    pub fn get_userdata_mut(&mut self, value: &LuaValue) -> Option<&mut LuaUserdata> {
+        self.vm_mut().get_userdata_mut(value)
+    }
+
     // ===== Global Access =====
 
     /// Get global variable
@@ -594,6 +610,17 @@ impl LuaState {
     /// Set value in table
     pub fn table_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
         self.vm_mut().table_set(table, key, value)
+    }
+
+    /// Set value in table with metatable support
+    pub fn table_set_with_meta(&mut self, table: LuaValue, key: LuaValue, value: LuaValue) -> LuaResult<()> {
+        self.vm_mut().table_set_with_meta(table, key, value)
+    }
+
+    /// Get string from value
+    pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
+        let vm = unsafe { &*self.vm };
+        vm.get_string(value)
     }
 }
 

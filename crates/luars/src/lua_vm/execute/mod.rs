@@ -2313,7 +2313,8 @@ fn execute_frame(
                             pc += 1; // Consume EXTRAARG
                             let extra = extra_instr.get_ax() as usize;
                             // Add extra to starting index: vc += extra * (MAXARG_vC + 1)
-                            vc += extra * 256;
+                            // MAXARG_vC is 10 bits = 1023, so + 1 = 1024
+                            vc += extra * 1024;
                         }
                     }
                 }

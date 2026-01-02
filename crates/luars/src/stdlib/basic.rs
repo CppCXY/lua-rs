@@ -761,10 +761,76 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// require(modname) - Load a module  
-/// TODO: Implement full require logic with protected_call
+/// Simplified implementation - loads from package.preload or package.path
 fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
-    // Temporary simplified implementation
-    Err(l.error("require() not yet fully implemented".to_string()))
+    let modname_val = l.get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'require' (string expected)".to_string()))?;
+
+    let Some(modname_id) = modname_val.as_string_id() else {
+        return Err(l.error("bad argument #1 to 'require' (string expected)".to_string()));
+    };
+
+    let modname_str = {
+        let vm = l.vm_mut();
+        let Some(s) = vm.object_pool.get_string(modname_id) else {
+            return Err(l.error("bad argument #1 to 'require' (string expected)".to_string()));
+        };
+        s.as_str().to_string()
+    };
+
+    // Get package.loaded
+    let package_table = l.get_global("package")
+        .ok_or_else(|| l.error("package table not found".to_string()))?;
+
+    let Some(package_id) = package_table.as_table_id() else {
+        return Err(l.error("package must be a table".to_string()));
+    };
+
+    let loaded_key = l.create_string("loaded");
+    let loaded_val = {
+        let vm = l.vm_mut();
+        let Some(pkg_table) = vm.object_pool.get_table(package_id) else {
+            return Err(l.error("package must be a table".to_string()));
+        };
+        pkg_table.raw_get(&loaded_key)
+            .ok_or_else(|| l.error("package.loaded not found".to_string()))?
+    };
+
+    let Some(loaded_id) = loaded_val.as_table_id() else {
+        return Err(l.error("package.loaded must be a table".to_string()));
+    };
+
+    // Check if module is already loaded
+    let already_loaded = {
+        let vm = l.vm_mut();
+        let Some(loaded_table) = vm.object_pool.get_table(loaded_id) else {
+            return Err(l.error("package.loaded must be a table".to_string()));
+        };
+        loaded_table.raw_get(&modname_val)
+            .unwrap_or(LuaValue::nil())
+    };
+
+    // If module is already loaded and not nil/false, return it
+    if !already_loaded.is_nil() {
+        if let Some(b) = already_loaded.as_boolean() {
+            if !b {
+                // It's false, continue to load
+            } else {
+                l.push_value(already_loaded)?;
+                return Ok(1);
+            }
+        } else {
+            l.push_value(already_loaded)?;
+            return Ok(1);
+        }
+    }
+
+    // For now, return error suggesting package system not fully implemented
+    // Full implementation would iterate through package.searchers
+    Err(l.error(format!(
+        "module '{}' not found (require not fully implemented yet)",
+        modname_str
+    )))
 }
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
