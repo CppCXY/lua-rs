@@ -325,10 +325,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
     } else if let Some(b) = value.as_bool() {
         vm.create_string(if b { "true" } else { "false" })
     } else if let Some(i) = value.as_integer() {
-        // OPTIMIZED: Use itoa for fast integer formatting
-        let mut buffer = itoa::Buffer::new();
-        let s = buffer.format(i);
-        vm.create_string(s)
+        vm.create_string(&i.to_string())
     } else if let Some(f) = value.as_number() {
         vm.create_string(&f.to_string())
     } else {

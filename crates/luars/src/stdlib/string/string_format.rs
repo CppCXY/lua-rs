@@ -1,5 +1,7 @@
 /// Optimized string.format implementation
 /// Reduced from 400+ lines to ~200 lines with better performance
+/// Uses std::fmt::Write for zero-allocation formatting directly to buffer
+use std::fmt::Write as FmtWrite;
 use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 
 /// string.format(formatstring, ...) - Format with various specifiers
@@ -114,25 +116,24 @@ fn format_char(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<
 #[inline]
 fn format_int(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
-    buf.push_str(&num.to_string());
+    write!(buf, "{}", num).unwrap();
     Ok(())
 }
 
 #[inline]
 fn format_octal(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
-    let s = format!("{:o}", num);
-    if flags.contains('#') && !s.starts_with('0') {
+    if flags.contains('#') && num != 0 {
         buf.push('0');
     }
-    buf.push_str(&s);
+    write!(buf, "{:o}", num).unwrap();
     Ok(())
 }
 
 #[inline]
 fn format_uint(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
-    buf.push_str(&(num as u64).to_string());
+    write!(buf, "{}", num as u64).unwrap();
     Ok(())
 }
 
@@ -145,9 +146,9 @@ fn format_hex(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mu
     }
     
     if upper {
-        buf.push_str(&format!("{:X}", num));
+        write!(buf, "{:X}", num).unwrap();
     } else {
-        buf.push_str(&format!("{:x}", num));
+        write!(buf, "{:x}", num).unwrap();
     }
     Ok(())
 }
@@ -160,18 +161,18 @@ fn format_sci(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mu
     if let Some(dot_pos) = flags.find('.') {
         if let Ok(prec) = flags[dot_pos + 1..].trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<usize>() {
             if upper {
-                buf.push_str(&format!("{:.prec$E}", num, prec = prec));
+                write!(buf, "{:.prec$E}", num, prec = prec).unwrap();
             } else {
-                buf.push_str(&format!("{:.prec$e}", num, prec = prec));
+                write!(buf, "{:.prec$e}", num, prec = prec).unwrap();
             }
             return Ok(());
         }
     }
     
     if upper {
-        buf.push_str(&format!("{:E}", num));
+        write!(buf, "{:E}", num).unwrap();
     } else {
-        buf.push_str(&format!("{:e}", num));
+        write!(buf, "{:e}", num).unwrap();
     }
     Ok(())
 }
@@ -183,12 +184,12 @@ fn format_float(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState)
     // Parse precision from flags (e.g., ".2")
     if let Some(dot_pos) = flags.find('.') {
         if let Ok(prec) = flags[dot_pos + 1..].trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<usize>() {
-            buf.push_str(&format!("{:.prec$}", num, prec = prec));
+            write!(buf, "{:.prec$}", num, prec = prec).unwrap();
             return Ok(());
         }
     }
     
-    buf.push_str(&num.to_string());
+    write!(buf, "{}", num).unwrap();
     Ok(())
 }
 
@@ -199,12 +200,12 @@ fn format_auto(buf: &mut String, arg: &LuaValue, upper: bool, l: &mut LuaState) 
     // Use scientific for very large/small numbers
     if num.abs() < 0.0001 || num.abs() >= 1e10 {
         if upper {
-            buf.push_str(&format!("{:E}", num));
+            write!(buf, "{:E}", num).unwrap();
         } else {
-            buf.push_str(&format!("{:e}", num));
+            write!(buf, "{:e}", num).unwrap();
         }
     } else {
-        buf.push_str(&num.to_string());
+        write!(buf, "{}", num).unwrap();
     }
     Ok(())
 }
@@ -217,9 +218,9 @@ fn format_string(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
             .ok_or_else(|| l.error("invalid string".to_string()))?;
         buf.push_str(&s);
     } else if let Some(n) = arg.as_integer() {
-        buf.push_str(&n.to_string());
+        write!(buf, "{}", n).unwrap();
     } else if let Some(n) = arg.as_number() {
-        buf.push_str(&n.to_string());
+        write!(buf, "{}", n).unwrap();
     } else {
         let s = l.vm_mut().value_to_string_raw(arg);
         buf.push_str(&s);
@@ -244,7 +245,7 @@ fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
             '\n' => buf.push_str("\\n"),
             '\r' => buf.push_str("\\r"),
             '\t' => buf.push_str("\\t"),
-            c if c.is_control() => buf.push_str(&format!("\\{}", c as u8)),
+            c if c.is_control() => write!(buf, "\\{}", c as u8).unwrap(),
             c => buf.push(c),
         }
     }
