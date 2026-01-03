@@ -1,22 +1,25 @@
+use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 /// Optimized string.format implementation
 /// Reduced from 400+ lines to ~200 lines with better performance
 /// Uses std::fmt::Write for zero-allocation formatting directly to buffer
 use std::fmt::Write as FmtWrite;
-use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 
 /// string.format(formatstring, ...) - Format with various specifiers
 pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
     // Get format string
-    let format_str_value = l.get_arg(1)
+    let format_str_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'format' (string expected)".to_string()))?;
-    
-    let format_str_id = format_str_value.as_string_id()
+
+    let format_str_id = format_str_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #1 to 'format' (string expected)".to_string()))?;
 
     // Copy format string once to avoid borrow conflicts
     let format = {
         let vm = l.vm_mut();
-        vm.object_pool.get_string(format_str_id)
+        vm.object_pool
+            .get_string(format_str_id)
             .map(|s| s.as_str().to_string())
             .ok_or_else(|| l.error("invalid string".to_string()))?
     };
@@ -54,12 +57,17 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         // Get format character
-        let fmt_char = chars.next()
+        let fmt_char = chars
+            .next()
             .ok_or_else(|| l.error("incomplete format".to_string()))?;
 
         // Get argument
-        let arg = args.get(arg_index)
-            .ok_or_else(|| l.error(format!("bad argument #{} to 'format' (no value)", arg_index + 1)))?;
+        let arg = args.get(arg_index).ok_or_else(|| {
+            l.error(format!(
+                "bad argument #{} to 'format' (no value)",
+                arg_index + 1
+            ))
+        })?;
         arg_index += 1;
 
         // Format based on type
@@ -138,13 +146,19 @@ fn format_uint(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<
 }
 
 #[inline]
-fn format_hex(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mut LuaState) -> LuaResult<()> {
+fn format_hex(
+    buf: &mut String,
+    arg: &LuaValue,
+    flags: &str,
+    upper: bool,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
-    
+
     if flags.contains('#') && num != 0 {
         buf.push_str(if upper { "0X" } else { "0x" });
     }
-    
+
     if upper {
         write!(buf, "{:X}", num).unwrap();
     } else {
@@ -154,12 +168,21 @@ fn format_hex(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mu
 }
 
 #[inline]
-fn format_sci(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mut LuaState) -> LuaResult<()> {
+fn format_sci(
+    buf: &mut String,
+    arg: &LuaValue,
+    flags: &str,
+    upper: bool,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
-    
+
     // Parse precision from flags (e.g., ".2")
     if let Some(dot_pos) = flags.find('.') {
-        if let Ok(prec) = flags[dot_pos + 1..].trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<usize>() {
+        if let Ok(prec) = flags[dot_pos + 1..]
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse::<usize>()
+        {
             if upper {
                 write!(buf, "{:.prec$E}", num, prec = prec).unwrap();
             } else {
@@ -168,7 +191,7 @@ fn format_sci(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mu
             return Ok(());
         }
     }
-    
+
     if upper {
         write!(buf, "{:E}", num).unwrap();
     } else {
@@ -180,15 +203,18 @@ fn format_sci(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mu
 #[inline]
 fn format_float(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
-    
+
     // Parse precision from flags (e.g., ".2")
     if let Some(dot_pos) = flags.find('.') {
-        if let Ok(prec) = flags[dot_pos + 1..].trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<usize>() {
+        if let Ok(prec) = flags[dot_pos + 1..]
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse::<usize>()
+        {
             write!(buf, "{:.prec$}", num, prec = prec).unwrap();
             return Ok(());
         }
     }
-    
+
     write!(buf, "{}", num).unwrap();
     Ok(())
 }
@@ -196,7 +222,7 @@ fn format_float(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState)
 #[inline]
 fn format_auto(buf: &mut String, arg: &LuaValue, upper: bool, l: &mut LuaState) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
-    
+
     // Use scientific for very large/small numbers
     if num.abs() < 0.0001 || num.abs() >= 1e10 {
         if upper {
@@ -213,7 +239,10 @@ fn format_auto(buf: &mut String, arg: &LuaValue, upper: bool, l: &mut LuaState) 
 #[inline]
 fn format_string(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
     if let Some(str_id) = arg.as_string_id() {
-        let s = l.vm_mut().object_pool.get_string(str_id)
+        let s = l
+            .vm_mut()
+            .object_pool
+            .get_string(str_id)
             .map(|s| s.as_str().to_string())
             .ok_or_else(|| l.error("invalid string".to_string()))?;
         buf.push_str(&s);
@@ -230,13 +259,17 @@ fn format_string(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
 
 #[inline]
 fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
-    let str_id = arg.as_string_id()
+    let str_id = arg
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument to 'format' (string expected for %q)".to_string()))?;
-    
-    let s = l.vm_mut().object_pool.get_string(str_id)
+
+    let s = l
+        .vm_mut()
+        .object_pool
+        .get_string(str_id)
         .map(|s| s.as_str().to_string())
         .ok_or_else(|| l.error("invalid string".to_string()))?;
-    
+
     buf.push('"');
     for ch in s.chars() {
         match ch {

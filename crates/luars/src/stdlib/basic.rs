@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::lua_vm::{LuaResult, LuaState, LuaError};
+use crate::lua_vm::{LuaError, LuaResult, LuaState};
 
 pub fn create_basic_lib() -> LibraryModule {
     crate::lib_module!("_G", {
@@ -42,12 +42,18 @@ pub fn create_basic_lib() -> LibraryModule {
 /// print(...) - Print values to stdout
 fn lua_print(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
+    eprintln!("[DEBUG] print: got {} args", args.len());
+    for (i, arg) in args.iter().enumerate() {
+        eprintln!(
+            "[DEBUG] print: arg[{}] is_string={}, is_nil={}",
+            i,
+            arg.is_string(),
+            arg.is_nil()
+        );
+    }
     let vm = l.vm_mut();
 
-    let output: Vec<String> = args
-        .iter()
-        .map(|v| vm.value_to_string_raw(v))
-        .collect();
+    let output: Vec<String> = args.iter().map(|v| vm.value_to_string_raw(v)).collect();
 
     if !output.is_empty() {
         println!("{}", output.join("\t"));
@@ -79,7 +85,28 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let result = l.vm_mut().create_string(type_name);
+    eprintln!(
+        "[DEBUG] type(): Created string result, is_string={}, is_nil={}",
+        result.is_string(),
+        result.is_nil()
+    );
+    if result.is_string() {
+        eprintln!("[DEBUG] type(): String ID = {:?}", result.as_string_id());
+    }
+    let top_before = l.stack_len();
     l.push_value(result)?;
+    let top_after = l.stack_len();
+    eprintln!(
+        "[DEBUG] type(): top before={}, after={}",
+        top_before, top_after
+    );
+    if let Some(pushed) = l.stack_get(top_after - 1) {
+        eprintln!(
+            "[DEBUG] type(): Pushed value is_string={}, is_nil={}",
+            pushed.is_string(),
+            pushed.is_nil()
+        );
+    }
     Ok(1)
 }
 
@@ -88,10 +115,12 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
     let condition = l.get_arg(1).unwrap_or(LuaValue::nil());
 
     if !condition.is_truthy() {
-        let message = l.get_arg(2)
+        let message = l
+            .get_arg(2)
             .and_then(|v| {
                 v.as_string_id().and_then(|id| {
-                    l.vm_mut().object_pool
+                    l.vm_mut()
+                        .object_pool
                         .get_string(id)
                         .map(|s| s.as_str().to_string())
                 })
@@ -117,7 +146,9 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
 
 /// tonumber(e [, base]) - Convert to number
 fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1).ok_or_else(|| l.error("tonumber() requires argument 1".to_string()))?;
+    let value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("tonumber() requires argument 1".to_string()))?;
     let base = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(10);
 
     if base < 2 || base > 36 {
@@ -253,7 +284,9 @@ fn parse_hex_float(s: &str) -> Option<f64> {
 /// tostring(v) - Convert to string
 /// OPTIMIZED: Fast path for common types
 fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1).ok_or_else(|| l.error("tostring() requires argument 1".to_string()))?;
+    let value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("tostring() requires argument 1".to_string()))?;
 
     // Fast path: if already a string, return it directly
     if value.is_string() {
@@ -262,7 +295,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     let vm = l.vm_mut();
-    
+
     // Fast path: simple types without metamethods
     let result = if value.is_nil() {
         vm.create_string("nil")
@@ -277,7 +310,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         let value_str = vm.value_to_string_raw(&value);
         vm.create_string(&value_str)
     };
-    
+
     l.push_value(result)?;
     Ok(1)
 }
@@ -285,8 +318,10 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
 /// select(index, ...) - Return subset of arguments
 /// ULTRA-OPTIMIZED: Fast path for "#" and direct stack manipulation
 fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
-    let index_arg = l.get_arg(1).ok_or_else(|| l.error("bad argument #1 to 'select' (value expected)".to_string()))?;
-    
+    let index_arg = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'select' (value expected)".to_string()))?;
+
     // Total args after index
     let total_args = l.arg_count();
     let vararg_count = if total_args > 0 { total_args - 1 } else { 0 };
@@ -304,7 +339,8 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'select' (number expected)".to_string()));
     }
 
-    let index = index_arg.as_integer()
+    let index = index_arg
+        .as_integer()
         .ok_or_else(|| l.error("bad argument #1 to 'select' (number expected)".to_string()))?;
 
     if index == 0 {
@@ -335,7 +371,8 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
 
 /// ipairs(t) - Return iterator for array part of table
 fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
-    let table_val = l.get_arg(1)
+    let table_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'ipairs' (value expected)".to_string()))?;
 
     // Validate that it's a table
@@ -354,9 +391,11 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
 /// Iterator function for ipairs - Optimized for performance
 #[inline]
 fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
-    let table_val = l.get_arg(1)
+    let table_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("ipairs iterator: missing table".to_string()))?;
-    let index_val = l.get_arg(2)
+    let index_val = l
+        .get_arg(2)
         .ok_or_else(|| l.error("ipairs iterator: missing index".to_string()))?;
 
     // Fast path: both table and index are valid
@@ -386,7 +425,8 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
 
 /// pairs(t) - Return iterator for all key-value pairs
 fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
-    let table_val = l.get_arg(1)
+    let table_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'pairs' (value expected)".to_string()))?;
 
     // Validate that it's a table
@@ -416,45 +456,48 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
     // Arguments are already on stack from the call:
     // stack: [pcall_func, target_func, arg1, arg2, ...]
     // We need: [target_func, arg1, arg2, ...] and call it
-    
+
     let arg_count = l.arg_count();
     if arg_count < 1 {
         return Err(l.error("bad argument #1 to 'pcall' (value expected)".to_string()));
     }
-    
+
     // Get current frame info
-    let base = l.current_frame()
+    let base = l
+        .current_frame()
         .map(|f| f.base)
         .ok_or_else(|| LuaError::RuntimeError)?;
-    
+
     // func is at base+0, args are at base+1..base+arg_count-1
     // We want to call func with arg_count-1 arguments
     let func_idx = base;
     let call_arg_count = arg_count - 1;
-    
+
     // Call using stack-based API (no Vec allocation!)
     let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
-    
+
     // Results are already on stack starting at func_idx
     // We need to insert success boolean before them
     let success_val = LuaValue::boolean(success);
-    
+
     // Insert success at func_idx position
     l.stack_insert(func_idx, success_val)?;
-    
+
     Ok(result_count + 1)
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
 fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
     // Get function (first argument)
-    let func = l.get_arg(1)
+    let func = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'xpcall' (value expected)".to_string()))?;
-    
+
     // Get error handler (second argument)
-    let err_handler = l.get_arg(2)
+    let err_handler = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'xpcall' (value expected)".to_string()))?;
-    
+
     // Collect remaining arguments
     let mut args = Vec::new();
     let arg_count = l.arg_count();
@@ -463,25 +506,26 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
             args.push(arg);
         }
     }
-    
+
     // Call xpcall
     let (success, results) = l.xpcall(func, args, err_handler)?;
-    
+
     // Push success status
     l.push_value(LuaValue::boolean(success))?;
-    
+
     // Push results and count them
     let result_count = results.len();
     for result in results {
         l.push_value(result)?;
     }
-    
+
     Ok(1 + result_count)
 }
 
 /// getmetatable(object) - Get metatable
 fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1)
+    let value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'getmetatable' (value expected)".to_string()))?;
 
     let vm = l.vm_mut();
@@ -560,13 +604,15 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
 
 /// setmetatable(table, metatable) - Set metatable
 fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
-    let table = l.get_arg(1)
+    let table = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'setmetatable' (value expected)".to_string()))?;
-    let metatable = l.get_arg(2)
+    let metatable = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'setmetatable' (value expected)".to_string()))?;
 
     let vm = l.vm_mut();
-    
+
     // Set the new metatable using ObjectPool
     let Some(table_id) = table.as_table_id() else {
         return Err(l.error("bad argument #1 to 'setmetatable' (table expected)".to_string()));
@@ -625,9 +671,11 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
 
 /// rawget(table, index) - Get without metamethods
 fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
-    let table = l.get_arg(1)
+    let table = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'rawget' (value expected)".to_string()))?;
-    let key = l.get_arg(2)
+    let key = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'rawget' (value expected)".to_string()))?;
 
     if let Some(table_id) = table.as_table_id() {
@@ -643,11 +691,14 @@ fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
 
 /// rawset(table, index, value) - Set without metamethods
 fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
-    let table = l.get_arg(1)
+    let table = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'rawset' (value expected)".to_string()))?;
-    let key = l.get_arg(2)
+    let key = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'rawset' (value expected)".to_string()))?;
-    let value = l.get_arg(3)
+    let value = l
+        .get_arg(3)
         .ok_or_else(|| l.error("bad argument #3 to 'rawset' (value expected)".to_string()))?;
 
     if let Some(table_id) = table.as_table_id() {
@@ -663,7 +714,8 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
 
 /// rawlen(v) - Length without metamethods
 fn lua_rawlen(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1)
+    let value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'rawlen' (value expected)".to_string()))?;
 
     let vm = l.vm_mut();
@@ -673,10 +725,14 @@ fn lua_rawlen(l: &mut LuaState) -> LuaResult<usize> {
                 if let Some(table) = vm.object_pool.get_table(table_id) {
                     table.len() as i64
                 } else {
-                    return Err(l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string()));
+                    return Err(l.error(
+                        "bad argument #1 to 'rawlen' (table or string expected)".to_string(),
+                    ));
                 }
             } else {
-                return Err(l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string()));
+                return Err(
+                    l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string())
+                );
             }
         }
         LuaValueKind::String => {
@@ -684,14 +740,20 @@ fn lua_rawlen(l: &mut LuaState) -> LuaResult<usize> {
                 if let Some(s) = vm.object_pool.get_string(string_id) {
                     s.as_str().len() as i64
                 } else {
-                    return Err(l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string()));
+                    return Err(l.error(
+                        "bad argument #1 to 'rawlen' (table or string expected)".to_string(),
+                    ));
                 }
             } else {
-                return Err(l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string()));
+                return Err(
+                    l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string())
+                );
             }
         }
         _ => {
-            return Err(l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string()));
+            return Err(
+                l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string())
+            );
         }
     };
 
@@ -704,7 +766,8 @@ fn lua_rawequal(l: &mut LuaState) -> LuaResult<usize> {
     let v1 = l.get_arg(1).unwrap_or(LuaValue::nil());
     let v2 = l.get_arg(2).unwrap_or(LuaValue::nil());
 
-    let result = v1 == v2;
+    let object_pool = &l.vm_mut().object_pool;
+    let result = v1.raw_equal(&v2, object_pool);
     l.push_value(LuaValue::boolean(result))?;
     Ok(1)
 }
@@ -758,7 +821,8 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 /// require(modname) - Load a module  
 /// Simplified implementation - loads from package.preload or package.path
 fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
-    let modname_val = l.get_arg(1)
+    let modname_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'require' (string expected)".to_string()))?;
 
     let Some(modname_id) = modname_val.as_string_id() else {
@@ -774,7 +838,8 @@ fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Get package.loaded
-    let package_table = l.get_global("package")
+    let package_table = l
+        .get_global("package")
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_id) = package_table.as_table_id() else {
@@ -787,7 +852,8 @@ fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         let Some(pkg_table) = vm.object_pool.get_table(package_id) else {
             return Err(l.error("package must be a table".to_string()));
         };
-        pkg_table.raw_get(&loaded_key)
+        pkg_table
+            .raw_get(&loaded_key)
             .ok_or_else(|| l.error("package.loaded not found".to_string()))?
     };
 
@@ -801,7 +867,8 @@ fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         let Some(loaded_table) = vm.object_pool.get_table(loaded_id) else {
             return Err(l.error("package.loaded must be a table".to_string()));
         };
-        loaded_table.raw_get(&modname_val)
+        loaded_table
+            .raw_get(&modname_val)
             .unwrap_or(LuaValue::nil())
     };
 
@@ -830,14 +897,15 @@ fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
 fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
-    let chunk_val = l.get_arg(1)
+    let chunk_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'load' (value expected)".to_string()))?;
     let arg2 = l.get_arg(2);
     let arg3 = l.get_arg(3);
     let arg4 = l.get_arg(4);
 
     let vm = l.vm_mut();
-    
+
     // Get the chunk string
     let Some(string_id) = chunk_val.as_string_id() else {
         return Err(l.error("bad argument #1 to 'load' (string expected)".to_string()));
@@ -901,9 +969,10 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
 /// loadfile([filename [, mode [, env]]]) - Load a file as a chunk
 fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
-    let filename = l.get_arg(1)
+    let filename = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'loadfile' (value expected)".to_string()))?;
-    
+
     let vm = l.vm_mut();
     let Some(string_id) = filename.as_string_id() else {
         return Err(l.error("bad argument #1 to 'loadfile' (string expected)".to_string()));
@@ -958,10 +1027,7 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
     let vm = l.vm_mut();
 
-    let messages: Vec<String> = args
-        .iter()
-        .map(|v| vm.value_to_string_raw(v))
-        .collect();
+    let messages: Vec<String> = args.iter().map(|v| vm.value_to_string_raw(v)).collect();
     let message = messages.join("");
 
     // Emit warning to stderr

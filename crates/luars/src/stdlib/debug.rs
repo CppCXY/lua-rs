@@ -26,7 +26,8 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Get level argument (default is 1)
-    let level = l.get_arg(2)
+    let level = l
+        .get_arg(2)
         .and_then(|v| v.as_integer())
         .unwrap_or(1)
         .max(0) as usize;
@@ -43,13 +44,13 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
 
     // Get call stack info
     let call_depth = l.call_depth();
-    
+
     // Iterate through call frames, starting from 'level'
     if level < call_depth {
         for i in (level..call_depth).rev() {
             if let Some(func) = l.get_frame_func(i) {
                 let pc = l.get_frame_pc(i);
-                
+
                 // Try to get function info
                 if let Some(func_id) = func.as_function_id() {
                     let vm = l.vm_mut();
@@ -57,14 +58,15 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                         if let Some(chunk) = func_obj.chunk() {
                             // Lua function
                             let source = chunk.source_name.as_deref().unwrap_or("?");
-                            
+
                             // Get line number from pc
                             let pc_idx = pc.saturating_sub(1) as usize;
-                            let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
-                                chunk.line_info[pc_idx]
-                            } else {
-                                0
-                            };
+                            let line =
+                                if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
+                                    chunk.line_info[pc_idx]
+                                } else {
+                                    0
+                                };
 
                             if line > 0 {
                                 trace.push_str(&format!("\n\t{}:{}: in function", source, line));
@@ -98,25 +100,26 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
     // Simplified implementation: just return a table with basic info
     let vm = l.vm_mut();
     let info_table = vm.create_table(0, 4);
-    
+
     // Set some basic fields
     let source_key = vm.create_string("source");
     let source_val = vm.create_string("=[C]");
     vm.table_set_with_meta(info_table, source_key, source_val)?;
-    
+
     let what_key = vm.create_string("what");
     let what_val = vm.create_string("C");
     vm.table_set_with_meta(info_table, what_key, what_val)?;
-    
+
     l.push_value(info_table)?;
     Ok(1)
 }
 
 /// debug.getmetatable(value) - Get metatable of a value (no protection)
 fn debug_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1)
+    let value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("getmetatable() requires argument 1".to_string()))?;
-    
+
     // For tables, get metatable directly
     if let Some(table_id) = value.as_table_id() {
         let vm = l.vm_mut();
@@ -127,7 +130,7 @@ fn debug_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
             }
         }
     }
-    
+
     // For other types, return nil (simplified)
     l.push_value(LuaValue::nil())?;
     Ok(1)
@@ -135,11 +138,12 @@ fn debug_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
 
 /// debug.setmetatable(value, table) - Set metatable of a value
 fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1)
+    let value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("setmetatable() requires argument 1".to_string()))?;
-    
+
     let metatable = l.get_arg(2);
-    
+
     // Only support tables for now
     if let Some(table_id) = value.as_table_id() {
         let vm = l.vm_mut();
@@ -157,7 +161,7 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
             }
         }
     }
-    
+
     l.push_value(value)?;
     Ok(1)
 }

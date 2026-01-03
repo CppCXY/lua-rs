@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaResult, LuaState, LuaError};
+use crate::lua_vm::{LuaError, LuaResult, LuaState};
 
 pub fn create_package_lib() -> LibraryModule {
     crate::lib_module!("package", {
@@ -18,7 +18,8 @@ pub fn create_package_lib() -> LibraryModule {
 // Initialize package library fields (called after module is loaded)
 pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     // Get package table (should already exist from module creation)
-    let package_table = l.get_global("package")
+    let package_table = l
+        .get_global("package")
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_id) = package_table.as_table_id() else {
@@ -40,25 +41,33 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     let preload_table = vm.create_table(0, 0);
     let path_value = vm.create_string("./?.lua;./?/init.lua");
     let cpath_value = vm.create_string("./?.so;./?.dll;./?.dylib");
-    
+
     #[cfg(windows)]
     let config_str = "\\\n;\n?\n!\n-";
     #[cfg(not(windows))]
     let config_str = "/\n;\n?\n!\n-";
     let config_value = vm.create_string(config_str);
-    
+
     // Create searchers array
     let searchers_table = vm.create_table(4, 0);
     let searchers_id = searchers_table.as_table_id().unwrap();
-    
+
     // Fill searchers array
-    vm.object_pool.get_table_mut(searchers_id).unwrap()
+    vm.object_pool
+        .get_table_mut(searchers_id)
+        .unwrap()
         .set_int(1, LuaValue::cfunction(searcher_preload));
-    vm.object_pool.get_table_mut(searchers_id).unwrap()
+    vm.object_pool
+        .get_table_mut(searchers_id)
+        .unwrap()
         .set_int(2, LuaValue::cfunction(searcher_lua));
-    vm.object_pool.get_table_mut(searchers_id).unwrap()
+    vm.object_pool
+        .get_table_mut(searchers_id)
+        .unwrap()
         .set_int(3, LuaValue::cfunction(searcher_c));
-    vm.object_pool.get_table_mut(searchers_id).unwrap()
+    vm.object_pool
+        .get_table_mut(searchers_id)
+        .unwrap()
         .set_int(4, LuaValue::cfunction(searcher_allinone));
 
     // Set all fields in package table
@@ -75,13 +84,14 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
 
 // Searcher 1: Check package.preload
 fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
-    let modname_val = l.get_arg(1)
+    let modname_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("module name expected".to_string()))?;
-    
+
     let Some(modname_id) = modname_val.as_string_id() else {
         return Err(l.error("module name expected".to_string()));
     };
-    
+
     let modname_str = {
         let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(modname_id) else {
@@ -90,7 +100,8 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
         s.as_str().to_string()
     };
 
-    let package_table = l.get_global("package")
+    let package_table = l
+        .get_global("package")
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_id) = package_table.as_table_id() else {
@@ -135,13 +146,14 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
 
 // Searcher 2: Search package.path
 fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
-    let modname_val = l.get_arg(1)
+    let modname_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("module name expected".to_string()))?;
-    
+
     let Some(modname_id) = modname_val.as_string_id() else {
         return Err(l.error("module name expected".to_string()));
     };
-    
+
     let modname_str = {
         let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(modname_id) else {
@@ -150,7 +162,8 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
         s.as_str().to_string()
     };
 
-    let package_table = l.get_global("package")
+    let package_table = l
+        .get_global("package")
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_id) = package_table.as_table_id() else {
@@ -205,15 +218,17 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
 // Called as: loader(modname, filepath)
 fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     // First arg is modname, second arg is filepath (passed by searcher)
-    let _modname_val = l.get_arg(1)
+    let _modname_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("module name expected".to_string()))?;
-    let filepath_val = l.get_arg(2)
+    let filepath_val = l
+        .get_arg(2)
         .ok_or_else(|| l.error("file path expected".to_string()))?;
 
     let Some(filepath_id) = filepath_val.as_string_id() else {
         return Err(l.error("file path must be a string".to_string()));
     };
-    
+
     let filepath_str = {
         let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(filepath_id) else {
@@ -288,15 +303,17 @@ fn package_loadlib(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
-    let name_val = l.get_arg(1)
+    let name_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'searchpath' (string expected)".to_string()))?;
-    let path_val = l.get_arg(2)
+    let path_val = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'searchpath' (string expected)".to_string()))?;
 
     let Some(name_id) = name_val.as_string_id() else {
         return Err(l.error("bad argument #1 to 'searchpath' (string expected)".to_string()));
     };
-    
+
     let name_str = {
         let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(name_id) else {
@@ -308,7 +325,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
     let Some(path_id) = path_val.as_string_id() else {
         return Err(l.error("bad argument #2 to 'searchpath' (string expected)".to_string()));
     };
-    
+
     let path_str = {
         let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(path_id) else {
@@ -318,20 +335,26 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Optional sep and rep arguments
-    let sep = l.get_arg(3)
+    let sep = l
+        .get_arg(3)
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
                 let vm = l.vm_mut();
-                vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                vm.object_pool
+                    .get_string(id)
+                    .map(|s| s.as_str().to_string())
             })
         })
         .unwrap_or_else(|| ".".to_string());
 
-    let rep = l.get_arg(4)
+    let rep = l
+        .get_arg(4)
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
                 let vm = l.vm_mut();
-                vm.object_pool.get_string(id).map(|s| s.as_str().to_string())
+                vm.object_pool
+                    .get_string(id)
+                    .map(|s| s.as_str().to_string())
             })
         })
         .unwrap_or_else(|| "/".to_string());

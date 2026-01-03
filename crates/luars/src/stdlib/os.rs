@@ -74,10 +74,12 @@ fn os_exit(_l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn os_difftime(l: &mut LuaState) -> LuaResult<usize> {
-    let t2 = l.get_arg(1)
+    let t2 = l
+        .get_arg(1)
         .and_then(|v| v.as_integer())
         .ok_or_else(|| l.error("difftime: argument 1 must be a number".to_string()))?;
-    let t1 = l.get_arg(2)
+    let t1 = l
+        .get_arg(2)
         .and_then(|v| v.as_integer())
         .ok_or_else(|| l.error("difftime: argument 2 must be a number".to_string()))?;
 
@@ -94,7 +96,8 @@ fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
             None
         } else {
             v.as_string_id().and_then(|id| {
-                l.vm_mut().object_pool
+                l.vm_mut()
+                    .object_pool
                     .get_string(id)
                     .map(|s| s.as_str().to_string())
             })
@@ -135,10 +138,12 @@ fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn os_getenv(l: &mut LuaState) -> LuaResult<usize> {
-    let varname = l.get_arg(1)
+    let varname = l
+        .get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            l.vm_mut().object_pool
+            l.vm_mut()
+                .object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
@@ -158,10 +163,12 @@ fn os_getenv(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn os_remove(l: &mut LuaState) -> LuaResult<usize> {
-    let filename = l.get_arg(1)
+    let filename = l
+        .get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            l.vm_mut().object_pool
+            l.vm_mut()
+                .object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
@@ -182,23 +189,27 @@ fn os_remove(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn os_rename(l: &mut LuaState) -> LuaResult<usize> {
-    let oldname = l.get_arg(1)
+    let oldname = l
+        .get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            l.vm_mut().object_pool
+            l.vm_mut()
+                .object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
         .ok_or_else(|| l.error("rename: argument 1 must be a string".to_string()))?;
-    let newname = l.get_arg(2)
+    let newname = l
+        .get_arg(2)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            l.vm_mut().object_pool
+            l.vm_mut()
+                .object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })
         .ok_or_else(|| l.error("rename: argument 2 must be a string".to_string()))?;
-        
+
     match std::fs::rename(oldname.as_str(), newname.as_str()) {
         Ok(_) => {
             l.push_value(LuaValue::boolean(true))?;
@@ -215,10 +226,12 @@ fn os_rename(l: &mut LuaState) -> LuaResult<usize> {
 
 fn os_setlocale(l: &mut LuaState) -> LuaResult<usize> {
     // Stub implementation - just return the requested locale or "C"
-    let locale = l.get_arg(1)
+    let locale = l
+        .get_arg(1)
         .and_then(|v| v.as_string_id())
         .and_then(|id| {
-            l.vm_mut().object_pool
+            l.vm_mut()
+                .object_pool
                 .get_string(id)
                 .map(|s| s.as_str().to_string())
         })

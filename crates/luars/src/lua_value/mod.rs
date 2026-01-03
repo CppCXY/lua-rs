@@ -16,8 +16,8 @@ pub use lua_value::{LuaValue, LuaValueKind};
 
 // Re-export type tag constants for VM execution
 pub use lua_value::{
-    LUA_VNUMINT, LUA_VNUMFLT, LUA_VFALSE, LUA_VTRUE, LUA_VNIL,
-    LUA_TNIL, LUA_TBOOLEAN, LUA_TNUMBER, LUA_TSTRING,
+    LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT,
+    LUA_VNUMINT, LUA_VTRUE,
 };
 
 use crate::Instruction;

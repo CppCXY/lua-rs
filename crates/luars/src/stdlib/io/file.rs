@@ -4,8 +4,8 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 
-use crate::lua_vm::{LuaResult, LuaState};
 use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::lua_vm::{LuaResult, LuaState};
 
 /// File handle wrapper - supports files and standard streams
 pub struct LuaFile {
@@ -262,11 +262,11 @@ pub fn create_file_metatable(l: &mut LuaState) -> LuaResult<LuaValue> {
     // file:write(...)
     let write_key = l.create_string("write");
     l.table_set(&index_table, write_key, LuaValue::cfunction(file_write));
-    
+
     // file:flush()
     let flush_key = l.create_string("flush");
     l.table_set(&index_table, flush_key, LuaValue::cfunction(file_flush));
-    
+
     // file:close()
     let close_key = l.create_string("close");
     l.table_set(&index_table, close_key, LuaValue::cfunction(file_close));
@@ -292,7 +292,8 @@ pub fn create_file_metatable(l: &mut LuaState) -> LuaResult<LuaValue> {
 /// file:read([format])
 fn file_read(l: &mut LuaState) -> LuaResult<usize> {
     // For method calls from Lua, arg 1 is self (file object)
-    let file_val = l.get_arg(1)
+    let file_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("file:read requires file handle".to_string()))?;
 
     // Extract LuaFile from userdata
@@ -397,7 +398,8 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
 /// file:write(...)
 fn file_write(l: &mut LuaState) -> LuaResult<usize> {
     // For method calls from Lua, arg 1 is self (file object)
-    let file_val = l.get_arg(1)
+    let file_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("file:write requires file handle".to_string()))?;
 
     // Extract LuaFile from userdata
@@ -457,7 +459,8 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
 /// file:flush()
 fn file_flush(l: &mut LuaState) -> LuaResult<usize> {
     // For method calls from Lua, arg 1 is self (file object)
-    let file_val = l.get_arg(1)
+    let file_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("file:flush requires file handle".to_string()))?;
 
     // Extract LuaFile from userdata
@@ -479,7 +482,8 @@ fn file_flush(l: &mut LuaState) -> LuaResult<usize> {
 /// file:close()
 fn file_close(l: &mut LuaState) -> LuaResult<usize> {
     // For method calls from Lua, arg 1 is self (file object)
-    let file_val = l.get_arg(1)
+    let file_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("file:close requires file handle".to_string()))?;
 
     // Extract LuaFile from userdata
@@ -501,7 +505,8 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
 /// file:lines([formats]) - Returns an iterator for reading lines
 fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
     // Get file handle from self
-    let file_val = l.get_arg(1)
+    let file_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("file:lines requires file handle".to_string()))?;
 
     // For now, return a simple iterator that reads lines
@@ -518,10 +523,12 @@ fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
 
 /// Iterator function for file:lines()
 fn file_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
-    let state_val = l.get_arg(1)
+    let state_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("iterator requires state".to_string()))?;
     let file_key = l.create_string("file");
-    let file_val = l.table_get(&state_val, &file_key)
+    let file_val = l
+        .table_get(&state_val, &file_key)
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
 
     // Read next line
@@ -550,10 +557,12 @@ fn file_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
 
 /// file:seek([whence [, offset]]) - Sets and gets the file position
 fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
-    let file_val = l.get_arg(1)
+    let file_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("file:seek requires file handle".to_string()))?;
 
-    let whence = l.get_arg(2)
+    let whence = l
+        .get_arg(2)
         .and_then(|v| l.get_string(&v).map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "cur".to_string());
 
@@ -601,10 +610,12 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
 
 /// file:setvbuf(mode [, size]) - Sets the buffering mode
 fn file_setvbuf(l: &mut LuaState) -> LuaResult<usize> {
-    let file_val = l.get_arg(1)
+    let file_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("file:setvbuf requires file handle".to_string()))?;
 
-    let _mode = l.get_arg(2)
+    let _mode = l
+        .get_arg(2)
         .and_then(|v| l.get_string(&v).map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "full".to_string());
 

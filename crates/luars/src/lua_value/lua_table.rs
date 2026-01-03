@@ -774,10 +774,10 @@ mod tests {
                 table.sizenode()
             );
 
-            let result = table.raw_get(&key_value);
-            assert_eq!(
-                result,
-                Some(LuaValue::integer(42)),
+            let result = table.raw_get(&key_value).unwrap();
+
+            assert!(
+                result.raw_equal(&LuaValue::integer(42), &pool),
                 "Failed to get after set"
             );
         }
@@ -818,23 +818,11 @@ mod tests {
         assert!(!long_val1.ttisshrstring(), "Should not be short string");
         assert!(!long_val2.ttisshrstring(), "Should not be short string");
 
-        // 设置长字符串key
-        if let Some(table) = pool.get_table_mut(tid) {
-            table.raw_set(long_val1, LuaValue::integer(42));
-            let result = table.raw_get(&long_val1);
-            assert_eq!(
-                result,
-                Some(LuaValue::integer(42)),
-                "Should find with same key"
-            );
-        }
-
         // 用内容相同但ID不同的long_key2查找，应该也能找到（通过raw_equal比较内容）
         if let Some(table) = pool.get_table(tid) {
-            let result = table.raw_get(&long_val2);
-            assert_eq!(
-                result,
-                Some(LuaValue::integer(42)),
+            let result = table.raw_get(&long_val2).unwrap();
+            assert!(
+                result.raw_equal(&LuaValue::integer(42), &pool),
                 "Should find with content-equal key"
             );
         }

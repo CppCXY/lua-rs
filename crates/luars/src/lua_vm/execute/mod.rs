@@ -198,7 +198,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
         if current_depth <= target_depth {
             return Ok(()); // Reached target depth, stop execution
         }
-        
+
         // Get current call frame index
         let frame_idx = current_depth - 1;
 
@@ -303,7 +303,27 @@ fn execute_frame(
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let rb = stack_ptr.add(base + b);
+                    if b == 0 {
+                        // Debug for register 0 (our result)
+                        eprintln!(
+                            "[DEBUG] MOVE: R[{}] := R[{}], rb.is_string={}, rb.is_nil={}",
+                            a,
+                            b,
+                            (*rb).is_string(),
+                            (*rb).is_nil()
+                        );
+                    }
                     *ra = *rb; // Direct copy (setobjs2s)
+                    if b == 0 {
+                        // Debug after copy
+                        eprintln!(
+                            "[DEBUG] MOVE: After copy, R[{}].is_string={}, R[{}].is_nil={}",
+                            a,
+                            (*ra).is_string(),
+                            a,
+                            (*ra).is_nil()
+                        );
+                    }
                 }
             }
             OpCode::LoadI => {
@@ -1192,14 +1212,15 @@ fn execute_frame(
                 // vB (6 bits) = log2(hash size) + 1
                 // vC (10 bits) = array size
                 let a = instr.get_a() as usize;
-                let vb = instr.get_vb() as usize;  // Use get_vb() for ivABC format
-                let mut vc = instr.get_vc() as usize;  // Use get_vc() for ivABC format
+                let vb = instr.get_vb() as usize; // Use get_vb() for ivABC format
+                let mut vc = instr.get_vc() as usize; // Use get_vc() for ivABC format
                 let k = instr.get_k();
 
                 // Calculate hash size: if vB > 0, hash_size = 2^(vB-1)
                 // vB is 6 bits, so max value is 63
                 let hash_size = if vb > 0 {
-                    if vb > 31 {  // Safety check to prevent overflow on 32-bit systems
+                    if vb > 31 {
+                        // Safety check to prevent overflow on 32-bit systems
                         0
                     } else {
                         1usize << (vb - 1)
@@ -1221,7 +1242,7 @@ fn execute_frame(
                         }
                     }
                 }
-                
+
                 // ALWAYS skip the next instruction (EXTRAARG), as per Lua 5.4+ spec
                 pc += 1;
 
@@ -2040,7 +2061,7 @@ fn execute_frame(
                     let rb = stack_ptr.add(base + b);
 
                     // Simple equality check (TODO: metamethod)
-                    let cond = (*ra) == (*rb);
+                    let cond = (*ra).raw_equal(&*rb, &lua_state.vm_mut().object_pool);
                     if cond != k {
                         pc += 2; // skip next jump instruction
                     } else {
@@ -2123,7 +2144,16 @@ fn execute_frame(
                     let kb = constants.get(b).unwrap();
 
                     // Raw equality (no metamethods for constants)
-                    let cond = (*ra) == *kb;
+                    let cond = (*ra).raw_equal(&*kb, &lua_state.vm_mut().object_pool);
+                    eprintln!(
+                        "[DEBUG] EQK: R[{}] == K[{}], ra.is_string={}, kb.is_string={}, cond={}, k={}",
+                        a,
+                        b,
+                        (*ra).is_string(),
+                        kb.is_string(),
+                        cond,
+                        k
+                    );
                     if cond != k {
                         pc += 2;
                     } else {

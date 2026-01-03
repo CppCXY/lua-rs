@@ -63,7 +63,7 @@ pub fn handle_return(
     // Caller expects results at ci->func (function slot), which is base-1
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = if call_info.base > 0 {
-        call_info.base - 1  // Function is at base-1
+        call_info.base - 1 // Function is at base-1
     } else {
         0
     };

@@ -2,7 +2,7 @@
   String Concatenation Optimization - Lua 5.5 Style
 
   Based on luaV_concat from lua-5.5.0/src/lvm.c
-  
+
   Key optimizations:
   1. Pre-calculate total length to avoid reallocation
   2. Short string optimization (stack buffer)
@@ -92,10 +92,10 @@ pub fn concat_strings(
         let mut total_len = 0usize;
         let mut all_strings = true;
         let mut has_empty = false;
-        
+
         for i in 0..n {
             let val = *stack_ptr.add(base + a + i);
-            
+
             if let Some(string_id) = val.as_string_id() {
                 if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
                     let len = s.as_str().len();
@@ -117,7 +117,7 @@ pub fn concat_strings(
             if n == 2 && has_empty {
                 let first = *stack_ptr.add(base + a);
                 let second = *stack_ptr.add(base + a + 1);
-                
+
                 if let (Some(id1), Some(id2)) = (first.as_string_id(), second.as_string_id()) {
                     let (len1, len2) = {
                         let pool = &lua_state.vm_mut().object_pool;
@@ -125,7 +125,7 @@ pub fn concat_strings(
                         let l2 = pool.get_string(id2).map(|s| s.as_str().len()).unwrap_or(0);
                         (l1, l2)
                     };
-                    
+
                     if len1 == 0 {
                         return Ok(second); // First is empty, return second
                     }
@@ -139,7 +139,7 @@ pub fn concat_strings(
             if total_len <= MAX_SHORT_LEN {
                 // Short string - use Vec (will be on stack in optimized version)
                 let mut buffer = Vec::with_capacity(total_len);
-                
+
                 for i in 0..n {
                     let val = *stack_ptr.add(base + a + i);
                     if let Some(string_id) = val.as_string_id() {
@@ -148,14 +148,14 @@ pub fn concat_strings(
                         }
                     }
                 }
-                
+
                 let result = String::from_utf8(buffer).unwrap_or_default();
                 let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&result);
                 return Ok(LuaValue::string(string_id));
             } else {
                 // Long string - build directly
                 let mut result = String::with_capacity(total_len);
-                
+
                 for i in 0..n {
                     let val = *stack_ptr.add(base + a + i);
                     if let Some(string_id) = val.as_string_id() {
@@ -164,7 +164,7 @@ pub fn concat_strings(
                         }
                     }
                 }
-                
+
                 let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&result);
                 return Ok(LuaValue::string(string_id));
             }
@@ -174,7 +174,7 @@ pub fn concat_strings(
         // Collect all parts first, then concatenate
         let mut parts: Vec<String> = Vec::with_capacity(n);
         let mut total_len = 0;
-        
+
         for i in 0..n {
             let val = *stack_ptr.add(base + a + i);
             let (s, _was_string) = value_to_string_content(lua_state, &val)?;
@@ -225,12 +225,14 @@ mod tests {
     fn test_concat_single() {
         let mut vm = LuaVM::new(SafeOption::default());
         vm.open_libs();
-        
+
         // Test single string
-        let result = vm.execute_string(r#"
+        let result = vm.execute_string(
+            r#"
             local s = "hello"
             return s
-        "#);
+        "#,
+        );
         assert!(result.is_ok());
     }
 
@@ -238,12 +240,14 @@ mod tests {
     fn test_concat_numbers() {
         let mut vm = LuaVM::new(SafeOption::default());
         vm.open_libs();
-        
+
         // Test number concatenation
-        let result = vm.execute_string(r#"
+        let result = vm.execute_string(
+            r#"
             local s = "x" .. 42 .. "y"
             assert(s == "x42y")
-        "#);
+        "#,
+        );
         assert!(result.is_ok());
     }
 }

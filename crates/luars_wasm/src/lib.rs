@@ -1,4 +1,4 @@
-use luars::{LuaVM, LuaValue, lua_vm::SafeOption};
+use luars::{lua_vm::SafeOption, LuaVM, LuaValue};
 use wasm_bindgen::prelude::*;
 
 // Set panic hook for better error messages in WASM
@@ -21,9 +21,7 @@ impl LuaWasm {
         let mut vm = LuaVM::new(SafeOption::default());
         vm.open_libs();
 
-        Ok(LuaWasm {
-            vm,
-        })
+        Ok(LuaWasm { vm })
     }
 
     /// Execute Lua code and return the result as a string
@@ -41,8 +39,8 @@ impl LuaWasm {
     /// Set a global variable in Lua
     #[wasm_bindgen(js_name = setGlobal)]
     pub fn set_global(&mut self, name: &str, value: JsValue) -> Result<(), JsValue> {
-        let lua_value =
-            js_value_to_lua(&mut *self.vm, &value).map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        let lua_value = js_value_to_lua(&mut *self.vm, &value)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         self.vm.set_global(name, lua_value);
         Ok(())
     }
@@ -93,11 +91,13 @@ impl LuaWasm {
             name
         );
 
-        let chunk = self.vm
+        let chunk = self
+            .vm
             .compile(&code)
             .map_err(|e| JsValue::from_str(&format!("Failed to register function: {:?}", e)))?;
 
-        self.vm.execute(std::rc::Rc::new(chunk))
+        self.vm
+            .execute(std::rc::Rc::new(chunk))
             .map_err(|e| JsValue::from_str(&format!("Failed to execute registration: {:?}", e)))?;
 
         Ok(())

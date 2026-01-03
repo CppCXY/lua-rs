@@ -67,7 +67,7 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
             // Success - either yielded (finished=false) or completed (finished=true)
             // Both are successful from pcall perspective
             let result_count = results.len();
-            l.push_value(LuaValue::boolean(true))?;  // success=true
+            l.push_value(LuaValue::boolean(true))?; // success=true
             for result in results {
                 l.push_value(result)?;
             }
@@ -77,7 +77,7 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
             // Error occurred during resume
             let error_msg = format!("{:?}", e);
             let error_str = l.create_string(&error_msg);
-            l.push_value(LuaValue::boolean(false))?;  // success=false
+            l.push_value(LuaValue::boolean(false))?; // success=false
             l.push_value(error_str)?;
             Ok(2)
         }
@@ -90,7 +90,7 @@ fn coroutine_yield(l: &mut LuaState) -> LuaResult<usize> {
 
     // Yield with values
     l.do_yield(args)?;
-    
+
     // This return value won't be used because do_yield returns Err(LuaError::Yield)
     Ok(0)
 }
@@ -253,7 +253,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
     if vm.object_pool.get_thread(thread_id).is_none() {
         return Err(l.error("cannot close dead coroutine".to_string()));
     }
-    
+
     // Clear the thread's stack and frames to mark it as closed
     if let Some(thread_rc) = vm.object_pool.get_thread(thread_id) {
         let mut thread = thread_rc.borrow_mut();

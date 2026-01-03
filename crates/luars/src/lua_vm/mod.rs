@@ -187,17 +187,17 @@ impl LuaVM {
 
         // Run the VM execution loop
         let results = self.run()?;
-        
+
         // Clear the stack for next execution
         self.main_state.stack_truncate(0);
-        
+
         Ok(results)
     }
 
     /// Main VM execution loop (equivalent to luaV_execute)
     fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
         lua_execute(&mut self.main_state)?;
-        
+
         // Collect all values remaining on stack as return values
         let mut results = Vec::new();
         for i in 0..self.main_state.stack_len() {
@@ -205,7 +205,7 @@ impl LuaVM {
                 results.push(val);
             }
         }
-        
+
         Ok(results)
     }
 
@@ -250,7 +250,7 @@ impl LuaVM {
     pub fn create_thread(&mut self, func: LuaValue) -> LuaValue {
         // Create a new LuaState for the coroutine
         let mut thread = LuaState::new(1, self as *mut LuaVM, self.safe_option.clone());
-        
+
         // Push the function onto the thread's stack
         // It will be used when resume() is first called
         thread.stack_mut().push(func);
@@ -293,12 +293,7 @@ impl LuaVM {
     }
 
     #[inline(always)]
-    pub fn table_set(
-        &mut self,
-        lua_table_val: &LuaValue,
-        key: LuaValue,
-        value: LuaValue,
-    ) -> bool {
+    pub fn table_set(&mut self, lua_table_val: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
         let Some(table_id) = lua_table_val.as_table_id() else {
             return false;
         };
@@ -321,18 +316,18 @@ impl LuaVM {
     ) -> Option<LuaValue> {
         // First try raw get
         let table_id = table_value.as_table_id()?;
-        
+
         // Try to get value directly from table
         if let Some(value) = self.table_get_raw(table_value, key) {
             return Some(value);
         }
-        
+
         // Value not found, check for __index metamethod
         let metatable = {
             let table = self.object_pool.get_table(table_id)?;
             table.get_metatable()
         };
-        
+
         if let Some(mt) = metatable {
             // Try to get __index metamethod
             let index_key = self.create_string("__index");
@@ -348,11 +343,11 @@ impl LuaVM {
                 }
             }
         }
-        
+
         None
     }
 
-        /// Set value in table with metatable support (__newindex metamethod)
+    /// Set value in table with metatable support (__newindex metamethod)
     /// Use this for SETTABLE, SETFIELD, SETI instructions
     /// For raw set without metamethods, use table_set_raw() instead
     pub fn table_set_with_meta(
@@ -372,20 +367,20 @@ impl LuaVM {
         } else {
             return Err(self.error("invalid table".to_string()));
         };
-        
+
         if key_exists {
             // Key exists, just set it directly
             self.table_set_raw(&lua_table_val, key, value);
             return Ok(());
         }
-        
+
         // Key doesn't exist, check for __newindex metamethod
         let metatable = if let Some(table) = self.object_pool.get_table(table_id) {
             table.get_metatable()
         } else {
             return Err(self.error("invalid table".to_string()));
         };
-        
+
         if let Some(mt) = metatable {
             let newindex_key = self.create_string("__newindex");
             if let Some(newindex_mm) = self.table_get_raw(&mt, &newindex_key) {
@@ -400,12 +395,11 @@ impl LuaVM {
                 }
             }
         }
-        
+
         // No metamethod or metamethod didn't handle it, do raw set
         self.table_set_raw(&lua_table_val, key, value);
         Ok(())
     }
-
 
     /// Get value from userdata with metatable support
     /// Handles __index metamethod
@@ -672,7 +666,13 @@ impl LuaVM {
     /// Convert a LuaValue to its string representation (without metamethods)
     /// This properly resolves GC objects through the object pool
     pub fn value_to_string_raw(&self, value: &LuaValue) -> String {
+        eprintln!(
+            "[DEBUG] value_to_string_raw: is_nil={}, is_string={}",
+            value.is_nil(),
+            value.is_string()
+        );
         if value.is_nil() {
+            eprintln!("[DEBUG] value_to_string_raw: returning 'nil' (was nil)");
             "nil".to_string()
         } else if let Some(b) = value.as_bool() {
             b.to_string()
@@ -686,6 +686,10 @@ impl LuaVM {
                 n.to_string()
             }
         } else if let Some(lua_str) = self.get_string(value) {
+            eprintln!(
+                "[DEBUG] value_to_string_raw: returning string '{}'",
+                lua_str.as_str()
+            );
             lua_str.as_str().to_string()
         } else if value.is_table() {
             if let Some(id) = value.as_table_id() {

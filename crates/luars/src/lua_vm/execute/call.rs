@@ -33,14 +33,14 @@ pub fn handle_call(
         // Arguments are from base+a+1 to current frame's top
         let func_idx = base + a;
         let first_arg = func_idx + 1;
-        
+
         // Get current frame's top (not global stack top!)
         let frame_top = if let Some(frame) = lua_state.current_frame() {
             frame.top
         } else {
-            lua_state.stack_len()  // Fallback to global top
+            lua_state.stack_len() // Fallback to global top
         };
-        
+
         if frame_top > first_arg {
             frame_top - first_arg
         } else {
@@ -158,7 +158,7 @@ fn call_c_function(
 
     // Pop the frame BEFORE handling error (important for Yield)
     lua_state.pop_frame();
-    
+
     // Now handle the result
     let n = result?;
 
@@ -173,11 +173,11 @@ fn call_c_function(
     // This is crucial for nested calls - the outer call needs to know
     // where the returned values end
     let final_nresults = if nresults == -1 {
-        n  // MULTRET: all results
+        n // MULTRET: all results
     } else {
-        nresults as usize  // Fixed number (may be 0)
+        nresults as usize // Fixed number (may be 0)
     };
-    
+
     let new_top = func_idx + final_nresults;
     if let Some(frame) = lua_state.current_frame_mut() {
         frame.top = new_top;
@@ -214,7 +214,23 @@ fn move_results(
             } else {
                 // At least one result - move it
                 let val = lua_state.stack_get(first_result).unwrap_or(LuaValue::nil());
+                eprintln!(
+                    "[DEBUG] move_results: Moving 1 result from {} to {}",
+                    first_result, res
+                );
+                eprintln!(
+                    "[DEBUG] move_results: val is_string={}, is_nil={}",
+                    val.is_string(),
+                    val.is_nil()
+                );
                 lua_state.stack_set(res, val)?;
+                let check = lua_state.stack_get(res).unwrap();
+                eprintln!(
+                    "[DEBUG] move_results: After set, stack[{}] is_string={}, is_nil={}",
+                    res,
+                    check.is_string(),
+                    check.is_nil()
+                );
             }
         }
         -1 => {
@@ -262,13 +278,13 @@ pub fn handle_tailcall(
         // Variable args: use current frame's top
         let func_idx = base + a;
         let first_arg = func_idx + 1;
-        
+
         let frame_top = if let Some(frame) = lua_state.current_frame() {
             frame.top
         } else {
             lua_state.stack_len()
         };
-        
+
         if frame_top > first_arg {
             frame_top - first_arg
         } else {

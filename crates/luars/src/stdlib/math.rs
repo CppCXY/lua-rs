@@ -5,8 +5,8 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::lua_vm::LuaState;
 use crate::lua_vm::LuaResult;
+use crate::lua_vm::LuaState;
 
 pub fn create_math_lib() -> LibraryModule {
     let mut module = crate::lib_module!("math", {
@@ -45,7 +45,8 @@ pub fn create_math_lib() -> LibraryModule {
 }
 
 fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1)
+    let value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'abs' (number expected)".to_string()))?;
 
     // Fast path: preserve integer type
@@ -63,7 +64,8 @@ fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_acos(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'acos' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'acos' (number expected)".to_string()))?;
@@ -72,7 +74,8 @@ fn math_acos(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_asin(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'asin' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'asin' (number expected)".to_string()))?;
@@ -81,7 +84,8 @@ fn math_asin(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_atan(l: &mut LuaState) -> LuaResult<usize> {
-    let y = l.get_arg(1)
+    let y = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'atan' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'atan' (number expected)".to_string()))?;
@@ -91,7 +95,8 @@ fn math_atan(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1)
+    let value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'ceil' (number expected)".to_string()))?;
 
     // Fast path: integers are already ceil'd
@@ -109,7 +114,8 @@ fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_cos(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'cos' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'cos' (number expected)".to_string()))?;
@@ -118,7 +124,8 @@ fn math_cos(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_deg(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'deg' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'deg' (number expected)".to_string()))?;
@@ -127,7 +134,8 @@ fn math_deg(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_exp(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'exp' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'exp' (number expected)".to_string()))?;
@@ -136,7 +144,8 @@ fn math_exp(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
-    let value = l.get_arg(1)
+    let value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'floor' (number expected)".to_string()))?;
 
     // Fast path: integers are already floor'd
@@ -154,11 +163,13 @@ fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_fmod(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?;
-    let y = l.get_arg(2)
+    let y = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?;
@@ -167,7 +178,8 @@ fn math_fmod(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_log(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'log' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'log' (number expected)".to_string()))?;
@@ -187,17 +199,21 @@ fn math_max(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Get first argument
-    let first = l.get_arg(1)
+    let first = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
-    let mut max_val = first.as_number()
+    let mut max_val = first
+        .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
     let mut max_arg = first;
 
     // Compare with rest
     for i in 2..=argc {
-        let arg = l.get_arg(i)
+        let arg = l
+            .get_arg(i)
             .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
-        let val = arg.as_number()
+        let val = arg
+            .as_number()
             .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
         if val > max_val {
             max_val = val;
@@ -217,17 +233,21 @@ fn math_min(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Get first argument
-    let first = l.get_arg(1)
+    let first = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
-    let mut min_val = first.as_number()
+    let mut min_val = first
+        .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
     let mut min_arg = first;
 
     // Compare with rest
     for i in 2..=argc {
-        let arg = l.get_arg(i)
+        let arg = l
+            .get_arg(i)
             .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
-        let val = arg.as_number()
+        let val = arg
+            .as_number()
             .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
         if val < min_val {
             min_val = val;
@@ -240,7 +260,8 @@ fn math_min(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_modf(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'modf' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'modf' (number expected)".to_string()))?;
@@ -253,7 +274,8 @@ fn math_modf(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_rad(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'rad' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'rad' (number expected)".to_string()))?;
@@ -294,10 +316,15 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         1 => {
-            let m = l.get_arg(1)
-                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))?
+            let m = l
+                .get_arg(1)
+                .ok_or_else(|| {
+                    l.error("bad argument #1 to 'random' (number expected)".to_string())
+                })?
                 .as_number()
-                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))? as i64;
+                .ok_or_else(|| {
+                    l.error("bad argument #1 to 'random' (number expected)".to_string())
+                })? as i64;
             if m < 1 {
                 return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
@@ -306,14 +333,24 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         _ => {
-            let m = l.get_arg(1)
-                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))?
+            let m = l
+                .get_arg(1)
+                .ok_or_else(|| {
+                    l.error("bad argument #1 to 'random' (number expected)".to_string())
+                })?
                 .as_number()
-                .ok_or_else(|| l.error("bad argument #1 to 'random' (number expected)".to_string()))? as i64;
-            let n = l.get_arg(2)
-                .ok_or_else(|| l.error("bad argument #2 to 'random' (number expected)".to_string()))?
+                .ok_or_else(|| {
+                    l.error("bad argument #1 to 'random' (number expected)".to_string())
+                })? as i64;
+            let n = l
+                .get_arg(2)
+                .ok_or_else(|| {
+                    l.error("bad argument #2 to 'random' (number expected)".to_string())
+                })?
                 .as_number()
-                .ok_or_else(|| l.error("bad argument #2 to 'random' (number expected)".to_string()))? as i64;
+                .ok_or_else(|| {
+                    l.error("bad argument #2 to 'random' (number expected)".to_string())
+                })? as i64;
             if m > n {
                 return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
@@ -337,9 +374,7 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
         } else if let Some(n) = arg.as_number() {
             n as u64
         } else {
-            return Err(
-                l.error("bad argument #1 to 'randomseed' (number expected)".to_string())
-            );
+            return Err(l.error("bad argument #1 to 'randomseed' (number expected)".to_string()));
         }
     } else {
         // No argument - use time-based seed
@@ -367,7 +402,8 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_sin(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'sin' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'sin' (number expected)".to_string()))?;
@@ -376,7 +412,8 @@ fn math_sin(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_sqrt(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'sqrt' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'sqrt' (number expected)".to_string()))?;
@@ -385,7 +422,8 @@ fn math_sqrt(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_tan(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l.get_arg(1)
+    let x = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'tan' (number expected)".to_string()))?
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'tan' (number expected)".to_string()))?;
@@ -394,7 +432,8 @@ fn math_tan(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_tointeger(l: &mut LuaState) -> LuaResult<usize> {
-    let val = l.get_arg(1)
+    let val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'tointeger' (value expected)".to_string()))?;
 
     let result = if let Some(i) = val.as_integer() {
@@ -464,7 +503,8 @@ fn float_to_integer(f: f64) -> LuaValue {
 }
 
 fn math_type(l: &mut LuaState) -> LuaResult<usize> {
-    let val = l.get_arg(1)
+    let val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'type' (value expected)".to_string()))?;
 
     let type_str = match val.kind() {
@@ -482,12 +522,14 @@ fn math_type(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_ult(l: &mut LuaState) -> LuaResult<usize> {
-    let m_value = l.get_arg(1)
+    let m_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'ult' (integer expected)".to_string()))?;
     let Some(m) = m_value.as_integer() else {
         return Err(l.error("bad argument #1 to 'ult' (integer expected)".to_string()));
     };
-    let n_value = l.get_arg(2)
+    let n_value = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'ult' (integer expected)".to_string()))?;
     let Some(n) = n_value.as_integer() else {
         return Err(l.error("bad argument #2 to 'ult' (integer expected)".to_string()));

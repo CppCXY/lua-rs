@@ -236,7 +236,7 @@ fn try_bin_tm(
     // 2. Lookup metamethod by name in metatable
     // 3. If found, call it with (p1, p2) as arguments
     // 4. Return result
-    
+
     // No metamethod found, return error
     let msg = match tm {
         TmKind::Band | TmKind::Bor | TmKind::Bxor | TmKind::Shl | TmKind::Shr | TmKind::Bnot => {

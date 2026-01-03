@@ -7,7 +7,7 @@ pub struct SafeOption {
 impl Default for SafeOption {
     fn default() -> Self {
         Self {
-            max_stack_size: 10000000, 
+            max_stack_size: 10000000,
             max_call_depth: 256,
         }
     }

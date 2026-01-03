@@ -778,6 +778,13 @@ impl ObjectPool {
             match self.string_intern.find_or_insert_index(hash, compare) {
                 Ok(existing_id) => {
                     // Found existing string with same content
+                    if s == "nil" {
+                        eprintln!(
+                            "[DEBUG] create_string('nil'): Found existing StringId({}) hash={:x}",
+                            existing_id.raw(),
+                            hash
+                        );
+                    }
                     return (existing_id, false);
                 }
                 Err(insert_idx) => {
@@ -787,6 +794,13 @@ impl ObjectPool {
                         data: LuaString::with_hash(s.to_string(), hash),
                     };
                     let id = StringId::short(self.strings.alloc(gc_string));
+                    if s == "nil" {
+                        eprintln!(
+                            "[DEBUG] create_string('nil'): Created NEW StringId({}) hash={:x}",
+                            id.raw(),
+                            hash
+                        );
+                    }
                     self.string_intern.insert(hash, id, insert_idx);
 
                     // Check if resize needed (pass dummy closure since we just inserted)
@@ -1147,12 +1161,23 @@ impl ObjectPool {
     }
 
     /// Create upvalue from LuaUpvalue
-    pub fn create_upvalue(&mut self, upvalue: std::rc::Rc<crate::lua_value::LuaUpvalue>) -> UpvalueId {
+    pub fn create_upvalue(
+        &mut self,
+        upvalue: std::rc::Rc<crate::lua_value::LuaUpvalue>,
+    ) -> UpvalueId {
         // Check if open and get stack index
         let (is_open, stack_index, closed_value) = if upvalue.is_open() {
-            (true, upvalue.get_stack_index().unwrap_or(0), LuaValue::nil())
+            (
+                true,
+                upvalue.get_stack_index().unwrap_or(0),
+                LuaValue::nil(),
+            )
         } else {
-            (false, 0, upvalue.get_closed_value().unwrap_or(LuaValue::nil()))
+            (
+                false,
+                0,
+                upvalue.get_closed_value().unwrap_or(LuaValue::nil()),
+            )
         };
 
         let gc_uv = GcUpvalue {
@@ -1433,9 +1458,11 @@ mod tests {
 
         // Read back
         if let Some(table) = pool.get_table(tid) {
-            assert_eq!(
-                table.raw_get(&LuaValue::integer(1)),
-                Some(LuaValue::integer(42))
+            assert!(
+                table
+                    .raw_get(&LuaValue::integer(1))
+                    .unwrap()
+                    .raw_equal(&LuaValue::integer(42), &pool)
             );
         }
     }

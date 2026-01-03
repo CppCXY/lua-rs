@@ -2,8 +2,8 @@
 // Provides a clean way to register Rust functions as Lua libraries
 
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{CFunction, LuaResult, LuaVM};
 use crate::lua_vm::LuaState;
+use crate::lua_vm::{CFunction, LuaResult, LuaVM};
 use crate::stdlib;
 // use crate::stdlib;
 

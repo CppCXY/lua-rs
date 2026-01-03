@@ -3,8 +3,8 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::LuaState;
 use crate::lua_vm::LuaResult;
+use crate::lua_vm::LuaState;
 
 pub fn create_utf8_lib() -> LibraryModule {
     let mut module = crate::lib_module!("utf8", {
@@ -27,7 +27,8 @@ pub fn create_utf8_lib() -> LibraryModule {
 }
 
 fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
-    let s_value = l.get_arg(1)
+    let s_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'len' (string expected)".to_string()))?;
     let Some(s_id) = s_value.as_string_id() else {
         return Err(l.error("bad argument #1 to 'len' (string expected)".to_string()));
@@ -133,7 +134,8 @@ fn utf8_char(l: &mut LuaState) -> LuaResult<usize> {
 
 /// utf8.codes(s) - Returns an iterator for UTF-8 characters
 fn utf8_codes(l: &mut LuaState) -> LuaResult<usize> {
-    let s_value = l.get_arg(1)
+    let s_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'codes' (string expected)".to_string()))?;
     if !s_value.is_string() {
         return Err(l.error("bad argument #1 to 'codes' (string expected)".to_string()));
@@ -161,7 +163,8 @@ fn utf8_codes(l: &mut LuaState) -> LuaResult<usize> {
 
 /// Iterator function for utf8.codes
 fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
-    let t_value = l.get_arg(1)
+    let t_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("utf8.codes iterator: invalid state".to_string()))?;
 
     let string_key = 1;
@@ -231,7 +234,8 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
 
 /// utf8.codepoint(s [, i [, j]]) - Returns code points of characters
 fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
-    let s_value = l.get_arg(1)
+    let s_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'codepoint' (string expected)".to_string()))?;
     let Some(s_id) = s_value.as_string_id() else {
         return Err(l.error("bad argument #1 to 'codepoint' (string expected)".to_string()));
@@ -246,7 +250,8 @@ fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
 
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
 
-    let j = l.get_arg(3)
+    let j = l
+        .get_arg(3)
         .and_then(|v| v.as_integer())
         .map(|v| v as usize)
         .unwrap_or(i);
@@ -278,7 +283,8 @@ fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
 
 /// utf8.offset(s, n [, i]) - Returns byte position of n-th character
 fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
-    let s_value = l.get_arg(1)
+    let s_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'offset' (string expected)".to_string()))?;
     let Some(s_id) = s_value.as_string_id() else {
         return Err(l.error("bad argument #1 to 'offset' (string expected)".to_string()));
@@ -291,12 +297,14 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
         s.as_str().to_string()
     };
 
-    let n_value = l.get_arg(2)
+    let n_value = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'offset' (number expected)".to_string()))?;
     let Some(n) = n_value.as_integer() else {
         return Err(l.error("bad argument #2 to 'offset' (number expected)".to_string()));
     };
-    let i = l.get_arg(3)
+    let i = l
+        .get_arg(3)
         .and_then(|v| v.as_integer())
         .unwrap_or(if n >= 0 { 1 } else { (s_str.len() + 1) as i64 }) as usize;
 

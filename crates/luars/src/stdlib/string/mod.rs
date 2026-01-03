@@ -24,9 +24,10 @@ pub fn create_string_lib() -> LibraryModule {
     module
         .entries
         .push(("find", LibraryEntry::Function(string_find)));
-    module
-        .entries
-        .push(("format", LibraryEntry::Function(string_format::string_format)));
+    module.entries.push((
+        "format",
+        LibraryEntry::Function(string_format::string_format),
+    ));
     module
         .entries
         .push(("gsub", LibraryEntry::Function(string_gsub)));
@@ -54,7 +55,7 @@ pub fn create_string_lib() -> LibraryModule {
 
     // TODO: gmatch - needs iterator support
     // module.entries.push(("gmatch", LibraryEntry::Function(string_gmatch)));
-    
+
     // TODO: pack/packsize/unpack - need conversion to new API
     // module.entries.push(("pack", LibraryEntry::Function(string_pack)));
     // module.entries.push(("packsize", LibraryEntry::Function(string_packsize)));
@@ -428,14 +429,18 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
 /// string.find(s, pattern [, init [, plain]]) - Find pattern
 /// ULTRA-OPTIMIZED: Avoid string cloning in hot path
 fn string_find(l: &mut LuaState) -> LuaResult<usize> {
-    let s_value = l.get_arg(1)
+    let s_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'find' (string expected)".to_string()))?;
-    let s_id = s_value.as_string_id()
+    let s_id = s_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #1 to 'find' (string expected)".to_string()))?;
-    
-    let pattern_value = l.get_arg(2)
+
+    let pattern_value = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'find' (string expected)".to_string()))?;
-    let pattern_id = pattern_value.as_string_id()
+    let pattern_id = pattern_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #2 to 'find' (string expected)".to_string()))?;
 
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
@@ -449,13 +454,17 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
         let pattern_lua = vm.object_pool.get_string(pattern_id);
         match (s_lua, pattern_lua) {
             (Some(s), Some(p)) => Ok((s.as_str().to_string(), p.as_str().to_string())),
-            _ => Err("invalid string".to_string())
+            _ => Err("invalid string".to_string()),
         }
-    }.map_err(|e| l.error(e))?;
+    }
+    .map_err(|e| l.error(e))?;
 
     // Fast path: check if pattern contains special characters
     let has_special = pattern.bytes().any(|c| {
-        matches!(c, b'%' | b'.' | b'[' | b']' | b'*' | b'+' | b'-' | b'?' | b'^' | b'$' | b'(' | b')')
+        matches!(
+            c,
+            b'%' | b'.' | b'[' | b']' | b'*' | b'+' | b'-' | b'?' | b'^' | b'$' | b'(' | b')'
+        )
     });
 
     if plain || !has_special {
@@ -498,10 +507,12 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
                     }
                 } else {
                     // Complex pattern - use full pattern matcher
-                    if let Some((start, end, captures)) = pattern::find(&s_str, &parsed_pattern, start_pos) {
+                    if let Some((start, end, captures)) =
+                        pattern::find(&s_str, &parsed_pattern, start_pos)
+                    {
                         l.push_value(LuaValue::integer((start + 1) as i64))?;
                         l.push_value(LuaValue::integer(end as i64))?;
-                        
+
                         // Add captures
                         for cap in captures {
                             let cap_str = l.create_string(&cap);
@@ -523,14 +534,18 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
 
 /// string.match(s, pattern [, init]) - Match pattern
 fn string_match(l: &mut LuaState) -> LuaResult<usize> {
-    let s_value = l.get_arg(1)
+    let s_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'match' (string expected)".to_string()))?;
-    let string_id = s_value.as_string_id()
+    let string_id = s_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #1 to 'match' (string expected)".to_string()))?;
 
-    let pattern_value = l.get_arg(2)
+    let pattern_value = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'match' (string expected)".to_string()))?;
-    let pattern_id = pattern_value.as_string_id()
+    let pattern_id = pattern_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #2 to 'match' (string expected)".to_string()))?;
 
     let (s_str, pattern_str) = {
@@ -538,10 +553,13 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
         let s = vm.object_pool.get_string(string_id);
         let p = vm.object_pool.get_string(pattern_id);
         match (s, p) {
-            (Some(s_obj), Some(p_obj)) => Ok((s_obj.as_str().to_string(), p_obj.as_str().to_string())),
-            _ => Err("invalid string".to_string())
+            (Some(s_obj), Some(p_obj)) => {
+                Ok((s_obj.as_str().to_string(), p_obj.as_str().to_string()))
+            }
+            _ => Err("invalid string".to_string()),
         }
-    }.map_err(|e| l.error(e))?;
+    }
+    .map_err(|e| l.error(e))?;
 
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
     let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
@@ -579,20 +597,26 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
 /// NOTE: Only string replacement is currently implemented
 /// TODO: Function and table replacement need protected_call support in LuaState API
 fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
-    let s_value = l.get_arg(1)
+    let s_value = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'gsub' (string expected)".to_string()))?;
-    let s_id = s_value.as_string_id()
+    let s_id = s_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #1 to 'gsub' (string expected)".to_string()))?;
 
-    let pattern_value = l.get_arg(2)
+    let pattern_value = l
+        .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'gsub' (string expected)".to_string()))?;
-    let pattern_id = pattern_value.as_string_id()
+    let pattern_id = pattern_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #2 to 'gsub' (string expected)".to_string()))?;
 
-    let repl_value = l.get_arg(3)
+    let repl_value = l
+        .get_arg(3)
         .ok_or_else(|| l.error("bad argument #3 to 'gsub' (value expected)".to_string()))?;
 
-    let repl_id = repl_value.as_string_id()
+    let repl_id = repl_value
+        .as_string_id()
         .ok_or_else(|| l.error("bad argument #3 to 'gsub' (string expected)".to_string()))?;
 
     // Get all strings first before any operations
@@ -601,16 +625,22 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         let s = vm.object_pool.get_string(s_id);
         let p = vm.object_pool.get_string(pattern_id);
         let r = vm.object_pool.get_string(repl_id);
-        
-        match (s, p, r) {
-            (Some(s_obj), Some(p_obj), Some(r_obj)) => {
-                Ok((s_obj.as_str().to_string(), p_obj.as_str().to_string(), r_obj.as_str().to_string()))
-            }
-            _ => Err("invalid string".to_string())
-        }
-    }.map_err(|e| l.error(e))?;
 
-    let max = l.get_arg(4).and_then(|v| v.as_integer()).map(|n| n as usize);
+        match (s, p, r) {
+            (Some(s_obj), Some(p_obj), Some(r_obj)) => Ok((
+                s_obj.as_str().to_string(),
+                p_obj.as_str().to_string(),
+                r_obj.as_str().to_string(),
+            )),
+            _ => Err("invalid string".to_string()),
+        }
+    }
+    .map_err(|e| l.error(e))?;
+
+    let max = l
+        .get_arg(4)
+        .and_then(|v| v.as_integer())
+        .map(|n| n as usize);
 
     let pattern = match pattern::parse_pattern(&pattern_str) {
         Ok(p) => p,
@@ -655,8 +685,7 @@ fn gsub_with_function(
             }
         }
 
-        if let Some((end_pos, captures)) = pattern::try_match(pattern, &text_chars, pos)
-        {
+        if let Some((end_pos, captures)) = pattern::try_match(pattern, &text_chars, pos) {
             count += 1;
 
             // Prepare arguments for function call

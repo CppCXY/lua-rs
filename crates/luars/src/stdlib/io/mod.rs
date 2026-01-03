@@ -29,9 +29,10 @@ pub fn create_io_lib() -> LibraryModule {
 
 /// Initialize io standard streams (called after library registration)
 pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
-    let io_table = l.get_global("io")
+    let io_table = l
+        .get_global("io")
         .ok_or_else(|| l.error("io table not found".to_string()))?;
-    
+
     let Some(io_id) = io_table.as_table_id() else {
         return Err(l.error("io must be a table".to_string()));
     };
@@ -223,14 +224,16 @@ fn io_flush(_l: &mut LuaState) -> LuaResult<usize> {
 
 /// io.open(filename [, mode]) - Open a file
 fn io_open(l: &mut LuaState) -> LuaResult<usize> {
-    let filename_val = l.get_arg(1)
+    let filename_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'io.open' (string expected)".to_string()))?;
     let filename_str = match l.get_string(&filename_val) {
         Some(s) => s.as_str().to_string(),
         None => return Err(l.error("bad argument #1 to 'io.open' (string expected)".to_string())),
     };
 
-    let mode_str = l.get_arg(2)
+    let mode_str = l
+        .get_arg(2)
         .and_then(|v| l.get_string(&v).map(|s| s.as_str().to_string()))
         .unwrap_or_else(|| "r".to_string());
     let mode = mode_str.as_str();
@@ -318,12 +321,14 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
 
 /// Iterator function for io.lines()
 fn io_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
-    let state_val = l.get_arg(1)
+    let state_val = l
+        .get_arg(1)
         .ok_or_else(|| l.error("iterator requires state".to_string()))?;
     let file_key = l.create_string("file");
-    let file_val = l.table_get(&state_val, &file_key)
+    let file_val = l
+        .table_get(&state_val, &file_key)
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
-    
+
     // Read next line
     if let Some(ud) = l.get_userdata(&file_val) {
         let data = ud.get_data();

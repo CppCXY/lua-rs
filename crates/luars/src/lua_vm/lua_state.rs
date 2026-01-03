@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use crate::gc::UpvalueId;
-use crate::lua_value::{LuaValue, LuaUserdata, LuaString};
+use crate::lua_value::{LuaString, LuaUserdata, LuaValue};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
 use crate::{Chunk, LuaVM};
@@ -101,10 +101,15 @@ impl LuaState {
 
         // Determine call status based on function type
         use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
-        let call_status = if func.is_cfunction() || func.as_function_id().and_then(|id| {
-            let vm = unsafe { &*self.vm };
-            vm.object_pool.get_function(id).and_then(|f| f.c_function())
-        }).is_some() {
+        let call_status = if func.is_cfunction()
+            || func
+                .as_function_id()
+                .and_then(|id| {
+                    let vm = unsafe { &*self.vm };
+                    vm.object_pool.get_function(id).and_then(|f| f.c_function())
+                })
+                .is_some()
+        {
             CIST_C
         } else {
             CIST_LUA
@@ -221,7 +226,8 @@ impl LuaState {
                     if let Some(func_obj) = vm.object_pool.get_function(func_id) {
                         if let Some(chunk) = func_obj.chunk() {
                             let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len()
+                            {
                                 chunk.line_info[ci.pc as usize - 1] as usize
                             } else if !chunk.line_info.is_empty() {
                                 chunk.line_info[0] as usize
@@ -248,7 +254,7 @@ impl LuaState {
         } else {
             String::new()
         };
-        
+
         self.error_msg = format!("{}{}", location, msg);
         LuaError::RuntimeError
     }
@@ -271,14 +277,14 @@ impl LuaState {
     pub fn generate_traceback(&self) -> String {
         let mut result = String::new();
         let vm = unsafe { &*self.vm };
-        
+
         // Iterate through call stack from newest to oldest
         for (level, ci) in self.call_stack.iter().rev().enumerate() {
             if level >= 20 {
                 result.push_str("\t...\n");
                 break;
             }
-            
+
             // Get function info
             if ci.is_lua() {
                 // Lua function - get source and line info
@@ -286,27 +292,32 @@ impl LuaState {
                     if let Some(func_obj) = vm.object_pool.get_function(func_id) {
                         if let Some(chunk) = func_obj.chunk() {
                             let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                            
+
                             // Get current line number from PC
-                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len()
+                            {
                                 chunk.line_info[ci.pc as usize - 1] as usize
                             } else if !chunk.line_info.is_empty() {
                                 chunk.line_info[0] as usize
                             } else {
                                 0
                             };
-                            
+
                             if level == 0 {
                                 // Current function (where error occurred)
                                 if line > 0 {
-                                    result.push_str(&format!("\t{}:{}: in main chunk\n", source, line));
+                                    result.push_str(&format!(
+                                        "\t{}:{}: in main chunk\n",
+                                        source, line
+                                    ));
                                 } else {
                                     result.push_str(&format!("\t{}: in main chunk\n", source));
                                 }
                             } else {
                                 // Called functions
                                 if line > 0 {
-                                    result.push_str(&format!("\t{}:{}: in function\n", source, line));
+                                    result
+                                        .push_str(&format!("\t{}:{}: in function\n", source, line));
                                 } else {
                                     result.push_str(&format!("\t{}: in function\n", source));
                                 }
@@ -321,7 +332,7 @@ impl LuaState {
                 result.push_str("\t[C]: in function\n");
             }
         }
-        
+
         result
     }
 
@@ -544,9 +555,12 @@ impl LuaState {
         // (NOT base+1, because C function frame.base already points to first arg)
         let stack_index = base + index - 1;
 
-        if stack_index < top {
-            self.stack_get(stack_index)
+        // Check if argument position is within the valid range
+        if stack_index < top && stack_index < self.stack.len() {
+            // Return the value (including nil values)
+            Some(self.stack[stack_index])
         } else {
+            // Argument doesn't exist
             None
         }
     }
@@ -639,7 +653,12 @@ impl LuaState {
     }
 
     /// Set value in table with metatable support
-    pub fn table_set_with_meta(&mut self, table: LuaValue, key: LuaValue, value: LuaValue) -> LuaResult<()> {
+    pub fn table_set_with_meta(
+        &mut self,
+        table: LuaValue,
+        key: LuaValue,
+        value: LuaValue,
+    ) -> LuaResult<()> {
         self.vm_mut().table_set_with_meta(table, key, value)
     }
 
@@ -656,23 +675,28 @@ impl LuaState {
     /// - success=true, results=return values
     /// - success=false, results=[error_message]
     /// Note: Yields are NOT caught by pcall - they propagate through
-    pub fn pcall(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
+    pub fn pcall(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save state for cleanup
         let initial_depth = self.call_depth();
         let func_idx = self.stack.len();
-        
+
         // Check if it's a C function - handle differently
         let is_c_function = if func.is_cfunction() {
             true
         } else if let Some(func_id) = func.as_function_id() {
             let vm = unsafe { &*self.vm };
-            vm.object_pool.get_function(func_id)
+            vm.object_pool
+                .get_function(func_id)
                 .map(|f| f.is_c_function())
                 .unwrap_or(false)
         } else {
             false
         };
-        
+
         if is_c_function {
             // C function - call directly
             self.stack.push(func);
@@ -680,18 +704,19 @@ impl LuaState {
             for arg in args {
                 self.stack.push(arg);
             }
-            
+
             // Get the C function pointer
             let cfunc = if func.is_cfunction() {
                 func.as_cfunction()
             } else if let Some(func_id) = func.as_function_id() {
                 let vm = unsafe { &*self.vm };
-                vm.object_pool.get_function(func_id)
+                vm.object_pool
+                    .get_function(func_id)
                     .and_then(|f| f.c_function())
             } else {
                 None
             };
-            
+
             if let Some(cfunc) = cfunc {
                 // Create frame for C function
                 let base = func_idx + 1;
@@ -701,13 +726,13 @@ impl LuaState {
                     let err_str = self.create_string(&error_msg);
                     return Ok((false, vec![err_str]));
                 }
-                
+
                 // Call C function
                 let result = cfunc(self);
-                
+
                 // Pop frame
                 self.pop_frame();
-                
+
                 match result {
                     Ok(nresults) => {
                         // Success - collect results
@@ -717,16 +742,16 @@ impl LuaState {
                         } else {
                             0
                         };
-                        
+
                         for i in result_start..self.stack.len() {
                             if let Some(val) = self.stack_get(i) {
                                 results.push(val);
                             }
                         }
-                        
+
                         // Clean up stack
                         self.stack.truncate(func_idx);
-                        
+
                         Ok((true, results))
                     }
                     Err(LuaError::Yield) => Err(LuaError::Yield),
@@ -748,7 +773,7 @@ impl LuaState {
             for arg in args {
                 self.stack.push(arg);
             }
-            
+
             // Create call frame
             let base = func_idx + 1;
             if let Err(_) = self.push_frame(func, base, nargs) {
@@ -757,10 +782,10 @@ impl LuaState {
                 let err_str = self.create_string(&error_msg);
                 return Ok((false, vec![err_str]));
             }
-            
+
             // Execute via lua_execute_until - only execute the new frame
             let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
-            
+
             match result {
                 Ok(()) => {
                     // Success - collect return values from stack
@@ -770,36 +795,37 @@ impl LuaState {
                             results.push(val);
                         }
                     }
-                    
+
                     // Clean up stack
                     self.stack.truncate(func_idx);
-                    
+
                     Ok((true, results))
                 }
                 Err(LuaError::Yield) => Err(LuaError::Yield),
                 Err(_) => {
                     // Error occurred - clean up
-                    
+
                     // Close upvalues
                     if self.call_depth() > initial_depth {
-                        if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base) {
+                        if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base)
+                        {
                             let vm = unsafe { &mut *self.vm };
                             self.close_upvalues(frame_base, &mut vm.object_pool);
                         }
                     }
-                    
+
                     // Pop frames
                     while self.call_depth() > initial_depth {
                         self.pop_frame();
                     }
-                    
+
                     // Get error message
                     let error_msg = std::mem::take(&mut self.error_msg);
                     let err_str = self.create_string(&error_msg);
-                    
+
                     // Clean up stack
                     self.stack.truncate(func_idx);
-                    
+
                     Ok((false, vec![err_str]))
                 }
             }
@@ -816,7 +842,7 @@ impl LuaState {
     ) -> LuaResult<(bool, usize)> {
         // Save current call stack depth
         let initial_depth = self.call_depth();
-        
+
         // Get function from stack
         let func = match self.stack_get(func_idx) {
             Some(f) => f,
@@ -828,7 +854,7 @@ impl LuaState {
                 return Ok((false, 1));
             }
         };
-        
+
         // Create call frame
         let base = func_idx + 1;
         if let Err(_) = self.push_frame(func, base, arg_count) {
@@ -839,10 +865,10 @@ impl LuaState {
             self.stack.push(err_str);
             return Ok((false, 1));
         }
-        
+
         // Execute
         let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
-        
+
         match result {
             Ok(()) => {
                 // Success - count results from func_idx to stack top
@@ -856,7 +882,7 @@ impl LuaState {
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(_) => {
                 // Error - clean up and return error message
-                
+
                 // Close upvalues
                 if self.call_depth() > initial_depth {
                     if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base) {
@@ -864,19 +890,19 @@ impl LuaState {
                         self.close_upvalues(frame_base, &mut vm.object_pool);
                     }
                 }
-                
+
                 // Pop frames
                 while self.call_depth() > initial_depth {
                     self.pop_frame();
                 }
-                
+
                 // Get error and push to stack
                 let error_msg = std::mem::take(&mut self.error_msg);
                 let err_str = self.create_string(&error_msg);
-                
+
                 self.stack.truncate(func_idx);
                 self.stack.push(err_str);
-                
+
                 Ok((false, 1))
             }
         }
@@ -894,16 +920,16 @@ impl LuaState {
         // Save error handler and function on stack
         let handler_idx = self.stack.len();
         self.stack.push(err_handler);
-        
+
         let initial_depth = self.call_depth();
         let func_idx = self.stack.len();
         self.stack.push(func);
-        
+
         let nargs = args.len();
         for arg in args {
             self.stack.push(arg);
         }
-        
+
         // Create call frame
         let base = func_idx + 1;
         if let Err(_) = self.push_frame(func, base, nargs) {
@@ -913,10 +939,10 @@ impl LuaState {
             let err_str = self.create_string(&error_msg);
             return Ok((false, vec![err_str]));
         }
-        
+
         // Execute
         let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
-        
+
         match result {
             Ok(()) => {
                 // Success - collect results from func_idx to stack top
@@ -926,7 +952,7 @@ impl LuaState {
                         results.push(val);
                     }
                 }
-                
+
                 self.stack.truncate(handler_idx);
                 Ok((true, results))
             }
@@ -934,7 +960,7 @@ impl LuaState {
             Err(_) => {
                 // Error occurred - call error handler
                 let error_msg = self.error_msg.clone();
-                
+
                 // Clean up failed frames
                 if self.call_depth() > initial_depth {
                     if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base) {
@@ -942,32 +968,33 @@ impl LuaState {
                         self.close_upvalues(frame_base, &mut vm.object_pool);
                     }
                 }
-                
+
                 while self.call_depth() > initial_depth {
                     self.pop_frame();
                 }
-                
+
                 // Set up error handler call
                 self.stack.truncate(handler_idx + 1); // Keep error handler
-                
+
                 // Push error message as argument
                 let err_value = self.create_string(&error_msg);
                 self.stack.push(err_value);
-                
+
                 // Get handler and create frame
                 let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
                 let handler_base = handler_idx + 1;
-                
+
                 if let Err(_) = self.push_frame(handler, handler_base, 1) {
                     // Error handler setup failed
                     self.stack.truncate(handler_idx);
-                    let final_err = self.create_string(&format!("error in error handling: {}", error_msg));
+                    let final_err =
+                        self.create_string(&format!("error in error handling: {}", error_msg));
                     return Ok((false, vec![final_err]));
                 }
-                
+
                 // Execute error handler
                 let handler_result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
-                
+
                 match handler_result {
                     Ok(()) => {
                         // Error handler succeeded - collect results from handler_idx
@@ -977,18 +1004,19 @@ impl LuaState {
                                 results.push(val);
                             }
                         }
-                        
+
                         if results.is_empty() {
                             results.push(self.create_string(&error_msg));
                         }
-                        
+
                         self.stack.truncate(handler_idx);
                         Ok((false, results))
                     }
                     Err(_) => {
                         // Error handler failed
                         self.stack.truncate(handler_idx);
-                        let final_err = self.create_string(&format!("error in error handling: {}", error_msg));
+                        let final_err =
+                            self.create_string(&format!("error in error handling: {}", error_msg));
                         Ok((false, vec![final_err]))
                     }
                 }
@@ -1010,22 +1038,22 @@ impl LuaState {
             if self.stack.is_empty() {
                 return Err(self.error("cannot resume dead coroutine".to_string()));
             }
-            
+
             let func = self.stack[0];
-            
+
             // Push arguments
             for arg in args {
                 self.stack.push(arg);
             }
-            
+
             // Create initial frame
             let nargs = self.stack.len() - 1; // -1 for function itself
             let base = 1; // Arguments start at index 1 (function is at 0)
             self.push_frame(func, base, nargs)?;
-            
+
             // Execute until yield or completion
             let result = crate::lua_vm::execute::lua_execute(self);
-            
+
             match result {
                 Ok(()) => {
                     // Coroutine completed - collect return values from stack[0..]
@@ -1043,18 +1071,18 @@ impl LuaState {
         } else {
             // Resuming after yield
             let has_yield_values = !self.yield_values.is_empty();
-            
+
             if has_yield_values {
                 // Restore yield values to stack
                 let yield_vals = self.take_yield();
-                
+
                 if let Some(frame) = self.current_frame() {
                     let return_base = frame.base;
-                    
+
                     if let Err(_) = self.grow_stack(return_base + yield_vals.len()) {
                         return Err(self.error("stack overflow during resume".to_string()));
                     }
-                    
+
                     for (i, val) in yield_vals.into_iter().enumerate() {
                         let _ = self.stack_set(return_base + i, val);
                     }
@@ -1064,22 +1092,22 @@ impl LuaState {
                 // These will become the return values of the yield call
                 if let Some(frame) = self.current_frame() {
                     let base = frame.base;
-                    
+
                     // Ensure stack has enough space
                     if let Err(_) = self.grow_stack(base + args.len()) {
                         return Err(self.error("stack overflow during resume".to_string()));
                     }
-                    
+
                     // Place args at base positions (they become yield's return values)
                     for (i, arg) in args.into_iter().enumerate() {
                         let _ = self.stack_set(base + i, arg);
                     }
                 }
             }
-            
+
             // Execute until yield or completion
             let result = crate::lua_vm::execute::lua_execute(self);
-            
+
             match result {
                 Ok(()) => {
                     // Coroutine completed
