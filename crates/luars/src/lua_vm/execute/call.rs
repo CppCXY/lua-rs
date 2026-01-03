@@ -83,8 +83,8 @@ pub fn handle_call(
             // Lua function call: push new frame
             let new_base = func_idx + 1; // Arguments start after function
 
-            // Push new call frame
-            lua_state.push_frame(func, new_base, nargs)?;
+            // Push new call frame with nresults from caller
+            lua_state.push_frame(func, new_base, nargs, nresults)?;
 
             // Return FrameAction::Call - main loop will load new chunk and continue
             Ok(FrameAction::Call)
@@ -146,8 +146,8 @@ pub fn call_c_function(
     // 我们简化版本：
     let call_base = func_idx + 1;
 
-    // Push temporary frame for C function
-    lua_state.push_frame(func, call_base, nargs)?;
+    // Push temporary frame for C function with nresults
+    lua_state.push_frame(func, call_base, nargs, nresults)?;
 
     // Call the C function (it returns number of results)
     let result = c_func(lua_state);
@@ -405,7 +405,8 @@ fn call_c_function_tailcall(
     let call_base = func_idx + 1;
 
     // Push temporary frame for C function
-    lua_state.push_frame(func, call_base, nargs)?;
+    // Tail call inherits caller's nresults (-1 for multi-return)
+    lua_state.push_frame(func, call_base, nargs, -1)?;
 
     // Call the C function
     let n = c_func(lua_state)?;

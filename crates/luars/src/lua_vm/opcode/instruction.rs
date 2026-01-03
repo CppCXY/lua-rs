@@ -471,23 +471,26 @@ mod tests {
 
     #[test]
     fn test_offset_constants() {
-        // Verify offset constants for signed fields
-        assert_eq!(Instruction::OFFSET_SB, 128);
-        assert_eq!(Instruction::OFFSET_SBX, 65535);
-        assert_eq!(Instruction::OFFSET_SJ, 16777215);
+        // Verify offset constants for signed fields (Lua 5.5)
+        // OFFSET_SB = OFFSET_SC = (MAXARG_C >> 1) = (255 >> 1) = 127
+        assert_eq!(Instruction::OFFSET_SB, 127);
         assert_eq!(Instruction::OFFSET_SC, 127);
+        // OFFSET_SBX = (MAXARG_Bx >> 1) = ((1<<17)-1) >> 1 = 65535
+        assert_eq!(Instruction::OFFSET_SBX, 65535);
+        // OFFSET_SJ = (MAXARG_sJ >> 1) = ((1<<25)-1) >> 1 = 16777215  
+        assert_eq!(Instruction::OFFSET_SJ, 16777215);
     }
 
     #[test]
     fn test_signed_b_field() {
-        // Test sB field (signed B, range -128 to 127)
-        let pos_instr = Instruction::create_abc(OpCode::EqI, 0, 128 + 10, 0);
+        // Test sB field (signed B, range -127 to 128, using OFFSET_SB=127)
+        let pos_instr = Instruction::create_abc(OpCode::EqI, 0, 127 + 10, 0);
         assert_eq!(pos_instr.get_sb(), 10);
 
-        let neg_instr = Instruction::create_abc(OpCode::EqI, 0, 128 - 10, 0);
+        let neg_instr = Instruction::create_abc(OpCode::EqI, 0, 127 - 10, 0);
         assert_eq!(neg_instr.get_sb(), -10);
 
-        let zero_instr = Instruction::create_abc(OpCode::EqI, 0, 128, 0);
+        let zero_instr = Instruction::create_abc(OpCode::EqI, 0, 127, 0);
         assert_eq!(zero_instr.get_sb(), 0);
     }
 

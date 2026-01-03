@@ -97,6 +97,12 @@ pub fn handle_return(
     // Pop current call frame
     lua_state.pop_call_frame();
 
+    // Update caller frame's top to reflect the actual number of results
+    // This is crucial - the caller needs to know where its stack values are
+    if let Some(caller_frame) = lua_state.current_frame_mut() {
+        caller_frame.top = func_pos + nres;
+    }
+
     // Check if this was the top-level frame
     if lua_state.call_depth() == 0 {
         // No more frames, execution complete
@@ -136,6 +142,12 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<F
 
     // Pop current call frame
     lua_state.pop_call_frame();
+
+    // Update caller frame's top to reflect the actual number of results
+    // This is crucial - the caller needs to know where its stack values are
+    if let Some(caller_frame) = lua_state.current_frame_mut() {
+        caller_frame.top = func_pos + wanted_results;
+    }
 
     // Check if this was the top-level frame
     if lua_state.call_depth() == 0 {
@@ -190,6 +202,12 @@ pub fn handle_return1(
 
     // Pop current call frame
     lua_state.pop_call_frame();
+
+    // Update caller frame's top to reflect the actual number of results
+    // This is crucial - the caller needs to know where its stack values are
+    if let Some(caller_frame) = lua_state.current_frame_mut() {
+        caller_frame.top = func_pos + wanted_results;
+    }
 
     // Check if this was the top-level frame
     if lua_state.call_depth() == 0 {

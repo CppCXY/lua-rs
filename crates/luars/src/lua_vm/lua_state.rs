@@ -89,7 +89,7 @@ impl LuaState {
 
     /// Push a new call frame (equivalent to Lua's luaD_precall)
     /// 按需动态分配 - Lua 5.4 风格
-    pub fn push_frame(&mut self, func: LuaValue, base: usize, nparams: usize) -> LuaResult<()> {
+    pub fn push_frame(&mut self, func: LuaValue, base: usize, nparams: usize, nresults: i32) -> LuaResult<()> {
         // 检查栈深度限制
         if self.call_stack.len() >= self.safe_option.max_call_depth {
             self.error(format!(
@@ -121,7 +121,7 @@ impl LuaState {
             base,
             top: base + nparams,
             pc: 0,
-            nresults: -1, // Variable results by default
+            nresults, // Use the nresults from caller
             call_status,
             nextraargs: 0,
         };
@@ -728,7 +728,7 @@ impl LuaState {
             if let Some(cfunc) = cfunc {
                 // Create frame for C function
                 let base = func_idx + 1;
-                if let Err(_) = self.push_frame(func, base, nargs) {
+                if let Err(_) = self.push_frame(func, base, nargs, -1) {
                     self.stack.truncate(func_idx);
                     let error_msg = std::mem::take(&mut self.error_msg);
                     let err_str = self.create_string(&error_msg);
@@ -784,7 +784,8 @@ impl LuaState {
 
             // Create call frame
             let base = func_idx + 1;
-            if let Err(_) = self.push_frame(func, base, nargs) {
+            // pcall expects all return values
+            if let Err(_) = self.push_frame(func, base, nargs, -1) {
                 self.stack.truncate(func_idx);
                 let error_msg = std::mem::take(&mut self.error_msg);
                 let err_str = self.create_string(&error_msg);
@@ -876,9 +877,9 @@ impl LuaState {
                 0, // MULTRET - want all results
             ).map(|_| ())
         } else {
-            // Lua function - push frame and execute
+            // Lua function - push frame and execute, expecting all return values
             let base = func_idx + 1;
-            self.push_frame(func, base, arg_count)?;
+            self.push_frame(func, base, arg_count, -1)?;
             crate::lua_vm::execute::lua_execute_until(self, initial_depth)
         };
 
@@ -943,9 +944,9 @@ impl LuaState {
             self.stack.push(arg);
         }
 
-        // Create call frame
+        // Create call frame, expecting all return values
         let base = func_idx + 1;
-        if let Err(_) = self.push_frame(func, base, nargs) {
+        if let Err(_) = self.push_frame(func, base, nargs, -1) {
             // Error during setup
             self.stack.truncate(handler_idx);
             let error_msg = std::mem::take(&mut self.error_msg);
@@ -993,11 +994,11 @@ impl LuaState {
                 let err_value = self.create_string(&error_msg);
                 self.stack.push(err_value);
 
-                // Get handler and create frame
+                // Get handler and create frame, expecting all return values
                 let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
                 let handler_base = handler_idx + 1;
 
-                if let Err(_) = self.push_frame(handler, handler_base, 1) {
+                if let Err(_) = self.push_frame(handler, handler_base, 1, -1) {
                     // Error handler setup failed
                     self.stack.truncate(handler_idx);
                     let final_err =
@@ -1059,10 +1060,10 @@ impl LuaState {
                 self.stack.push(arg);
             }
 
-            // Create initial frame
+            // Create initial frame, expecting all return values
             let nargs = self.stack.len() - 1; // -1 for function itself
             let base = 1; // Arguments start at index 1 (function is at 0)
-            self.push_frame(func, base, nargs)?;
+            self.push_frame(func, base, nargs, -1)?;
 
             // Execute until yield or completion
             let result = crate::lua_vm::execute::lua_execute(self);
