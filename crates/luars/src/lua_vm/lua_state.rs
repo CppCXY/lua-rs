@@ -153,6 +153,24 @@ impl LuaState {
         Ok(())
     }
 
+    /// Insert a value at a specific stack position, shifting everything after it
+    pub fn stack_insert(&mut self, index: usize, value: LuaValue) -> LuaResult<()> {
+        if self.stack.len() + 1 >= self.safe_option.max_stack_size {
+            self.error(format!(
+                "stack overflow: attempted to insert at index {} exceeding maximum {}",
+                index, self.safe_option.max_stack_size
+            ));
+            return Err(LuaError::StackOverflow);
+        }
+        if index >= self.stack.len() {
+            self.stack.resize(index, LuaValue::nil());
+            self.stack.push(value);
+        } else {
+            self.stack.insert(index, value);
+        }
+        Ok(())
+    }
+
     /// Get register relative to current frame base
     #[inline(always)]
     pub fn reg_get(&self, reg: u8) -> Option<LuaValue> {
@@ -1026,18 +1044,6 @@ impl LuaState {
             // Resuming after yield
             let has_yield_values = !self.yield_values.is_empty();
             
-            eprintln!("[RESUME DEBUG] Second+ resume: has_yield_values={}, args.len()={}, call_stack.len()={}", 
-                      has_yield_values, args.len(), self.call_stack.len());
-            
-            if let Some(frame) = self.current_frame() {
-                eprintln!("[RESUME DEBUG] Current frame: base={}, top={}", 
-                          frame.base, frame.top);
-            }
-            eprintln!("[RESUME DEBUG] Stack before: len={}", self.stack.len());
-            for (i, val) in self.stack.iter().enumerate().take(10) {
-                eprintln!("  stack[{}]: {:?}", i, val);
-            }
-            
             if has_yield_values {
                 // Restore yield values to stack
                 let yield_vals = self.take_yield();
@@ -1054,18 +1060,22 @@ impl LuaState {
                     }
                 }
             } else {
-                // Push new arguments onto stack
-                for arg in args {
-                    self.stack.push(arg);
-                }
-                let new_top = self.stack.len();
-                
-                if let Some(frame) = self.current_frame_mut() {
-                    frame.top = new_top;
+                // Push new arguments onto stack at the current frame's base
+                // These will become the return values of the yield call
+                if let Some(frame) = self.current_frame() {
+                    let base = frame.base;
+                    
+                    // Ensure stack has enough space
+                    if let Err(_) = self.grow_stack(base + args.len()) {
+                        return Err(self.error("stack overflow during resume".to_string()));
+                    }
+                    
+                    // Place args at base positions (they become yield's return values)
+                    for (i, arg) in args.into_iter().enumerate() {
+                        let _ = self.stack_set(base + i, arg);
+                    }
                 }
             }
-            
-            eprintln!("[RESUME DEBUG] About to lua_execute, stack.len()={}", self.stack.len());
             
             // Execute until yield or completion
             let result = crate::lua_vm::execute::lua_execute(self);
@@ -1090,8 +1100,6 @@ impl LuaState {
     /// Yield from current coroutine
     /// This should be called by Lua code via coroutine.yield
     pub fn do_yield(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
-        eprintln!("[YIELD DEBUG] Yielding with {} values, call_stack.len()={}", 
-                  values.len(), self.call_stack.len());
         self.set_yield(values);
         Err(LuaError::Yield)
     }

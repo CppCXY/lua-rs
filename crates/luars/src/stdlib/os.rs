@@ -7,21 +7,19 @@ use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_os_lib() -> LibraryModule {
-    let mut module = LibraryModule::new("os");
-    
-    module.entries.push(("clock", LibraryEntry::Function(os_clock)));
-    module.entries.push(("time", LibraryEntry::Function(os_time)));
-    module.entries.push(("date", LibraryEntry::Function(os_date)));
-    module.entries.push(("difftime", LibraryEntry::Function(os_difftime)));
-    module.entries.push(("execute", LibraryEntry::Function(os_execute)));
-    module.entries.push(("exit", LibraryEntry::Function(os_exit)));
-    module.entries.push(("getenv", LibraryEntry::Function(os_getenv)));
-    module.entries.push(("remove", LibraryEntry::Function(os_remove)));
-    module.entries.push(("rename", LibraryEntry::Function(os_rename)));
-    module.entries.push(("setlocale", LibraryEntry::Function(os_setlocale)));
-    module.entries.push(("tmpname", LibraryEntry::Function(os_tmpname)));
-    
-    module
+    crate::lib_module!("os", {
+        "clock" => os_clock,
+        "time" => os_time,
+        "date" => os_date,
+        "difftime" => os_difftime,
+        "execute" => os_execute,
+        "exit" => os_exit,
+        "getenv" => os_getenv,
+        "remove" => os_remove,
+        "rename" => os_rename,
+        "setlocale" => os_setlocale,
+        "tmpname" => os_tmpname,
+    })
 }
 
 fn os_clock(l: &mut LuaState) -> LuaResult<usize> {

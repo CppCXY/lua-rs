@@ -6,18 +6,16 @@ use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_coroutine_lib() -> LibraryModule {
-    let mut module = LibraryModule::new("coroutine");
-    
-    module.entries.push(("create", LibraryEntry::Function(coroutine_create)));
-    module.entries.push(("resume", LibraryEntry::Function(coroutine_resume)));
-    module.entries.push(("yield", LibraryEntry::Function(coroutine_yield)));
-    module.entries.push(("status", LibraryEntry::Function(coroutine_status)));
-    module.entries.push(("running", LibraryEntry::Function(coroutine_running)));
-    module.entries.push(("wrap", LibraryEntry::Function(coroutine_wrap)));
-    module.entries.push(("isyieldable", LibraryEntry::Function(coroutine_isyieldable)));
-    module.entries.push(("close", LibraryEntry::Function(coroutine_close)));
-    
-    module
+    crate::lib_module!("coroutine", {
+        "create" => coroutine_create,
+        "resume" => coroutine_resume,
+        "yield" => coroutine_yield,
+        "status" => coroutine_status,
+        "running" => coroutine_running,
+        "wrap" => coroutine_wrap,
+        "isyieldable" => coroutine_isyieldable,
+        "close" => coroutine_close,
+    })
 }
 
 /// coroutine.create(f) - Create a new coroutine
@@ -208,32 +206,20 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
 
     // Resume the coroutine
     let vm = l.vm_mut();
-    let (success, results) = vm.resume_thread(thread_val, args)?;
-
-    if !success {
-        // If resume failed, propagate the error
-        let error_msg = if !results.is_empty() {
-            if let Some(string_id) = results[0].as_string_id() {
-                if let Some(err_msg) = vm.object_pool.get_string(string_id) {
-                    err_msg.as_str().to_string()
-                } else {
-                    "coroutine error".to_string()
-                }
-            } else {
-                "coroutine error".to_string()
+    match vm.resume_thread(thread_val, args) {
+        Ok((_finished, results)) => {
+            // Success - push all results
+            for result in &results {
+                l.push_value(*result)?;
             }
-        } else {
-            "coroutine error".to_string()
-        };
-        return Err(l.error(error_msg));
+            Ok(results.len())
+        }
+        Err(e) => {
+            // Error occurred - propagate it
+            let error_msg = format!("coroutine error: {:?}", e);
+            Err(l.error(error_msg))
+        }
     }
-
-    // Push results
-    for result in &results {
-        l.push_value(*result)?;
-    }
-
-    Ok(results.len())
 }
 
 /// coroutine.isyieldable() - Check if current position can yield

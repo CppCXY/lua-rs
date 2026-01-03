@@ -5,94 +5,38 @@
 
 use std::rc::Rc;
 
-use crate::lib_registry::{LibraryEntry, LibraryModule};
+use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::lua_vm::{LuaResult, LuaState};
+use crate::lua_vm::{LuaResult, LuaState, LuaError};
 
 pub fn create_basic_lib() -> LibraryModule {
-    let mut module = LibraryModule::new("_G");
-
-    // Functions
-    module
-        .entries
-        .push(("print", LibraryEntry::Function(lua_print)));
-    module
-        .entries
-        .push(("type", LibraryEntry::Function(lua_type)));
-    module
-        .entries
-        .push(("assert", LibraryEntry::Function(lua_assert)));
-    module
-        .entries
-        .push(("error", LibraryEntry::Function(lua_error)));
-    module
-        .entries
-        .push(("tonumber", LibraryEntry::Function(lua_tonumber)));
-    module
-        .entries
-        .push(("tostring", LibraryEntry::Function(lua_tostring)));
-    module
-        .entries
-        .push(("select", LibraryEntry::Function(lua_select)));
-    module
-        .entries
-        .push(("ipairs", LibraryEntry::Function(lua_ipairs)));
-    module
-        .entries
-        .push(("pairs", LibraryEntry::Function(lua_pairs)));
-    module
-        .entries
-        .push(("next", LibraryEntry::Function(lua_next)));
-    module
-        .entries
-        .push(("pcall", LibraryEntry::Function(lua_pcall)));
-    module
-        .entries
-        .push(("xpcall", LibraryEntry::Function(lua_xpcall)));
-    module
-        .entries
-        .push(("getmetatable", LibraryEntry::Function(lua_getmetatable)));
-    module
-        .entries
-        .push(("setmetatable", LibraryEntry::Function(lua_setmetatable)));
-    module
-        .entries
-        .push(("rawget", LibraryEntry::Function(lua_rawget)));
-    module
-        .entries
-        .push(("rawset", LibraryEntry::Function(lua_rawset)));
-    module
-        .entries
-        .push(("rawlen", LibraryEntry::Function(lua_rawlen)));
-    module
-        .entries
-        .push(("rawequal", LibraryEntry::Function(lua_rawequal)));
-    module
-        .entries
-        .push(("collectgarbage", LibraryEntry::Function(lua_collectgarbage)));
-    module
-        .entries
-        .push(("require", LibraryEntry::Function(lua_require)));
-    module
-        .entries
-        .push(("load", LibraryEntry::Function(lua_load)));
-    module
-        .entries
-        .push(("loadfile", LibraryEntry::Function(lua_loadfile)));
-    module
-        .entries
-        .push(("dofile", LibraryEntry::Function(lua_dofile)));
-    module
-        .entries
-        .push(("warn", LibraryEntry::Function(lua_warn)));
-
-    // Values
-    module.entries.push((
-        "_VERSION",
-        LibraryEntry::Value(|vm| vm.create_string("Lua 5.5")),
-    ));
-
-    module
+    crate::lib_module!("_G", {
+        "print" => lua_print,
+        "type" => lua_type,
+        "assert" => lua_assert,
+        "error" => lua_error,
+        "tonumber" => lua_tonumber,
+        "tostring" => lua_tostring,
+        "select" => lua_select,
+        "ipairs" => lua_ipairs,
+        "pairs" => lua_pairs,
+        "next" => lua_next,
+        "pcall" => lua_pcall,
+        "xpcall" => lua_xpcall,
+        "getmetatable" => lua_getmetatable,
+        "setmetatable" => lua_setmetatable,
+        "rawget" => lua_rawget,
+        "rawset" => lua_rawset,
+        "rawlen" => lua_rawlen,
+        "rawequal" => lua_rawequal,
+        "collectgarbage" => lua_collectgarbage,
+        "require" => lua_require,
+        "load" => lua_load,
+        "loadfile" => lua_loadfile,
+        "dofile" => lua_dofile,
+        "warn" => lua_warn,
+    })
+    .with_value("_VERSION", |vm| vm.create_string("Lua 5.5"))
 }
 
 /// print(...) - Print values to stdout
@@ -469,32 +413,36 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
 
 /// pcall(f [, arg1, ...]) - Protected call
 fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
-    // Get function (first argument)
-    let func = l.get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'pcall' (value expected)".to_string()))?;
+    // Arguments are already on stack from the call:
+    // stack: [pcall_func, target_func, arg1, arg2, ...]
+    // We need: [target_func, arg1, arg2, ...] and call it
     
-    // Collect remaining arguments
-    let mut args = Vec::new();
     let arg_count = l.arg_count();
-    for i in 2..=arg_count {
-        if let Some(arg) = l.get_arg(i) {
-            args.push(arg);
-        }
+    if arg_count < 1 {
+        return Err(l.error("bad argument #1 to 'pcall' (value expected)".to_string()));
     }
     
-    // Call pcall
-    let (success, results) = l.pcall(func, args)?;
+    // Get current frame info
+    let base = l.current_frame()
+        .map(|f| f.base)
+        .ok_or_else(|| LuaError::RuntimeError)?;
     
-    // Push success status
-    l.push_value(LuaValue::boolean(success))?;
+    // func is at base+0, args are at base+1..base+arg_count-1
+    // We want to call func with arg_count-1 arguments
+    let func_idx = base;
+    let call_arg_count = arg_count - 1;
     
-    // Push results and count them
-    let result_count = results.len();
-    for result in results {
-        l.push_value(result)?;
-    }
+    // Call using stack-based API (no Vec allocation!)
+    let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
     
-    Ok(1 + result_count)
+    // Results are already on stack starting at func_idx
+    // We need to insert success boolean before them
+    let success_val = LuaValue::boolean(success);
+    
+    // Insert success at func_idx position
+    l.stack_insert(func_idx, success_val)?;
+    
+    Ok(result_count + 1)
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler

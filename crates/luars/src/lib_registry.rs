@@ -3,11 +3,15 @@
 
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{CFunction, LuaResult, LuaVM};
+use crate::lua_vm::LuaState;
 use crate::stdlib;
 // use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
 pub type ValueInitializer = fn(&mut LuaVM) -> LuaValue;
+
+/// Type for module initializers - functions that set up additional module fields
+pub type ModuleInitializer = fn(&mut LuaState) -> LuaResult<()>;
 
 /// Entry in a library module - can be a function or a value
 pub enum LibraryEntry {
@@ -19,6 +23,7 @@ pub enum LibraryEntry {
 pub struct LibraryModule {
     pub name: &'static str,
     pub entries: Vec<(&'static str, LibraryEntry)>,
+    pub initializer: Option<ModuleInitializer>,
 }
 
 impl LibraryModule {
@@ -27,6 +32,7 @@ impl LibraryModule {
         Self {
             name,
             entries: Vec::new(),
+            initializer: None,
         }
     }
 
@@ -39,6 +45,12 @@ impl LibraryModule {
     /// Add a value to this library
     pub fn with_value(mut self, name: &'static str, value_init: ValueInitializer) -> Self {
         self.entries.push((name, LibraryEntry::Value(value_init)));
+        self
+    }
+
+    /// Set the module initializer function
+    pub fn with_initializer(mut self, init: ModuleInitializer) -> Self {
+        self.initializer = Some(init);
         self
     }
 }
@@ -162,6 +174,11 @@ impl LibraryRegistry {
             }
         }
 
+        // Call the module initializer if it exists
+        if let Some(init_fn) = module.initializer {
+            init_fn(&mut vm.main_state)?;
+        }
+
         Ok(())
     }
 
@@ -184,7 +201,6 @@ pub fn create_standard_registry() -> LibraryRegistry {
     // // Register package library FIRST so package.loaded exists
     // // before other libraries try to register themselves
     registry.register(stdlib::package::create_package_lib());
-
     // Register all other standard libraries
     registry.register(stdlib::basic::create_basic_lib());
     registry.register(stdlib::string::create_string_lib());

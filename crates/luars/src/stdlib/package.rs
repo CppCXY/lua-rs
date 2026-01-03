@@ -12,19 +12,14 @@ pub fn create_package_lib() -> LibraryModule {
         "loadlib" => package_loadlib,
         "searchpath" => package_searchpath,
     })
+    .with_initializer(init_package_fields)
 }
 
-// Initialize package library fields (called separately)
+// Initialize package library fields (called after module is loaded)
 pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
-    // Get or create package table
-    let package_table = match l.get_global("package") {
-        Some(val) => val,
-        None => {
-            let table = l.create_table(0, 8);
-            l.set_global("package", table);
-            table
-        }
-    };
+    // Get package table (should already exist from module creation)
+    let package_table = l.get_global("package")
+        .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_id) = package_table.as_table_id() else {
         return Err(l.error("package must be a table".to_string()));
@@ -32,7 +27,7 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
 
     let vm = l.vm_mut();
 
-    // Create all strings first to avoid borrow conflicts
+    // Create all keys
     let loaded_key = vm.create_string("loaded");
     let preload_key = vm.create_string("preload");
     let path_key = vm.create_string("path");
@@ -40,53 +35,40 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     let config_key = vm.create_string("config");
     let searchers_key = vm.create_string("searchers");
 
-    // Create package.loaded
-    let loaded = vm.create_table(0, 0);
-    if let Some(pkg) = vm.object_pool.get_table_mut(package_id) {
-        pkg.raw_set(loaded_key, loaded);
-    }
-
-    // Create package.preload
-    let preload = vm.create_table(0, 0);
-    if let Some(pkg) = vm.object_pool.get_table_mut(package_id) {
-        pkg.raw_set(preload_key, preload);
-    }
-
-    // Set package.path
-    let path = vm.create_string("./?.lua;./?/init.lua");
-    if let Some(pkg) = vm.object_pool.get_table_mut(package_id) {
-        pkg.raw_set(path_key, path);
-    }
-
-    // Set package.cpath
-    let cpath = vm.create_string("./?.so;./?.dll;./?.dylib");
-    if let Some(pkg) = vm.object_pool.get_table_mut(package_id) {
-        pkg.raw_set(cpath_key, cpath);
-    }
-
-    // Set package.config
+    // Create all values
+    let loaded_table = vm.create_table(0, 0);
+    let preload_table = vm.create_table(0, 0);
+    let path_value = vm.create_string("./?.lua;./?/init.lua");
+    let cpath_value = vm.create_string("./?.so;./?.dll;./?.dylib");
+    
     #[cfg(windows)]
     let config_str = "\\\n;\n?\n!\n-";
     #[cfg(not(windows))]
     let config_str = "/\n;\n?\n!\n-";
-    let config = vm.create_string(config_str);
-    if let Some(pkg) = vm.object_pool.get_table_mut(package_id) {
-        pkg.raw_set(config_key, config);
-    }
+    let config_value = vm.create_string(config_str);
+    
+    // Create searchers array
+    let searchers_table = vm.create_table(4, 0);
+    let searchers_id = searchers_table.as_table_id().unwrap();
+    
+    // Fill searchers array
+    vm.object_pool.get_table_mut(searchers_id).unwrap()
+        .set_int(1, LuaValue::cfunction(searcher_preload));
+    vm.object_pool.get_table_mut(searchers_id).unwrap()
+        .set_int(2, LuaValue::cfunction(searcher_lua));
+    vm.object_pool.get_table_mut(searchers_id).unwrap()
+        .set_int(3, LuaValue::cfunction(searcher_c));
+    vm.object_pool.get_table_mut(searchers_id).unwrap()
+        .set_int(4, LuaValue::cfunction(searcher_allinone));
 
-    // Create package.searchers
-    let searchers = vm.create_table(4, 0);
-    if let Some(searchers_ref) = searchers.as_table_id()
-        .and_then(|id| vm.object_pool.get_table_mut(id)) 
-    {
-        searchers_ref.set_int(1, LuaValue::cfunction(searcher_preload));
-        searchers_ref.set_int(2, LuaValue::cfunction(searcher_lua));
-        searchers_ref.set_int(3, LuaValue::cfunction(searcher_c));
-        searchers_ref.set_int(4, LuaValue::cfunction(searcher_allinone));
-    }
-    if let Some(pkg) = vm.object_pool.get_table_mut(package_id) {
-        pkg.raw_set(searchers_key, searchers);
-    }
+    // Set all fields in package table
+    let pkg = vm.object_pool.get_table_mut(package_id).unwrap();
+    pkg.raw_set(loaded_key, loaded_table);
+    pkg.raw_set(preload_key, preload_table);
+    pkg.raw_set(path_key, path_value);
+    pkg.raw_set(cpath_key, cpath_value);
+    pkg.raw_set(config_key, config_value);
+    pkg.raw_set(searchers_key, searchers_table);
 
     Ok(())
 }
