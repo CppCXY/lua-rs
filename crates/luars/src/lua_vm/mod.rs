@@ -248,16 +248,12 @@ impl LuaVM {
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
     /// OPTIMIZED: Minimal initial allocations - grows on demand
     pub fn create_thread(&mut self, func: LuaValue) -> LuaValue {
-        // Only allocate capacity, don't pre-fill (unlike main VM)
-        // Coroutines typically have shallow call stacks, so we grow on demand
-        const INITIAL_COROUTINE_CALL_DEPTH: usize = 16;
-        let _frames: Vec<CallInfo> = Vec::with_capacity(INITIAL_COROUTINE_CALL_DEPTH);
-
-        // Start with smaller register stack - grows on demand
-        let mut _register_stack = Vec::with_capacity(64);
-        _register_stack.push(func);
-
-        let thread = LuaState::new(1, self as *mut LuaVM, self.safe_option.clone());
+        // Create a new LuaState for the coroutine
+        let mut thread = LuaState::new(1, self as *mut LuaVM, self.safe_option.clone());
+        
+        // Push the function onto the thread's stack
+        // It will be used when resume() is first called
+        thread.stack_mut().push(func);
 
         // Create thread in ObjectPool and return LuaValue
         let thread_id = self.object_pool.create_thread(thread);

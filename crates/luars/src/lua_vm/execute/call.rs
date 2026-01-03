@@ -152,12 +152,15 @@ fn call_c_function(
     let top_before = lua_state.stack_len();
 
     // Call the C function (it returns number of results)
-    let n = c_func(lua_state)?;
+    let result = c_func(lua_state);
 
     let top_after = lua_state.stack_len();
 
-    // Pop the frame
+    // Pop the frame BEFORE handling error (important for Yield)
     lua_state.pop_frame();
+    
+    // Now handle the result
+    let n = result?;
 
     // Results are from top_before to top_after-1
     let first_result = top_after - n;

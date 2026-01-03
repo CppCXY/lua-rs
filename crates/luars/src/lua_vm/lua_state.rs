@@ -985,73 +985,104 @@ impl LuaState {
     /// - finished=true: coroutine completed normally
     /// - finished=false: coroutine yielded
     pub fn resume(&mut self, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Check if we have any frames (is this a valid resume?)
+        // Check if this is the first resume (no frames yet)
         if self.call_stack.is_empty() {
-            return Err(self.error("cannot resume dead coroutine".to_string()));
-        }
-        
-        // Check if there are yield values to handle (resuming after yield)
-        let has_yield_values = !self.yield_values.is_empty();
-        
-        if has_yield_values {
-            // Resuming after yield - restore yield values to stack
-            let yield_vals = self.take_yield();
-            
-            // Get current frame and push yield values as return values
-            if let Some(frame) = self.current_frame() {
-                let return_base = frame.base;
-                
-                // Ensure stack space
-                if let Err(_) = self.grow_stack(return_base + yield_vals.len()) {
-                    return Err(self.error("stack overflow during resume".to_string()));
-                }
-                
-                // Push yield values
-                for (i, val) in yield_vals.into_iter().enumerate() {
-                    let _ = self.stack_set(return_base + i, val);
-                }
+            // Initial resume - need to set up the function
+            // The function should be at stack[0] (set by create_thread)
+            if self.stack.is_empty() {
+                return Err(self.error("cannot resume dead coroutine".to_string()));
             }
-        } else {
-            // Initial resume - push arguments onto stack
+            
+            let func = self.stack[0];
+            
+            // Push arguments
             for arg in args {
                 self.stack.push(arg);
             }
-            let new_top = self.stack.len();
             
-            // Update current frame's top
-            if let Some(frame) = self.current_frame_mut() {
-                frame.top = new_top;
+            // Create initial frame
+            let nargs = self.stack.len() - 1; // -1 for function itself
+            let base = 1; // Arguments start at index 1 (function is at 0)
+            self.push_frame(func, base, nargs)?;
+            
+            // Execute until yield or completion
+            let result = crate::lua_vm::execute::lua_execute(self);
+            
+            match result {
+                Ok(()) => {
+                    // Coroutine completed - collect return values from stack[0..]
+                    let results = self.get_all_return_values(0);
+                    self.stack.clear();
+                    Ok((true, results))
+                }
+                Err(LuaError::Yield) => {
+                    // Coroutine yielded
+                    let yield_vals = self.take_yield();
+                    Ok((false, yield_vals))
+                }
+                Err(e) => Err(e),
             }
-        }
-        
-        // Execute until yield or completion
-        let result = crate::lua_vm::execute::lua_execute(self);
-        
-        match result {
-            Ok(()) => {
-                // Coroutine completed - collect return values
-                let mut results = Vec::new();
+        } else {
+            // Resuming after yield
+            let has_yield_values = !self.yield_values.is_empty();
+            
+            eprintln!("[RESUME DEBUG] Second+ resume: has_yield_values={}, args.len()={}, call_stack.len()={}", 
+                      has_yield_values, args.len(), self.call_stack.len());
+            
+            if let Some(frame) = self.current_frame() {
+                eprintln!("[RESUME DEBUG] Current frame: base={}, top={}", 
+                          frame.base, frame.top);
+            }
+            eprintln!("[RESUME DEBUG] Stack before: len={}", self.stack.len());
+            for (i, val) in self.stack.iter().enumerate().take(10) {
+                eprintln!("  stack[{}]: {:?}", i, val);
+            }
+            
+            if has_yield_values {
+                // Restore yield values to stack
+                let yield_vals = self.take_yield();
                 
-                // All values remaining on stack are return values
-                for i in 0..self.stack.len() {
-                    if let Some(val) = self.stack_get(i) {
-                        results.push(val);
+                if let Some(frame) = self.current_frame() {
+                    let return_base = frame.base;
+                    
+                    if let Err(_) = self.grow_stack(return_base + yield_vals.len()) {
+                        return Err(self.error("stack overflow during resume".to_string()));
+                    }
+                    
+                    for (i, val) in yield_vals.into_iter().enumerate() {
+                        let _ = self.stack_set(return_base + i, val);
                     }
                 }
+            } else {
+                // Push new arguments onto stack
+                for arg in args {
+                    self.stack.push(arg);
+                }
+                let new_top = self.stack.len();
                 
-                // Clear stack
-                self.stack.clear();
-                
-                Ok((true, results))
+                if let Some(frame) = self.current_frame_mut() {
+                    frame.top = new_top;
+                }
             }
-            Err(LuaError::Yield) => {
-                // Coroutine yielded - get yield values
-                let yield_vals = self.take_yield();
-                Ok((false, yield_vals))
-            }
-            Err(e) => {
-                // Error in coroutine
-                Err(e)
+            
+            eprintln!("[RESUME DEBUG] About to lua_execute, stack.len()={}", self.stack.len());
+            
+            // Execute until yield or completion
+            let result = crate::lua_vm::execute::lua_execute(self);
+            
+            match result {
+                Ok(()) => {
+                    // Coroutine completed
+                    let results = self.get_all_return_values(0);
+                    self.stack.clear();
+                    Ok((true, results))
+                }
+                Err(LuaError::Yield) => {
+                    // Coroutine yielded
+                    let yield_vals = self.take_yield();
+                    Ok((false, yield_vals))
+                }
+                Err(e) => Err(e),
             }
         }
     }
@@ -1059,6 +1090,8 @@ impl LuaState {
     /// Yield from current coroutine
     /// This should be called by Lua code via coroutine.yield
     pub fn do_yield(&mut self, values: Vec<LuaValue>) -> LuaResult<()> {
+        eprintln!("[YIELD DEBUG] Yielding with {} values, call_stack.len()={}", 
+                  values.len(), self.call_stack.len());
         self.set_yield(values);
         Err(LuaError::Yield)
     }

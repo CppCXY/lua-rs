@@ -193,7 +193,7 @@ pub fn create_standard_registry() -> LibraryRegistry {
     registry.register(stdlib::io::create_io_lib());
     registry.register(stdlib::os::create_os_lib());
     registry.register(stdlib::utf8::create_utf8_lib());
-    // registry.register(stdlib::coroutine::create_coroutine_lib());
+    registry.register(stdlib::coroutine::create_coroutine_lib());
     // registry.register(stdlib::debug::create_debug_lib());
     // #[cfg(feature = "loadlib")]
     // registry.register(stdlib::ffi::create_ffi_lib());

@@ -191,6 +191,9 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
 /// Used for protected calls (pcall) to execute only the called function
 /// without affecting caller frames
 pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
+    eprintln!("[EXECUTE DEBUG] Starting execute_until, target_depth={}, current_depth={}", 
+              target_depth, lua_state.call_depth());
+    
     // Main execution loop - continues until frames are popped to target depth
     'vm_loop: loop {
         // Check if we've reached target depth

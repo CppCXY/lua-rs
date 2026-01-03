@@ -1,231 +1,282 @@
 // Coroutine library - Full implementation
 // Implements: create, resume, yield, status, running, wrap, isyieldable
 
-use crate::lib_registry::{LibraryModule, get_args, require_arg};
-use crate::lua_value::{CoroutineStatus, LuaValue, MultiValue};
-use crate::lua_vm::{LuaResult, LuaVM};
+use crate::lib_registry::{LibraryEntry, LibraryModule};
+use crate::lua_value::LuaValue;
+use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_coroutine_lib() -> LibraryModule {
-    crate::lib_module!("coroutine", {
-        "create" => coroutine_create,
-        "resume" => coroutine_resume,
-        "yield" => coroutine_yield,
-        "status" => coroutine_status,
-        "running" => coroutine_running,
-        "wrap" => coroutine_wrap,
-        "isyieldable" => coroutine_isyieldable,
-        "close" => coroutine_close,
-    })
+    let mut module = LibraryModule::new("coroutine");
+    
+    module.entries.push(("create", LibraryEntry::Function(coroutine_create)));
+    module.entries.push(("resume", LibraryEntry::Function(coroutine_resume)));
+    module.entries.push(("yield", LibraryEntry::Function(coroutine_yield)));
+    module.entries.push(("status", LibraryEntry::Function(coroutine_status)));
+    module.entries.push(("running", LibraryEntry::Function(coroutine_running)));
+    module.entries.push(("wrap", LibraryEntry::Function(coroutine_wrap)));
+    module.entries.push(("isyieldable", LibraryEntry::Function(coroutine_isyieldable)));
+    module.entries.push(("close", LibraryEntry::Function(coroutine_close)));
+    
+    module
 }
 
 /// coroutine.create(f) - Create a new coroutine
-fn coroutine_create(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let func = require_arg(vm, 1, "coroutine.create")?;
+fn coroutine_create(l: &mut LuaState) -> LuaResult<usize> {
+    let func = match l.get_arg(1) {
+        Some(f) => f,
+        None => {
+            return Err(l.error("coroutine.create requires a function argument".to_string()));
+        }
+    };
 
     if !func.is_function() && !func.is_cfunction() {
-        return Err(vm.error("coroutine.create requires a function argument".to_string()));
+        return Err(l.error("coroutine.create requires a function argument".to_string()));
     }
 
-    // Use new ThreadId-based API
-    let thread_val = vm.create_thread_value(func);
+    // Use VM's create_thread which properly sets up the thread with the function
+    let vm = l.vm_mut();
+    let thread_val = vm.create_thread(func);
 
-    Ok(MultiValue::single(thread_val))
+    l.push_value(thread_val)?;
+    Ok(1)
 }
 
 /// coroutine.resume(co, ...) - Resume a coroutine
-fn coroutine_resume(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let thread_val = require_arg(vm, 1, "coroutine.resume")?;
+fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
+    let thread_val = match l.get_arg(1) {
+        Some(t) => t,
+        None => {
+            return Err(l.error("coroutine.resume requires a thread argument".to_string()));
+        }
+    };
 
     if !thread_val.is_thread() {
-        return Err(vm.error("coroutine.resume requires a thread argument".to_string()));
+        return Err(l.error("coroutine.resume requires a thread argument".to_string()));
     }
 
-    // Get arguments
-    let all_args = get_args(vm);
+    // Get remaining arguments
+    let all_args = l.get_args();
     let args: Vec<LuaValue> = if all_args.len() > 1 {
         all_args[1..].to_vec()
     } else {
         Vec::new()
     };
 
-    // Resume the thread (pass LuaValue directly)
-    let (success, results) = vm.resume_thread(thread_val, args)?;
-
-    // Return success status and results
-    let mut return_values = vec![LuaValue::boolean(success)];
-    return_values.extend(results);
-
-    Ok(MultiValue::multiple(return_values))
+    // Resume the thread
+    let vm = l.vm_mut();
+    match vm.resume_thread(thread_val, args) {
+        Ok((_finished, results)) => {
+            // Success - either yielded (finished=false) or completed (finished=true)
+            // Both are successful from pcall perspective
+            let result_count = results.len();
+            l.push_value(LuaValue::boolean(true))?;  // success=true
+            for result in results {
+                l.push_value(result)?;
+            }
+            Ok(1 + result_count)
+        }
+        Err(e) => {
+            // Error occurred during resume
+            let error_msg = format!("{:?}", e);
+            let error_str = l.create_string(&error_msg);
+            l.push_value(LuaValue::boolean(false))?;  // success=false
+            l.push_value(error_str)?;
+            Ok(2)
+        }
+    }
 }
 
 /// coroutine.yield(...) - Yield from current coroutine
-fn coroutine_yield(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let args = get_args(vm);
+fn coroutine_yield(l: &mut LuaState) -> LuaResult<usize> {
+    let args = l.get_args();
 
-    // Check if we're in a coroutine (use new thread_id based check)
-    if vm.current_thread_id.is_none() {
-        return Err(vm.error("attempt to yield from outside a coroutine".to_string()));
-    }
-
-    // Yield with values - this will store the values and mark as suspended
-    vm.yield_thread(args)?;
-
-    // When yielding for the first time, we don't return anything here
-    // The return values will be set when resume() is called with new values
-    // For now, return empty (but this won't actually be used due to yielding flag)
-    Ok(MultiValue::multiple(vm.return_values.clone()))
+    // Yield with values
+    l.do_yield(args)?;
+    
+    // This return value won't be used because do_yield returns Err(LuaError::Yield)
+    Ok(0)
 }
 
 /// coroutine.status(co) - Get coroutine status
-fn coroutine_status(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let thread_val = require_arg(vm, 1, "coroutine.status")?;
-
-    if !thread_val.is_thread() {
-        return Err(vm.error("coroutine.status requires a thread argument".to_string()));
-    }
-
-    // Get thread status using thread_id and pre-cached StringIds
-    let status_sid = if let Some(thread_id) = thread_val.as_thread_id() {
-        if let Some(thread) = vm.object_pool.get_thread(thread_id) {
-            match thread.status {
-                CoroutineStatus::Suspended => vm.object_pool.str_suspended,
-                CoroutineStatus::Running => vm.object_pool.str_running,
-                CoroutineStatus::Normal => vm.object_pool.str_normal,
-                CoroutineStatus::Dead => vm.object_pool.str_dead,
-            }
-        } else {
-            vm.object_pool.str_dead
+fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
+    let thread_val = match l.get_arg(1) {
+        Some(t) => t,
+        None => {
+            return Err(l.error("coroutine.status requires a thread argument".to_string()));
         }
-    } else {
-        vm.object_pool.str_dead
     };
 
-    Ok(MultiValue::single(LuaValue::string(status_sid)))
+    if !thread_val.is_thread() {
+        return Err(l.error("coroutine.status requires a thread argument".to_string()));
+    }
+
+    let Some(thread_id) = thread_val.as_thread_id() else {
+        let status_str = l.create_string("dead");
+        l.push_value(status_str)?;
+        return Ok(1);
+    };
+
+    // Check if thread exists and get status
+    let vm = l.vm_mut();
+    let status_str = if let Some(thread_rc) = vm.object_pool.get_thread(thread_id) {
+        let thread = thread_rc.borrow();
+        // Thread is suspended if it has frames or stack content
+        if thread.call_depth() > 0 {
+            "suspended"
+        } else if !thread.stack().is_empty() {
+            // Has stack but no frames - initial state
+            "suspended"
+        } else {
+            "dead"
+        }
+    } else {
+        "dead"
+    };
+
+    let status_val = l.create_string(status_str);
+    l.push_value(status_val)?;
+    Ok(1)
 }
 
 /// coroutine.running() - Get currently running coroutine
-fn coroutine_running(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    if let Some(thread_val) = &vm.current_thread_value {
-        // Return the stored thread value for proper comparison
-        Ok(MultiValue::multiple(vec![
-            thread_val.clone(),
-            LuaValue::boolean(false),
-        ]))
-    } else {
-        // Main thread - create a dummy thread representation if not exists
-        if vm.main_thread_value.is_none() {
-            // Create a dummy thread for main thread representation using new API
-            let dummy_func = LuaValue::nil();
-            let main_thread_val = vm.create_thread_value(dummy_func);
-            vm.main_thread_value = Some(main_thread_val);
-        }
-
-        Ok(MultiValue::multiple(vec![
-            vm.main_thread_value.as_ref().unwrap().clone(),
-            LuaValue::boolean(true),
-        ]))
-    }
+fn coroutine_running(l: &mut LuaState) -> LuaResult<usize> {
+    // In the main thread, return nil and true
+    // TODO: Track current executing thread properly
+    l.push_value(LuaValue::nil())?;
+    l.push_value(LuaValue::boolean(true))?;
+    Ok(2)
 }
 
 /// coroutine.wrap(f) - Create a wrapped coroutine
-/// OPTIMIZED: Uses C closure with inline upvalue for ultra-fast access
-fn coroutine_wrap(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let func = require_arg(vm, 1, "coroutine.wrap")?;
+fn coroutine_wrap(l: &mut LuaState) -> LuaResult<usize> {
+    let func = match l.get_arg(1) {
+        Some(f) => f,
+        None => {
+            return Err(l.error("coroutine.wrap requires a function argument".to_string()));
+        }
+    };
 
     if !func.is_function() && !func.is_cfunction() {
-        return Err(vm.error("coroutine.wrap requires a function argument".to_string()));
+        return Err(l.error("coroutine.wrap requires a function argument".to_string()));
     }
 
     // Create the coroutine
-    let thread_val = vm.create_thread_value(func);
+    let vm = l.vm_mut();
+    let thread_val = vm.create_thread(func);
 
-    // Get the ThreadId from the thread value
-    let Some(thread_id) = thread_val.as_thread_id() else {
-        return Err(vm.error("Failed to create coroutine".to_string()));
-    };
+    // Create a C closure with the thread as upvalue
+    let wrapper_func = vm.create_c_closure(coroutine_wrap_call, vec![thread_val]);
 
-    // ULTRA-OPTIMIZED: Create C closure with inline upvalue (no indirection)
-    // This is the fastest possible path for coroutine.wrap
-    let thread_val = LuaValue::thread(thread_id);
-    let wrapper = vm.create_c_closure_inline1(coroutine_wrap_call, thread_val);
-
-    Ok(MultiValue::single(wrapper))
+    l.push_value(wrapper_func)?;
+    Ok(1)
 }
 
 /// Helper function for coroutine.wrap - called when the wrapper is invoked
-/// ULTRA-OPTIMIZED: Thread is stored as inline upvalue, direct value access
-fn coroutine_wrap_call(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    // Get the thread from inline upvalue (no indirection, direct value)
-    let thread_val = vm.get_c_closure_inline_upvalue();
+fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
+    // Get the thread from upvalue
+    let thread_val = if let Some(frame) = l.current_frame() {
+        if let Some(func_id) = frame.func.as_function_id() {
+            let vm = l.vm_mut();
+            if let Some(func) = vm.object_pool.get_function(func_id) {
+                if !func.upvalues.is_empty() {
+                    let upval_id = func.upvalues[0];
+                    if let Some(upval) = vm.object_pool.get_upvalue(upval_id) {
+                        // Upvalue should be closed with the thread value
+                        upval.get_closed_value().unwrap_or(LuaValue::nil())
+                    } else {
+                        LuaValue::nil()
+                    }
+                } else {
+                    LuaValue::nil()
+                }
+            } else {
+                LuaValue::nil()
+            }
+        } else {
+            LuaValue::nil()
+        }
+    } else {
+        LuaValue::nil()
+    };
 
     if !thread_val.is_thread() {
-        return Err(vm.error("invalid wrapped coroutine".to_string()));
+        return Err(l.error("invalid wrapped coroutine".to_string()));
     }
 
-    // Collect arguments (all args go to resume, no self)
-    let args = get_args(vm);
+    // Collect arguments
+    let args = l.get_args();
 
     // Resume the coroutine
+    let vm = l.vm_mut();
     let (success, results) = vm.resume_thread(thread_val, args)?;
 
     if !success {
         // If resume failed, propagate the error
-        if !results.is_empty() {
+        let error_msg = if !results.is_empty() {
             if let Some(string_id) = results[0].as_string_id() {
                 if let Some(err_msg) = vm.object_pool.get_string(string_id) {
-                    return Err(vm.error(err_msg.as_str().to_string()));
+                    err_msg.as_str().to_string()
+                } else {
+                    "coroutine error".to_string()
                 }
+            } else {
+                "coroutine error".to_string()
             }
-        }
-        return Err(vm.error("coroutine error".to_string()));
+        } else {
+            "coroutine error".to_string()
+        };
+        return Err(l.error(error_msg));
     }
 
-    // Return results as MultiValue
-    Ok(MultiValue::multiple(results))
+    // Push results
+    for result in &results {
+        l.push_value(*result)?;
+    }
+
+    Ok(results.len())
 }
 
 /// coroutine.isyieldable() - Check if current position can yield
-fn coroutine_isyieldable(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let can_yield = vm.current_thread_id.is_some();
-    Ok(MultiValue::single(LuaValue::boolean(can_yield)))
+fn coroutine_isyieldable(l: &mut LuaState) -> LuaResult<usize> {
+    // For now, we can't easily determine if we're in a yieldable context
+    // Return false from main thread
+    // TODO: Track execution context properly
+    l.push_value(LuaValue::boolean(false))?;
+    Ok(1)
 }
 
 /// coroutine.close(co) - Close a coroutine, marking it as dead
-fn coroutine_close(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let thread_val = require_arg(vm, 1, "coroutine.close")?;
+fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
+    let thread_val = match l.get_arg(1) {
+        Some(t) => t,
+        None => {
+            return Err(l.error("coroutine.close requires a thread argument".to_string()));
+        }
+    };
 
     if !thread_val.is_thread() {
-        return Err(vm.error("coroutine.close requires a thread argument".to_string()));
+        return Err(l.error("coroutine.close requires a thread argument".to_string()));
     }
 
-    // Get thread using thread_id
     let Some(thread_id) = thread_val.as_thread_id() else {
-        return Err(vm.error("invalid thread".to_string()));
+        return Err(l.error("invalid thread".to_string()));
     };
 
-    // Check status first (immutable borrow)
-    let status = {
-        let Some(thread) = vm.object_pool.get_thread(thread_id) else {
-            return Err(vm.error("cannot close dead coroutine".to_string()));
-        };
-        thread.status
-    };
-
-    // Check if already dead
-    if matches!(status, CoroutineStatus::Dead) {
-        return Err(vm.error("cannot close dead coroutine".to_string()));
+    // Check if thread exists and close it
+    let vm = l.vm_mut();
+    if vm.object_pool.get_thread(thread_id).is_none() {
+        return Err(l.error("cannot close dead coroutine".to_string()));
+    }
+    
+    // Clear the thread's stack and frames to mark it as closed
+    if let Some(thread_rc) = vm.object_pool.get_thread(thread_id) {
+        let mut thread = thread_rc.borrow_mut();
+        thread.stack_truncate(0);
+        while thread.call_depth() > 0 {
+            thread.pop_frame();
+        }
     }
 
-    // Check if running
-    if matches!(status, CoroutineStatus::Running) {
-        return Err(vm.error("cannot close running coroutine".to_string()));
-    }
-
-    // Mark as dead (mutable borrow)
-    let Some(thread) = vm.object_pool.get_thread_mut(thread_id) else {
-        return Err(vm.error("invalid thread".to_string()));
-    };
-    thread.status = CoroutineStatus::Dead;
-
-    Ok(MultiValue::multiple(vec![LuaValue::boolean(true)]))
+    l.push_value(LuaValue::boolean(true))?;
+    Ok(1)
 }
