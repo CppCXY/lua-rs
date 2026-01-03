@@ -1759,17 +1759,22 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                // Get values before modifying stack
+                let ra_base = base + a;
+                let iterator = unsafe { *stack_ptr.add(ra_base) };
+                let state = unsafe { *stack_ptr.add(ra_base + 1) };
+                let control = unsafe { *stack_ptr.add(ra_base + 3) };
 
-                    // Setup call stack:
-                    // ra+3: function (copy from ra)
-                    // ra+4: arg1 (copy from ra+1, state)
-                    // ra+5: arg2 (copy from ra+3, control variable)
-                    *ra.add(5) = *ra.add(3); // copy control variable (was ra+2 but swapped)
-                    *ra.add(4) = *ra.add(1); // copy state
-                    *ra.add(3) = *ra; // copy iterator function
-                }
+                // Setup call stack using safe API:
+                // ra+3: function (copy from ra)
+                // ra+4: arg1 (copy from ra+1, state)
+                // ra+5: arg2 (copy from ra+3, control variable)
+                lua_state.stack_set(ra_base + 3, iterator)?;
+                lua_state.stack_set(ra_base + 4, state)?;
+                lua_state.stack_set(ra_base + 5, control)?;
+
+                // Refresh stack pointer after potential reallocation
+                stack_ptr = lua_state.stack_ptr_mut();
 
                 // Save PC before call
                 lua_state.set_frame_pc(frame_idx, pc as u32);

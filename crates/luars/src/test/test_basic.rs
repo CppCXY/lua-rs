@@ -193,6 +193,9 @@ fn test_ipairs() {
     "#,
     );
 
+    if let Err(e) = &result {
+        eprintln!("test_ipairs error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 
