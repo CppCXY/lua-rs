@@ -169,15 +169,16 @@ impl LuaVM {
         func: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<Vec<LuaValue>> {
-        // Push function onto stack
-        let func_idx = self.main_state.stack_mut().len(); // Function will be at this index
-        let nargs = args.len(); // Save length before moving args
+        // Save function index - will be at current logical top
+        let func_idx = self.main_state.get_top();
+        let nargs = args.len();
 
-        self.main_state.stack_mut().push(func.clone());
+        // Push function onto stack (updates stack_top)
+        self.main_state.push_value(func.clone())?;
 
-        // Push arguments
+        // Push arguments (each updates stack_top)
         for arg in args {
-            self.main_state.stack_mut().push(arg);
+            self.main_state.push_value(arg)?;
         }
 
         // Create initial call frame
@@ -189,8 +190,8 @@ impl LuaVM {
         // Run the VM execution loop
         let results = self.run()?;
 
-        // Clear the stack for next execution
-        self.main_state.stack_truncate(0);
+        // Reset logical stack top for next execution
+        self.main_state.set_top(0);
 
         Ok(results)
     }
@@ -199,9 +200,10 @@ impl LuaVM {
     fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
         lua_execute(&mut self.main_state)?;
 
-        // Collect all values remaining on stack as return values
+        // Collect all values from logical stack (0 to stack_top) as return values
         let mut results = Vec::new();
-        for i in 0..self.main_state.stack_len() {
+        let top = self.main_state.get_top();
+        for i in 0..top {
             if let Some(val) = self.main_state.stack_get(i) {
                 results.push(val);
             }
@@ -252,9 +254,9 @@ impl LuaVM {
         // Create a new LuaState for the coroutine
         let mut thread = LuaState::new(1, self as *mut LuaVM, self.safe_option.clone());
 
-        // Push the function onto the thread's stack
+        // Push the function onto the thread's stack (updates stack_top)
         // It will be used when resume() is first called
-        thread.stack_mut().push(func);
+        thread.push_value(func).expect("Failed to push function onto coroutine stack");
 
         // Create thread in ObjectPool and return LuaValue
         let thread_id = self.object_pool.create_thread(thread);

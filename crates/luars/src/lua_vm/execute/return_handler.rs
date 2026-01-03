@@ -39,8 +39,8 @@ pub fn handle_return(
 ) -> LuaResult<FrameAction> {
     // n = number of results (B-1), if B=0 then return all values to top
     let mut nres = if b == 0 {
-        // Return all values from R[A] to top
-        let top = lua_state.stack_len();
+        // Return all values from R[A] to logical top (L->top.p)
+        let top = lua_state.get_top();
         let ra_pos = base + a;
         if top > ra_pos { top - ra_pos } else { 0 }
     } else {
@@ -97,10 +97,13 @@ pub fn handle_return(
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Update caller frame's top to reflect the actual number of results
-    // This is crucial - the caller needs to know where its stack values are
+    // Update logical stack top and caller frame's top
+    // This is CRITICAL: both must be updated for correct stack management
+    let new_top = func_pos + nres;
+    lua_state.set_top(new_top);
+    
     if let Some(caller_frame) = lua_state.current_frame_mut() {
-        caller_frame.top = func_pos + nres;
+        caller_frame.top = new_top;
     }
 
     // Check if this was the top-level frame
@@ -143,10 +146,10 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<F
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Update caller frame's top to reflect the actual number of results
-    // This is crucial - the caller needs to know where its stack values are
+    // Update caller frame's top to match logical stack top
+    let current_top = lua_state.get_top();
     if let Some(caller_frame) = lua_state.current_frame_mut() {
-        caller_frame.top = func_pos + wanted_results;
+        caller_frame.top = current_top;
     }
 
     // Check if this was the top-level frame
@@ -203,10 +206,10 @@ pub fn handle_return1(
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Update caller frame's top to reflect the actual number of results
-    // This is crucial - the caller needs to know where its stack values are
+    // Update caller frame's top to match logical stack top
+    let current_top = lua_state.get_top();
     if let Some(caller_frame) = lua_state.current_frame_mut() {
-        caller_frame.top = func_pos + wanted_results;
+        caller_frame.top = current_top;
     }
 
     // Check if this was the top-level frame

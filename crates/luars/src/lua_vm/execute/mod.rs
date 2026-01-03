@@ -2358,7 +2358,7 @@ fn execute_frame(
 
                 // If vB == 0, use all values from ra+1 to top
                 if vb == 0 {
-                    let stack_top = lua_state.stack_len();
+                    let stack_top = lua_state.get_top();
                     let ra = base + a;
                     vb = if stack_top > ra + 1 {
                         stack_top - ra - 1
@@ -2582,7 +2582,7 @@ fn execute_frame(
                 // Calculate total arguments and extra arguments
                 let call_info = lua_state.get_call_info(frame_idx);
                 let func_pos = call_info.base;
-                let stack_top = lua_state.stack_len();
+                let stack_top = lua_state.get_top();
 
                 // Total arguments = stack_top - func_pos - 1 (exclude function itself)
                 let totalargs = if stack_top > func_pos {

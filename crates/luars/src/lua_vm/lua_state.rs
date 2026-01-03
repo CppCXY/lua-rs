@@ -24,7 +24,13 @@ pub struct LuaState {
     /// Data stack - stores all values (registers, temporaries, function arguments)
     /// Layout: [frame0_values...][frame1_values...][frame2_values...]
     /// Similar to Lua's TValue stack[] in lua_State
+    /// IMPORTANT: This is the PHYSICAL stack, only grows, never shrinks
     stack: Vec<LuaValue>,
+    
+    /// Logical stack top - index of first free slot (Lua's L->top.p)
+    /// This is the actual "top" that controls which stack slots are active
+    /// Values above stack_top are considered "garbage" and can be reused
+    stack_top: usize,
 
     /// Call stack - one CallInfo per active function call
     /// Grows dynamically on demand (like Lua 5.4's linked list approach)
@@ -61,6 +67,7 @@ impl LuaState {
         Self {
             vm,
             stack,
+            stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             // 初始只分配很小的容量，按需增长（Lua 5.4 初始只有 1 个）
             call_stack: Vec::with_capacity(call_stack_size),
             open_upvalues: Vec::new(),
@@ -122,11 +129,14 @@ impl LuaState {
             CIST_LUA
         };
 
+        // Calculate frame top
+        let frame_top = base + nparams;
+        
         // 动态分配新的 CallInfo（Lua 5.4 也是这样做的）
         let frame = CallInfo {
             func,
             base,
-            top: base + nparams,
+            top: frame_top,
             pc: 0,
             nresults, // Use the nresults from caller
             call_status,
@@ -134,12 +144,36 @@ impl LuaState {
         };
 
         self.call_stack.push(frame);
+        
+        // CRITICAL: Sync stack_top with new frame's top
+        // This ensures C functions see correct stack_top for push_value
+        self.set_top(frame_top);
+        
         Ok(())
     }
 
     /// Pop call frame (equivalent to Lua's luaD_poscall)
     pub fn pop_frame(&mut self) -> Option<CallInfo> {
         self.call_stack.pop()
+    }
+
+    /// Get logical stack top (L->top.p in Lua source)
+    /// This is the first free slot in the stack, NOT the length of physical stack
+    #[inline(always)]
+    pub fn get_top(&self) -> usize {
+        self.stack_top
+    }
+
+    /// Set logical stack top (L->top.p = L->stack + new_top in Lua)
+    /// This only updates the logical pointer, does NOT truncate the physical stack
+    /// Old values remain in stack array but are considered "garbage"
+    #[inline(always)]
+    pub fn set_top(&mut self, new_top: usize) {
+        // Ensure physical stack is large enough
+        if new_top > self.stack.len() {
+            self.stack.resize(new_top, LuaValue::nil());
+        }
+        self.stack_top = new_top;
     }
 
     /// Get stack value at absolute index
@@ -163,6 +197,16 @@ impl LuaState {
         }
         self.stack[index] = value;
         Ok(())
+    }
+
+    /// DEPRECATED: Use set_top() instead
+    /// Old version that truncates stack - this is WRONG in Lua's model!
+    /// Kept for backward compatibility but should not be used
+    #[deprecated(note = "Use set_top() instead - this truncates stack incorrectly")]
+    #[inline(always)]
+    pub fn set_stack_top(&mut self, new_top: usize) {
+        // Just delegate to set_top which does the right thing
+        self.set_top(new_top);
     }
 
     /// Insert a value at a specific stack position, shifting everything after it
@@ -477,15 +521,6 @@ impl LuaState {
         &mut self.call_stack[idx]
     }
 
-    /// Set stack top to new position
-    #[inline(always)]
-    pub fn set_top(&mut self, new_top: usize) {
-        if new_top > self.stack.len() {
-            self.stack.resize(new_top, LuaValue::nil());
-        }
-        // Note: We don't shrink the stack here for performance
-    }
-
     /// Pop the current call frame
     #[inline]
     pub fn pop_call_frame(&mut self) {
@@ -587,18 +622,31 @@ impl LuaState {
     }
 
     pub fn push_value(&mut self, value: LuaValue) -> LuaResult<()> {
-        if self.stack.len() >= self.safe_option.max_stack_size {
+        // Check stack limit (Lua's luaD_checkstack equivalent)
+        if self.stack_top >= self.safe_option.max_stack_size {
             self.error(format!(
                 "stack overflow: attempted to push value exceeding maximum {}",
                 self.safe_option.max_stack_size
             ));
             return Err(LuaError::StackOverflow);
         }
-        self.stack.push(value);
+        
+        // Save current top before any borrows
+        let current_top = self.stack_top;
+        
+        // Ensure physical stack is large enough (Lua's luaD_reallocstack equivalent)
+        if current_top >= self.stack.len() {
+            self.stack.resize(current_top + 1, LuaValue::nil());
+        }
 
-        // Update current frame's top to reflect the new stack top
-        // This is crucial for C functions that push results
-        let new_top = self.stack.len();
+        // Write at logical top position (L->top.p->value = value)
+        self.stack[current_top] = value;
+        
+        // Increment logical top (L->top.p++)
+        let new_top = current_top + 1;
+        self.stack_top = new_top;
+
+        // Update current frame's top limit (CallInfo.top)
         if let Some(frame) = self.current_frame_mut() {
             frame.top = new_top;
         }

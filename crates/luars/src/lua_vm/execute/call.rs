@@ -28,6 +28,14 @@ pub fn handle_call(
     b: usize,
     c: usize,
 ) -> LuaResult<FrameAction> {
+    // CRITICAL: Sync stack_top with frame.top before reading arguments
+    // During normal execution, frame.top tracks the current top, but stack_top
+    // may lag behind. We need to sync them before function calls.
+    if let Some(frame) = lua_state.current_frame() {
+        let frame_top = frame.top;
+        lua_state.set_top(frame_top);
+    }
+    
     let nargs = if b == 0 {
         // Variable args: use current frame's top
         // Arguments are from base+a+1 to current frame's top
@@ -38,7 +46,7 @@ pub fn handle_call(
         let frame_top = if let Some(frame) = lua_state.current_frame() {
             frame.top
         } else {
-            lua_state.stack_len() // Fallback to global top
+            lua_state.get_top() // Fallback to logical stack top
         };
 
         if frame_top > first_arg {
@@ -152,24 +160,16 @@ pub fn call_c_function(
     // Call the C function (it returns number of results)
     let result = c_func(lua_state);
 
-    // Get the frame's top BEFORE popping - this is where results should be
-    // (C function may have pushed/popped values, modifying frame.top)
-    let frame_top = if let Some(frame) = lua_state.current_frame() {
-        frame.top
-    } else {
-        // Should not happen, but fallback to call_base
-        call_base
-    };
-
-    // Pop the frame BEFORE handling error (important for Yield)
-    lua_state.pop_frame();
-
     // Now handle the result
     let n = result?;
+    
+    // Get logical stack top BEFORE popping frame (L->top.p in Lua)
+    // C function pushes results, so first result is at top - n
+    let stack_top = lua_state.get_top();
+    let first_result = if stack_top >= n { stack_top - n } else { call_base };
 
-    // Results are at frame_top - n (Lua's firstresult = L->top.p - nres)
-    // This works because C functions must ensure results are at the top of their stack
-    let first_result = if frame_top >= n { frame_top - n } else { call_base };
+    // Pop the frame BEFORE moving results
+    lua_state.pop_frame();
 
     // Move results from first_result to func_idx (Lua's moveresults)
     // Implements Lua's moveresults logic from ldo.c
@@ -185,6 +185,13 @@ pub fn call_c_function(
     };
 
     let new_top = func_idx + final_nresults;
+    
+    // Set logical stack top (L->top.p) - does NOT truncate physical stack
+    // This is critical: old values remain in stack array but are "hidden"
+    // This preserves caller's local variables which live below this top
+    lua_state.set_top(new_top);
+    
+    // Update current frame's top limit
     if let Some(frame) = lua_state.current_frame_mut() {
         frame.top = new_top;
     }
@@ -276,7 +283,7 @@ pub fn handle_tailcall(
         let frame_top = if let Some(frame) = lua_state.current_frame() {
             frame.top
         } else {
-            lua_state.stack_len()
+            lua_state.get_top() // Use logical stack top
         };
 
         if frame_top > first_arg {
