@@ -913,8 +913,8 @@ impl LuaState {
             None => {
                 self.error("pcall: invalid function index".to_string());
                 let err_str = self.create_string("pcall: invalid function index");
-                self.stack.truncate(func_idx);
-                self.stack.push(err_str);
+                self.stack_set(func_idx, err_str)?;
+                self.set_top(func_idx + 1);
                 return Ok((false, 1));
             }
         };
@@ -940,9 +940,10 @@ impl LuaState {
 
         match result {
             Ok(()) => {
-                // Success - count results from func_idx to stack top
-                let result_count = if self.stack.len() > func_idx {
-                    self.stack.len() - func_idx
+                // Success - count results from func_idx to logical stack top
+                let stack_top = self.get_top();
+                let result_count = if stack_top > func_idx {
+                    stack_top - func_idx
                 } else {
                     0
                 };
@@ -969,8 +970,9 @@ impl LuaState {
                 let error_msg = std::mem::take(&mut self.error_msg);
                 let err_str = self.create_string(&error_msg);
 
-                self.stack.truncate(func_idx);
-                self.stack.push(err_str);
+                // Set error at func_idx and update stack top
+                self.stack_set(func_idx, err_str)?;
+                self.set_top(func_idx + 1);
 
                 Ok((false, 1))
             }

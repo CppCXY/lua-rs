@@ -463,23 +463,24 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
     // Call using stack-based API (no Vec allocation!)
     let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
 
-    // pcall_stack_based已经把结果放在func_idx开始的位置
-    // 策略：先收集结果，然后用stack_set重新设置
+    // pcall_stack_based leaves results at func_idx
+    // We need to push them so call_c_function can handle them correctly
+    // Strategy: collect results, then push them
     
-    // 收集所有结果
-    let mut results = Vec::with_capacity(result_count + 1);
-    results.push(LuaValue::boolean(success)); // 第一个是success
+    // Collect all results (success flag + actual results)
+    let mut all_results = Vec::with_capacity(result_count + 1);
+    all_results.push(LuaValue::boolean(success));
     for i in 0..result_count {
         if let Some(val) = l.stack_get(func_idx + i) {
-            results.push(val);
+            all_results.push(val);
         } else {
-            results.push(LuaValue::nil());
+            all_results.push(LuaValue::nil());
         }
     }
     
-    // 把结果写回func_idx开始的位置
-    for (i, val) in results.iter().enumerate() {
-        l.stack_set(func_idx + i, *val)?;
+    // Push all results so call_c_function can collect them
+    for val in all_results {
+        l.push_value(val)?;
     }
 
     Ok(result_count + 1)

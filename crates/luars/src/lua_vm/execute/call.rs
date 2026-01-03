@@ -275,6 +275,13 @@ pub fn handle_tailcall(
     a: usize,
     b: usize,
 ) -> LuaResult<FrameAction> {
+    // CRITICAL: Sync stack_top with frame.top before reading arguments
+    // Same as handle_call - we need current top to calculate variable args
+    if let Some(frame) = lua_state.current_frame() {
+        let frame_top = frame.top;
+        lua_state.set_top(frame_top);
+    }
+    
     let nargs = if b == 0 {
         // Variable args: use current frame's top
         let func_idx = base + a;
@@ -324,12 +331,15 @@ pub fn handle_tailcall(
                 lua_state.stack_set(dst_idx, arg)?;
             }
 
-            // Replace function at base
+            // Replace function at base-1 (where current function is)
             lua_state.stack_set(base - 1, func)?;
-            // Update frame function and reset PC (reusing current frame)
-            // Don't pop/push - just modify the existing frame
-            // TODO: Need set_frame_func that updates the current frame's function
-            // For now, this is simplified
+            
+            // CRITICAL: Update current frame's func field so main loop loads new chunk
+            let current_frame_idx = lua_state.call_depth() - 1;
+            lua_state.set_frame_func(current_frame_idx, func);
+            
+            // Reset PC to 0 to start executing the new function from beginning
+            lua_state.set_frame_pc(current_frame_idx, 0);
 
             // Return FrameAction::TailCall - main loop will load new chunk and continue
             Ok(FrameAction::TailCall)
@@ -339,15 +349,17 @@ pub fn handle_tailcall(
             call_c_function(lua_state, func_idx, nargs, -1)?;
 
             // Move results to current frame base (for return)
-            let mut i = 0;
-            loop {
-                match lua_state.stack_get(func_idx + i) {
-                    Some(result) if i == 0 || !result.is_nil() => {
-                        lua_state.stack_set(base + i, result)?;
-                        i += 1;
-                    }
-                    _ => break,
-                }
+            // Use stack_top to determine actual number of results
+            let result_top = lua_state.get_top();
+            let nresults = if result_top > func_idx {
+                result_top - func_idx
+            } else {
+                0
+            };
+            
+            for i in 0..nresults {
+                let result = lua_state.stack_get(func_idx + i).unwrap_or(LuaValue::nil());
+                lua_state.stack_set(base + i, result)?;
             }
 
             // C function done, just continue (it's like a return for tail call)
@@ -357,15 +369,17 @@ pub fn handle_tailcall(
             call_c_function(lua_state, func_idx, nargs, -1)?;
 
             // Move results to current frame base
-            let mut i = 0;
-            loop {
-                match lua_state.stack_get(func_idx + i) {
-                    Some(result) if i == 0 || !result.is_nil() => {
-                        lua_state.stack_set(base + i, result)?;
-                        i += 1;
-                    }
-                    _ => break,
-                }
+            // Use stack_top to determine actual number of results
+            let result_top = lua_state.get_top();
+            let nresults = if result_top > func_idx {
+                result_top - func_idx
+            } else {
+                0
+            };
+            
+            for i in 0..nresults {
+                let result = lua_state.stack_get(func_idx + i).unwrap_or(LuaValue::nil());
+                lua_state.stack_set(base + i, result)?;
             }
 
             Ok(FrameAction::Continue)
