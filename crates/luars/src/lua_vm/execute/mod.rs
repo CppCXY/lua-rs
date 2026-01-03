@@ -76,12 +76,30 @@ unsafe fn setivalue(v: *mut LuaValue, i: i64) {
     }
 }
 
+/// chgivalue - 只修改整数值，不修改类型标签（Lua的chgivalue宏）
+/// 调用前必须确认类型已经是整数！
+#[inline(always)]
+unsafe fn chgivalue(v: *mut LuaValue, i: i64) {
+    unsafe {
+        (*v).value_.i = i;
+    }
+}
+
 /// setfltvalue - 设置浮点值
 #[inline(always)]
 unsafe fn setfltvalue(v: *mut LuaValue, n: f64) {
     unsafe {
         (*v).value_.n = n;
         (*v).tt_ = LUA_VNUMFLT;
+    }
+}
+
+/// chgfltvalue - 只修改浮点值，不修改类型标签
+/// 调用前必须确认类型已经是浮点！
+#[inline(always)]
+unsafe fn chgfltvalue(v: *mut LuaValue, n: f64) {
+    unsafe {
+        (*v).value_.n = n;
     }
 }
 
@@ -1568,14 +1586,14 @@ fn execute_frame(
                         if count > 0 {
                             // More iterations
                             let step = ivalue(ra.add(1));
-                            let mut idx = ivalue(ra.add(2));
+                            let idx = ivalue(ra.add(2));
 
-                            // Update counter (decrement)
-                            setivalue(ra, (count - 1) as i64);
+                            // Update counter (decrement) - 用chgivalue避免重设类型标签
+                            chgivalue(ra, (count - 1) as i64);
 
                             // Update control variable: idx += step
-                            idx = idx.wrapping_add(step);
-                            setivalue(ra.add(2), idx);
+                            let new_idx = idx.wrapping_add(step);
+                            chgivalue(ra.add(2), new_idx);
 
                             // Jump back
                             if bx > pc {
@@ -1592,21 +1610,21 @@ fn execute_frame(
                         // ra+2: idx (control variable)
                         let step = fltvalue(ra.add(1));
                         let limit = fltvalue(ra);
-                        let mut idx = fltvalue(ra.add(2));
+                        let idx = fltvalue(ra.add(2));
 
                         // idx += step
-                        idx += step;
+                        let new_idx = idx + step;
 
                         // Check if should continue
                         let should_continue = if step > 0.0 {
-                            idx <= limit
+                            new_idx <= limit
                         } else {
-                            idx >= limit
+                            new_idx >= limit
                         };
 
                         if should_continue {
-                            // Update control variable
-                            setfltvalue(ra.add(2), idx);
+                            // Update control variable - 用chgfltvalue避免重设类型标签
+                            chgfltvalue(ra.add(2), new_idx);
 
                             // Jump back
                             if bx > pc {
@@ -2260,7 +2278,7 @@ fn execute_frame(
             // CONDITIONAL TESTS
             // ============================================================
             OpCode::Test => {
-                // if (not R[A] == k) then pc++
+                // docondjump(): if (cond != k) then pc++ else donextjump
                 let a = instr.get_a() as usize;
                 let k = instr.get_k();
 
@@ -2273,15 +2291,20 @@ fn execute_frame(
                     let cond = !is_false;
 
                     if cond != k {
-                        pc += 2; // skip next jump
+                        pc += 1; // Skip next instruction (JMP)
                     } else {
-                        pc += 1;
+                        // Execute next instruction (must be JMP)
+                        let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                        debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
+                        pc += 1; // Move past the JMP
+                        let sj = next_instr.get_sj();
+                        pc = (pc as i32 + sj) as usize; // Execute the jump
                     }
                 }
             }
 
             OpCode::TestSet => {
-                // if (not R[B] == k) then pc++ else R[A] := R[B]
+                // if (l_isfalse(R[B]) == k) then pc++ else R[A] := R[B]; donextjump
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
@@ -2292,11 +2315,17 @@ fn execute_frame(
                         (*rb).is_nil() || ((*rb).is_boolean() && (*rb).tt_ == LUA_VFALSE);
 
                     if is_false == k {
-                        pc += 2; // skip next jump
+                        pc += 1; // Condition failed - skip next instruction (JMP)
                     } else {
+                        // Condition succeeded - copy value and EXECUTE next instruction (must be JMP)
                         let ra = stack_ptr.add(base + a);
                         *ra = *rb;
-                        pc += 1; // execute next jump
+                        // donextjump: fetch and execute next JMP instruction
+                        let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                        debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
+                        pc += 1; // Move past the JMP instruction
+                        let sj = next_instr.get_sj();
+                        pc = (pc as i32 + sj) as usize; // Execute the jump
                     }
                 }
             }

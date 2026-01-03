@@ -200,6 +200,7 @@ pub fn call_c_function(
 /// - first_result: position of first result on stack
 /// - nres: number of actual results
 /// - wanted: number of results wanted (-1 for MULTRET)
+#[inline]
 fn move_results(
     lua_state: &mut LuaState,
     res: usize,
@@ -207,21 +208,23 @@ fn move_results(
     nres: usize,
     wanted: i32,
 ) -> LuaResult<()> {
-    // Handle common cases separately (like Lua's switch)
+    // Fast path for common cases (like Lua's switch in moveresults)
     match wanted {
         0 => {
-            // No values needed - do nothing
+            // No values needed - just return (caller will set top)
+            return Ok(());
         }
         1 => {
-            // One value needed
+            // One value needed (most common case for expression results)
             if nres == 0 {
                 // No results - set nil
                 lua_state.stack_set(res, LuaValue::nil())?;
             } else {
-                // At least one result - move it
+                // At least one result - move first one
                 let val = lua_state.stack_get(first_result).unwrap_or(LuaValue::nil());
                 lua_state.stack_set(res, val)?;
             }
+            return Ok(());
         }
         -1 => {
             // MULTRET - want all results
@@ -231,6 +234,7 @@ fn move_results(
                     .unwrap_or(LuaValue::nil());
                 lua_state.stack_set(res + i, val)?;
             }
+            return Ok(());
         }
         _ => {
             // General case: specific number of results (2+)
@@ -249,10 +253,10 @@ fn move_results(
             for i in copy_count..wanted {
                 lua_state.stack_set(res + i, LuaValue::nil())?;
             }
+            
+            return Ok(());
         }
     }
-
-    Ok(())
 }
 
 /// Handle TAILCALL opcode - Lua style (replace frame, don't recurse)

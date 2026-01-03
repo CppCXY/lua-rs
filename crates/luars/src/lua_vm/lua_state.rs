@@ -10,6 +10,13 @@ use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
 use crate::{Chunk, LuaVM};
 
+// Branch prediction hints (similar to Lua's l_likely/l_unlikely macros)
+#[inline(always)]
+#[cold]
+fn l_unlikely<T>(b: T) -> T where T: Copy {
+    b
+}
+
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
 pub struct LuaState {
@@ -580,43 +587,22 @@ impl LuaState {
     }
 
     pub fn push_value(&mut self, value: LuaValue) -> LuaResult<()> {
-        // Get current frame's top position
-        let (push_pos, has_frame) = if let Some(frame) = self.current_frame() {
-            (frame.top, true)
-        } else {
-            // No frame, push to stack end (for initialization phase)
-            (self.stack.len(), false)
-        };
-
-        // Check if we exceed max stack size
-        if push_pos >= self.safe_option.max_stack_size {
+        if self.stack.len() >= self.safe_option.max_stack_size {
             self.error(format!(
                 "stack overflow: attempted to push value exceeding maximum {}",
                 self.safe_option.max_stack_size
             ));
             return Err(LuaError::StackOverflow);
         }
+        self.stack.push(value);
 
-        // If no frame, use traditional push to grow stack
-        // If has frame, set at specific position
-        if has_frame {
-            // Set value at the frame's top position (may resize stack)
-            self.stack_set(push_pos, value)?;
-        } else {
-            // No frame yet (initialization), append to stack
-            if push_pos >= self.stack.len() {
-                self.stack.push(value);
-            } else {
-                self.stack[push_pos] = value;
-            }
-        }
-        
-        // Update current frame's top to reflect the pushed value
+        // Update current frame's top to reflect the new stack top
         // This is crucial for C functions that push results
+        let new_top = self.stack.len();
         if let Some(frame) = self.current_frame_mut() {
-            frame.top = push_pos + 1;
+            frame.top = new_top;
         }
-        
+
         Ok(())
     }
 
