@@ -5,7 +5,6 @@
 
 use std::rc::Rc;
 
-use crate::compiler::{NumberResult, parse_float_token_value, parse_int_token_value};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaError, LuaResult, LuaState};
@@ -464,12 +463,24 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
     // Call using stack-based API (no Vec allocation!)
     let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
 
-    // Results are already on stack starting at func_idx
-    // We need to insert success boolean before them
-    let success_val = LuaValue::boolean(success);
-
-    // Insert success at func_idx position
-    l.stack_insert(func_idx, success_val)?;
+    // pcall_stack_based已经把结果放在func_idx开始的位置
+    // 策略：先收集结果，然后用stack_set重新设置
+    
+    // 收集所有结果
+    let mut results = Vec::with_capacity(result_count + 1);
+    results.push(LuaValue::boolean(success)); // 第一个是success
+    for i in 0..result_count {
+        if let Some(val) = l.stack_get(func_idx + i) {
+            results.push(val);
+        } else {
+            results.push(LuaValue::nil());
+        }
+    }
+    
+    // 把结果写回func_idx开始的位置
+    for (i, val) in results.iter().enumerate() {
+        l.stack_set(func_idx + i, *val)?;
+    }
 
     Ok(result_count + 1)
 }
