@@ -106,7 +106,7 @@ pub fn handle_call(
 /// Call a C function and handle results  
 /// Similar to Lua's precallC - much simpler than our initial attempt
 /// Lua 的做法：C 函数直接在当前栈上执行，返回结果数量
-fn call_c_function(
+pub fn call_c_function(
     lua_state: &mut LuaState,
     func_idx: usize,
     nargs: usize,
@@ -149,12 +149,17 @@ fn call_c_function(
     // Push temporary frame for C function
     lua_state.push_frame(func, call_base, nargs)?;
 
-    let top_before = lua_state.stack_len();
-
     // Call the C function (it returns number of results)
     let result = c_func(lua_state);
 
-    let top_after = lua_state.stack_len();
+    // Get the frame's top BEFORE popping - this is where results should be
+    // (C function may have pushed/popped values, modifying frame.top)
+    let frame_top = if let Some(frame) = lua_state.current_frame() {
+        frame.top
+    } else {
+        // Should not happen, but fallback to call_base
+        call_base
+    };
 
     // Pop the frame BEFORE handling error (important for Yield)
     lua_state.pop_frame();
@@ -162,8 +167,9 @@ fn call_c_function(
     // Now handle the result
     let n = result?;
 
-    // Results are from top_before to top_after-1
-    let first_result = top_after - n;
+    // Results are at frame_top - n (Lua's firstresult = L->top.p - nres)
+    // This works because C functions must ensure results are at the top of their stack
+    let first_result = if frame_top >= n { frame_top - n } else { call_base };
 
     // Move results from first_result to func_idx (Lua's moveresults)
     // Implements Lua's moveresults logic from ldo.c

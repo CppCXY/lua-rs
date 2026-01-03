@@ -588,6 +588,14 @@ impl LuaState {
             return Err(LuaError::StackOverflow);
         }
         self.stack.push(value);
+        
+        // Update current frame's top to reflect the new stack top
+        // This is crucial for C functions that push results
+        let new_top = self.stack.len();
+        if let Some(frame) = self.current_frame_mut() {
+            frame.top = new_top;
+        }
+        
         Ok(())
     }
 
@@ -855,19 +863,24 @@ impl LuaState {
             }
         };
 
-        // Create call frame
-        let base = func_idx + 1;
-        if let Err(_) = self.push_frame(func, base, arg_count) {
-            // Error during setup
-            let error_msg = std::mem::take(&mut self.error_msg);
-            let err_str = self.create_string(&error_msg);
-            self.stack.truncate(func_idx);
-            self.stack.push(err_str);
-            return Ok((false, 1));
-        }
-
-        // Execute
-        let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
+        // Call the function using the internal call machinery
+        // This handles both C and Lua functions correctly
+        let result = if func.is_cfunction() || func.as_function_id().and_then(|id| {
+            unsafe { &*self.vm }.object_pool.get_function(id).and_then(|f| f.c_function())
+        }).is_some() {
+            // C function - call directly
+            crate::lua_vm::execute::call::call_c_function(
+                self,
+                func_idx,
+                arg_count,
+                0, // MULTRET - want all results
+            ).map(|_| ())
+        } else {
+            // Lua function - push frame and execute
+            let base = func_idx + 1;
+            self.push_frame(func, base, arg_count)?;
+            crate::lua_vm::execute::lua_execute_until(self, initial_depth)
+        };
 
         match result {
             Ok(()) => {

@@ -80,11 +80,11 @@ impl Instruction {
     pub const MAX_AX: u32 = (1 << Self::SIZE_AX) - 1;
     pub const MAX_SJ: u32 = (1 << Self::SIZE_SJ) - 1;
 
-    // Offsets for signed arguments
-    pub const OFFSET_SB: i32 = 128; // For signed B field (-128 to 127)
+    // Offsets for signed arguments (Lua 5.5: OFFSET_X = MAXARG_X >> 1)
+    pub const OFFSET_SB: i32 = (Self::MAX_C >> 1) as i32;  // sB uses OFFSET_sC (127 for 8-bit)
+    pub const OFFSET_SC: i32 = (Self::MAX_C >> 1) as i32;  // 127 for 8-bit C
     pub const OFFSET_SBX: i32 = (Self::MAX_BX >> 1) as i32;
     pub const OFFSET_SJ: i32 = (Self::MAX_SJ >> 1) as i32;
-    pub const OFFSET_SC: i32 = (Self::MAX_C >> 1) as i32;
 
     // Create masks
     #[inline(always)]

@@ -16,7 +16,7 @@
 
   This matches Lua's lvm.c design where everything is pointer-based
 ----------------------------------------------------------------------*/
-mod call;
+pub mod call;
 mod closure_handler;
 mod concat;
 mod metamethod;

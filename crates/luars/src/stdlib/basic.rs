@@ -83,6 +83,9 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
 
 /// assert(v [, message]) - Raise error if v is false or nil
 fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
+    let arg_count = l.arg_count();
+    
+    // Get first argument without consuming it
     let condition = l.get_arg(1).unwrap_or(LuaValue::nil());
 
     if !condition.is_truthy() {
@@ -100,8 +103,9 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error(message));
     }
 
-    // Return all arguments (already on stack)
-    Ok(l.arg_count())
+    // Return all arguments - they are already on stack
+    // Just return the count
+    Ok(arg_count)
 }
 
 /// error(message) - Raise an error
@@ -380,8 +384,59 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 /// next(table [, index]) - Return next key-value pair
 /// TODO: Implement table.next() method on LuaTable
 fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
-    // Temporary simplified implementation
-    Err(l.error("next() not yet fully implemented".to_string()))
+    // next(table [, index])
+    // Returns the next index-value pair in the table
+    let table_val = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
+
+    let table_id = table_val
+        .as_table_id()
+        .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
+
+    let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
+
+    // Get all key-value pairs from the table
+    let vm = l.vm_mut();
+    let table = match vm.object_pool.get_table(table_id) {
+        Some(t) => t,
+        None => return Err(l.error("table not found".to_string())),
+    };
+    
+    // Collect all key-value pairs first (to avoid borrow issues)
+    let all_pairs: Vec<(LuaValue, LuaValue)> = table.iter_all()
+        .filter(|(_, v)| !v.is_nil())
+        .collect();
+    
+    // Find next key-value pair
+    // If index is nil, return first pair
+    // Otherwise, find the key after index
+    let mut found_current = index_val.is_nil();
+    let mut next_pair: Option<(LuaValue, LuaValue)> = None;
+
+    for (k, v) in all_pairs {
+        if found_current {
+            next_pair = Some((k, v));
+            break;
+        } else if k.raw_equal(&index_val, &vm.object_pool) {
+            found_current = true;
+        }
+    }
+
+    // If we didn't find the current key, error
+    if !found_current && !index_val.is_nil() {
+        return Err(l.error("invalid key to 'next'".to_string()));
+    }
+
+    // Return next key-value pair, or nil if at end
+    if let Some((k, v)) = next_pair {
+        l.push_value(k)?;
+        l.push_value(v)?;
+        Ok(2)
+    } else {
+        l.push_value(LuaValue::nil())?;
+        Ok(1)
+    }
 }
 
 /// pcall(f [, arg1, ...]) - Protected call
