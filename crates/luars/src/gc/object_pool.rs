@@ -778,13 +778,6 @@ impl ObjectPool {
             match self.string_intern.find_or_insert_index(hash, compare) {
                 Ok(existing_id) => {
                     // Found existing string with same content
-                    if s == "nil" {
-                        eprintln!(
-                            "[DEBUG] create_string('nil'): Found existing StringId({}) hash={:x}",
-                            existing_id.raw(),
-                            hash
-                        );
-                    }
                     return (existing_id, false);
                 }
                 Err(insert_idx) => {
@@ -794,13 +787,6 @@ impl ObjectPool {
                         data: LuaString::with_hash(s.to_string(), hash),
                     };
                     let id = StringId::short(self.strings.alloc(gc_string));
-                    if s == "nil" {
-                        eprintln!(
-                            "[DEBUG] create_string('nil'): Created NEW StringId({}) hash={:x}",
-                            id.raw(),
-                            hash
-                        );
-                    }
                     self.string_intern.insert(hash, id, insert_idx);
 
                     // Check if resize needed (pass dummy closure since we just inserted)

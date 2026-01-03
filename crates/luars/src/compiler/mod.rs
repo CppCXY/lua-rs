@@ -14,6 +14,7 @@ mod statement; // Statement parsing (lparser.c)
 pub use code::*;
 pub use expression::*;
 pub use func_state::*;
+pub use parse_literal::*;
 
 use crate::compiler::parser::{
     LuaLanguageLevel, LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig,
@@ -21,6 +22,7 @@ use crate::compiler::parser::{
 use crate::gc::ObjectPool;
 use crate::lua_value::Chunk;
 use crate::lua_vm::OpCode;
+
 
 // Structures are now in separate files (func_state.rs, expression.rs)
 

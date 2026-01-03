@@ -755,10 +755,14 @@ impl LuaValue {
             LUA_TNIL => true,                      // All nils are equal
             LUA_TBOOLEAN => self.tt_ == other.tt_, // Already checked above
             LUA_TNUMBER => {
-                if self.ttisinteger() {
+                // Both are numbers, but could be integer or float
+                if self.ttisinteger() && other.ttisinteger() {
                     self.ivalue() == other.ivalue()
                 } else {
-                    self.fltvalue() == other.fltvalue()
+                    // Convert both to float for comparison
+                    let v1 = if self.ttisinteger() { self.ivalue() as f64 } else { self.fltvalue() };
+                    let v2 = if other.ttisinteger() { other.ivalue() as f64 } else { other.fltvalue() };
+                    v1 == v2
                 }
             }
             LUA_TSTRING => {
@@ -869,45 +873,6 @@ impl Default for LuaValue {
         Self::nil()
     }
 }
-
-// impl PartialEq for LuaValue {
-//     fn eq(&self, other: &Self) -> bool {
-//         // Quick check: if tags differ, not equal
-//         if self.tt_ != other.tt_ {
-//             if self.ttisstring() || other.ttisstring() {
-//                 eprintln!("[DEBUG] PartialEq: tags differ: self.tt_={}, other.tt_={}", self.tt_, other.tt_);
-//             }
-//             return false;
-//         }
-
-//         // For inline values, compare value_ directly
-//         match self.ttype() {
-//             LUA_TNIL => true,
-//             LUA_TBOOLEAN => true, // Already checked tag equality
-//             LUA_TNUMBER => unsafe {
-//                 if self.ttisinteger() {
-//                     self.value_.i == other.value_.i
-//                 } else {
-//                     self.value_.n == other.value_.n
-//                 }
-//             },
-//             LUA_TLIGHTUSERDATA => unsafe { self.value_.p == other.value_.p },
-//             LUA_TFUNCTION if self.ttiscfunction() => unsafe { self.value_.f == other.value_.f },
-//             // GC objects: compare IDs
-//             _ if self.iscollectable() => unsafe {
-//                 let result = self.value_.gc_id == other.value_.gc_id;
-//                 if self.ttisstring() {
-//                     eprintln!("[DEBUG] PartialEq: string compare: self.gc_id={}, other.gc_id={}, result={}",
-//                         self.value_.gc_id, other.value_.gc_id, result);
-//                 }
-//                 result
-//             },
-//             _ => false,
-//         }
-//     }
-// }
-
-// impl Eq for LuaValue {}
 
 impl std::fmt::Debug for LuaValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

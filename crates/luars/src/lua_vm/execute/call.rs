@@ -214,23 +214,7 @@ fn move_results(
             } else {
                 // At least one result - move it
                 let val = lua_state.stack_get(first_result).unwrap_or(LuaValue::nil());
-                eprintln!(
-                    "[DEBUG] move_results: Moving 1 result from {} to {}",
-                    first_result, res
-                );
-                eprintln!(
-                    "[DEBUG] move_results: val is_string={}, is_nil={}",
-                    val.is_string(),
-                    val.is_nil()
-                );
                 lua_state.stack_set(res, val)?;
-                let check = lua_state.stack_get(res).unwrap();
-                eprintln!(
-                    "[DEBUG] move_results: After set, stack[{}] is_string={}, is_nil={}",
-                    res,
-                    check.is_string(),
-                    check.is_nil()
-                );
             }
         }
         -1 => {

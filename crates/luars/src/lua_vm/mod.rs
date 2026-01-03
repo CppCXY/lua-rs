@@ -666,13 +666,7 @@ impl LuaVM {
     /// Convert a LuaValue to its string representation (without metamethods)
     /// This properly resolves GC objects through the object pool
     pub fn value_to_string_raw(&self, value: &LuaValue) -> String {
-        eprintln!(
-            "[DEBUG] value_to_string_raw: is_nil={}, is_string={}",
-            value.is_nil(),
-            value.is_string()
-        );
         if value.is_nil() {
-            eprintln!("[DEBUG] value_to_string_raw: returning 'nil' (was nil)");
             "nil".to_string()
         } else if let Some(b) = value.as_bool() {
             b.to_string()
@@ -686,10 +680,6 @@ impl LuaVM {
                 n.to_string()
             }
         } else if let Some(lua_str) = self.get_string(value) {
-            eprintln!(
-                "[DEBUG] value_to_string_raw: returning string '{}'",
-                lua_str.as_str()
-            );
             lua_str.as_str().to_string()
         } else if value.is_table() {
             if let Some(id) = value.as_table_id() {

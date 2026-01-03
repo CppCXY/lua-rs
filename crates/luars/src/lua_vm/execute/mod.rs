@@ -303,27 +303,7 @@ fn execute_frame(
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let rb = stack_ptr.add(base + b);
-                    if b == 0 {
-                        // Debug for register 0 (our result)
-                        eprintln!(
-                            "[DEBUG] MOVE: R[{}] := R[{}], rb.is_string={}, rb.is_nil={}",
-                            a,
-                            b,
-                            (*rb).is_string(),
-                            (*rb).is_nil()
-                        );
-                    }
                     *ra = *rb; // Direct copy (setobjs2s)
-                    if b == 0 {
-                        // Debug after copy
-                        eprintln!(
-                            "[DEBUG] MOVE: After copy, R[{}].is_string={}, R[{}].is_nil={}",
-                            a,
-                            (*ra).is_string(),
-                            a,
-                            (*ra).is_nil()
-                        );
-                    }
                 }
             }
             OpCode::LoadI => {
@@ -2051,7 +2031,8 @@ fn execute_frame(
             // COMPARISON OPERATIONS (register-register)
             // ============================================================
             OpCode::Eq => {
-                // if ((R[A] == R[B]) ~= k) then pc++
+                // if ((R[A] == R[B]) ~= k) then pc++; else donextjump
+                // Lua 5.5: docondjump() - if cond != k, skip next; else execute next (JMP)
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
@@ -2063,15 +2044,14 @@ fn execute_frame(
                     // Simple equality check (TODO: metamethod)
                     let cond = (*ra).raw_equal(&*rb, &lua_state.vm_mut().object_pool);
                     if cond != k {
-                        pc += 2; // skip next jump instruction
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
             OpCode::Lt => {
-                // if ((R[A] < R[B]) ~= k) then pc++
+                // if ((R[A] < R[B]) ~= k) then pc++; else donextjump
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
@@ -2093,15 +2073,14 @@ fn execute_frame(
                     };
 
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
             OpCode::Le => {
-                // if ((R[A] <= R[B]) ~= k) then pc++
+                // if ((R[A] <= R[B]) ~= k) then pc++; else donextjump
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
@@ -2123,10 +2102,9 @@ fn execute_frame(
                     };
 
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
@@ -2134,7 +2112,8 @@ fn execute_frame(
             // COMPARISON WITH CONSTANT/IMMEDIATE
             // ============================================================
             OpCode::EqK => {
-                // if ((R[A] == K[B]) ~= k) then pc++
+                // if ((R[A] == K[B]) ~= k) then pc++; else donextjump
+                // Lua 5.5: docondjump() - if cond != k, skip next; else execute next (JMP)
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
@@ -2144,26 +2123,16 @@ fn execute_frame(
                     let kb = constants.get(b).unwrap();
 
                     // Raw equality (no metamethods for constants)
-                    let cond = (*ra).raw_equal(&*kb, &lua_state.vm_mut().object_pool);
-                    eprintln!(
-                        "[DEBUG] EQK: R[{}] == K[{}], ra.is_string={}, kb.is_string={}, cond={}, k={}",
-                        a,
-                        b,
-                        (*ra).is_string(),
-                        kb.is_string(),
-                        cond,
-                        k
-                    );
+                    let cond = (*ra).raw_equal(kb, &lua_state.vm_mut().object_pool);
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
             OpCode::EqI => {
-                // if ((R[A] == sB) ~= k) then pc++
+                // if ((R[A] == sB) ~= k) then pc++; else donextjump
                 let a = instr.get_a() as usize;
                 let sb = instr.get_sb();
                 let k = instr.get_k();
@@ -2180,15 +2149,14 @@ fn execute_frame(
                     };
 
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
             OpCode::LtI => {
-                // if ((R[A] < sB) ~= k) then pc++
+                // if ((R[A] < sB) ~= k) then pc++; else donextjump
                 let a = instr.get_a() as usize;
                 let im = instr.get_sb();
                 let k = instr.get_k();
@@ -2205,15 +2173,14 @@ fn execute_frame(
                     };
 
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
             OpCode::LeI => {
-                // if ((R[A] <= sB) ~= k) then pc++
+                // if ((R[A] <= sB) ~= k) then pc++; else donextjump
                 let a = instr.get_a() as usize;
                 let im = instr.get_sb();
                 let k = instr.get_k();
@@ -2230,10 +2197,9 @@ fn execute_frame(
                     };
 
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
@@ -2255,15 +2221,14 @@ fn execute_frame(
                     };
 
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 
             OpCode::GeI => {
-                // if ((R[A] >= sB) ~= k) then pc++ (implemented as !(A < B))
+                // if ((R[A] >= sB) ~= k) then pc++; else donextjump
                 let a = instr.get_a() as usize;
                 let im = instr.get_sb();
                 let k = instr.get_k();
@@ -2280,10 +2245,9 @@ fn execute_frame(
                     };
 
                     if cond != k {
-                        pc += 2;
-                    } else {
-                        pc += 1;
+                        pc += 1; // Condition failed - skip next instruction
                     }
+                    // else: Condition succeeded - execute next instruction (must be JMP)
                 }
             }
 

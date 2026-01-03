@@ -5,6 +5,7 @@
 
 use std::rc::Rc;
 
+use crate::compiler::{NumberResult, parse_float_token_value, parse_int_token_value};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaError, LuaResult, LuaState};
@@ -42,15 +43,6 @@ pub fn create_basic_lib() -> LibraryModule {
 /// print(...) - Print values to stdout
 fn lua_print(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
-    eprintln!("[DEBUG] print: got {} args", args.len());
-    for (i, arg) in args.iter().enumerate() {
-        eprintln!(
-            "[DEBUG] print: arg[{}] is_string={}, is_nil={}",
-            i,
-            arg.is_string(),
-            arg.is_nil()
-        );
-    }
     let vm = l.vm_mut();
 
     let output: Vec<String> = args.iter().map(|v| vm.value_to_string_raw(v)).collect();
@@ -85,28 +77,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let result = l.vm_mut().create_string(type_name);
-    eprintln!(
-        "[DEBUG] type(): Created string result, is_string={}, is_nil={}",
-        result.is_string(),
-        result.is_nil()
-    );
-    if result.is_string() {
-        eprintln!("[DEBUG] type(): String ID = {:?}", result.as_string_id());
-    }
-    let top_before = l.stack_len();
     l.push_value(result)?;
-    let top_after = l.stack_len();
-    eprintln!(
-        "[DEBUG] type(): top before={}, after={}",
-        top_before, top_after
-    );
-    if let Some(pushed) = l.stack_get(top_after - 1) {
-        eprintln!(
-            "[DEBUG] type(): Pushed value is_string={}, is_nil={}",
-            pushed.is_string(),
-            pushed.is_nil()
-        );
-    }
     Ok(1)
 }
 
@@ -142,6 +113,63 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
         .unwrap_or_else(|| "error".to_string());
 
     Err(l.error(message))
+}
+
+fn parse_lua_number(s: &str) -> LuaValue {
+    let s = s.trim();
+    if s.is_empty() {
+        return LuaValue::nil();
+    }
+
+    // Handle sign
+    let (sign, rest) = if s.starts_with('-') {
+        (-1i64, &s[1..])
+    } else if s.starts_with('+') {
+        (1i64, &s[1..])
+    } else {
+        (1i64, s)
+    };
+
+    let rest = rest.trim_start();
+
+    // Check for hex prefix (0x or 0X)
+    if rest.starts_with("0x") || rest.starts_with("0X") {
+        let hex_part = &rest[2..];
+
+        // Hex float contains '.' or 'p'/'P' - always treat as float
+        if hex_part.contains('.') || hex_part.to_lowercase().contains('p') {
+            // For hex float, just try to parse as float (Rust doesn't support hex float literals)
+            // Return nil for now - proper implementation would need custom parser
+            return LuaValue::nil();
+        }
+
+        // Plain hex integer
+        if let Ok(i) = u64::from_str_radix(hex_part, 16) {
+            let i = i as i64;
+            return LuaValue::integer(sign * i);
+        }
+        return LuaValue::nil();
+    }
+
+    // Decimal number - determine if integer or float
+    // Integer: no '.' and no 'e'/'E'
+    // Float: contains '.' or 'e'/'E'
+    let has_dot = rest.contains('.');
+    let has_exponent = rest.to_lowercase().contains('e');
+
+    if !has_dot && !has_exponent {
+        // Try as integer
+        if let Ok(i) = s.parse::<i64>() {
+            return LuaValue::integer(i);
+        }
+    }
+
+    // Try as float (either has '.'/e' or integer parse failed due to overflow)
+    if let Ok(f) = s.parse::<f64>() {
+        return LuaValue::float(f);
+    }
+
+    LuaValue::nil()
 }
 
 /// tonumber(e [, base]) - Convert to number
@@ -184,101 +212,6 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
 
     l.push_value(result)?;
     Ok(1)
-}
-
-/// Parse a Lua number string, supporting hex integers and hex floats
-fn parse_lua_number(s: &str) -> LuaValue {
-    let s = s.trim();
-    if s.is_empty() {
-        return LuaValue::nil();
-    }
-
-    // Check for hex prefix (0x or 0X), with optional sign
-    let (sign, rest) = if s.starts_with('-') {
-        (-1i64, &s[1..])
-    } else if s.starts_with('+') {
-        (1i64, &s[1..])
-    } else {
-        (1i64, s)
-    };
-
-    let rest = rest.trim_start();
-
-    if rest.starts_with("0x") || rest.starts_with("0X") {
-        let hex_part = &rest[2..];
-
-        // Check if this is a hex float (contains '.' or 'p'/'P')
-        if hex_part.contains('.') || hex_part.to_lowercase().contains('p') {
-            // Parse hex float: 0xAA.BB or 0xAA.BBpEE or 0xAApEE
-            if let Some(f) = parse_hex_float(hex_part) {
-                return LuaValue::float(sign as f64 * f);
-            }
-            return LuaValue::nil();
-        }
-
-        // Plain hex integer
-        if let Ok(i) = u64::from_str_radix(hex_part, 16) {
-            // Reinterpret as i64 for large values
-            let i = i as i64;
-            return LuaValue::integer(sign * i);
-        }
-        return LuaValue::nil();
-    }
-
-    // Regular decimal number
-    if let Ok(i) = s.parse::<i64>() {
-        return LuaValue::integer(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return LuaValue::float(f);
-    }
-
-    LuaValue::nil()
-}
-
-/// Parse hex float like "AA.BB" or "AA.BBpEE" (without 0x prefix)
-fn parse_hex_float(s: &str) -> Option<f64> {
-    let s_lower = s.to_lowercase();
-
-    // Split by 'p' for exponent
-    let (mantissa_str, exp_str) = if let Some(p_pos) = s_lower.find('p') {
-        (&s[..p_pos], Some(&s[p_pos + 1..]))
-    } else {
-        (s, None)
-    };
-
-    // Parse mantissa (integer.fraction in hex)
-    let mantissa = if let Some(dot_pos) = mantissa_str.find('.') {
-        let int_part = &mantissa_str[..dot_pos];
-        let frac_part = &mantissa_str[dot_pos + 1..];
-
-        let int_val = if int_part.is_empty() {
-            0u64
-        } else {
-            u64::from_str_radix(int_part, 16).ok()?
-        };
-
-        let frac_val = if frac_part.is_empty() {
-            0.0
-        } else {
-            let frac_int = u64::from_str_radix(frac_part, 16).ok()?;
-            frac_int as f64 / 16f64.powi(frac_part.len() as i32)
-        };
-
-        int_val as f64 + frac_val
-    } else {
-        let int_val = u64::from_str_radix(mantissa_str, 16).ok()?;
-        int_val as f64
-    };
-
-    // Parse exponent (base 2)
-    let exp = if let Some(exp_str) = exp_str {
-        exp_str.parse::<i32>().ok()?
-    } else {
-        0
-    };
-
-    Some(mantissa * 2f64.powi(exp))
 }
 
 /// tostring(v) - Convert to string
