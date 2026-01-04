@@ -62,7 +62,7 @@ fn value_to_string_content(
 /// Concatenates values from stack[base+a] to stack[base+a+n-1]
 pub fn concat_strings(
     lua_state: &mut LuaState,
-    stack_ptr: *mut LuaValue,
+    stack_slice: &mut [LuaValue],
     base: usize,
     a: usize,
     n: usize,
@@ -76,11 +76,11 @@ pub fn concat_strings(
     if n == 1 {
         // Single value - convert to string if needed
         unsafe {
-            let val = *stack_ptr.add(base + a);
+            let val = stack_slice.get_unchecked(base + a);
             if val.is_string() {
-                return Ok(val); // Already a string
+                return Ok(*val); // Already a string
             }
-            let (s, _) = value_to_string_content(lua_state, &val)?;
+            let (s, _) = value_to_string_content(lua_state, val)?;
             let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&s);
             return Ok(LuaValue::string(string_id));
         }
@@ -216,7 +216,7 @@ mod tests {
     fn test_concat_empty() {
         let mut vm = LuaVM::new(SafeOption::default());
         let state = &mut vm.main_state;
-        let stack_ptr = state.stack_ptr_mut();
+        let stack_ptr = state.stack_mut();
         // Empty concat should return empty string
         let result = concat_strings(state, stack_ptr, 0, 0, 0);
         assert!(result.is_ok());

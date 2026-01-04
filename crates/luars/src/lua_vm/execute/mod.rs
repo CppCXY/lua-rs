@@ -33,6 +33,74 @@ use crate::{
 };
 pub use metamethod::TmKind;
 
+/// Build hidden arguments for vararg functions
+/// Port of ltm.c:245-270 buildhiddenargs
+/// 
+/// Initial stack:  func arg1 ... argn extra1 ...
+///                 ^ ci->func                    ^ L->top
+/// Final stack: func nil ... nil extra1 ... func arg1 ... argn
+///                                          ^ ci->func
+fn buildhiddenargs(
+    lua_state: &mut LuaState,
+    frame_idx: usize,
+    chunk: &Chunk,
+    totalargs: usize,
+    nfixparams: usize,
+    nextra: usize,
+) -> LuaResult<usize> {
+    let call_info = lua_state.get_call_info(frame_idx);
+    let old_base = call_info.base;
+    let func_pos = if old_base > 0 { old_base - 1 } else { 0 };
+    let stack_top = lua_state.get_top();
+    
+    unsafe {
+        let mut stack_ptr_local = lua_state.stack_ptr_mut();
+        let mut top = stack_top;
+        
+        // Step 1: Copy function to top (after all arguments)
+        // setobjs2s(L, L->top.p++, ci->func.p);
+        let func_src = stack_ptr_local.add(func_pos);
+        *stack_ptr_local.add(top) = *func_src;
+        top += 1;
+        
+        // Step 2: Copy fixed parameters to after copied function
+        // for (i = 1; i <= nfixparams; i++)
+        for i in 0..nfixparams {
+            let src = stack_ptr_local.add(func_pos + 1 + i);
+            *stack_ptr_local.add(top) = *src;
+            top += 1;
+            // Erase original parameter with nil (for GC)
+            setnilvalue(stack_ptr_local.add(func_pos + 1 + i));
+        }
+        
+        // Step 3: Update ci->func.p and ci->top.p
+        // ci->func.p += totalargs + 1;
+        // ci->top.p += totalargs + 1;
+        let new_func_pos = func_pos + totalargs + 1;
+        let new_base = new_func_pos + 1;
+        
+        let new_call_info_top = {
+            let call_info = lua_state.get_call_info_mut(frame_idx);
+            call_info.base = new_base;
+            call_info.top += totalargs + 1;
+            call_info.func_offset = new_base - func_pos; // Distance from new_base to original func
+            call_info.top
+        };
+        
+        // Ensure enough stack space for new base + registers
+        let new_needed_size = new_base + chunk.max_stack_size;
+        if new_needed_size > lua_state.stack_len() {
+            lua_state.grow_stack(new_needed_size - lua_state.stack_len())?;
+        }
+        
+        // Update lua_state.top to match call_info.top
+        // This ensures that subsequent set_top calls preserve our data
+        lua_state.set_top(new_call_info_top);
+        
+        Ok(new_base)
+    }
+}
+
 // ============ Type tag检查宏 (对应 Lua 的 ttis* 宏) ============
 
 /// ttisinteger - 检查是否是整数 (最快的类型检查)
@@ -283,20 +351,12 @@ fn execute_frame(
 ) -> LuaResult<FrameAction> {
     // Cache values in locals (will be in CPU registers)
     let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
-    let base = lua_state.get_frame_base(frame_idx);
+    let mut base = lua_state.get_frame_base(frame_idx);
 
     // PRE-GROW STACK: Ensure enough space for this frame
     // This prevents reallocation during normal instruction execution
     let needed_size = base + chunk.max_stack_size;
     lua_state.grow_stack(needed_size)?;
-
-    // SAFETY: Get raw pointer after grow_stack
-    // This pointer may become invalid after operations that:
-    // - Create tables/strings/closures (may trigger GC)
-    // - Call functions (may grow stack)
-    // - Concatenate strings (may allocate)
-    // After such operations, we must refresh stack_ptr
-    let mut stack_ptr = lua_state.stack_ptr_mut();
 
     // Constants and code pointers (avoid repeated dereferencing)
     let constants = &chunk.constants;
@@ -318,10 +378,24 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
+                // Ensure stack is large enough BEFORE writing
+                let write_pos = base + a;
+                if write_pos >= lua_state.stack_len() {
+                    lua_state.grow_stack(write_pos + 1)?;
+                    // Refresh stack_ptr after potential reallocation
+                    stack_ptr = lua_state.stack_ptr_mut();
+                }
+
                 unsafe {
                     let ra = stack_ptr.add(base + a);
                     let rb = stack_ptr.add(base + b);
                     *ra = *rb; // Direct copy (setobjs2s)
+                }
+                
+                // Update frame.top if we're writing beyond current top
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                if write_pos >= call_info.top {
+                    call_info.top = write_pos + 1;
                 }
             }
             OpCode::LoadI => {
@@ -1316,6 +1390,21 @@ fn execute_frame(
                             .ok_or(LuaError::RuntimeError)?;
 
                         let result = table.get_int(c as i64).unwrap_or(LuaValue::nil());
+                        
+                        // Update frame.top FIRST if we're writing beyond current top
+                        // This must happen BEFORE we calculate the pointer and write,
+                        // because set_top might trigger reallocation
+                        let write_pos = base + a;
+                        let call_info = lua_state.get_call_info_mut(frame_idx);
+                        if write_pos >= call_info.top {
+                            call_info.top = write_pos + 1;
+                            // Also update lua_state's stack_top
+                            lua_state.set_top(write_pos + 1);
+                            // Refresh stack_ptr after potential reallocation
+                            stack_ptr = lua_state.stack_ptr_mut();
+                        }
+                        
+                        // NOW calculate pointer from fresh stack_ptr and write
                         let ra = stack_ptr.add(base + a);
                         *ra = result;
                     } else {
@@ -2445,83 +2534,76 @@ fn execute_frame(
 
             OpCode::Vararg => {
                 // R[A], ..., R[A+C-2] = varargs
-                // Based on lvm.c:1936 and ltm.c:338 luaT_getvarargs
+                // Port of lvm.c:1936 OP_VARARG and ltm.c:338 luaT_getvarargs
                 let a = instr.get_a() as usize;
-                let _b = instr.get_b() as usize; // vatab register (if k flag set)
+                let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
-                let _k = instr.get_k(); // whether B specifies vararg table register
+                let k = instr.get_k();
 
-                // n = number of results wanted (C-1), -1 means all
-                let wanted = if c == 0 {
-                    -1 // Get all varargs
-                } else {
-                    (c - 1) as i32
-                };
+                // wanted = number of results wanted (C-1), -1 means all
+                let wanted = if c == 0 { -1 } else { (c - 1) as i32 };
 
-                // Get nextraargs from CallInfo
+                // Get nextraargs from CallInfo (set by VarargPrep)
                 let call_info = lua_state.get_call_info(frame_idx);
-                let nextra = call_info.nextraargs as usize;
-                let func_id = call_info.func.as_function_id().ok_or(LuaError::RuntimeError)?;
-                
-                // Get param_count from the function's chunk
-                let param_count = {
-                    let vm = lua_state.vm_mut();
-                    let func_obj = vm.object_pool.get_function(func_id).ok_or(LuaError::RuntimeError)?;
-                    let chunk = func_obj.chunk().ok_or(LuaError::RuntimeError)?;
-                    chunk.param_count
+                let nargs = call_info.nextraargs as usize;
+
+                // Check if using vararg table (k flag set)
+                let vatab = if k { b as i32 } else { -1 };
+
+                // Calculate how many to copy
+                let touse = if wanted < 0 {
+                    nargs // Get all
+                } else {
+                    if (wanted as usize) > nargs { nargs } else { wanted as usize }
                 };
+
+                // Always update stack_top and frame.top to accommodate the results
+                let new_top = base + a + touse;
+                lua_state.set_top(new_top);
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                call_info.top = new_top;
+                // Refresh stack_ptr after potential reallocation
+                stack_ptr = lua_state.stack_ptr_mut();
 
                 unsafe {
                     let ra = stack_ptr.add(base + a);
 
-                    if nextra == 0 {
-                        // No varargs - fill with nil
-                        if wanted < 0 {
-                            // Getting all but there are none - stack top doesn't change
+                    if vatab < 0 {
+                        // No vararg table - get from stack
+                        // After buildhiddenargs: new_func is copied to base-1
+                        // varargs are at (base-1) - nargs (matching Lua 5.5's ci->func.p - nargs)
+                        let new_func_pos = base - 1;
+                        let vararg_start = if new_func_pos >= nargs { new_func_pos - nargs } else { 0 };
+
+                        for i in 0..touse {
+                            let src = stack_ptr.add(vararg_start + i);
+                            let dst = ra.add(i);
+                            *dst = *src;
+                        }
+                    } else {
+                        // Get from vararg table at R[B]
+                        let table_val = *stack_ptr.add(base + b);
+                        if let Some(table_id) = table_val.as_table_id() {
+                            let table = lua_state.vm_mut().object_pool.get_table(table_id).ok_or(LuaError::RuntimeError)?;
+                            for i in 0..touse {
+                                let val = table.get_int((i + 1) as i64).unwrap_or(LuaValue::nil());
+                                *ra.add(i) = val;
+                            }
                         } else {
-                            // Fill wanted slots with nil
-                            for i in 0..(wanted as usize) {
+                            // Not a table, fill with nil
+                            for i in 0..touse {
                                 setnilvalue(ra.add(i));
                             }
                         }
-                    } else if wanted < 0 {
-                        // Get all varargs
-                        // Extra varargs are stored after fixed parameters in the current frame
-                        // They start at base + param_count
-                        if nextra > 0 {
-                            let vararg_start = base + param_count;
-                            for i in 0..nextra {
-                                let src = stack_ptr.add(vararg_start + i);
-                                let dst = ra.add(i);
-                                *dst = *src;
-                            }
-                            // Adjust stack top to include all varargs
-                            let new_top = base + a + nextra;
-                            lua_state.set_top(new_top);
-                        }
-                    } else {
-                        // Get exactly 'wanted' varargs
-                        let to_copy = if wanted as usize > nextra {
-                            nextra
-                        } else {
-                            wanted as usize
-                        };
+                    }
 
-                        // Copy available varargs from base + param_count
-                        if nextra > 0 && to_copy > 0 {
-                            let vararg_start = base + param_count;
-                            for i in 0..to_copy {
-                                let src = stack_ptr.add(vararg_start + i);
-                                let dst = ra.add(i);
-                                *dst = *src;
-                            }
-                        }
-
-                        // Fill remaining with nil
-                        for i in to_copy..(wanted as usize) {
+                    // Fill remaining with nil
+                    if wanted >= 0 {
+                        for i in touse..(wanted as usize) {
                             setnilvalue(ra.add(i));
                         }
                     }
+                    // Note: if wanted < 0, we already adjusted stack top before unsafe block
                 }
             }
 
@@ -2622,12 +2704,13 @@ fn execute_frame(
 
             OpCode::VarargPrep => {
                 // Adjust varargs (prepare vararg function)
-                // Based on lvm.c:1955 and ltm.c:272 luaT_adjustvarargs
+                // Based on lvm.c:1955 and ltm.c:245-286 (buildhiddenargs)
                 let c = instr.get_c() as usize; // number of fixed parameters
 
                 // Calculate total arguments and extra arguments
                 let call_info = lua_state.get_call_info(frame_idx);
-                let func_pos = call_info.base;
+                // Function is at base - 1, arguments start at base
+                let func_pos = call_info.base - 1;
                 let stack_top = lua_state.get_top();
 
                 // Total arguments = stack_top - func_pos - 1 (exclude function itself)
@@ -2648,9 +2731,13 @@ fn execute_frame(
                 let call_info = lua_state.get_call_info_mut(frame_idx);
                 call_info.nextraargs = nextra as i32;
 
-                // Adjust base to account for varargs
-                // In Lua 5.5, varargs are placed BEFORE the function on the stack
-                // We need to ensure proper stack layout
+                // Implement buildhiddenargs (ltm.c:245-270)
+                if nextra > 0 {
+                    let new_base = buildhiddenargs(lua_state, frame_idx, &chunk, totalargs, nfixparams, nextra)?;
+                    base = new_base;
+                    // Refresh stack pointer after potential reallocation
+                    stack_ptr = lua_state.stack_ptr_mut();
+                }
             }
 
             OpCode::ExtraArg => {

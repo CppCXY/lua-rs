@@ -944,6 +944,9 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1728: marktobeclosed(fs); /* last internal var. must be closed */
     mark_to_be_closed(fs);
 
+    // lparser.c:1735: luaK_checkstack(fs, 2); /* extra space to call iterator */
+    code::checkstack(fs, 2);
+
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
 
@@ -1406,6 +1409,12 @@ fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc
     use ExpKind;
 
     let needed = nvars as isize - nexps as isize;
+    
+    // lparser.c:485: luaK_checkstack(fs, needed);
+    // Check stack BEFORE any operations that might use the space
+    if needed > 0 {
+        code::checkstack(fs, needed as u8);
+    }
 
     // Check if last expression has multiple returns
     if matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG) {
@@ -1429,6 +1438,7 @@ fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc
 
     // lparser.c:496-500: Adjust freereg
     if needed > 0 {
+        // NOTE: We already called checkstack above, so reserve_regs will just update freereg
         code::reserve_regs(fs, needed as u8);
     } else {
         // lparser.c:500: adding 'needed' is actually a subtraction

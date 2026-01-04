@@ -28,7 +28,14 @@ pub struct CallInfo {
 
     /// Base index in the stack for this call frame's registers
     /// Equivalent to Lua's CallInfo.func (but we store index, not pointer)
+    /// NOTE: This may be updated by VARARGPREP after stack rearrangement
     pub base: usize,
+    
+    /// Offset from original base to func position (for vararg functions after buildhiddenargs)
+    /// When nextraargs > 0 and buildhiddenargs was called:
+    /// - func_offset = totalargs + 1 (the shift amount)
+    /// Otherwise: func_offset = 1 (base - 1 = func)
+    pub func_offset: usize,
 
     /// Top of stack for this frame (first free slot)
     /// Equivalent to Lua's CallInfo.top
@@ -59,6 +66,7 @@ impl CallInfo {
         Self {
             func,
             base,
+            func_offset: 1, // Initially base - 1 = func
             top: base + nparams,
             pc: 0,
             nresults: -1,
@@ -72,6 +80,7 @@ impl CallInfo {
         Self {
             func,
             base,
+            func_offset: 1,
             top: base + nparams,
             pc: 0,
             nresults: -1,
@@ -109,6 +118,7 @@ impl Default for CallInfo {
     fn default() -> Self {
         Self {
             func: LuaValue::nil(),
+            func_offset: 1,
             base: 0,
             top: 0,
             pc: 0,

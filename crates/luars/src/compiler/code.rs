@@ -771,13 +771,24 @@ pub fn free_regs(fs: &mut FuncState, r1: u8, r2: u8) {
     }
 }
 
-// Port of luaK_reserveregs from lcode.c:511-516
-// void luaK_reserveregs (FuncState *fs, int n)
-pub fn reserve_regs(fs: &mut FuncState, n: u8) {
-    fs.freereg = fs.freereg.saturating_add(n);
-    if (fs.freereg as usize) > fs.chunk.max_stack_size {
-        fs.chunk.max_stack_size = fs.freereg as usize;
+// Port of luaK_checkstack from lcode.c:478-483
+// void luaK_checkstack (FuncState *fs, int n)
+// Check register-stack level, keeping track of its maximum size in field 'maxstacksize'
+pub fn checkstack(fs: &mut FuncState, n: u8) {
+    let newstack = (fs.freereg as usize) + (n as usize);
+    if newstack > fs.chunk.max_stack_size {
+        // In Lua: luaY_checklimit(fs, newstack, MAX_FSTACK, "registers");
+        // We'll just update maxstacksize here
+        fs.chunk.max_stack_size = newstack;
     }
+}
+
+// Port of luaK_reserveregs from lcode.c:489-492
+// void luaK_reserveregs (FuncState *fs, int n)
+// Reserve 'n' registers in register stack
+pub fn reserve_regs(fs: &mut FuncState, n: u8) {
+    checkstack(fs, n);
+    fs.freereg = fs.freereg.saturating_add(n);
 }
 
 // Port of luaK_nil from lcode.c:136-155

@@ -61,7 +61,6 @@ impl LuaState {
             vm,
             stack,
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
-            // 初始只分配很小的容量，按需增长（Lua 5.4 初始只有 1 个）
             call_stack: Vec::with_capacity(call_stack_size),
             open_upvalues: Vec::new(),
             error_msg: String::new(),
@@ -160,6 +159,7 @@ impl LuaState {
         let frame = CallInfo {
             func,
             base,
+            func_offset: 1, // Initially base - 1 = func
             top: frame_top,
             pc: 0,
             nresults, // Use the nresults from caller
@@ -441,8 +441,8 @@ impl LuaState {
     /// # Safety
     /// Caller must ensure stack is not reallocated during pointer usage
     #[inline(always)]
-    pub(crate) fn stack_ptr_mut(&mut self) -> *mut LuaValue {
-        self.stack.as_mut_ptr()
+    pub(crate) fn stack_mut(&mut self) -> &mut [LuaValue] {
+        &mut self.stack
     }
 
     /// Get stack length
