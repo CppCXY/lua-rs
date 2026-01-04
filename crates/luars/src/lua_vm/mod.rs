@@ -785,46 +785,9 @@ impl LuaVM {
     #[cold]
     #[inline(never)]
     fn check_gc_slow(&mut self) {
-        // Collect roots for GC
-        let mut roots = Vec::with_capacity(128);
-
-        // 1. Global table
-        roots.push(LuaValue::table(self.global));
-
-        // 2. Registry table (persistent objects storage)
-        roots.push(LuaValue::table(self.registry));
-
-        // 3. String metatable
-        if let Some(mt) = &self.string_mt {
-            roots.push(*mt);
-        }
-
-        // 4. All values in the logical stack (0..stack_top)
-        let stack_top = self.main_state.get_top();
-        for i in 0..stack_top {
-            if let Some(value) = self.main_state.stack_get(i) {
-                if !value.is_nil() {
-                    roots.push(value);
-                }
-            }
-        }
-
-        // 5. All call frames (functions being executed)
-        for i in 0..self.main_state.call_depth() {
-            if let Some(frame) = self.main_state.get_frame(i) {
-                roots.push(frame.func.clone());
-            }
-        }
-
-        // 6. Open upvalues - these point to stack locations that must stay alive
-        for upval_id in self.main_state.get_open_upvalues() {
-            if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
-                if let Some(val) = uv.get_closed_value() {
-                    roots.push(val);
-                }
-            }
-        }
-
+        // Collect roots for GC (like luaC_step in Lua 5.5)
+        let roots = self.collect_roots();
+        
         // Perform GC step with complete root set
         self.gc.step(&roots, &mut self.object_pool);
     }
@@ -860,55 +823,107 @@ impl LuaVM {
         }
     }
 
-    /// Perform garbage collection
+    /// Perform garbage collection (like luaC_fullgc in Lua 5.5)
+    /// Performs a complete GC cycle, running until pause state is reached
+    /// If isemergency is true, avoids operations that might change interpreter state
     pub fn collect_garbage(&mut self) {
-        // Collect all roots
-        // let mut roots = Vec::new();
+        self.full_gc(false);
+    }
 
-        // // Add the global table itself as a root
-        // roots.push(LuaValue::table(self.global));
-
-        // // Add registry table as a root (persistent objects)
-        // roots.push(LuaValue::table(self.registry));
-
-        // // Add string metatable if present
-        // if let Some(mt) = self.string_mt {
-        //     roots.push(mt);
-        // }
-
-        // // Add all active stack values as roots
-        // for i in 0..self.main_state.stack_top {
-        //     if i < self.main_state.stack.len() {
-        //         roots.push(self.main_state.stack[i]);
-        //     }
-        // }
-
-        // // Add all call frames' closures as roots
-        // for ci in &self.main_state.call_stack {
-        //     roots.push(ci.func);
-        // }
-
-        // // Force a full GC cycle
-        // // Set debt to force collection
-        // self.gc.gc_debt = 1;
+    /// Perform a full GC cycle (like luaC_fullgc in Lua 5.5)
+    /// This is the internal version that can be called in emergency situations
+    fn full_gc(&mut self, is_emergency: bool) {
+        let old_emergency = self.gc.gc_emergency;
+        self.gc.gc_emergency = is_emergency;
         
-        // // Step until we complete a full cycle (reach Pause state)
-        // let max_iterations = 100;
-        // for _ in 0..max_iterations {
-        //     use crate::gc::GcState;
-            
-        //     if self.gc.gc_state == GcState::Pause {
-        //         // Start a new cycle
-        //         self.gc.gc_debt = 1;
-        //     }
-            
-        //     self.gc.step(&roots, &mut self.object_pool);
-            
-        //     // If we're back to Pause after doing work, cycle is complete
-        //     if self.gc.gc_state == GcState::Pause {
-        //         break;
-        //     }
-        // }
+        // Dispatch based on GC mode (from luaC_fullgc)
+        match self.gc.gc_kind {
+            crate::gc::GcKind::GenMinor => {
+                self.full_gen();
+            }
+            crate::gc::GcKind::Inc => {
+                self.full_inc();
+            }
+            crate::gc::GcKind::GenMajor => {
+                // Temporarily switch to incremental mode
+                self.gc.gc_kind = crate::gc::GcKind::Inc;
+                self.full_inc();
+                self.gc.gc_kind = crate::gc::GcKind::GenMajor;
+            }
+        }
+        
+        self.gc.gc_emergency = old_emergency;
+    }
+
+    /// Full GC cycle for incremental mode (like fullinc in Lua 5.5)
+    fn full_inc(&mut self) {
+        // Collect roots
+        let roots = self.collect_roots();
+        
+        // If we're keeping invariant (in marking phase), sweep first
+        if self.gc.keep_invariant() {
+            self.gc.enter_sweep(&mut self.object_pool);
+        }
+        
+        // Run until pause state
+        self.gc.run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
+        // Run finalizers
+        self.gc.run_until_state(crate::gc::GcState::CallFin, &roots, &mut self.object_pool);
+        // Complete the cycle
+        self.gc.run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
+        
+        // Set pause for next cycle
+        self.gc.set_pause();
+    }
+
+    /// Full GC cycle for generational mode (like fullgen in Lua 5.5)
+    fn full_gen(&mut self) {
+        let roots = self.collect_roots();
+        self.gc.full_generation(&roots, &mut self.object_pool);
+    }
+
+    /// Collect all GC roots (objects that must not be collected)
+    fn collect_roots(&self) -> Vec<LuaValue> {
+        let mut roots = Vec::with_capacity(128);
+
+        // 1. Global table
+        roots.push(LuaValue::table(self.global));
+
+        // 2. Registry table (persistent objects storage)
+        roots.push(LuaValue::table(self.registry));
+
+        // 3. String metatable
+        if let Some(mt) = &self.string_mt {
+            roots.push(*mt);
+        }
+
+        // 4. All values in the logical stack (0..stack_top)
+        let stack_top = self.main_state.get_top();
+        for i in 0..stack_top {
+            if let Some(value) = self.main_state.stack_get(i) {
+                if !value.is_nil() {
+                    roots.push(value);
+                }
+            }
+        }
+
+        // 5. All call frames (functions being executed)
+        for i in 0..self.main_state.call_depth() {
+            if let Some(frame) = self.main_state.get_frame(i) {
+                roots.push(frame.func.clone());
+            }
+        }
+
+        // 6. Open upvalues
+        for upval_id in self.main_state.get_open_upvalues() {
+            if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
+                if let Some(val) = uv.get_closed_value() {
+                    roots.push(val);
+                }
+            }
+        }
+
+        roots
     }
 
     /// Get GC statistics

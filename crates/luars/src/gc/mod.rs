@@ -364,15 +364,24 @@ impl GC {
                 StepResult::Atomic
             }
             GcState::SwpAllGc => {
-                self.sweep_step(pool, fast);
+                let complete = self.sweep_step(pool, fast);
+                if complete {
+                    self.gc_state = GcState::SwpFinObj;
+                }
                 StepResult::Work(100) // GCSWEEPMAX equivalent
             }
             GcState::SwpFinObj => {
-                self.sweep_step(pool, fast);
+                let complete = self.sweep_step(pool, fast);
+                if complete {
+                    self.gc_state = GcState::SwpToBeFnz;
+                }
                 StepResult::Work(100)
             }
             GcState::SwpToBeFnz => {
-                self.sweep_step(pool, fast);
+                let complete = self.sweep_step(pool, fast);
+                if complete {
+                    self.gc_state = GcState::SwpEnd;
+                }
                 StepResult::Work(100)
             }
             GcState::SwpEnd => {
@@ -380,7 +389,9 @@ impl GC {
                 StepResult::Work(100)
             }
             GcState::CallFin => {
-                // Would call finalizers here
+                // In Lua 5.5, this would call finalizers if tobefnz is not empty
+                // For now, we immediately transition to Pause
+                // TODO: Implement proper finalizer calling
                 self.gc_state = GcState::Pause;
                 StepResult::Pause
             }
@@ -580,19 +591,23 @@ impl GC {
         self.current_white ^= 1;
     }
 
-    /// Enter sweep phase
-    fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
+    /// Enter sweep phase (like entersweep in Lua 5.5)
+    pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
     }
 
-    /// Sweep step - collect dead objects
-    fn sweep_step(&mut self, pool: &mut ObjectPool, fast: bool) {
+    /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
+    /// Returns true if sweep is complete (no more objects to sweep)
+    fn sweep_step(&mut self, pool: &mut ObjectPool, fast: bool) -> bool {
         let max_sweep = if fast { usize::MAX } else { 100 }; // GCSWEEPMAX
         let mut swept = 0;
+        
+        // Get the "other white" - objects from the previous GC cycle that weren't marked
+        let other_white = 1 - self.current_white;
 
         // Sweep tables
         let dead_tables: Vec<_> = pool.tables.iter()
-            .filter(|(_, t)| !t.header.is_fixed() && t.header.is_white())
+            .filter(|(_, t)| !t.header.is_fixed() && t.header.is_dead(other_white))
             .map(|(id, _)| id)
             .take(max_sweep)
             .collect();
@@ -607,7 +622,7 @@ impl GC {
         // Sweep functions
         if swept < max_sweep {
             let dead_funcs: Vec<_> = pool.functions.iter()
-                .filter(|(_, f)| !f.header.is_fixed() && f.header.is_white())
+                .filter(|(_, f)| !f.header.is_fixed() && f.header.is_dead(other_white))
                 .map(|(id, _)| id)
                 .take(max_sweep - swept)
                 .collect();
@@ -623,7 +638,7 @@ impl GC {
         // Sweep upvalues
         if swept < max_sweep {
             let dead_upvals: Vec<_> = pool.upvalues.iter()
-                .filter(|(_, u)| !u.header.is_fixed() && u.header.is_white())
+                .filter(|(_, u)| !u.header.is_fixed() && u.header.is_dead(other_white))
                 .map(|(id, _)| id)
                 .take(max_sweep - swept)
                 .collect();
@@ -639,7 +654,7 @@ impl GC {
         // Sweep strings  
         if swept < max_sweep {
             let dead_strings: Vec<_> = pool.strings.iter()
-                .filter(|(_, s)| !s.header.is_fixed() && s.header.is_white())
+                .filter(|(_, s)| !s.header.is_fixed() && s.header.is_dead(other_white))
                 .map(|(id, _)| id)
                 .take(max_sweep - swept)
                 .collect();
@@ -651,22 +666,84 @@ impl GC {
             }
         }
 
-        // Move to next state when done
-        if swept < max_sweep {
-            self.gc_state = match self.gc_state {
-                GcState::SwpAllGc => GcState::SwpFinObj,
-                GcState::SwpFinObj => GcState::SwpToBeFnz,
-                GcState::SwpToBeFnz => GcState::SwpEnd,
-                _ => self.gc_state,
-            };
-        }
+        // Return true if we didn't find enough objects to sweep (sweep complete)
+        swept < max_sweep
     }
 
     /// Set pause (like setpause in Lua 5.5)
-    fn set_pause(&mut self) {
+    pub fn set_pause(&mut self) {
         let threshold = self.apply_param(PAUSE, self.gc_marked);
         let debt = threshold - self.total_bytes;
         self.set_debt(debt.max(0));
+    }
+    /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
+    /// During marking phase, the invariant must be kept
+    pub fn keep_invariant(&self) -> bool {
+        matches!(self.gc_state, GcState::Propagate | GcState::EnterAtomic | GcState::Atomic)
+    }
+
+    /// Run GC until reaching a specific state (like luaC_runtilstate in Lua 5.5)
+    pub fn run_until_state(&mut self, target_state: GcState, roots: &[LuaValue], pool: &mut ObjectPool) {
+        const MAX_ITERATIONS: usize = 1000;
+        let mut iterations = 0;
+        
+        // Already at target state? Done.
+        if self.gc_state == target_state {
+            return;
+        }
+        
+        // Special case: If we're trying to reach CallFin from Pause,
+        // and we don't have finalizer support yet, CallFin will immediately
+        // transition to Pause. We need to detect when we pass through CallFin.
+        let mut just_left_callfin = false;
+        
+        loop {
+            let prev_state = self.gc_state;
+            self.single_step(roots, pool, true);
+            let new_state = self.gc_state;
+            iterations += 1;
+            
+            // Track if we just transitioned FROM CallFin to Pause
+            if prev_state == GcState::CallFin && new_state == GcState::Pause {
+                just_left_callfin = true;
+            }
+            
+            // Check if we reached the target state
+            if new_state == target_state {
+                break;
+            }
+            
+            // Special case: If target is CallFin and we just left it
+            if target_state == GcState::CallFin && just_left_callfin {
+                break;
+            }
+            
+            if iterations >= MAX_ITERATIONS {
+                // Safety check - should never happen in normal operation
+                break;
+            }
+        }
+    }
+
+    /// Full generation collection (like fullgen in Lua 5.5)
+    pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+        // For generational mode, do a major collection
+        // Similar to fullinc in Lua 5.5
+        
+        // Restart collection
+        self.restart_collection(roots, pool);
+        
+        // Mark all roots
+        while !self.gray.is_empty() {
+            self.propagate_mark(pool);
+        }
+        
+        // Sweep using run_until_state
+        self.enter_sweep(pool);
+        self.run_until_state(GcState::CallFin, roots, pool);
+        self.run_until_state(GcState::Pause, roots, pool);
+        
+        self.set_pause();
     }
 
     /// Set minor debt for generational mode
