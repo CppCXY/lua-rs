@@ -208,3 +208,47 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
         false
     }
 }
+
+/// Lookup value from object's metatable __index
+/// Returns Some(value) if found, None if not found or no metatable
+pub fn lookup_from_metatable(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+) -> Option<LuaValue> {
+    // For string: use string_mt
+    if obj.is_string() {
+        let mt_val = lua_state.vm_mut().string_mt?;
+        return lookup_index_from_metatable_value(lua_state, mt_val, key);
+    }
+    
+    // For userdata: use userdata's metatable
+    if let Some(ud_id) = obj.as_userdata_id() {
+        let mt_val = lua_state.vm_mut().object_pool.get_userdata(ud_id)?.get_metatable();
+        return lookup_index_from_metatable_value(lua_state, mt_val, key);
+    }
+    
+    // For table: check if it has metatable
+    if let Some(table_id) = obj.as_table_id() {
+        let mt_val = lua_state.vm_mut().object_pool.get_table(table_id)?.get_metatable()?;
+        return lookup_index_from_metatable_value(lua_state, mt_val, key);
+    }
+    
+    None
+}
+
+/// Helper: lookup from metatable's __index field
+fn lookup_index_from_metatable_value(
+    lua_state: &mut LuaState,
+    mt_val: LuaValue,
+    key: &LuaValue,
+) -> Option<LuaValue> {
+    let mt_table_id = mt_val.as_table_id()?;
+    let vm = lua_state.vm_mut();
+    let index_key = vm.create_string("__index");
+    let mt = vm.object_pool.get_table(mt_table_id)?;
+    let index_value = mt.raw_get(&index_key)?;
+    let index_table_id = index_value.as_table_id()?;
+    let index_table = vm.object_pool.get_table(index_table_id)?;
+    index_table.raw_get(key)
+}

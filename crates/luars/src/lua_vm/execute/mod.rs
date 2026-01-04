@@ -1032,8 +1032,8 @@ fn execute_frame(
                 let rb = lua_state.stack_mut()[base + b];
                 let rc = lua_state.stack_mut()[base + c];
 
-                // Fast path for table with integer key
-                if let Some(table_id) = rb.as_table_id() {
+                let result = if let Some(table_id) = rb.as_table_id() {
+                    // Fast path for table
                     if ttisinteger(&rc) {
                         let key = ivalue(&rc);
                         let table = lua_state
@@ -1041,25 +1041,21 @@ fn execute_frame(
                             .object_pool
                             .get_table(table_id)
                             .ok_or(LuaError::RuntimeError)?;
-
-                        let result = table.get_int(key).unwrap_or(LuaValue::nil());
-                        lua_state.stack_mut()[base + a] = result;
+                        table.get_int(key)
                     } else {
-                        // General case: use key as LuaValue
-                        let key = rc;
                         let table = lua_state
                             .vm_mut()
                             .object_pool
                             .get_table(table_id)
                             .ok_or(LuaError::RuntimeError)?;
-                        let result = table.raw_get(&key).unwrap_or(LuaValue::nil());
-                        lua_state.stack_mut()[base + a] = result;
+                        table.raw_get(&rc)
                     }
                 } else {
-                    // Not a table - should trigger metamethod
-                    // For now, return nil
-                    setnilvalue(&mut lua_state.stack_mut()[base + a]);
-                }
+                    // Try metatable lookup
+                    helper::lookup_from_metatable(lua_state, &rb, &rc)
+                };
+
+                lua_state.stack_mut()[base + a] = result.unwrap_or(LuaValue::nil());
             }
             OpCode::GetI => {
                 // R[A] := R[B][C] (integer key)
@@ -1068,33 +1064,31 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
 
                 let stack = lua_state.stack_mut();
-                let rb = &stack[base + b];
+                let rb = stack[base + b];
 
-                if let Some(table_id) = rb.as_table_id() {
+                let result = if let Some(table_id) = rb.as_table_id() {
                     let table = lua_state
                         .vm_mut()
                         .object_pool
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
-
-                    let result = table.get_int(c as i64).unwrap_or(LuaValue::nil());
-
-                    // Update frame.top FIRST if we're writing beyond current top
-                    let write_pos = base + a;
-                    let call_info = lua_state.get_call_info_mut(frame_idx);
-                    if write_pos >= call_info.top {
-                        call_info.top = write_pos + 1;
-                        // Also update lua_state's stack_top
-                        lua_state.set_top(write_pos + 1);
-                    }
-
-                    // Now write the result
-                    let stack = lua_state.stack_mut();
-                    stack[base + a] = result;
+                    table.get_int(c as i64)
                 } else {
-                    // Not a table - should trigger metamethod
-                    setnilvalue(&mut stack[base + a]);
+                    // Try metatable lookup with integer key
+                    let key = LuaValue::integer(c as i64);
+                    helper::lookup_from_metatable(lua_state, &rb, &key)
+                };
+
+                // Update frame.top FIRST if we're writing beyond current top
+                let write_pos = base + a;
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                if write_pos >= call_info.top {
+                    call_info.top = write_pos + 1;
+                    lua_state.set_top(write_pos + 1);
                 }
+
+                let stack = lua_state.stack_mut();
+                stack[base + a] = result.unwrap_or(LuaValue::nil());
             }
             OpCode::GetField => {
                 // R[A] := R[B][K[C]:string]
@@ -1108,23 +1102,24 @@ fn execute_frame(
                 }
 
                 let stack = lua_state.stack_mut();
-                let rb = &stack[base + b];
+                let rb = stack[base + b];
                 let key = &constants[c];
 
-                if let Some(table_id) = rb.as_table_id() {
+                let result = if let Some(table_id) = rb.as_table_id() {
+                    // Fast path: direct table access
                     let table = lua_state
                         .vm_mut()
                         .object_pool
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
-
-                    let result = table.raw_get(key).unwrap_or(LuaValue::nil());
-                    let stack = lua_state.stack_mut();
-                    stack[base + a] = result;
+                    table.raw_get(key)
                 } else {
-                    // Not a table
-                    setnilvalue(&mut stack[base + a]);
-                }
+                    // Try metatable lookup
+                    helper::lookup_from_metatable(lua_state, &rb, key)
+                };
+
+                let stack = lua_state.stack_mut();
+                stack[base + a] = result.unwrap_or(LuaValue::nil());
             }
             OpCode::SetTable => {
                 // R[A][R[B]] := RK(C)
@@ -1259,63 +1254,21 @@ fn execute_frame(
                 // R[A] := R[B][K[C]] (get method)
                 let key = &constants[c];
 
-                if let Some(table_id) = rb.as_table_id() {
+                let result = if let Some(table_id) = rb.as_table_id() {
+                    // Fast path: direct table access
                     let table = lua_state
                         .vm_mut()
                         .object_pool
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
-
-                    let result = table.raw_get(key).unwrap_or(LuaValue::nil());
-                    let stack = lua_state.stack_mut();
-                    stack[base + a] = result;
-                } else if rb.is_string() {
-                    // For strings, check the string metatable
-                    let vm = lua_state.vm_mut();
-                    if let Some(string_mt) = &vm.string_mt {
-                        // Get __index from the metatable
-                        if let Some(mt_table_id) = string_mt.as_table_id() {
-                            let index_key = vm.create_string("__index");
-                            if let Some(mt) = vm.object_pool.get_table(mt_table_id) {
-                                if let Some(index_value) = mt.raw_get(&index_key) {
-                                    // __index should be the string library table
-                                    if let Some(string_lib_id) = index_value.as_table_id() {
-                                        if let Some(string_lib) =
-                                            vm.object_pool.get_table(string_lib_id)
-                                        {
-                                            let result =
-                                                string_lib.raw_get(key).unwrap_or(LuaValue::nil());
-                                            let stack = lua_state.stack_mut();
-                                            stack[base + a] = result;
-                                        } else {
-                                            let stack = lua_state.stack_mut();
-                                            setnilvalue(&mut stack[base + a]);
-                                        }
-                                    } else {
-                                        let stack = lua_state.stack_mut();
-                                        setnilvalue(&mut stack[base + a]);
-                                    }
-                                } else {
-                                    let stack = lua_state.stack_mut();
-                                    setnilvalue(&mut stack[base + a]);
-                                }
-                            } else {
-                                let stack = lua_state.stack_mut();
-                                setnilvalue(&mut stack[base + a]);
-                            }
-                        } else {
-                            let stack = lua_state.stack_mut();
-                            setnilvalue(&mut stack[base + a]);
-                        }
-                    } else {
-                        let stack = lua_state.stack_mut();
-                        setnilvalue(&mut stack[base + a]);
-                    }
+                    table.raw_get(key)
                 } else {
-                    // Not a table or string - should trigger metamethod
-                    let stack = lua_state.stack_mut();
-                    setnilvalue(&mut stack[base + a]);
-                }
+                    // Try metatable lookup
+                    helper::lookup_from_metatable(lua_state, &rb, key)
+                };
+
+                let stack = lua_state.stack_mut();
+                stack[base + a] = result.unwrap_or(LuaValue::nil());
             }
             OpCode::Call => {
                 // R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
