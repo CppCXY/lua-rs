@@ -97,7 +97,6 @@ impl LuaVM {
         // Reset GC debt after initialization (like Lua's luaC_fullgc at start)
         // The objects created during initialization should not count towards the first GC
         vm.gc.gc_debt = -(8 * 1024);
-        vm.gc.gc_estimate = vm.gc.total_bytes;
 
         vm
     }
@@ -143,7 +142,6 @@ impl LuaVM {
         // Reset GC state after loading standard libraries
         // Like Lua's initial full GC after loading base libs
         self.gc.gc_debt = -(8 * 1024);
-        self.gc.gc_estimate = self.gc.total_bytes;
 
         Ok(())
     }
@@ -207,6 +205,10 @@ impl LuaVM {
                 results.push(val);
             }
         }
+
+        // Check GC after VM execution completes (like Lua's luaC_checkGC after returning to caller)
+        // At this point, all return values are collected and safe from collection
+        self.check_gc();
 
         Ok(results)
     }
@@ -487,7 +489,7 @@ impl LuaVM {
     /// If table is old and value is young/collectable, mark table as touched
     pub fn gc_barrier_back_table(&mut self, table_id: TableId, value: &LuaValue) {
         // Only process in generational mode and if value is collectable
-        if self.gc.gc_kind() != crate::gc::GcKind::Generational {
+        if self.gc.gc_kind != crate::gc::GcKind::GenMinor {
             return;
         }
 
@@ -511,7 +513,7 @@ impl LuaVM {
     /// If upvalue is old/closed and value is young, mark upvalue as touched
     pub fn gc_barrier_upvalue(&mut self, upvalue_id: UpvalueId, value: &LuaValue) {
         // Only process in generational mode
-        if self.gc.gc_kind() != crate::gc::GcKind::Generational {
+        if self.gc.gc_kind != crate::gc::GcKind::GenMinor {
             return;
         }
 
@@ -642,6 +644,7 @@ impl LuaVM {
     #[inline]
     pub fn create_c_closure_inline1(&mut self, func: CFunction, upvalue: LuaValue) -> LuaValue {
         let id = self.object_pool.create_c_closure_inline1(func, upvalue);
+        self.check_gc();
         self.gc.track_object(GcId::FunctionId(id), 128);
         LuaValue::function(id)
     }
@@ -650,6 +653,7 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let id = self.object_pool.create_upvalue_open(stack_index);
+        self.check_gc();
         self.gc.track_object(GcId::UpvalueId(id), 64);
         id
     }
@@ -657,6 +661,7 @@ impl LuaVM {
     /// Create a closed upvalue with a value
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
+        self.check_gc();
         let id = self.object_pool.create_upvalue_closed(value);
         self.gc.track_object(GcId::UpvalueId(id), 64);
         id
@@ -780,80 +785,48 @@ impl LuaVM {
     #[cold]
     #[inline(never)]
     fn check_gc_slow(&mut self) {
-        // // Collect roots using pre-allocated buffer (avoid allocation)
-        // self.gc_roots_buffer.clear();
+        // Collect roots for GC
+        let mut roots = Vec::with_capacity(128);
 
-        // // 1. Global table
-        // self.gc_roots_buffer.push(LuaValue::table(self.global));
+        // 1. Global table
+        roots.push(LuaValue::table(self.global));
 
-        // // 2. Registry table (persistent objects storage)
-        // self.gc_roots_buffer.push(LuaValue::table(self.registry));
+        // 2. Registry table (persistent objects storage)
+        roots.push(LuaValue::table(self.registry));
 
-        // // 3. String metatable
-        // if let Some(mt) = &self.string_metatable {
-        //     self.gc_roots_buffer.push(*mt);
-        // }
+        // 3. String metatable
+        if let Some(mt) = &self.string_mt {
+            roots.push(*mt);
+        }
 
-        // // 4. ALL frame registers AND function values (not just current frame)
-        // // This is critical - any register in any active frame must be kept alive
-        // // Also, the function being executed in each frame must be kept alive!
-        // for frame in &self.frames[..self.frame_count] {
-        //     // Add the function value for this frame - this is CRITICAL!
-        //     self.gc_roots_buffer.push(frame.as_function_value());
+        // 4. All values in the logical stack (0..stack_top)
+        let stack_top = self.main_state.get_top();
+        for i in 0..stack_top {
+            if let Some(value) = self.main_state.stack_get(i) {
+                if !value.is_nil() {
+                    roots.push(value);
+                }
+            }
+        }
 
-        //     let base_ptr = frame.base_ptr as usize;
-        //     let top = frame.top as usize;
-        //     for i in 0..top {
-        //         if base_ptr + i < self.register_stack.len() {
-        //             let value = self.register_stack[base_ptr + i];
-        //             // Skip nil values - they don't need to be roots
-        //             if !value.is_nil() {
-        //                 self.gc_roots_buffer.push(value);
-        //             }
-        //         }
-        //     }
-        // }
+        // 5. All call frames (functions being executed)
+        for i in 0..self.main_state.call_depth() {
+            if let Some(frame) = self.main_state.get_frame(i) {
+                roots.push(frame.func.clone());
+            }
+        }
 
-        // // 5. All registers beyond the last frame's top (temporary values)
-        // // NOTE: Only scan up to a reasonable limit to avoid scanning stale registers
-        // if self.frame_count > 0 {
-        //     let last_frame = &self.frames[self.frame_count - 1];
-        //     let last_frame_end = last_frame.base_ptr as usize + last_frame.top as usize;
-        //     // Limit scan to avoid excessive GC work on large register stacks
-        //     let scan_limit = (last_frame_end + 128).min(self.register_stack.len());
-        //     for i in last_frame_end..scan_limit {
-        //         let value = self.register_stack[i];
-        //         if !value.is_nil() {
-        //             self.gc_roots_buffer.push(value);
-        //         }
-        //     }
-        // } else {
-        //     // No frames? Scan limited portion
-        //     let scan_limit = 256.min(self.register_stack.len());
-        //     for i in 0..scan_limit {
-        //         let value = self.register_stack[i];
-        //         if !value.is_nil() {
-        //             self.gc_roots_buffer.push(value);
-        //         }
-        //     }
-        // }
+        // 6. Open upvalues - these point to stack locations that must stay alive
+        for upval_id in self.main_state.get_open_upvalues() {
+            if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
+                if let Some(val) = uv.get_closed_value() {
+                    roots.push(val);
+                }
+            }
+        }
 
-        // // 6. Return values
-        // for value in &self.return_values {
-        //     self.gc_roots_buffer.push(*value);
-        // }
-
-        // // 7. Open upvalues - these point to stack locations that must stay alive
-        // for upval_id in &self.open_upvalues {
-        //     if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
-        //         if let Some(val) = uv.get_closed_value() {
-        //             self.gc_roots_buffer.push(val);
-        //         }
-        //     }
-        // }
-
-        // // Perform GC step with complete root set
-        // self.gc.step(&self.gc_roots_buffer, &mut self.object_pool);
+        // Perform GC step with complete root set
+        self.gc.step(&roots, &mut self.object_pool);
     }
 
     // ============ GC Management ============
@@ -889,7 +862,7 @@ impl LuaVM {
 
     /// Perform garbage collection
     pub fn collect_garbage(&mut self) {
-        // // Collect all roots
+        // Collect all roots
         // let mut roots = Vec::new();
 
         // // Add the global table itself as a root
@@ -899,40 +872,43 @@ impl LuaVM {
         // roots.push(LuaValue::table(self.registry));
 
         // // Add string metatable if present
-        // if let Some(mt) = &self.string_metatable {
-        //     roots.push(*mt);
+        // if let Some(mt) = self.string_mt {
+        //     roots.push(mt);
         // }
 
-        // // Add all frame registers AND function values as roots
-        // for frame in &self.frames[..self.frame_count] {
-        //     // CRITICAL: Add the function being executed
-        //     roots.push(frame.as_function_value());
-
-        //     let base_ptr = frame.base_ptr as usize;
-        //     let top = frame.top as usize;
-        //     for i in 0..top {
-        //         if base_ptr + i < self.register_stack.len() {
-        //             roots.push(self.register_stack[base_ptr + i]);
-        //         }
+        // // Add all active stack values as roots
+        // for i in 0..self.main_state.stack_top {
+        //     if i < self.main_state.stack.len() {
+        //         roots.push(self.main_state.stack[i]);
         //     }
         // }
 
-        // // Add return values as roots
-        // for value in &self.return_values {
-        //     roots.push(value.clone());
+        // // Add all call frames' closures as roots
+        // for ci in &self.main_state.call_stack {
+        //     roots.push(ci.func);
         // }
 
-        // // Add open upvalues as roots (only closed ones that have values)
-        // for upvalue_id in &self.open_upvalues {
-        //     if let Some(uv) = self.object_pool.get_upvalue(*upvalue_id) {
-        //         if let Some(value) = uv.get_closed_value() {
-        //             roots.push(value);
-        //         }
+        // // Force a full GC cycle
+        // // Set debt to force collection
+        // self.gc.gc_debt = 1;
+        
+        // // Step until we complete a full cycle (reach Pause state)
+        // let max_iterations = 100;
+        // for _ in 0..max_iterations {
+        //     use crate::gc::GcState;
+            
+        //     if self.gc.gc_state == GcState::Pause {
+        //         // Start a new cycle
+        //         self.gc.gc_debt = 1;
+        //     }
+            
+        //     self.gc.step(&roots, &mut self.object_pool);
+            
+        //     // If we're back to Pause after doing work, cycle is complete
+        //     if self.gc.gc_state == GcState::Pause {
+        //         break;
         //     }
         // }
-
-        // // Run GC with mutable object pool reference
-        // self.gc.collect(&roots, &mut self.object_pool);
     }
 
     /// Get GC statistics

@@ -808,8 +808,10 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "count" => {
-            // Return a dummy value for now
-            l.push_value(LuaValue::integer(0))?;
+            // Return memory in KB (Lua returns fractional KB)
+            let bytes = vm.gc.total_bytes.max(0) as f64;
+            let kb = bytes / 1024.0;
+            l.push_value(LuaValue::number(kb))?;
             Ok(1)
         }
         "stop" => {

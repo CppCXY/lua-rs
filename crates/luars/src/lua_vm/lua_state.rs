@@ -20,17 +20,17 @@ pub struct LuaState {
     /// Layout: [frame0_values...][frame1_values...][frame2_values...]
     /// Similar to Lua's TValue stack[] in lua_State
     /// IMPORTANT: This is the PHYSICAL stack, only grows, never shrinks
-    stack: Vec<LuaValue>,
+    pub(crate) stack: Vec<LuaValue>,
 
     /// Logical stack top - index of first free slot (Lua's L->top.p)
     /// This is the actual "top" that controls which stack slots are active
     /// Values above stack_top are considered "garbage" and can be reused
-    stack_top: usize,
+    pub(crate) stack_top: usize,
 
     /// Call stack - one CallInfo per active function call
     /// Grows dynamically on demand (like Lua 5.4's linked list approach)
     /// Similar to Lua's CallInfo *ci in lua_State
-    call_stack: Vec<CallInfo>,
+    pub(crate) call_stack: Vec<CallInfo>,
 
     /// Open upvalues list - upvalues pointing to stack locations
     /// Must be kept sorted by stack index for correct closure semantics
@@ -496,6 +496,18 @@ impl LuaState {
     #[inline(always)]
     pub fn get_frame_func(&self, frame_idx: usize) -> Option<LuaValue> {
         self.call_stack.get(frame_idx).map(|f| f.func)
+    }
+
+    /// Get frame by index (for GC root collection)
+    #[inline(always)]
+    pub fn get_frame(&self, frame_idx: usize) -> Option<&CallInfo> {
+        self.call_stack.get(frame_idx)
+    }
+
+    /// Get all open upvalues (for GC root collection)
+    #[inline(always)]
+    pub fn get_open_upvalues(&self) -> &[UpvalueId] {
+        &self.open_upvalues
     }
 
     /// Set frame PC by index

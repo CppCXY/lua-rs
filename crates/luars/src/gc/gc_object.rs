@@ -136,6 +136,30 @@ impl GcHeader {
         (self.marked & (1 << (WHITE0BIT + other_white))) != 0
     }
 
+    /// Check if object has a specific white bit set
+    #[inline(always)]
+    pub fn has_white_bit(&self, white_bit: u8) -> bool {
+        (self.marked & (1 << (WHITE0BIT + white_bit))) != 0
+    }
+
+    /// Make object OLD0 (first old generation)
+    #[inline(always)]
+    pub fn make_old0(&mut self) {
+        self.set_age(G_OLD0);
+    }
+
+    /// Make object TOUCHED1 (old object modified in this cycle)
+    #[inline(always)]
+    pub fn make_touched1(&mut self) {
+        self.set_age(G_TOUCHED1);
+    }
+
+    /// Make object OLD (fully old)
+    #[inline(always)]
+    pub fn make_old(&mut self) {
+        self.set_age(G_OLD);
+    }
+
     // Legacy compatibility
     #[inline(always)]
     pub fn is_marked(&self) -> bool {
