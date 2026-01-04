@@ -153,7 +153,8 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
             return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
         };
-        match table_ref.insert_array_at(len, value) {
+        // Append at position len + 1 (1-based indexing)
+        match table_ref.insert_array_at(len + 1, value) {
             Ok(_) => {}
             Err(e) => {
                 return Err(l.error(format!("error inserting into table: {}", e)));

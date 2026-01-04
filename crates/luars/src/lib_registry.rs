@@ -128,7 +128,7 @@ impl LibraryRegistry {
             if module.name == "string" {
                 // In Lua, all strings share a metatable where __index points to the string library
                 // This allows using string methods with : syntax (e.g., str:upper())
-                // vm.set_string_metatable(lib_table.clone());
+                vm.set_string_metatable(lib_table.clone());
             }
 
             // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)

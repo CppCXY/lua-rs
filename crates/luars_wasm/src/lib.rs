@@ -1,4 +1,4 @@
-use luars::{lua_vm::SafeOption, LuaVM, LuaValue};
+use luars::{lua_vm::SafeOption, stdlib, LuaVM, LuaValue};
 use wasm_bindgen::prelude::*;
 
 // Set panic hook for better error messages in WASM
@@ -19,7 +19,7 @@ impl LuaWasm {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<LuaWasm, JsValue> {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+        vm.open_stdlib(stdlib::Stdlib::All).unwrap();
 
         Ok(LuaWasm { vm })
     }

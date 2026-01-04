@@ -128,6 +128,31 @@ impl LuaState {
             CIST_LUA
         };
 
+        // Calculate nextraargs for vararg functions
+        // nextraargs = number of arguments passed beyond the function's fixed parameters
+        let nextraargs = if let Some(func_id) = func.as_function_id() {
+            let vm = unsafe { &*self.vm };
+            if let Some(func_obj) = vm.object_pool.get_function(func_id) {
+                if let Some(chunk) = func_obj.chunk() {
+                    // For Lua functions with prototypes
+                    let numparams = chunk.param_count;
+                    if nparams > numparams {
+                        (nparams - numparams) as i32
+                    } else {
+                        0
+                    }
+                } else {
+                    // C functions don't use nextraargs
+                    0
+                }
+            } else {
+                0
+            }
+        } else {
+            // Light C functions don't use nextraargs
+            0
+        };
+
         // Calculate frame top
         let frame_top = base + nparams;
 
@@ -139,7 +164,7 @@ impl LuaState {
             pc: 0,
             nresults, // Use the nresults from caller
             call_status,
-            nextraargs: 0,
+            nextraargs,
         };
 
         self.call_stack.push(frame);

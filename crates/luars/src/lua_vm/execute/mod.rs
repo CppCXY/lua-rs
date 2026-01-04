@@ -1507,8 +1507,40 @@ fn execute_frame(
 
                         let result = table.raw_get(key).unwrap_or(LuaValue::nil());
                         *ra = result;
+                    } else if (*rb).is_string() {
+                        // For strings, check the string metatable
+                        let vm = lua_state.vm_mut();
+                        if let Some(string_mt) = &vm.string_mt {
+                            // Get __index from the metatable
+                            if let Some(mt_table_id) = string_mt.as_table_id() {
+                                let index_key = vm.create_string("__index");
+                                if let Some(mt) = vm.object_pool.get_table(mt_table_id) {
+                                    if let Some(index_value) = mt.raw_get(&index_key) {
+                                        // __index should be the string library table
+                                        if let Some(string_lib_id) = index_value.as_table_id() {
+                                            if let Some(string_lib) = vm.object_pool.get_table(string_lib_id) {
+                                                let result = string_lib.raw_get(key).unwrap_or(LuaValue::nil());
+                                                *ra = result;
+                                            } else {
+                                                setnilvalue(ra);
+                                            }
+                                        } else {
+                                            setnilvalue(ra);
+                                        }
+                                    } else {
+                                        setnilvalue(ra);
+                                    }
+                                } else {
+                                    setnilvalue(ra);
+                                }
+                            } else {
+                                setnilvalue(ra);
+                            }
+                        } else {
+                            setnilvalue(ra);
+                        }
                     } else {
-                        // Not a table - should trigger metamethod
+                        // Not a table or string - should trigger metamethod
                         setnilvalue(ra);
                     }
                 }
@@ -2429,6 +2461,15 @@ fn execute_frame(
                 // Get nextraargs from CallInfo
                 let call_info = lua_state.get_call_info(frame_idx);
                 let nextra = call_info.nextraargs as usize;
+                let func_id = call_info.func.as_function_id().ok_or(LuaError::RuntimeError)?;
+                
+                // Get param_count from the function's chunk
+                let param_count = {
+                    let vm = lua_state.vm_mut();
+                    let func_obj = vm.object_pool.get_function(func_id).ok_or(LuaError::RuntimeError)?;
+                    let chunk = func_obj.chunk().ok_or(LuaError::RuntimeError)?;
+                    chunk.param_count
+                };
 
                 unsafe {
                     let ra = stack_ptr.add(base + a);
@@ -2445,10 +2486,10 @@ fn execute_frame(
                         }
                     } else if wanted < 0 {
                         // Get all varargs
-                        // varargs are stored after fixed parameters in the current frame
-                        // They start at base - nextra (before the actual base)
-                        if nextra > 0 && base >= nextra {
-                            let vararg_start = base - nextra;
+                        // Extra varargs are stored after fixed parameters in the current frame
+                        // They start at base + param_count
+                        if nextra > 0 {
+                            let vararg_start = base + param_count;
                             for i in 0..nextra {
                                 let src = stack_ptr.add(vararg_start + i);
                                 let dst = ra.add(i);
@@ -2466,9 +2507,9 @@ fn execute_frame(
                             wanted as usize
                         };
 
-                        // Copy available varargs
-                        if nextra > 0 && base >= nextra && to_copy > 0 {
-                            let vararg_start = base - nextra;
+                        // Copy available varargs from base + param_count
+                        if nextra > 0 && to_copy > 0 {
+                            let vararg_start = base + param_count;
                             for i in 0..to_copy {
                                 let src = stack_ptr.add(vararg_start + i);
                                 let dst = ra.add(i);
@@ -2495,6 +2536,15 @@ fn execute_frame(
                 // Get nextraargs from CallInfo
                 let call_info = lua_state.get_call_info(frame_idx);
                 let nextra = call_info.nextraargs as usize;
+                let func_id = call_info.func.as_function_id().ok_or(LuaError::RuntimeError)?;
+                
+                // Get param_count from the function's chunk
+                let param_count = {
+                    let vm = lua_state.vm_mut();
+                    let func_obj = vm.object_pool.get_function(func_id).ok_or(LuaError::RuntimeError)?;
+                    let chunk = func_obj.chunk().ok_or(LuaError::RuntimeError)?;
+                    chunk.param_count
+                };
 
                 unsafe {
                     let ra = stack_ptr.add(base + a);
@@ -2517,11 +2567,10 @@ fn execute_frame(
                         let index = ivalue(rc);
 
                         // Check if index is valid (1 <= index <= nextraargs)
-                        if nextra > 0 && index >= 1 && (index as usize) <= nextra && base >= nextra
-                        {
+                        if nextra > 0 && index >= 1 && (index as usize) <= nextra {
                             // Get value from varargs
-                            // varargs are stored before base
-                            let vararg_start = base - nextra;
+                            // varargs are stored after fixed parameters at base + param_count
+                            let vararg_start = base + param_count;
                             let src = stack_ptr.add(vararg_start + (index as usize) - 1);
                             *ra = *src;
                         } else {

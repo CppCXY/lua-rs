@@ -245,6 +245,23 @@ impl LuaVM {
         }
     }
 
+    /// Set the metatable for all strings
+    /// This allows string methods to be called with : syntax (e.g., str:upper())
+    pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) {
+        // Create a metatable with __index pointing to the string library
+        let mt_id = self.object_pool.create_table(0, 1);
+        let mt_value = LuaValue::table(mt_id);
+        
+        // Set __index to point to the string library
+        let index_key = self.create_string("__index");
+        if let Some(mt) = self.object_pool.get_table_mut(mt_id) {
+            mt.raw_set(index_key, string_lib_table);
+        }
+        
+        // Store in the VM
+        self.string_mt = Some(mt_value);
+    }
+
     // ============ Coroutine Support ============
 
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
