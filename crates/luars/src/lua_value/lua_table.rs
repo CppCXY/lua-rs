@@ -636,6 +636,28 @@ impl LuaTable {
         Ok(())
     }
 
+    /// Remove element at array index (Lua 1-based indexing)
+    /// 删除指定位置的元素，后面的元素向前移动
+    /// 返回被删除的元素
+    pub fn remove_array_at(&mut self, idx: usize) -> Result<LuaValue, String> {
+        if idx == 0 {
+            return Err("index must be >= 1 (Lua uses 1-based indexing)".to_string());
+        }
+
+        let asize = self.asize() as usize;
+
+        if idx > asize {
+            return Err(format!(
+                "index {} out of bounds (array size is {})",
+                idx, asize
+            ));
+        }
+
+        // Vec的remove使用0-based索引
+        let removed = self.array.remove(idx - 1);
+        Ok(removed)
+    }
+
     /// Metamethod absence check
     #[inline(always)]
     pub fn tm_absent(&self, flag: u8) -> bool {

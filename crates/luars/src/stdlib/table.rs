@@ -179,7 +179,7 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
             return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
         };
-        match table_ref.insert_array_at(pos as usize - 1, value) {
+        match table_ref.insert_array_at(pos as usize, value) {
             Ok(_) => {}
             Err(e) => {
                 return Err(l.error(format!("error inserting into table: {}", e)));
@@ -229,17 +229,13 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
     };
 
-    // Get the value to remove
-    let removed = table_ref.get_int(pos).unwrap_or(LuaValue::nil());
-
-    // Shift all elements after pos down by one
-    for i in pos..len as i64 {
-        let next_val = table_ref.get_int(i + 1).unwrap_or(LuaValue::nil());
-        table_ref.set_int(i, next_val);
-    }
-
-    // Clear the last element
-    table_ref.set_int(len as i64, LuaValue::nil());
+    // Remove the element using the proper method
+    let removed = match table_ref.remove_array_at(pos as usize) {
+        Ok(val) => val,
+        Err(e) => {
+            return Err(l.error(format!("error removing from table: {}", e)));
+        }
+    };
 
     l.push_value(removed)?;
     Ok(1)
@@ -402,15 +398,11 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(0);
     }
 
-    // For now, we only support default sorting (no custom comparison function)
-    // TODO: Implement custom comparison function support when VM call API is available
-    if comp.is_some() && !comp.as_ref().map(|v| v.is_nil()).unwrap_or(true) {
-        return Err(
-            l.error("custom comparison functions in table.sort not yet supported".to_string())
-        );
-    }
+    // Check if we have a custom comparison function
+    let has_comp = comp.is_some() && !comp.as_ref().map(|v| v.is_nil()).unwrap_or(true);
+    let comp_func = if has_comp { comp.unwrap() } else { LuaValue::nil() };
 
-    // Extract values and their string representations (for string sorting)
+    // Extract values
     let mut values = Vec::with_capacity(len);
     let mut string_cache: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
 
@@ -434,7 +426,55 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Sort using Lua semantics comparison
-    values.sort_by(|a, b| lua_compare_values(a, b, &string_cache));
+    if has_comp {
+        // Custom comparison function
+        values.sort_by(|a, b| {
+            // Call comp(a, b)
+            l.push_value(comp_func).ok();
+            l.push_value(*a).ok();
+            l.push_value(*b).ok();
+            
+            let func_idx = l.get_top() - 3;
+            let result = l.pcall_stack_based(func_idx, 2);
+            
+            match result {
+                Ok((true, result_count)) => {
+                    // Get the result
+                    let cmp_result = if result_count > 0 {
+                        l.stack_get(func_idx).unwrap_or(LuaValue::nil())
+                    } else {
+                        LuaValue::nil()
+                    };
+                    
+                    // Clean up stack
+                    l.set_top(func_idx);
+                    
+                    // Convert to bool: nil and false are false, everything else is true
+                    let is_less = if cmp_result.is_nil() {
+                        false
+                    } else if let Some(b) = cmp_result.as_boolean() {
+                        b
+                    } else {
+                        true
+                    };
+                    
+                    if is_less {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                _ => {
+                    // Error or false - treat as not less than
+                    l.set_top(func_idx);
+                    std::cmp::Ordering::Equal
+                }
+            }
+        });
+    } else {
+        // Default comparison
+        values.sort_by(|a, b| lua_compare_values(a, b, &string_cache));
+    }
 
     // Write sorted values back
     {
