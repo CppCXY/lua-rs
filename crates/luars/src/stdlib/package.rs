@@ -61,14 +61,6 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
         .get_table_mut(searchers_id)
         .unwrap()
         .set_int(2, LuaValue::cfunction(searcher_lua));
-    vm.object_pool
-        .get_table_mut(searchers_id)
-        .unwrap()
-        .set_int(3, LuaValue::cfunction(searcher_c));
-    vm.object_pool
-        .get_table_mut(searchers_id)
-        .unwrap()
-        .set_int(4, LuaValue::cfunction(searcher_allinone));
 
     // Set all fields in package table
     let pkg = vm.object_pool.get_table_mut(package_id).unwrap();
@@ -88,17 +80,17 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("module name expected".to_string()))?;
 
-    let Some(modname_id) = modname_val.as_string_id() else {
-        return Err(l.error("module name expected".to_string()));
-    };
+    // let Some(modname_id) = modname_val.as_string_id() else {
+    //     return Err(l.error("module name expected".to_string()));
+    // };
 
-    let modname_str = {
-        let vm = l.vm_mut();
-        let Some(s) = vm.object_pool.get_string(modname_id) else {
-            return Err(l.error("module name expected".to_string()));
-        };
-        s.as_str().to_string()
-    };
+    // let modname_str = {
+    //     let vm = l.vm_mut();
+    //     let Some(s) = vm.object_pool.get_string(modname_id) else {
+    //         return Err(l.error("module name expected".to_string()));
+    //     };
+    //     s.as_str().to_string()
+    // };
 
     let package_table = l
         .get_global("package")
@@ -132,9 +124,7 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     if loader.is_nil() {
-        let err = format!("\n\tno field package.preload['{}']", modname_str);
-        let err_str = l.create_string(&err);
-        l.push_value(err_str)?;
+        l.push_value(LuaValue::boolean(false))?;
         Ok(1)
     } else {
         l.push_value(loader)?;
@@ -261,20 +251,6 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
 
     // Push the function to be called by require
     l.push_value(func)?;
-    Ok(1)
-}
-
-// Searcher 3: Search package.cpath (C libraries)
-fn searcher_c(l: &mut LuaState) -> LuaResult<usize> {
-    let err = l.create_string("\n\tC library loading not supported");
-    l.push_value(err)?;
-    Ok(1)
-}
-
-// Searcher 4: all-in-one loader (stub)
-fn searcher_allinone(l: &mut LuaState) -> LuaResult<usize> {
-    let err = l.create_string("\n\tall-in-one loader not supported");
-    l.push_value(err)?;
     Ok(1)
 }
 

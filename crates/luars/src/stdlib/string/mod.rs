@@ -5,8 +5,8 @@ mod pattern;
 mod string_format;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::{LuaResult, LuaState, LuaVM};
+use crate::lua_value::LuaValue;
+use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
@@ -15,6 +15,7 @@ pub fn create_string_lib() -> LibraryModule {
         "dump" => string_dump,
         "find" => string_find,
         "format" => string_format::string_format,
+        "gmatch" => string_gmatch,
         "gsub" => string_gsub,
         "len" => string_len,
         "lower" => string_lower,
@@ -23,8 +24,6 @@ pub fn create_string_lib() -> LibraryModule {
         "reverse" => string_reverse,
         "sub" => string_sub,
         "upper" => string_upper,
-        // TODO: gmatch - needs iterator support
-        // "gmatch" => string_gmatch,
         // TODO: pack/packsize/unpack - need conversion to new API
         // "pack" => string_pack,
         // "packsize" => string_packsize,
@@ -632,155 +631,126 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
-/// Helper for gsub with function replacement
-fn gsub_with_function(
-    vm: &mut LuaVM,
-    text: &str,
-    pattern: &pattern::Pattern,
-    func: LuaValue,
-    max: Option<usize>,
-) -> LuaResult<MultiValue> {
-    let mut result = String::new();
-    let mut count = 0;
-    let mut pos = 0;
-    let text_chars: Vec<char> = text.chars().collect();
+/// string.gmatch(s, pattern) - Returns an iterator function
+/// Usage: for capture in string.gmatch(s, pattern) do ... end
+fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
+    let s_value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'gmatch' (string expected)".to_string()))?;
 
-    while pos < text_chars.len() {
-        if let Some(max_count) = max {
-            if count >= max_count {
-                result.extend(&text_chars[pos..]);
-                break;
-            }
-        }
+    let pattern_value = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
 
-        if let Some((end_pos, captures)) = pattern::try_match(pattern, &text_chars, pos) {
-            count += 1;
+    // Create state table: {string, pattern, position}
+    let state_table = l.create_table(3, 0);
+    let Some(table_id) = state_table.as_table_id() else {
+        return Err(l.error("failed to create state table for gmatch".to_string()));
+    };
 
-            // Prepare arguments for function call
-            let args = if captures.is_empty() {
-                // No captures, pass the whole match
-                let matched: String = text_chars[pos..end_pos].iter().collect();
-                vec![vm.create_string(&matched)]
-            } else {
-                // Pass captures as arguments
-                captures.iter().map(|cap| vm.create_string(cap)).collect()
-            };
-
-            // Call the function
-            match vm.protected_call(func, args) {
-                Ok((success, mut results)) => {
-                    if !success {
-                        let error_msg = results
-                            .first()
-                            .and_then(|v| v.as_string_id())
-                            .and_then(|id| vm.object_pool.get_string(id))
-                            .map(|s| s.as_str().to_string())
-                            .unwrap_or_else(|| "unknown error".to_string());
-                        return Err(vm.error(error_msg));
-                    }
-
-                    // Get the replacement from function result
-                    let replacement = results.pop().unwrap_or(LuaValue::nil());
-
-                    if replacement.is_string() {
-                        // Use the returned string
-                        if let Some(repl_id) = replacement.as_string_id() {
-                            if let Some(repl_str) = vm.object_pool.get_string(repl_id) {
-                                result.push_str(repl_str.as_str());
-                            }
-                        }
-                    } else if !replacement.is_nil() && !replacement.is_boolean() {
-                        // Convert to string (numbers, etc)
-                        let repl_str = vm.value_to_string_raw(&replacement);
-                        result.push_str(&repl_str);
-                    } else {
-                        // nil or false: keep original
-                        result.extend(&text_chars[pos..end_pos]);
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-
-            pos = end_pos.max(pos + 1);
-        } else {
-            result.push(text_chars[pos]);
-            pos += 1;
+    {
+        let vm = l.vm_mut();
+        if let Some(state_ref) = vm.object_pool.get_table_mut(table_id) {
+            state_ref.set_int(1, s_value);
+            state_ref.set_int(2, pattern_value);
+            state_ref.set_int(3, LuaValue::integer(0)); // position
         }
     }
 
-    let result_value = vm.create_string(&result);
-    Ok(MultiValue::multiple(vec![
-        result_value,
-        LuaValue::integer(count as i64),
-    ]))
+    // Return: iterator function, state table, nil (initial control variable)
+    l.push_value(LuaValue::cfunction(gmatch_iterator))?;
+    l.push_value(state_table)?;
+    l.push_value(LuaValue::nil())?;
+    Ok(3)
 }
 
-/// Helper for gsub with table replacement
-fn gsub_with_table(
-    vm: &mut LuaVM,
-    text: &str,
-    pattern: &pattern::Pattern,
-    table: LuaValue,
-    max: Option<usize>,
-) -> LuaResult<MultiValue> {
-    let mut result = String::new();
-    let mut count = 0;
-    let mut pos = 0;
-    let text_chars: Vec<char> = text.chars().collect();
+/// Iterator function for string.gmatch
+/// Called as: f(state, control_var)
+fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
+    // Arg 1: state table
+    // Arg 2: control variable (unused, we use state.position)
+    let state_table_value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("gmatch iterator: state expected".to_string()))?;
 
-    while pos < text_chars.len() {
-        if let Some(max_count) = max {
-            if count >= max_count {
-                result.extend(&text_chars[pos..]);
-                break;
+    let Some(table_id) = state_table_value.as_table_id() else {
+        return Err(l.error("gmatch iterator: state is not a table".to_string()));
+    };
+
+    // Extract string, pattern, and position from state
+    let (s_str, pattern_str, position) = {
+        let vm = l.vm_mut();
+        let Some(state_ref) = vm.object_pool.get_table(table_id) else {
+            return Err(l.error("gmatch iterator: state is not a table".to_string()));
+        };
+
+        let Some(s_val) = state_ref.get_int(1) else {
+            return Err(l.error("gmatch iterator: string not found in state".to_string()));
+        };
+        let Some(s_id) = s_val.as_string_id() else {
+            return Err(l.error("gmatch iterator: string invalid".to_string()));
+        };
+
+        let Some(pattern_val) = state_ref.get_int(2) else {
+            return Err(l.error("gmatch iterator: pattern not found in state".to_string()));
+        };
+        let Some(pattern_id) = pattern_val.as_string_id() else {
+            return Err(l.error("gmatch iterator: pattern invalid".to_string()));
+        };
+
+        let position_value = state_ref.get_int(3).unwrap_or(LuaValue::integer(0));
+        let position = position_value.as_integer().unwrap_or(0) as usize;
+
+        // Get string contents
+        let Some(s_obj) = vm.object_pool.get_string(s_id) else {
+            return Err(l.error("gmatch iterator: string invalid".to_string()));
+        };
+        let Some(pattern_obj) = vm.object_pool.get_string(pattern_id) else {
+            return Err(l.error("gmatch iterator: pattern invalid".to_string()));
+        };
+
+        (
+            s_obj.as_str().to_string(),
+            pattern_obj.as_str().to_string(),
+            position,
+        )
+    };
+
+    // Parse pattern
+    let pattern = match pattern::parse_pattern(&pattern_str) {
+        Ok(p) => p,
+        Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
+    };
+
+    // Find next match
+    if let Some((start, end, captures)) = pattern::find(&s_str, &pattern, position) {
+        // Update position for next iteration
+        let next_pos = if end > start { end } else { end + 1 };
+        {
+            let vm = l.vm_mut();
+            if let Some(state_ref) = vm.object_pool.get_table_mut(table_id) {
+                state_ref.set_int(3, LuaValue::integer(next_pos as i64));
             }
         }
 
-        if let Some((end_pos, captures)) = pattern::try_match(pattern, &text_chars, pos) {
-            count += 1;
-
-            // Get the key for table lookup
-            let key = if captures.is_empty() {
-                // No captures, use whole match
-                let matched: String = text_chars[pos..end_pos].iter().collect();
-                vm.create_string(&matched)
-            } else {
-                // Use first capture as key
-                vm.create_string(&captures[0])
-            };
-
-            // Lookup in table
-            if let Some(replacement) = vm.table_get(&table, &key) {
-                if let Some(repl_id) = replacement.as_string_id() {
-                    // Use the value from table
-                    if let Some(repl_str) = vm.object_pool.get_string(repl_id) {
-                        result.push_str(repl_str.as_str());
-                    }
-                } else if !replacement.is_nil() && !replacement.is_boolean() {
-                    // Convert to string
-                    let repl_str = vm.value_to_string_raw(&replacement);
-                    result.push_str(&repl_str);
-                } else {
-                    // nil or false: keep original
-                    result.extend(&text_chars[pos..end_pos]);
-                }
-            } else {
-                // nil: keep original
-                result.extend(&text_chars[pos..end_pos]);
-            }
-
-            pos = end_pos.max(pos + 1);
+        // Return captures if any, otherwise return the matched string
+        if captures.is_empty() {
+            let matched = &s_str[start..end];
+            let result = l.create_string(matched);
+            l.push_value(result)?;
+            Ok(1)
         } else {
-            result.push(text_chars[pos]);
-            pos += 1;
+            for cap in &captures {
+                let result = l.create_string(cap);
+                l.push_value(result)?;
+            }
+            Ok(captures.len())
         }
+    } else {
+        // No more matches - return nil to end iteration
+        l.push_value(LuaValue::nil())?;
+        Ok(1)
     }
-
-    let result_value = vm.create_string(&result);
-    Ok(MultiValue::multiple(vec![
-        result_value,
-        LuaValue::integer(count as i64),
-    ]))
 }
 
 // /// string.gmatch(s, pattern) - Returns an iterator function

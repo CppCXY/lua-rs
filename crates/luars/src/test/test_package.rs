@@ -36,6 +36,10 @@ fn test_package_preload() {
     "#,
     );
 
+    if let Err(e) = &result {
+        let error_msg = vm.get_error_message();
+        eprintln!("Error: {:?}, Message: {}", e, error_msg);
+    }
     assert!(result.is_ok());
 }
 
@@ -85,10 +89,7 @@ fn test_package_config() {
     "#,
     );
 
-    if let Err(e) = &result {
-        eprintln!("Error: {}", e);
-    }
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Error: {:?}", result);
 }
 
 #[test]
@@ -99,10 +100,9 @@ fn test_package_searchers() {
     let result = vm.execute_string(
         r#"
         assert(type(package.searchers) == "table")
-        assert(type(package.searchers[1]) == "function")
-        assert(type(package.searchers[2]) == "function")
-        assert(type(package.searchers[3]) == "function")
-        assert(type(package.searchers[4]) == "function")
+        assert(type(package.searchers[1]) == "function")  -- preload searcher
+        assert(type(package.searchers[2]) == "function")  -- lua file searcher
+        assert(package.searchers[3] == nil)  -- we only have 2 searchers
     "#,
     );
 
@@ -149,6 +149,10 @@ fn test_require_preload() {
     "#,
     );
 
+    if let Err(e) = &result {
+        let error_msg = vm.get_error_message();
+        panic!("Error: {:?}, Message: {}", e, error_msg);
+    }
     assert!(result.is_ok());
 }
 

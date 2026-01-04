@@ -6,6 +6,8 @@ use std::rc::Rc;
 
 use crate::gc::UpvalueId;
 use crate::lua_value::{LuaString, LuaUserdata, LuaValue};
+use crate::lua_vm::execute::call::call_c_function;
+use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
 use crate::{Chunk, LuaVM};
@@ -942,15 +944,15 @@ impl LuaState {
                 .is_some()
         {
             // C function - call directly
-            crate::lua_vm::execute::call::call_c_function(
-                self, func_idx, arg_count, 0, // MULTRET - want all results
+            call_c_function(
+                self, func_idx, arg_count, -1, // MULTRET - want all results
             )
             .map(|_| ())
         } else {
             // Lua function - push frame and execute, expecting all return values
             let base = func_idx + 1;
             self.push_frame(func, base, arg_count, -1)?;
-            crate::lua_vm::execute::lua_execute_until(self, initial_depth)
+            lua_execute_until(self, initial_depth)
         };
 
         match result {
