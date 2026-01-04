@@ -1,6 +1,7 @@
 // String library
 // Implements: byte, char, dump, find, format, gmatch, gsub, len, lower,
 // match, pack, packsize, rep, reverse, sub, unpack, upper
+mod pack;
 mod pattern;
 mod string_format;
 
@@ -20,14 +21,13 @@ pub fn create_string_lib() -> LibraryModule {
         "len" => string_len,
         "lower" => string_lower,
         "match" => string_match,
+        "pack" => pack::string_pack,
+        "packsize" => pack::string_packsize,
         "rep" => string_rep,
         "reverse" => string_reverse,
         "sub" => string_sub,
+        "unpack" => pack::string_unpack,
         "upper" => string_upper,
-        // TODO: pack/packsize/unpack - need conversion to new API
-        // "pack" => string_pack,
-        // "packsize" => string_packsize,
-        // "unpack" => string_unpack,
     })
 }
 
