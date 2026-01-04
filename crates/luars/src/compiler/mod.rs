@@ -23,7 +23,6 @@ use crate::gc::ObjectPool;
 use crate::lua_value::Chunk;
 use crate::lua_vm::OpCode;
 
-
 // Structures are now in separate files (func_state.rs, expression.rs)
 
 // Port of luaY_parser from lparser.c

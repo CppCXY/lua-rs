@@ -4,7 +4,7 @@ use crate::*;
 #[test]
 fn test_table_insert() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -24,7 +24,7 @@ fn test_table_insert() {
 #[test]
 fn test_table_remove() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -45,7 +45,7 @@ fn test_table_remove() {
 #[test]
 fn test_table_concat() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -65,7 +65,7 @@ fn test_table_concat() {
 #[test]
 fn test_table_sort() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -85,7 +85,7 @@ fn test_table_sort() {
 #[test]
 fn test_table_sort_with_comparator() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -103,7 +103,7 @@ fn test_table_sort_with_comparator() {
 #[test]
 fn test_table_pack() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -121,7 +121,7 @@ fn test_table_pack() {
 #[test]
 fn test_table_unpack() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -139,7 +139,7 @@ fn test_table_unpack() {
 #[test]
 fn test_table_move() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -158,7 +158,7 @@ fn test_table_move() {
 #[test]
 fn test_table_operations() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"

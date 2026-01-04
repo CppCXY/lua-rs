@@ -19,7 +19,7 @@ impl LuaWasm {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<LuaWasm, JsValue> {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_libs();
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         Ok(LuaWasm { vm })
     }

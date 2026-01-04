@@ -21,7 +21,7 @@ fn test_print() {
 #[test]
 fn test_type() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -41,7 +41,7 @@ fn test_type() {
 #[test]
 fn test_tonumber() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -59,7 +59,7 @@ fn test_tonumber() {
 #[test]
 fn test_tostring() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -77,7 +77,7 @@ fn test_tostring() {
 #[test]
 fn test_assert() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Successful assertion
     let result = vm.execute_string(
@@ -102,7 +102,7 @@ fn test_assert() {
 #[test]
 fn test_error() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -116,7 +116,7 @@ fn test_error() {
 #[test]
 fn test_pcall() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -138,7 +138,7 @@ fn test_pcall() {
 #[test]
 fn test_xpcall() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -163,7 +163,7 @@ fn test_xpcall() {
 #[test]
 fn test_select() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r##"
@@ -180,7 +180,7 @@ fn test_select() {
 #[test]
 fn test_ipairs() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -202,7 +202,7 @@ fn test_ipairs() {
 #[test]
 fn test_pairs() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -221,7 +221,7 @@ fn test_pairs() {
 #[test]
 fn test_next() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -238,7 +238,7 @@ fn test_next() {
 #[test]
 fn test_rawget_rawset() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -257,7 +257,7 @@ fn test_rawget_rawset() {
 #[test]
 fn test_rawlen() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -275,7 +275,7 @@ fn test_rawlen() {
 #[test]
 fn test_rawequal() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -294,7 +294,7 @@ fn test_rawequal() {
 #[test]
 fn test_getmetatable_setmetatable() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -314,7 +314,7 @@ fn test_getmetatable_setmetatable() {
 #[test]
 fn test_load() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -330,7 +330,7 @@ fn test_load() {
 #[test]
 fn test_warn() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -345,7 +345,7 @@ fn test_warn() {
 #[test]
 fn test_collectgarbage() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"

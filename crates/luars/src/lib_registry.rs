@@ -4,7 +4,7 @@
 use crate::lua_value::LuaValue;
 use crate::lua_vm::LuaState;
 use crate::lua_vm::{CFunction, LuaResult, LuaVM};
-use crate::stdlib;
+use crate::stdlib::{self, Stdlib};
 // use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
@@ -67,31 +67,6 @@ macro_rules! lib_module {
         )*
         module
     }};
-}
-
-/// Builder for creating library modules with explicit types
-#[macro_export]
-macro_rules! lib_module_ex {
-    ($name:expr, {
-        $($item_type:ident : $item_name:expr => $item:expr),* $(,)?
-    }) => {{
-        let mut module = $crate::lib_registry::LibraryModule::new($name);
-        $(
-            module.entries.push((
-                $item_name,
-                lib_module_ex!(@entry $item_type, $item)
-            ));
-        )*
-        module
-    }};
-
-    (@entry function, $func:expr) => {
-        $crate::lib_registry::LibraryEntry::Function($func)
-    };
-
-    (@entry value, $value_init:expr) => {
-        $crate::lib_registry::LibraryEntry::Value($value_init)
-    };
 }
 
 /// Registry for all Lua standard libraries
@@ -195,55 +170,44 @@ impl Default for LibraryRegistry {
 }
 
 /// Create a standard Lua 5.4 library registry with all standard libraries
-pub fn create_standard_registry() -> LibraryRegistry {
+pub fn create_standard_registry(open_lib: Stdlib) -> LibraryRegistry {
     let mut registry = LibraryRegistry::new();
 
-    // // Register package library FIRST so package.loaded exists
-    // // before other libraries try to register themselves
-    registry.register(stdlib::package::create_package_lib());
+    if matches!(open_lib, Stdlib::All | Stdlib::Package) {
+        registry.register(stdlib::package::create_package_lib());
+    }
     // Register all other standard libraries
-    registry.register(stdlib::basic::create_basic_lib());
-    registry.register(stdlib::string::create_string_lib());
-    registry.register(stdlib::table::create_table_lib());
-    registry.register(stdlib::math::create_math_lib());
-    registry.register(stdlib::io::create_io_lib());
-    registry.register(stdlib::os::create_os_lib());
-    registry.register(stdlib::utf8::create_utf8_lib());
-    registry.register(stdlib::coroutine::create_coroutine_lib());
-    registry.register(stdlib::debug::create_debug_lib());
+    if matches!(open_lib, Stdlib::All | Stdlib::Basic) {
+        registry.register(stdlib::basic::create_basic_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::String) {
+        registry.register(stdlib::string::create_string_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Table) {
+        registry.register(stdlib::table::create_table_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Math) {
+        registry.register(stdlib::math::create_math_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Io) {
+        registry.register(stdlib::io::create_io_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Os) {
+        registry.register(stdlib::os::create_os_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Utf8) {
+        registry.register(stdlib::utf8::create_utf8_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Coroutine) {
+        registry.register(stdlib::coroutine::create_coroutine_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Debug) {
+        registry.register(stdlib::debug::create_debug_lib());
+    }
     // #[cfg(feature = "loadlib")]
     // registry.register(stdlib::ffi::create_ffi_lib());
     // #[cfg(feature = "async")]
     // registry.register(stdlib::async_lib::create_async_lib());
 
     registry
-}
-
-/// Helper to get function arguments from VM
-#[inline]
-pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
-    vm.main_state.get_args()
-}
-
-/// Helper to get a specific argument
-/// 1-based index (Lua convention)
-#[inline(always)]
-pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
-    vm.main_state.get_arg(index)
-}
-
-/// Helper to require an argument
-/// 1-based index
-#[inline]
-pub fn require_arg(vm: &mut LuaVM, index: usize, func_name: &str) -> LuaResult<LuaValue> {
-    let Some(arg) = vm.main_state.get_arg(index) else {
-        return Err(vm.error(format!("{}() requires argument {}", func_name, index)));
-    };
-    Ok(arg)
-}
-
-/// Helper to get argument count
-#[inline(always)]
-pub fn arg_count(vm: &LuaVM) -> usize {
-    vm.main_state.arg_count()
 }

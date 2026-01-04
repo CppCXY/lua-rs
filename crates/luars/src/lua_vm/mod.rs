@@ -15,6 +15,7 @@ use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
+use crate::stdlib::Stdlib;
 use crate::{ObjectPool, lib_registry};
 pub use execute::TmKind;
 pub use opcode::{Instruction, OpCode};
@@ -136,17 +137,15 @@ impl LuaVM {
         None
     }
 
-    pub fn open_libs(&mut self) {
-        let _ = lib_registry::create_standard_registry().load_all(self);
-
-        // Register async functions
-        #[cfg(feature = "async")]
-        crate::stdlib::async_lib::register_async_functions(self);
+    pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
+        lib_registry::create_standard_registry(lib).load_all(self)?;
 
         // Reset GC state after loading standard libraries
         // Like Lua's initial full GC after loading base libs
         self.gc.gc_debt = -(8 * 1024);
         self.gc.gc_estimate = self.gc.total_bytes;
+
+        Ok(())
     }
 
     /// Execute a chunk in the main thread

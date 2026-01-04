@@ -4,7 +4,7 @@ use crate::*;
 #[test]
 fn test_arithmetic_operators() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -28,7 +28,7 @@ fn test_arithmetic_operators() {
 #[test]
 fn test_comparison_operators() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -47,7 +47,7 @@ fn test_comparison_operators() {
 #[test]
 fn test_logical_operators() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -66,7 +66,7 @@ fn test_logical_operators() {
 #[test]
 fn test_logical_short_circuit() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -87,7 +87,7 @@ fn test_logical_short_circuit() {
 #[test]
 fn test_concat_operator() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -102,7 +102,7 @@ fn test_concat_operator() {
 #[test]
 fn test_length_operator() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -118,7 +118,7 @@ fn test_length_operator() {
 #[test]
 fn test_bitwise_operators() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -137,7 +137,7 @@ fn test_bitwise_operators() {
 #[test]
 fn test_operator_precedence() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -154,7 +154,7 @@ fn test_operator_precedence() {
 #[test]
 fn test_table_constructor() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -175,7 +175,7 @@ fn test_table_constructor() {
 #[test]
 fn test_function_expressions() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -197,7 +197,7 @@ fn test_function_expressions() {
 #[test]
 fn test_vararg() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -222,7 +222,7 @@ fn test_vararg() {
 #[test]
 fn test_multiple_assignment() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -247,7 +247,7 @@ fn test_multiple_assignment() {
 #[test]
 fn test_table_access() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"

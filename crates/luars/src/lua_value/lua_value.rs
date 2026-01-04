@@ -760,8 +760,16 @@ impl LuaValue {
                     self.ivalue() == other.ivalue()
                 } else {
                     // Convert both to float for comparison
-                    let v1 = if self.ttisinteger() { self.ivalue() as f64 } else { self.fltvalue() };
-                    let v2 = if other.ttisinteger() { other.ivalue() as f64 } else { other.fltvalue() };
+                    let v1 = if self.ttisinteger() {
+                        self.ivalue() as f64
+                    } else {
+                        self.fltvalue()
+                    };
+                    let v2 = if other.ttisinteger() {
+                        other.ivalue() as f64
+                    } else {
+                        other.fltvalue()
+                    };
                     v1 == v2
                 }
             }

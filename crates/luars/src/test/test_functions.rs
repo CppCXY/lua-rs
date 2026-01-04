@@ -4,7 +4,7 @@ use crate::lua_vm::{LuaVM, SafeOption};
 #[test]
 fn test_function_with_default_return() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function no_return() end
@@ -18,7 +18,7 @@ fn test_function_with_default_return() {
 #[test]
 fn test_function_multiple_returns() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function multi()
@@ -34,7 +34,7 @@ fn test_function_multiple_returns() {
 #[test]
 fn test_function_variable_returns() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function ret_n(n)
@@ -57,7 +57,7 @@ fn test_function_variable_returns() {
 #[test]
 fn test_function_tail_call() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function countdown(n)
@@ -76,7 +76,7 @@ fn test_function_tail_call() {
 #[test]
 fn test_function_vararg_basic() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function sum(...)
@@ -115,7 +115,7 @@ fn test_function_vararg_basic() {
 #[test]
 fn test_function_vararg_count() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function count_args(...)
@@ -132,7 +132,7 @@ fn test_function_vararg_count() {
 #[test]
 fn test_function_vararg_select() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function get_nth(n, ...)
@@ -148,7 +148,7 @@ fn test_function_vararg_select() {
 #[test]
 fn test_function_nested_calls() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function add(a, b) return a + b end
@@ -166,7 +166,7 @@ fn test_function_nested_calls() {
 #[test]
 fn test_function_as_parameter() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function apply(f, x, y)
@@ -184,7 +184,7 @@ fn test_function_as_parameter() {
 #[test]
 fn test_function_returning_function() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function get_operation(op)
@@ -206,7 +206,7 @@ fn test_function_returning_function() {
 #[test]
 fn test_function_table_of_functions() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local ops = {
@@ -227,7 +227,7 @@ fn test_function_table_of_functions() {
 #[test]
 fn test_function_anonymous_immediate_call() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local result = (function(x, y)
@@ -242,7 +242,7 @@ fn test_function_anonymous_immediate_call() {
 #[test]
 fn test_function_method_call_chain() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local obj = {value = 10}
@@ -267,7 +267,7 @@ fn test_function_method_call_chain() {
 #[test]
 fn test_function_local_function_scope() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function outer()
@@ -286,7 +286,7 @@ fn test_function_local_function_scope() {
 #[test]
 fn test_function_early_return() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function check(x)
@@ -305,7 +305,7 @@ fn test_function_early_return() {
 #[test]
 fn test_function_multiple_definitions() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function foo() return "first" end
@@ -321,7 +321,7 @@ fn test_function_multiple_definitions() {
 #[test]
 fn test_function_pcall_wrapper() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function safe_divide(a, b)
@@ -342,7 +342,7 @@ fn test_function_pcall_wrapper() {
 #[test]
 fn test_function_with_goto() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function search(t, target)
@@ -365,7 +365,7 @@ fn test_function_with_goto() {
 #[test]
 fn test_function_ipairs_wrapper() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function map(t, f)
@@ -385,7 +385,7 @@ fn test_function_ipairs_wrapper() {
 #[test]
 fn test_function_reduce() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function reduce(t, f, init)

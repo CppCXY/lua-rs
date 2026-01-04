@@ -1,5 +1,6 @@
 use luars::LuaVM;
 use luars::lua_vm::SafeOption;
+use luars::stdlib;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -292,7 +293,7 @@ fn main() {
 
     // Create VM
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(stdlib::Stdlib::All).unwrap();
 
     // Setup arg table
     // FIXME: Disabled due to compiler bug with negative table indices

@@ -12,3 +12,18 @@ pub mod package;
 pub mod string;
 pub mod table;
 pub mod utf8;
+
+pub enum Stdlib {
+    Io,
+    Os,
+    Math,
+    String,
+    Table,
+    Basic,
+    Package,
+    Utf8,
+    Coroutine,
+    Debug,
+
+    All,
+}

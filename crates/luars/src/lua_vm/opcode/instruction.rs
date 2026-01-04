@@ -81,8 +81,8 @@ impl Instruction {
     pub const MAX_SJ: u32 = (1 << Self::SIZE_SJ) - 1;
 
     // Offsets for signed arguments (Lua 5.5: OFFSET_X = MAXARG_X >> 1)
-    pub const OFFSET_SB: i32 = (Self::MAX_C >> 1) as i32;  // sB uses OFFSET_sC (127 for 8-bit)
-    pub const OFFSET_SC: i32 = (Self::MAX_C >> 1) as i32;  // 127 for 8-bit C
+    pub const OFFSET_SB: i32 = (Self::MAX_C >> 1) as i32; // sB uses OFFSET_sC (127 for 8-bit)
+    pub const OFFSET_SC: i32 = (Self::MAX_C >> 1) as i32; // 127 for 8-bit C
     pub const OFFSET_SBX: i32 = (Self::MAX_BX >> 1) as i32;
     pub const OFFSET_SJ: i32 = (Self::MAX_SJ >> 1) as i32;
 
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(Instruction::OFFSET_SC, 127);
         // OFFSET_SBX = (MAXARG_Bx >> 1) = ((1<<17)-1) >> 1 = 65535
         assert_eq!(Instruction::OFFSET_SBX, 65535);
-        // OFFSET_SJ = (MAXARG_sJ >> 1) = ((1<<25)-1) >> 1 = 16777215  
+        // OFFSET_SJ = (MAXARG_sJ >> 1) = ((1<<25)-1) >> 1 = 16777215
         assert_eq!(Instruction::OFFSET_SJ, 16777215);
     }
 

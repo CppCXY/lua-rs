@@ -83,7 +83,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
 /// assert(v [, message]) - Raise error if v is false or nil
 fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
     let arg_count = l.arg_count();
-    
+
     // Get first argument without consuming it
     let condition = l.get_arg(1).unwrap_or(LuaValue::nil());
 
@@ -401,12 +401,11 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
         Some(t) => t,
         None => return Err(l.error("table not found".to_string())),
     };
-    
+
     // Collect all key-value pairs first (to avoid borrow issues)
-    let all_pairs: Vec<(LuaValue, LuaValue)> = table.iter_all()
-        .filter(|(_, v)| !v.is_nil())
-        .collect();
-    
+    let all_pairs: Vec<(LuaValue, LuaValue)> =
+        table.iter_all().filter(|(_, v)| !v.is_nil()).collect();
+
     // Find next key-value pair
     // If index is nil, return first pair
     // Otherwise, find the key after index
@@ -466,7 +465,7 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
     // pcall_stack_based leaves results at func_idx
     // We need to push them so call_c_function can handle them correctly
     // Strategy: collect results, then push them
-    
+
     // Collect all results (success flag + actual results)
     let mut all_results = Vec::with_capacity(result_count + 1);
     all_results.push(LuaValue::boolean(success));
@@ -477,7 +476,7 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
             all_results.push(LuaValue::nil());
         }
     }
-    
+
     // Push all results so call_c_function can collect them
     for val in all_results {
         l.push_value(val)?;

@@ -101,7 +101,7 @@ pub fn handle_return(
     // This is CRITICAL: both must be updated for correct stack management
     let new_top = func_pos + nres;
     lua_state.set_top(new_top);
-    
+
     if let Some(caller_frame) = lua_state.current_frame_mut() {
         caller_frame.top = new_top;
     }

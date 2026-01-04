@@ -97,14 +97,14 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
 // Helper functions - all inline for performance
 
 #[inline]
-fn get_num(arg: &LuaValue, l: &LuaState) -> Result<f64, String> {
+fn get_num(arg: &LuaValue, _l: &LuaState) -> Result<f64, String> {
     arg.as_number()
         .or_else(|| arg.as_integer().map(|i| i as f64))
         .ok_or_else(|| "bad argument to 'format' (number expected)".to_string())
 }
 
 #[inline]
-fn get_int(arg: &LuaValue, l: &LuaState) -> Result<i64, String> {
+fn get_int(arg: &LuaValue, _l: &LuaState) -> Result<i64, String> {
     arg.as_integer()
         .or_else(|| arg.as_number().map(|n| n as i64))
         .ok_or_else(|| "bad argument to 'format' (number expected)".to_string())

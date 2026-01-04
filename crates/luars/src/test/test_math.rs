@@ -4,7 +4,7 @@ use crate::*;
 #[test]
 fn test_math_constants() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -22,7 +22,7 @@ fn test_math_constants() {
 #[test]
 fn test_math_abs() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -41,7 +41,7 @@ fn test_math_abs() {
 #[test]
 fn test_math_ceil_floor() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -58,7 +58,7 @@ fn test_math_ceil_floor() {
 #[test]
 fn test_math_max_min() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -77,7 +77,7 @@ fn test_math_max_min() {
 #[test]
 fn test_math_sqrt() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -93,7 +93,7 @@ fn test_math_sqrt() {
 #[test]
 fn test_math_exp_log() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -109,7 +109,7 @@ fn test_math_exp_log() {
 #[test]
 fn test_math_sin_cos_tan() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -129,7 +129,7 @@ fn test_math_sin_cos_tan() {
 #[test]
 fn test_math_deg_rad() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -145,7 +145,7 @@ fn test_math_deg_rad() {
 #[test]
 fn test_math_random() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -167,7 +167,7 @@ fn test_math_random() {
 #[test]
 fn test_math_modf() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -183,7 +183,7 @@ fn test_math_modf() {
 #[test]
 fn test_math_fmod() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -198,7 +198,7 @@ fn test_math_fmod() {
 #[test]
 fn test_math_tointeger() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -217,7 +217,7 @@ fn test_math_tointeger() {
 #[test]
 fn test_math_type() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -233,7 +233,7 @@ fn test_math_type() {
 #[test]
 fn test_math_ult() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"

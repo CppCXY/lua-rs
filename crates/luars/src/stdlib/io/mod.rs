@@ -4,7 +4,9 @@
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::{LuaResult, LuaState};
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 mod file;
 pub use file::{LuaFile, create_file_metatable};
@@ -104,11 +106,11 @@ fn create_stderr(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file = LuaFile::stderr();
     let file_mt = create_file_metatable(l)?;
     let userdata = l.create_userdata(LuaUserdata::new(file));
-    if let Some(ud_id) = userdata.as_userdata_id() {
-        if let Some(ud) = l.get_userdata_mut(&userdata) {
-            ud.set_metatable(file_mt);
-        }
+
+    if let Some(ud) = l.get_userdata_mut(&userdata) {
+        ud.set_metatable(file_mt);
     }
+
     Ok(userdata)
 }
 
@@ -398,9 +400,34 @@ fn io_type(l: &mut LuaState) -> LuaResult<usize> {
 
 /// io.tmpfile() - Create a temporary file
 fn io_tmpfile(l: &mut LuaState) -> LuaResult<usize> {
-    // Create a temporary file
-    match tempfile::tempfile() {
+    // Create a temporary file manually without external dependencies
+    // Use system temp directory + random name
+    let temp_dir = std::env::temp_dir();
+
+    // Generate a unique filename using timestamp and process ID
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let filename = format!("lua_tmp_{}_{}.tmp", pid, timestamp);
+    let temp_path = temp_dir.join(filename);
+
+    // Open with read+write, create new, delete on close (platform-specific)
+    match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temp_path)
+    {
         Ok(file) => {
+            // On success, try to delete the file immediately
+            // On Unix, the file remains accessible via the open handle
+            // On Windows, we'll need to delete it on close
+            #[cfg(unix)]
+            let _ = std::fs::remove_file(&temp_path);
+
             // Wrap in LuaFile
             let lua_file = LuaFile::from_file(file);
 

@@ -4,7 +4,7 @@ use crate::*;
 #[test]
 fn test_string_len() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -20,7 +20,7 @@ fn test_string_len() {
 #[test]
 fn test_string_sub() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -36,7 +36,7 @@ fn test_string_sub() {
 #[test]
 fn test_string_upper_lower() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -51,7 +51,7 @@ fn test_string_upper_lower() {
 #[test]
 fn test_string_rep() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -66,7 +66,7 @@ fn test_string_rep() {
 #[test]
 fn test_string_reverse() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -80,7 +80,7 @@ fn test_string_reverse() {
 #[test]
 fn test_string_byte_char() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -96,7 +96,7 @@ fn test_string_byte_char() {
 #[test]
 fn test_string_format() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -112,7 +112,7 @@ fn test_string_format() {
 #[test]
 fn test_string_find() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -128,7 +128,7 @@ fn test_string_find() {
 #[test]
 fn test_string_match() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -143,7 +143,7 @@ fn test_string_match() {
 #[test]
 fn test_string_gmatch() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -163,7 +163,7 @@ fn test_string_gmatch() {
 #[test]
 fn test_string_gsub() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -183,7 +183,7 @@ fn test_string_gsub() {
 #[test]
 fn test_string_pack_unpack() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -206,7 +206,7 @@ fn test_string_pack_unpack() {
 #[test]
 fn test_string_packsize() {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_libs();
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"

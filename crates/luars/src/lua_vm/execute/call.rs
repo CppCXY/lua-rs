@@ -35,7 +35,7 @@ pub fn handle_call(
         let frame_top = frame.top;
         lua_state.set_top(frame_top);
     }
-    
+
     let nargs = if b == 0 {
         // Variable args: use current frame's top
         // Arguments are from base+a+1 to current frame's top
@@ -162,11 +162,15 @@ pub fn call_c_function(
 
     // Now handle the result
     let n = result?;
-    
+
     // Get logical stack top BEFORE popping frame (L->top.p in Lua)
     // C function pushes results, so first result is at top - n
     let stack_top = lua_state.get_top();
-    let first_result = if stack_top >= n { stack_top - n } else { call_base };
+    let first_result = if stack_top >= n {
+        stack_top - n
+    } else {
+        call_base
+    };
 
     // Pop the frame BEFORE moving results
     lua_state.pop_frame();
@@ -185,12 +189,12 @@ pub fn call_c_function(
     };
 
     let new_top = func_idx + final_nresults;
-    
+
     // Set logical stack top (L->top.p) - does NOT truncate physical stack
     // This is critical: old values remain in stack array but are "hidden"
     // This preserves caller's local variables which live below this top
     lua_state.set_top(new_top);
-    
+
     // Update current frame's top limit
     if let Some(frame) = lua_state.current_frame_mut() {
         frame.top = new_top;
@@ -260,7 +264,7 @@ fn move_results(
             for i in copy_count..wanted {
                 lua_state.stack_set(res + i, LuaValue::nil())?;
             }
-            
+
             return Ok(());
         }
     }
@@ -281,7 +285,7 @@ pub fn handle_tailcall(
         let frame_top = frame.top;
         lua_state.set_top(frame_top);
     }
-    
+
     let nargs = if b == 0 {
         // Variable args: use current frame's top
         let func_idx = base + a;
@@ -333,11 +337,11 @@ pub fn handle_tailcall(
 
             // Replace function at base-1 (where current function is)
             lua_state.stack_set(base - 1, func)?;
-            
+
             // CRITICAL: Update current frame's func field so main loop loads new chunk
             let current_frame_idx = lua_state.call_depth() - 1;
             lua_state.set_frame_func(current_frame_idx, func);
-            
+
             // Reset PC to 0 to start executing the new function from beginning
             lua_state.set_frame_pc(current_frame_idx, 0);
 
@@ -356,7 +360,7 @@ pub fn handle_tailcall(
             } else {
                 0
             };
-            
+
             for i in 0..nresults {
                 let result = lua_state.stack_get(func_idx + i).unwrap_or(LuaValue::nil());
                 lua_state.stack_set(base + i, result)?;
@@ -376,7 +380,7 @@ pub fn handle_tailcall(
             } else {
                 0
             };
-            
+
             for i in 0..nresults {
                 let result = lua_state.stack_get(func_idx + i).unwrap_or(LuaValue::nil());
                 lua_state.stack_set(base + i, result)?;

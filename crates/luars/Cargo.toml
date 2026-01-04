@@ -12,5 +12,5 @@ loadlib = ["dep:libloading"]
 [dependencies]
 libloading = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
-tempfile = "3.10"  # For io.tmpfile()
+
 

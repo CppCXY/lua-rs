@@ -7,7 +7,7 @@ mod tests {
     #[test]
     fn test_gc_metamethod() {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_libs();
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
             local finalized = {}
@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn test_weak_keys_mode() {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_libs();
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
             local weak_table = {}
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn test_weak_values_mode() {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_libs();
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
             local weak_table = {}
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_weak_keys_and_values_mode() {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_libs();
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
             local weak_table = {}
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn test_gc_resurrection_prevention() {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_libs();
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
             local resurrected = nil
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn test_finalizer_ordering() {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_libs();
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
             local order = {}
