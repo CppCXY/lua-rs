@@ -16,6 +16,7 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
+    Chunk, gc,
     lua_value::LuaValue,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
@@ -27,12 +28,11 @@ use std::rc::Rc;
 /// Based on lvm.c:1929-1934 and pushclosure (lvm.c:834-849)
 pub fn handle_closure(
     lua_state: &mut LuaState,
-    stack_ptr: *mut LuaValue,
     base: usize,
     a: usize,
     bx: usize,
-    current_chunk: &Rc<crate::Chunk>,
-    parent_upvalues: &[crate::gc::UpvalueId],
+    current_chunk: &Rc<Chunk>,
+    parent_upvalues: &[gc::UpvalueId],
 ) -> LuaResult<()> {
     // Get child prototype
     if bx >= current_chunk.child_protos.len() {
@@ -76,10 +76,7 @@ pub fn handle_closure(
 
     // Store in R[A]
     let closure_value = LuaValue::function(func_id);
-    unsafe {
-        let ra = stack_ptr.add(base + a);
-        *ra = closure_value;
-    }
+    lua_state.stack_mut()[base + a] = closure_value;
 
     Ok(())
 }

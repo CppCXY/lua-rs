@@ -28,11 +28,15 @@ use call::FrameAction;
 use std::rc::Rc;
 
 use crate::{
-    lua_value::{LuaValue, LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT}, lua_vm::{
+    Chunk, UpvalueId,
+    lua_value::{LUA_VFALSE, LuaValue},
+    lua_vm::{
+        LuaError, LuaResult, LuaState, OpCode,
         execute::helper::{
-            fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger
-        }, LuaError, LuaResult, LuaState, OpCode
-    }, Chunk, UpvalueId
+            buildhiddenargs, fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue,
+            setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger,
+        },
+    },
 };
 pub use metamethod::TmKind;
 
@@ -873,9 +877,7 @@ fn execute_frame(
                 // Update PC before returning
                 lua_state.set_frame_pc(frame_idx, pc as u32);
 
-                return return_handler::handle_return(
-                    lua_state, stack_ptr, base, frame_idx, a, b, c, k,
-                );
+                return return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k);
             }
             OpCode::Return0 => {
                 // return (no values)
@@ -886,7 +888,7 @@ fn execute_frame(
                 // return R[A]
                 let a = instr.get_a() as usize;
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                return return_handler::handle_return1(lua_state, stack_ptr, base, frame_idx, a);
+                return return_handler::handle_return1(lua_state, base, frame_idx, a);
             }
             OpCode::GetUpval => {
                 // R[A] := UpValue[B]
@@ -1027,14 +1029,13 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                let stack = lua_state.stack_mut();
-                let rb = &stack[base + b];
-                let rc = &stack[base + c];
+                let rb = lua_state.stack_mut()[base + b];
+                let rc = lua_state.stack_mut()[base + c];
 
                 // Fast path for table with integer key
                 if let Some(table_id) = rb.as_table_id() {
-                    if ttisinteger(rc) {
-                        let key = ivalue(rc);
+                    if ttisinteger(&rc) {
+                        let key = ivalue(&rc);
                         let table = lua_state
                             .vm_mut()
                             .object_pool
@@ -1042,23 +1043,22 @@ fn execute_frame(
                             .ok_or(LuaError::RuntimeError)?;
 
                         let result = table.get_int(key).unwrap_or(LuaValue::nil());
-                        stack[base + a] = result;
+                        lua_state.stack_mut()[base + a] = result;
                     } else {
                         // General case: use key as LuaValue
-                        let key = *rc;
+                        let key = rc;
                         let table = lua_state
                             .vm_mut()
                             .object_pool
                             .get_table(table_id)
                             .ok_or(LuaError::RuntimeError)?;
-
                         let result = table.raw_get(&key).unwrap_or(LuaValue::nil());
-                        stack[base + a] = result;
+                        lua_state.stack_mut()[base + a] = result;
                     }
                 } else {
                     // Not a table - should trigger metamethod
                     // For now, return nil
-                    setnilvalue(&mut stack[base + a]);
+                    setnilvalue(&mut lua_state.stack_mut()[base + a]);
                 }
             }
             OpCode::GetI => {
@@ -1251,10 +1251,10 @@ fn execute_frame(
                 }
 
                 let stack = lua_state.stack_mut();
-                let rb = &stack[base + b];
-                
+                let rb = stack[base + b];
+
                 // R[A+1] := R[B] (save object)
-                stack[base + a + 1] = *rb;
+                stack[base + a + 1] = rb;
 
                 // R[A] := R[B][K[C]] (get method)
                 let key = &constants[c];
@@ -1283,9 +1283,8 @@ fn execute_frame(
                                         if let Some(string_lib) =
                                             vm.object_pool.get_table(string_lib_id)
                                         {
-                                            let result = string_lib
-                                                .raw_get(key)
-                                                .unwrap_or(LuaValue::nil());
+                                            let result =
+                                                string_lib.raw_get(key).unwrap_or(LuaValue::nil());
                                             let stack = lua_state.stack_mut();
                                             stack[base + a] = result;
                                         } else {
@@ -1374,68 +1373,67 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = base + a;
 
-                    // Check if integer loop
-                    if ttisinteger(ra.add(1)) {
-                        // Integer loop
-                        // ra: counter (count of iterations left)
-                        // ra+1: step
-                        // ra+2: control variable (idx)
-                        let count = ivalue(ra) as u64; // unsigned count
-                        if count > 0 {
-                            // More iterations
-                            let step = ivalue(ra.add(1));
-                            let idx = ivalue(ra.add(2));
+                // Check if integer loop
+                if ttisinteger(&stack[ra + 1]) {
+                    // Integer loop
+                    // ra: counter (count of iterations left)
+                    // ra+1: step
+                    // ra+2: control variable (idx)
+                    let count = ivalue(&stack[ra]) as u64; // unsigned count
+                    if count > 0 {
+                        // More iterations
+                        let step = ivalue(&stack[ra + 1]);
+                        let idx = ivalue(&stack[ra + 2]);
 
-                            // Update counter (decrement) - 用chgivalue避免重设类型标签
-                            chgivalue(ra, (count - 1) as i64);
+                        // Update counter (decrement)
+                        setivalue(&mut stack[ra], (count - 1) as i64);
 
-                            // Update control variable: idx += step
-                            let new_idx = idx.wrapping_add(step);
-                            chgivalue(ra.add(2), new_idx);
+                        // Update control variable: idx += step
+                        let new_idx = idx.wrapping_add(step);
+                        setivalue(&mut stack[ra + 2], new_idx);
 
-                            // Jump back
-                            if bx > pc {
-                                lua_state.set_frame_pc(frame_idx, pc as u32);
-                                return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
-                            }
-                            pc -= bx;
+                        // Jump back
+                        if bx > pc {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
                         }
-                        // else: counter expired, exit loop
-                    } else {
-                        // Float loop
-                        // ra: limit
-                        // ra+1: step
-                        // ra+2: idx (control variable)
-                        let step = fltvalue(ra.add(1));
-                        let limit = fltvalue(ra);
-                        let idx = fltvalue(ra.add(2));
-
-                        // idx += step
-                        let new_idx = idx + step;
-
-                        // Check if should continue
-                        let should_continue = if step > 0.0 {
-                            new_idx <= limit
-                        } else {
-                            new_idx >= limit
-                        };
-
-                        if should_continue {
-                            // Update control variable - 用chgfltvalue避免重设类型标签
-                            chgfltvalue(ra.add(2), new_idx);
-
-                            // Jump back
-                            if bx > pc {
-                                lua_state.set_frame_pc(frame_idx, pc as u32);
-                                return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
-                            }
-                            pc -= bx;
-                        }
-                        // else: exit loop
+                        pc -= bx;
                     }
+                    // else: counter expired, exit loop
+                } else {
+                    // Float loop
+                    // ra: limit
+                    // ra+1: step
+                    // ra+2: idx (control variable)
+                    let step = fltvalue(&stack[ra + 1]);
+                    let limit = fltvalue(&stack[ra]);
+                    let idx = fltvalue(&stack[ra + 2]);
+
+                    // idx += step
+                    let new_idx = idx + step;
+
+                    // Check if should continue
+                    let should_continue = if step > 0.0 {
+                        new_idx <= limit
+                    } else {
+                        new_idx >= limit
+                    };
+
+                    if should_continue {
+                        // Update control variable
+                        setfltvalue(&mut stack[ra + 2], new_idx);
+
+                        // Jump back
+                        if bx > pc {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
+                        }
+                        pc -= bx;
+                    }
+                    // else: exit loop
                 }
             }
             OpCode::ForPrep => {
@@ -1446,105 +1444,103 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let pinit = ra;
-                    let plimit = ra.add(1);
-                    let pstep = ra.add(2);
+                let stack = lua_state.stack_mut();
+                let ra = base + a;
+                let pinit_idx = ra;
+                let plimit_idx = ra + 1;
+                let pstep_idx = ra + 2;
 
-                    // Check if integer loop
-                    if ttisinteger(pinit) && ttisinteger(pstep) {
-                        // Integer loop
-                        let init = ivalue(pinit);
-                        let step = ivalue(pstep);
+                // Check if integer loop
+                if ttisinteger(&stack[pinit_idx]) && ttisinteger(&stack[pstep_idx]) {
+                    // Integer loop
+                    let init = ivalue(&stack[pinit_idx]);
+                    let step = ivalue(&stack[pstep_idx]);
 
-                        if step == 0 {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' step is zero".to_string()));
-                        }
+                    if step == 0 {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("'for' step is zero".to_string()));
+                    }
 
-                        // Get limit (may need conversion)
-                        let mut limit = 0i64;
-                        if ttisinteger(plimit) {
-                            limit = ivalue(plimit);
-                        } else if ttisfloat(plimit) {
-                            let flimit = fltvalue(plimit);
-                            if step < 0 {
-                                limit = flimit.ceil() as i64;
-                            } else {
-                                limit = flimit.floor() as i64;
-                            }
+                    // Get limit (may need conversion)
+                    let limit = if ttisinteger(&stack[plimit_idx]) {
+                        ivalue(&stack[plimit_idx])
+                    } else if ttisfloat(&stack[plimit_idx]) {
+                        let flimit = fltvalue(&stack[plimit_idx]);
+                        if step < 0 {
+                            flimit.ceil() as i64
                         } else {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' limit must be a number".to_string()));
-                        }
-
-                        // Check if loop should run
-                        let should_skip = if step > 0 { init > limit } else { init < limit };
-
-                        if should_skip {
-                            // Skip loop
-                            pc += bx + 1;
-                        } else {
-                            // Prepare loop counter
-                            let count = if step > 0 {
-                                ((limit as u64).wrapping_sub(init as u64)) / (step as u64)
-                            } else {
-                                let step_abs = if step == i64::MIN {
-                                    i64::MAX as u64 + 1
-                                } else {
-                                    (-step) as u64
-                                };
-                                ((init as u64).wrapping_sub(limit as u64)) / step_abs
-                            };
-
-                            // Setup: ra=counter, ra+1=step, ra+2=idx
-                            setivalue(ra, count as i64);
-                            setivalue(ra.add(1), step);
-                            setivalue(ra.add(2), init);
+                            flimit.floor() as i64
                         }
                     } else {
-                        // Float loop
-                        let mut init = 0.0;
-                        let mut limit = 0.0;
-                        let mut step = 0.0;
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("'for' limit must be a number".to_string()));
+                    };
 
-                        if !tonumberns(plimit, &mut limit) {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' limit must be a number".to_string()));
-                        }
-                        if !tonumberns(pstep, &mut step) {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' step must be a number".to_string()));
-                        }
-                        if !tonumberns(pinit, &mut init) {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(
-                                lua_state.error("'for' initial value must be a number".to_string())
-                            );
-                        }
+                    // Check if loop should run
+                    let should_skip = if step > 0 { init > limit } else { init < limit };
 
-                        if step == 0.0 {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' step is zero".to_string()));
-                        }
-
-                        // Check if loop should run
-                        let should_skip = if step > 0.0 {
-                            limit < init
+                    if should_skip {
+                        // Skip loop
+                        pc += bx + 1;
+                    } else {
+                        // Prepare loop counter
+                        let count = if step > 0 {
+                            ((limit as u64).wrapping_sub(init as u64)) / (step as u64)
                         } else {
-                            init < limit
+                            let step_abs = if step == i64::MIN {
+                                i64::MAX as u64 + 1
+                            } else {
+                                (-step) as u64
+                            };
+                            ((init as u64).wrapping_sub(limit as u64)) / step_abs
                         };
 
-                        if should_skip {
-                            // Skip loop
-                            pc += bx + 1;
-                        } else {
-                            // Setup: ra=limit, ra+1=step, ra+2=idx
-                            setfltvalue(ra, limit);
-                            setfltvalue(ra.add(1), step);
-                            setfltvalue(ra.add(2), init);
-                        }
+                        // Setup: ra=counter, ra+1=step, ra+2=idx
+                        setivalue(&mut stack[ra], count as i64);
+                        setivalue(&mut stack[ra + 1], step);
+                        setivalue(&mut stack[ra + 2], init);
+                    }
+                } else {
+                    // Float loop
+                    let mut init = 0.0;
+                    let mut limit = 0.0;
+                    let mut step = 0.0;
+
+                    if !tonumberns(&stack[plimit_idx], &mut limit) {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("'for' limit must be a number".to_string()));
+                    }
+                    if !tonumberns(&stack[pstep_idx], &mut step) {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("'for' step must be a number".to_string()));
+                    }
+                    if !tonumberns(&stack[pinit_idx], &mut init) {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(
+                            lua_state.error("'for' initial value must be a number".to_string())
+                        );
+                    }
+
+                    if step == 0.0 {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("'for' step is zero".to_string()));
+                    }
+
+                    // Check if loop should run
+                    let should_skip = if step > 0.0 {
+                        limit < init
+                    } else {
+                        init < limit
+                    };
+
+                    if should_skip {
+                        // Skip loop
+                        pc += bx + 1;
+                    } else {
+                        // Setup: ra=limit, ra+1=step, ra+2=idx
+                        setfltvalue(&mut stack[ra], limit);
+                        setfltvalue(&mut stack[ra + 1], step);
+                        setfltvalue(&mut stack[ra + 2], init);
                     }
                 }
             }
@@ -1717,10 +1713,8 @@ fn execute_frame(
                     LuaValue::nil()
                 };
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    *ra = result;
-                }
+                let stack = lua_state.stack_mut();
+                stack[base + a] = result;
             }
 
             OpCode::SetTabUp => {
@@ -1766,10 +1760,8 @@ fn execute_frame(
                     }
                     constants[c]
                 } else {
-                    unsafe {
-                        let rc = stack_ptr.add(base + c);
-                        *rc
-                    }
+                    let stack = lua_state.stack_mut();
+                    stack[base + c]
                 };
 
                 // Set table[key] = value
@@ -1792,33 +1784,30 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
+                let rb = lua_state.stack_mut()[base + b];
 
-                    // Get length based on type
-                    if let Some(string_id) = (*rb).as_string_id() {
-                        // String: get length from object pool
-                        if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
-                            let len = s.as_str().len();
-                            setivalue(ra, len as i64);
-                        } else {
-                            setivalue(ra, 0);
-                        }
-                    } else if let Some(table_id) = (*rb).as_table_id() {
-                        // Table: use raw length (array part length)
-                        // Note: __len metamethod excluded per user request
-                        if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
-                            let len = table.len();
-                            setivalue(ra, len as i64);
-                        } else {
-                            setivalue(ra, 0);
-                        }
+                // Get length based on type
+                if let Some(string_id) = rb.as_string_id() {
+                    // String: get length from object pool
+                    if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
+                        let len = s.as_str().len();
+                        setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
                     } else {
-                        // Other types: length is 0
-                        // Note: __len metamethod excluded per user request
-                        setivalue(ra, 0);
+                        setivalue(&mut lua_state.stack_mut()[base + a], 0);
                     }
+                } else if let Some(table_id) = rb.as_table_id() {
+                    // Table: use raw length (array part length)
+                    // Note: __len metamethod excluded per user request
+                    if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
+                        let len = table.len();
+                        setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                    } else {
+                        setivalue(&mut lua_state.stack_mut()[base + a], 0);
+                    }
+                } else {
+                    // Other types: length is 0
+                    // Note: __len metamethod excluded per user request
+                    setivalue(&mut lua_state.stack_mut()[base + a], 0);
                 }
             }
 
@@ -1829,15 +1818,10 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let n = instr.get_b() as usize;
 
-                match concat::concat_strings(lua_state, stack_ptr, base, a, n) {
+                match concat::concat_strings(lua_state, base, a, n) {
                     Ok(result) => {
-                        // IMPORTANT: concat may allocate strings and trigger GC, refresh stack_ptr
-                        stack_ptr = lua_state.stack_ptr_mut();
-
-                        unsafe {
-                            let ra = stack_ptr.add(base + a);
-                            *ra = result;
-                        }
+                        let stack = lua_state.stack_mut();
+                        stack[base + a] = result;
                     }
                     Err(err) => {
                         return Err(err);
@@ -1855,17 +1839,16 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rb = stack_ptr.add(base + b);
+                let stack = lua_state.stack_mut();
+                let ra = stack[base + a];
+                let rb = stack[base + b];
 
-                    // Simple equality check (TODO: metamethod)
-                    let cond = (*ra).raw_equal(&*rb, &lua_state.vm_mut().object_pool);
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                // Simple equality check (TODO: metamethod)
+                let cond = ra.raw_equal(&rb, &lua_state.vm_mut().object_pool);
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             OpCode::Lt => {
@@ -1874,27 +1857,26 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rb = stack_ptr.add(base + b);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
+                let rb = &stack[base + b];
 
-                    let cond = if ttisinteger(ra) && ttisinteger(rb) {
-                        ivalue(ra) < ivalue(rb)
-                    } else if ttisnumber(ra) && ttisnumber(rb) {
-                        let mut na = 0.0;
-                        let mut nb = 0.0;
-                        tonumberns(ra, &mut na);
-                        tonumberns(rb, &mut nb);
-                        na < nb
-                    } else {
-                        false // TODO: metamethod
-                    };
+                let cond = if ttisinteger(ra) && ttisinteger(rb) {
+                    ivalue(ra) < ivalue(rb)
+                } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
+                    let mut na = 0.0;
+                    let mut nb = 0.0;
+                    tonumberns(ra, &mut na);
+                    tonumberns(rb, &mut nb);
+                    na < nb
+                } else {
+                    false // TODO: metamethod
+                };
 
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             OpCode::Le => {
@@ -1903,27 +1885,26 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rb = stack_ptr.add(base + b);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
+                let rb = &stack[base + b];
 
-                    let cond = if ttisinteger(ra) && ttisinteger(rb) {
-                        ivalue(ra) <= ivalue(rb)
-                    } else if ttisnumber(ra) && ttisnumber(rb) {
-                        let mut na = 0.0;
-                        let mut nb = 0.0;
-                        tonumberns(ra, &mut na);
-                        tonumberns(rb, &mut nb);
-                        na <= nb
-                    } else {
-                        false // TODO: metamethod
-                    };
+                let cond = if ttisinteger(ra) && ttisinteger(rb) {
+                    ivalue(ra) <= ivalue(rb)
+                } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
+                    let mut na = 0.0;
+                    let mut nb = 0.0;
+                    tonumberns(ra, &mut na);
+                    tonumberns(rb, &mut nb);
+                    na <= nb
+                } else {
+                    false // TODO: metamethod
+                };
 
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             // ============================================================
@@ -1936,17 +1917,16 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let kb = constants.get(b).unwrap();
+                let stack = lua_state.stack_mut();
+                let ra = stack[base + a];
+                let kb = constants.get(b).unwrap();
 
-                    // Raw equality (no metamethods for constants)
-                    let cond = (*ra).raw_equal(kb, &lua_state.vm_mut().object_pool);
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                // Raw equality (no metamethods for constants)
+                let cond = ra.raw_equal(kb, &lua_state.vm_mut().object_pool);
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             OpCode::EqI => {
@@ -1955,22 +1935,21 @@ fn execute_frame(
                 let sb = instr.get_sb();
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    let cond = if ttisinteger(ra) {
-                        ivalue(ra) == (sb as i64)
-                    } else if ttisfloat(ra) {
-                        fltvalue(ra) == (sb as f64)
-                    } else {
-                        false
-                    };
+                let cond = if ttisinteger(ra) {
+                    ivalue(ra) == (sb as i64)
+                } else if ttisfloat(ra) {
+                    fltvalue(ra) == (sb as f64)
+                } else {
+                    false
+                };
 
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             OpCode::LtI => {
@@ -1979,22 +1958,21 @@ fn execute_frame(
                 let im = instr.get_sb();
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    let cond = if ttisinteger(ra) {
-                        ivalue(ra) < (im as i64)
-                    } else if ttisfloat(ra) {
-                        fltvalue(ra) < (im as f64)
-                    } else {
-                        false // TODO: metamethod
-                    };
+                let cond = if ttisinteger(ra) {
+                    ivalue(ra) < (im as i64)
+                } else if ttisfloat(ra) {
+                    fltvalue(ra) < (im as f64)
+                } else {
+                    false // TODO: metamethod
+                };
 
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             OpCode::LeI => {
@@ -2003,22 +1981,21 @@ fn execute_frame(
                 let im = instr.get_sb();
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    let cond = if ttisinteger(ra) {
-                        ivalue(ra) <= (im as i64)
-                    } else if ttisfloat(ra) {
-                        fltvalue(ra) <= (im as f64)
-                    } else {
-                        false // TODO: metamethod
-                    };
+                let cond = if ttisinteger(ra) {
+                    ivalue(ra) <= (im as i64)
+                } else if ttisfloat(ra) {
+                    fltvalue(ra) <= (im as f64)
+                } else {
+                    false // TODO: metamethod
+                };
 
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             OpCode::GtI => {
@@ -2027,22 +2004,21 @@ fn execute_frame(
                 let im = instr.get_sb();
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    let cond = if ttisinteger(ra) {
-                        ivalue(ra) > (im as i64)
-                    } else if ttisfloat(ra) {
-                        fltvalue(ra) > (im as f64)
-                    } else {
-                        false // TODO: metamethod
-                    };
+                let cond = if ttisinteger(ra) {
+                    ivalue(ra) > (im as i64)
+                } else if ttisfloat(ra) {
+                    fltvalue(ra) > (im as f64)
+                } else {
+                    false // TODO: metamethod
+                };
 
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             OpCode::GeI => {
@@ -2051,22 +2027,21 @@ fn execute_frame(
                 let im = instr.get_sb();
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    let cond = if ttisinteger(ra) {
-                        ivalue(ra) >= (im as i64)
-                    } else if ttisfloat(ra) {
-                        fltvalue(ra) >= (im as f64)
-                    } else {
-                        false // TODO: metamethod
-                    };
+                let cond = if ttisinteger(ra) {
+                    ivalue(ra) >= (im as i64)
+                } else if ttisfloat(ra) {
+                    fltvalue(ra) >= (im as f64)
+                } else {
+                    false // TODO: metamethod
+                };
 
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                if cond != k {
+                    pc += 1; // Condition failed - skip next instruction
                 }
+                // else: Condition succeeded - execute next instruction (must be JMP)
             }
 
             // ============================================================
@@ -2081,8 +2056,7 @@ fn execute_frame(
                 let ra = &stack[base + a];
 
                 // l_isfalse: nil or false
-                let is_false =
-                    ra.is_nil() || (ra.is_boolean() && ra.tt_ == LUA_VFALSE);
+                let is_false = ra.is_nil() || (ra.is_boolean() && ra.tt_ == LUA_VFALSE);
                 let cond = !is_false;
 
                 if cond != k {
@@ -2105,8 +2079,7 @@ fn execute_frame(
 
                 let stack = lua_state.stack_mut();
                 let rb = &stack[base + b];
-                let is_false =
-                    rb.is_nil() || (rb.is_boolean() && rb.tt_ == LUA_VFALSE);
+                let is_false = rb.is_nil() || (rb.is_boolean() && rb.tt_ == LUA_VFALSE);
 
                 if is_false == k {
                     pc += 1; // Condition failed - skip next instruction (JMP)
@@ -2160,11 +2133,12 @@ fn execute_frame(
                 }
 
                 // Get table from R[A]
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let table_val = *ra;
+                let table_val = lua_state.stack_mut()[base + a];
 
-                    if let Some(table_id) = table_val.as_table_id() {
+                if let Some(table_id) = table_val.as_table_id() {
+                    // workaround for mutable borrow issues
+                    unsafe {
+                        let stack_ptr = lua_state.stack_mut().as_mut_ptr();
                         let table = lua_state
                             .vm_mut()
                             .object_pool
@@ -2173,14 +2147,13 @@ fn execute_frame(
 
                         // Set elements: table[vc+i] = R[A+i] for i=1..vb
                         for i in 1..=vb {
-                            let val_ptr = ra.add(i);
-                            let val = *val_ptr;
+                            let val = stack_ptr.add(base + a + i);
                             let index = (vc + i) as i64;
-                            table.set_int(index, val);
+                            table.set_int(index, *val);
                         }
                     }
-                    // else: not a table, should error but we skip for now
                 }
+                // else: not a table, should error but we skip for now
             }
 
             // ============================================================
@@ -2192,18 +2165,7 @@ fn execute_frame(
                 let bx = instr.get_bx() as usize;
 
                 // Create closure from child prototype
-                closure_handler::handle_closure(
-                    lua_state,
-                    stack_ptr,
-                    base,
-                    a,
-                    bx,
-                    &chunk,
-                    &upvalues_vec,
-                )?;
-
-                // IMPORTANT: closure creation may trigger GC, refresh stack_ptr
-                stack_ptr = lua_state.stack_ptr_mut();
+                closure_handler::handle_closure(lua_state, base, a, bx, &chunk, &upvalues_vec)?;
             }
 
             OpCode::Vararg => {
@@ -2240,57 +2202,71 @@ fn execute_frame(
                 lua_state.set_top(new_top);
                 let call_info = lua_state.get_call_info_mut(frame_idx);
                 call_info.top = new_top;
-                // Refresh stack_ptr after potential reallocation
-                stack_ptr = lua_state.stack_ptr_mut();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let ra = base + a;
 
-                    if vatab < 0 {
-                        // No vararg table - get from stack
-                        // After buildhiddenargs: new_func is copied to base-1
-                        // varargs are at (base-1) - nargs (matching Lua 5.5's ci->func.p - nargs)
-                        let new_func_pos = base - 1;
-                        let vararg_start = if new_func_pos >= nargs {
-                            new_func_pos - nargs
-                        } else {
-                            0
-                        };
+                if vatab < 0 {
+                    // No vararg table - get from stack
+                    // After buildhiddenargs: new_func is copied to base-1
+                    // varargs are at (base-1) - nargs (matching Lua 5.5's ci->func.p - nargs)
+                    let new_func_pos = base - 1;
+                    let vararg_start = if new_func_pos >= nargs {
+                        new_func_pos - nargs
+                    } else {
+                        0
+                    };
 
+                    // Collect values first to avoid borrow issues
+                    let stack = lua_state.stack_mut();
+                    let mut values = Vec::with_capacity(touse);
+                    for i in 0..touse {
+                        values.push(stack[vararg_start + i]);
+                    }
+                    for (i, val) in values.into_iter().enumerate() {
+                        stack[ra + i] = val;
+                    }
+                } else {
+                    // Get from vararg table at R[B]
+                    let table_id = {
+                        let stack = lua_state.stack_mut();
+                        let table_val = stack[base + b];
+                        table_val.as_table_id()
+                    };
+                    
+                    if let Some(table_id) = table_id {
+                        // Collect values from table first
+                        let mut values = Vec::with_capacity(touse);
+                        let table = lua_state
+                            .vm_mut()
+                            .object_pool
+                            .get_table(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
                         for i in 0..touse {
-                            let src = stack_ptr.add(vararg_start + i);
-                            let dst = ra.add(i);
-                            *dst = *src;
+                            let val = table.get_int((i + 1) as i64).unwrap_or(LuaValue::nil());
+                            values.push(val);
+                        }
+                        // Now write to stack
+                        let stack = lua_state.stack_mut();
+                        for (i, val) in values.into_iter().enumerate() {
+                            stack[ra + i] = val;
                         }
                     } else {
-                        // Get from vararg table at R[B]
-                        let table_val = *stack_ptr.add(base + b);
-                        if let Some(table_id) = table_val.as_table_id() {
-                            let table = lua_state
-                                .vm_mut()
-                                .object_pool
-                                .get_table(table_id)
-                                .ok_or(LuaError::RuntimeError)?;
-                            for i in 0..touse {
-                                let val = table.get_int((i + 1) as i64).unwrap_or(LuaValue::nil());
-                                *ra.add(i) = val;
-                            }
-                        } else {
-                            // Not a table, fill with nil
-                            for i in 0..touse {
-                                setnilvalue(ra.add(i));
-                            }
+                        // Not a table, fill with nil
+                        let stack = lua_state.stack_mut();
+                        for i in 0..touse {
+                            setnilvalue(&mut stack[ra + i]);
                         }
                     }
-
-                    // Fill remaining with nil
-                    if wanted >= 0 {
-                        for i in touse..(wanted as usize) {
-                            setnilvalue(ra.add(i));
-                        }
-                    }
-                    // Note: if wanted < 0, we already adjusted stack top before unsafe block
                 }
+
+                // Fill remaining with nil
+                if wanted >= 0 {
+                    let stack = lua_state.stack_mut();
+                    for i in touse..(wanted as usize) {
+                        setnilvalue(&mut stack[ra + i]);
+                    }
+                }
+                // Note: if wanted < 0, we already adjusted stack top before unsafe block
             }
 
             OpCode::GetVarg => {
@@ -2320,41 +2296,44 @@ fn execute_frame(
                     chunk.param_count
                 };
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rc = stack_ptr.add(base + c);
+                let stack = lua_state.stack_mut();
+                let ra_idx = base + a;
+                let rc = stack[base + c];
 
-                    // Check if R[C] is string "n" (get vararg count)
-                    if let Some(string_id) = (*rc).as_string_id() {
-                        if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
-                            if s.as_str() == "n" {
-                                // Return vararg count
-                                setivalue(ra, nextra as i64);
-                                pc += 1;
-                                continue;
-                            }
-                        }
+                // Check if R[C] is string "n" (get vararg count)
+                if let Some(string_id) = rc.as_string_id() {
+                    let is_n = lua_state.vm_mut().object_pool.get_string(string_id)
+                        .map(|s| s.as_str() == "n")
+                        .unwrap_or(false);
+                    if is_n {
+                        // Return vararg count
+                        let stack = lua_state.stack_mut();
+                        setivalue(&mut stack[ra_idx], nextra as i64);
+                        pc += 1;
+                        continue;
                     }
+                }
 
-                    // Check if R[C] is an integer (vararg index, 1-based)
-                    if ttisinteger(rc) {
-                        let index = ivalue(rc);
+                // Check if R[C] is an integer (vararg index, 1-based)
+                if ttisinteger(&rc) {
+                    let index = ivalue(&rc);
 
-                        // Check if index is valid (1 <= index <= nextraargs)
-                        if nextra > 0 && index >= 1 && (index as usize) <= nextra {
-                            // Get value from varargs
-                            // varargs are stored after fixed parameters at base + param_count
-                            let vararg_start = base + param_count;
-                            let src = stack_ptr.add(vararg_start + (index as usize) - 1);
-                            *ra = *src;
-                        } else {
-                            // Out of bounds or no varargs: return nil
-                            setnilvalue(ra);
-                        }
+                    // Check if index is valid (1 <= index <= nextraargs)
+                    let stack = lua_state.stack_mut();
+                    if nextra > 0 && index >= 1 && (index as usize) <= nextra {
+                        // Get value from varargs
+                        // varargs are stored after fixed parameters at base + param_count
+                        let vararg_start = base + param_count;
+                        let src_val = stack[vararg_start + (index as usize) - 1];
+                        stack[ra_idx] = src_val;
                     } else {
-                        // Not integer or "n": return nil
-                        setnilvalue(ra);
+                        // Out of bounds or no varargs: return nil
+                        setnilvalue(&mut stack[ra_idx]);
                     }
+                } else {
+                    // Not integer or "n": return nil
+                    let stack = lua_state.stack_mut();
+                    setnilvalue(&mut stack[ra_idx]);
                 }
             }
 
@@ -2365,32 +2344,31 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    // If value is not nil, it means the global is already defined
-                    if !(*ra).is_nil() {
-                        // Get global name from constants if bx > 0
-                        let global_name = if bx > 0 && bx - 1 < constants.len() {
-                            if let Some(string_id) = constants[bx - 1].as_string_id() {
-                                lua_state
-                                    .vm_mut()
-                                    .object_pool
-                                    .get_string(string_id)
-                                    .map(|s| s.as_str().to_string())
-                                    .unwrap_or_else(|| "?".to_string())
-                            } else {
-                                "?".to_string()
-                            }
+                // If value is not nil, it means the global is already defined
+                if !ra.is_nil() {
+                    // Get global name from constants if bx > 0
+                    let global_name = if bx > 0 && bx - 1 < constants.len() {
+                        if let Some(string_id) = constants[bx - 1].as_string_id() {
+                            lua_state
+                                .vm_mut()
+                                .object_pool
+                                .get_string(string_id)
+                                .map(|s| s.as_str().to_string())
+                                .unwrap_or_else(|| "?".to_string())
                         } else {
                             "?".to_string()
-                        };
+                        }
+                    } else {
+                        "?".to_string()
+                    };
 
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("global '{}' already defined", global_name))
-                        );
-                    }
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    return Err(
+                        lua_state.error(format!("global '{}' already defined", global_name))
+                    );
                 }
             }
 
@@ -2429,8 +2407,6 @@ fn execute_frame(
                         lua_state, frame_idx, &chunk, totalargs, nfixparams, nextra,
                     )?;
                     base = new_base;
-                    // Refresh stack pointer after potential reallocation
-                    stack_ptr = lua_state.stack_ptr_mut();
                 }
             }
 

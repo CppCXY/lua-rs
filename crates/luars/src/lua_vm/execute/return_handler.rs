@@ -29,7 +29,6 @@ use super::call::FrameAction;
 /// Based on lvm.c:1763-1783
 pub fn handle_return(
     lua_state: &mut LuaState,
-    stack_ptr: *mut LuaValue,
     base: usize,
     frame_idx: usize,
     a: usize,
@@ -71,12 +70,10 @@ pub fn handle_return(
     };
 
     // Copy results from R[A]..R[A+nres-1] to func_pos..func_pos+nres-1
-    unsafe {
-        for i in 0..nres {
-            let src = stack_ptr.add(base + a + i);
-            let dst = lua_state.stack_ptr_mut().add(func_pos + i);
-            *dst = *src;
-        }
+    let stack = lua_state.stack_mut();
+    for i in 0..nres {
+        let src_val = stack[base + a + i];
+        stack[func_pos + i] = src_val;
     }
 
     // Adjust top to point after the last result
@@ -158,15 +155,14 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<F
 /// Based on lvm.c:1801-1827
 pub fn handle_return1(
     lua_state: &mut LuaState,
-    stack_ptr: *mut LuaValue,
     base: usize,
     frame_idx: usize,
     a: usize,
 ) -> LuaResult<FrameAction> {
     // Get the single return value
-    let return_val = unsafe {
-        let ra = stack_ptr.add(base + a);
-        *ra
+    let return_val = {
+        let stack = lua_state.stack_mut();
+        stack[base + a]
     };
 
     // Get caller's frame to find where return values should go
