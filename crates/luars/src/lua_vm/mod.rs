@@ -11,7 +11,7 @@ use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
 use crate::lua_value::{Chunk, LuaString, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
-use crate::lua_vm::execute::{lua_execute, lua_execute_until};
+use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
@@ -256,7 +256,9 @@ impl LuaVM {
 
         // Push the function onto the thread's stack (updates stack_top)
         // It will be used when resume() is first called
-        thread.push_value(func).expect("Failed to push function onto coroutine stack");
+        thread
+            .push_value(func)
+            .expect("Failed to push function onto coroutine stack");
 
         // Create thread in ObjectPool and return LuaValue
         let thread_id = self.object_pool.create_thread(thread);

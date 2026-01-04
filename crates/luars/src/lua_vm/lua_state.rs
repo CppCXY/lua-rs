@@ -10,13 +10,6 @@ use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
 use crate::{Chunk, LuaVM};
 
-// Branch prediction hints (similar to Lua's l_likely/l_unlikely macros)
-#[inline(always)]
-#[cold]
-fn l_unlikely<T>(b: T) -> T where T: Copy {
-    b
-}
-
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
 pub struct LuaState {
@@ -26,7 +19,7 @@ pub struct LuaState {
     /// Similar to Lua's TValue stack[] in lua_State
     /// IMPORTANT: This is the PHYSICAL stack, only grows, never shrinks
     stack: Vec<LuaValue>,
-    
+
     /// Logical stack top - index of first free slot (Lua's L->top.p)
     /// This is the actual "top" that controls which stack slots are active
     /// Values above stack_top are considered "garbage" and can be reused
@@ -103,7 +96,13 @@ impl LuaState {
 
     /// Push a new call frame (equivalent to Lua's luaD_precall)
     /// 按需动态分配 - Lua 5.4 风格
-    pub fn push_frame(&mut self, func: LuaValue, base: usize, nparams: usize, nresults: i32) -> LuaResult<()> {
+    pub fn push_frame(
+        &mut self,
+        func: LuaValue,
+        base: usize,
+        nparams: usize,
+        nresults: i32,
+    ) -> LuaResult<()> {
         // 检查栈深度限制
         if self.call_stack.len() >= self.safe_option.max_call_depth {
             self.error(format!(
@@ -131,7 +130,7 @@ impl LuaState {
 
         // Calculate frame top
         let frame_top = base + nparams;
-        
+
         // 动态分配新的 CallInfo（Lua 5.4 也是这样做的）
         let frame = CallInfo {
             func,
@@ -144,11 +143,11 @@ impl LuaState {
         };
 
         self.call_stack.push(frame);
-        
+
         // CRITICAL: Sync stack_top with new frame's top
         // This ensures C functions see correct stack_top for push_value
         self.set_top(frame_top);
-        
+
         Ok(())
     }
 
@@ -248,12 +247,6 @@ impl LuaState {
         Ok(())
     }
 
-    /// Get mutable reference to stack (for bulk operations)
-    #[inline(always)]
-    pub(crate) fn stack_mut(&mut self) -> &mut Vec<LuaValue> {
-        &mut self.stack
-    }
-
     /// Get open upvalues list
     #[inline(always)]
     pub fn open_upvalues(&self) -> &[UpvalueId] {
@@ -270,7 +263,8 @@ impl LuaState {
     #[inline(always)]
     pub fn error(&mut self, msg: String) -> LuaError {
         // Try to get current source location for the error
-        let location = if let Some(ci) = self.call_stack.last() {
+        let mut location = String::new();
+        if let Some(ci) = self.call_stack.last() {
             if ci.is_lua() {
                 if let Some(func_id) = ci.func.as_function_id() {
                     let vm = unsafe { &*self.vm };
@@ -285,25 +279,15 @@ impl LuaState {
                             } else {
                                 0
                             };
-                            if line > 0 {
+                            location = if line > 0 {
                                 format!("{}:{}: ", source, line)
                             } else {
                                 format!("{}: ", source)
-                            }
-                        } else {
-                            String::new()
+                            };
                         }
-                    } else {
-                        String::new()
                     }
-                } else {
-                    String::new()
                 }
-            } else {
-                String::new()
             }
-        } else {
-            String::new()
         };
 
         self.error_msg = format!("{}{}", location, msg);
@@ -630,10 +614,10 @@ impl LuaState {
             ));
             return Err(LuaError::StackOverflow);
         }
-        
+
         // Save current top before any borrows
         let current_top = self.stack_top;
-        
+
         // Ensure physical stack is large enough (Lua's luaD_reallocstack equivalent)
         if current_top >= self.stack.len() {
             self.stack.resize(current_top + 1, LuaValue::nil());
@@ -641,7 +625,7 @@ impl LuaState {
 
         // Write at logical top position (L->top.p->value = value)
         self.stack[current_top] = value;
-        
+
         // Increment logical top (L->top.p++)
         let new_top = current_top + 1;
         self.stack_top = new_top;
@@ -921,16 +905,22 @@ impl LuaState {
 
         // Call the function using the internal call machinery
         // This handles both C and Lua functions correctly
-        let result = if func.is_cfunction() || func.as_function_id().and_then(|id| {
-            unsafe { &*self.vm }.object_pool.get_function(id).and_then(|f| f.c_function())
-        }).is_some() {
+        let result = if func.is_cfunction()
+            || func
+                .as_function_id()
+                .and_then(|id| {
+                    unsafe { &*self.vm }
+                        .object_pool
+                        .get_function(id)
+                        .and_then(|f| f.c_function())
+                })
+                .is_some()
+        {
             // C function - call directly
             crate::lua_vm::execute::call::call_c_function(
-                self,
-                func_idx,
-                arg_count,
-                0, // MULTRET - want all results
-            ).map(|_| ())
+                self, func_idx, arg_count, 0, // MULTRET - want all results
+            )
+            .map(|_| ())
         } else {
             // Lua function - push frame and execute, expecting all return values
             let base = func_idx + 1;

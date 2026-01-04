@@ -1791,9 +1791,6 @@ fn execute_frame(
                 lua_state.stack_set(ra_base + 4, state)?;
                 lua_state.stack_set(ra_base + 5, control)?;
 
-                // Refresh stack pointer after potential reallocation
-                stack_ptr = lua_state.stack_ptr_mut();
-
                 // Save PC before call
                 lua_state.set_frame_pc(frame_idx, pc as u32);
 
@@ -2294,7 +2291,7 @@ fn execute_frame(
                         pc += 1; // Skip next instruction (JMP)
                     } else {
                         // Execute next instruction (must be JMP)
-                        let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                        let next_instr = *chunk.code.get_unchecked(pc);
                         debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
                         pc += 1; // Move past the JMP
                         let sj = next_instr.get_sj();
@@ -2321,7 +2318,7 @@ fn execute_frame(
                         let ra = stack_ptr.add(base + a);
                         *ra = *rb;
                         // donextjump: fetch and execute next JMP instruction
-                        let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                        let next_instr = *chunk.code.get_unchecked(pc);
                         debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
                         pc += 1; // Move past the JMP instruction
                         let sj = next_instr.get_sj();
