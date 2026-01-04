@@ -331,11 +331,15 @@ fn main() {
             eprintln!("lua: {}", e);
             std::process::exit(1);
         }
+        // for ai debug
+        eprintln!("");
     } else if opts.read_stdin {
         if let Err(e) = execute_stdin(&mut vm) {
             eprintln!("lua: {}", e);
             std::process::exit(1);
         }
+        // for ai debug
+        eprintln!("");
     }
 
     // Enter interactive mode if requested or if no script was provided

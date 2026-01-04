@@ -560,7 +560,9 @@ fn lastlistfield(fs: &mut FuncState, cc: &mut ConsControl) {
         }
         code::setlist(fs, cc.table_reg, cc.na, cc.tostore);
     }
-    cc.na += cc.tostore;
+    // Use wrapping_add to handle intentional overflow (matching C behavior)
+    // When cc.na underflows above, this addition corrects it
+    cc.na = cc.na.wrapping_add(cc.tostore);
 }
 
 // Port of listfield from lparser.c

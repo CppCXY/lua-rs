@@ -299,9 +299,23 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Return values from start_idx onward (arg 2, 3, ...)
+    // Need to PUSH the values to the stack (C function results must be on stack)
     let result_count = vararg_count - start_idx;
-    // Values are already on stack at positions 2+start_idx onwards
-    // Just return the count
+    
+    // Argument indices: arg 1 is at base (index parameter)
+    // arg 2, 3, ... are at base+1, base+2, ...
+    // We want to return from arg (2+start_idx) onwards
+    let first_arg_idx = 2 + start_idx; // This is 1-based argument index
+    
+    // Push each result value onto the stack
+    for i in 0..result_count {
+        if let Some(val) = l.get_arg(first_arg_idx + i) {
+            l.push_value(val)?;
+        } else {
+            l.push_value(LuaValue::nil())?;
+        }
+    }
+    
     Ok(result_count)
 }
 

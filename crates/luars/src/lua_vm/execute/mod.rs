@@ -2207,14 +2207,30 @@ fn execute_frame(
 
                 if vatab < 0 {
                     // No vararg table - get from stack
-                    // After buildhiddenargs: new_func is copied to base-1
-                    // varargs are at (base-1) - nargs (matching Lua 5.5's ci->func.p - nargs)
+                    // After buildhiddenargs, varargs are still at their original position
+                    // Original layout: func arg1 arg2 ... argN
+                    // where arg1..argP are fixed params, arg(P+1)..argN are varargs
+                    // 
+                    // After buildhiddenargs: 
+                    // [old_func_pos is cleared] vararg1 vararg2 ... newfunc fixparam1 fixparam2 ...
+                    // 
+                    // So varargs start at: old_func_pos + 1 + nfixparams
+                    // old_func_pos = newfunc_pos - totalargs - 1
+                    // where newfunc_pos = base - 1
+                    
+                    // Get nfixparams from chunk
+                    let nfixparams = chunk.param_count;
+                    let totalargs = nfixparams + nargs;
+                    
                     let new_func_pos = base - 1;
-                    let vararg_start = if new_func_pos >= nargs {
-                        new_func_pos - nargs
+                    let old_func_pos = if totalargs > 0 && new_func_pos > totalargs {
+                        new_func_pos - totalargs - 1
                     } else {
-                        0
+                        // No buildhiddenargs was called (nextra = 0)
+                        // varargs would be at base + nfixparams, but there are none
+                        base + nfixparams
                     };
+                    let vararg_start = old_func_pos + 1 + nfixparams;
 
                     // Collect values first to avoid borrow issues
                     let stack = lua_state.stack_mut();
@@ -2375,7 +2391,6 @@ fn execute_frame(
             OpCode::VarargPrep => {
                 // Adjust varargs (prepare vararg function)
                 // Based on lvm.c:1955 and ltm.c:245-286 (buildhiddenargs)
-                let c = instr.get_c() as usize; // number of fixed parameters
 
                 // Calculate total arguments and extra arguments
                 let call_info = lua_state.get_call_info(frame_idx);
@@ -2390,7 +2405,9 @@ fn execute_frame(
                     0
                 };
 
-                let nfixparams = c; // C field contains number of fixed parameters
+                // CRITICAL FIX: nfixparams comes from chunk.param_count, NOT from C field!
+                // Official Lua also generates VARARGPREP with C=0
+                let nfixparams = chunk.param_count;
                 let nextra = if totalargs > nfixparams {
                     totalargs - nfixparams
                 } else {
@@ -2403,6 +2420,13 @@ fn execute_frame(
 
                 // Implement buildhiddenargs (ltm.c:245-270)
                 if nextra > 0 {
+                    // Ensure stack has enough space for buildhiddenargs
+                    // It needs: func_pos + totalargs + 1 (for func copy) + nfixparams (for fixparam copies)
+                    let required_size = func_pos + totalargs + 1 + nfixparams + chunk.max_stack_size;
+                    if lua_state.stack_len() < required_size {
+                        lua_state.grow_stack(required_size)?;  // grow_stack takes target size, not amount to grow!
+                    }
+                    
                     let new_base = buildhiddenargs(
                         lua_state, frame_idx, &chunk, totalargs, nfixparams, nextra,
                     )?;
