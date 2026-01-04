@@ -19,6 +19,7 @@
 pub mod call;
 mod closure_handler;
 mod concat;
+mod helper;
 mod metamethod;
 mod return_handler;
 
@@ -29,234 +30,15 @@ use std::rc::Rc;
 use crate::{
     Chunk, UpvalueId,
     lua_value::{LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT, LuaValue},
-    lua_vm::{LuaError, LuaResult, LuaState, OpCode},
+    lua_vm::{
+        LuaError, LuaResult, LuaState, OpCode,
+        execute::helper::{
+            fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
+            tonumberns, ttisfloat, ttisinteger,
+        },
+    },
 };
 pub use metamethod::TmKind;
-
-/// Build hidden arguments for vararg functions
-/// Port of ltm.c:245-270 buildhiddenargs
-/// 
-/// Initial stack:  func arg1 ... argn extra1 ...
-///                 ^ ci->func                    ^ L->top
-/// Final stack: func nil ... nil extra1 ... func arg1 ... argn
-///                                          ^ ci->func
-fn buildhiddenargs(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    chunk: &Chunk,
-    totalargs: usize,
-    nfixparams: usize,
-    nextra: usize,
-) -> LuaResult<usize> {
-    let call_info = lua_state.get_call_info(frame_idx);
-    let old_base = call_info.base;
-    let func_pos = if old_base > 0 { old_base - 1 } else { 0 };
-    let stack_top = lua_state.get_top();
-    
-    unsafe {
-        let mut stack_ptr_local = lua_state.stack_ptr_mut();
-        let mut top = stack_top;
-        
-        // Step 1: Copy function to top (after all arguments)
-        // setobjs2s(L, L->top.p++, ci->func.p);
-        let func_src = stack_ptr_local.add(func_pos);
-        *stack_ptr_local.add(top) = *func_src;
-        top += 1;
-        
-        // Step 2: Copy fixed parameters to after copied function
-        // for (i = 1; i <= nfixparams; i++)
-        for i in 0..nfixparams {
-            let src = stack_ptr_local.add(func_pos + 1 + i);
-            *stack_ptr_local.add(top) = *src;
-            top += 1;
-            // Erase original parameter with nil (for GC)
-            setnilvalue(stack_ptr_local.add(func_pos + 1 + i));
-        }
-        
-        // Step 3: Update ci->func.p and ci->top.p
-        // ci->func.p += totalargs + 1;
-        // ci->top.p += totalargs + 1;
-        let new_func_pos = func_pos + totalargs + 1;
-        let new_base = new_func_pos + 1;
-        
-        let new_call_info_top = {
-            let call_info = lua_state.get_call_info_mut(frame_idx);
-            call_info.base = new_base;
-            call_info.top += totalargs + 1;
-            call_info.func_offset = new_base - func_pos; // Distance from new_base to original func
-            call_info.top
-        };
-        
-        // Ensure enough stack space for new base + registers
-        let new_needed_size = new_base + chunk.max_stack_size;
-        if new_needed_size > lua_state.stack_len() {
-            lua_state.grow_stack(new_needed_size - lua_state.stack_len())?;
-        }
-        
-        // Update lua_state.top to match call_info.top
-        // This ensures that subsequent set_top calls preserve our data
-        lua_state.set_top(new_call_info_top);
-        
-        Ok(new_base)
-    }
-}
-
-// ============ Type tag检查宏 (对应 Lua 的 ttis* 宏) ============
-
-/// ttisinteger - 检查是否是整数 (最快的类型检查)
-#[inline(always)]
-unsafe fn ttisinteger(v: *const LuaValue) -> bool {
-    unsafe { (*v).tt_ == LUA_VNUMINT }
-}
-
-/// ttisfloat - 检查是否是浮点数
-#[inline(always)]
-unsafe fn ttisfloat(v: *const LuaValue) -> bool {
-    unsafe { (*v).tt_ == LUA_VNUMFLT }
-}
-
-/// ttisnumber - 检查是否是任意数字 (整数或浮点)
-#[inline(always)]
-unsafe fn ttisnumber(v: *const LuaValue) -> bool {
-    unsafe { (*v).tt_ == LUA_VNUMINT || (*v).tt_ == LUA_VNUMFLT }
-}
-
-// ============ 值访问宏 (对应 Lua 的 ivalue/fltvalue) ============
-
-/// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)
-#[inline(always)]
-unsafe fn ivalue(v: *const LuaValue) -> i64 {
-    unsafe { (*v).value_.i }
-}
-
-/// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
-#[inline(always)]
-unsafe fn fltvalue(v: *const LuaValue) -> f64 {
-    unsafe { (*v).value_.n }
-}
-
-/// setivalue - 设置整数值
-#[inline(always)]
-unsafe fn setivalue(v: *mut LuaValue, i: i64) {
-    unsafe {
-        (*v).value_.i = i;
-        (*v).tt_ = LUA_VNUMINT;
-    }
-}
-
-/// chgivalue - 只修改整数值，不修改类型标签（Lua的chgivalue宏）
-/// 调用前必须确认类型已经是整数！
-#[inline(always)]
-unsafe fn chgivalue(v: *mut LuaValue, i: i64) {
-    unsafe {
-        (*v).value_.i = i;
-    }
-}
-
-/// setfltvalue - 设置浮点值
-#[inline(always)]
-unsafe fn setfltvalue(v: *mut LuaValue, n: f64) {
-    unsafe {
-        (*v).value_.n = n;
-        (*v).tt_ = LUA_VNUMFLT;
-    }
-}
-
-/// chgfltvalue - 只修改浮点值，不修改类型标签
-/// 调用前必须确认类型已经是浮点！
-#[inline(always)]
-unsafe fn chgfltvalue(v: *mut LuaValue, n: f64) {
-    unsafe {
-        (*v).value_.n = n;
-    }
-}
-
-/// setbfvalue - 设置false
-#[inline(always)]
-unsafe fn setbfvalue(v: *mut LuaValue) {
-    unsafe {
-        (*v) = LuaValue::boolean(false);
-    }
-}
-
-/// setbtvalue - 设置true
-#[inline(always)]
-unsafe fn setbtvalue(v: *mut LuaValue) {
-    unsafe {
-        (*v) = LuaValue::boolean(true);
-    }
-}
-
-/// setnilvalue - 设置nil
-#[inline(always)]
-unsafe fn setnilvalue(v: *mut LuaValue) {
-    unsafe {
-        *v = LuaValue::nil();
-    }
-}
-
-// ============ 类型转换辅助函数 ============
-
-/// tointegerns - 尝试转换为整数 (不抛出错误)
-/// 对应 Lua 的 tointegerns 宏
-#[inline(always)]
-unsafe fn tointegerns(v: *const LuaValue, out: &mut i64) -> bool {
-    unsafe {
-        if ttisinteger(v) {
-            *out = ivalue(v);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-/// tonumberns - 尝试转换为浮点数 (不抛出错误)
-#[inline(always)]
-unsafe fn tonumberns(v: *const LuaValue, out: &mut f64) -> bool {
-    unsafe {
-        if ttisfloat(v) {
-            *out = fltvalue(v);
-            true
-        } else if ttisinteger(v) {
-            *out = ivalue(v) as f64;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-/// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
-#[inline(always)]
-fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
-    if v.tt_ == LUA_VNUMFLT {
-        unsafe {
-            *out = v.value_.n;
-        }
-        true
-    } else if v.tt_ == LUA_VNUMINT {
-        unsafe {
-            *out = v.value_.i as f64;
-        }
-        true
-    } else {
-        false
-    }
-}
-
-/// tointeger - 从LuaValue引用获取整数 (用于常量)
-#[inline(always)]
-fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
-    if v.tt_ == LUA_VNUMINT {
-        unsafe {
-            *out = v.value_.i;
-        }
-        true
-    } else {
-        false
-    }
-}
 
 /// Main VM execution entry point
 ///
@@ -378,21 +160,11 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
-                // Ensure stack is large enough BEFORE writing
-                let write_pos = base + a;
-                if write_pos >= lua_state.stack_len() {
-                    lua_state.grow_stack(write_pos + 1)?;
-                    // Refresh stack_ptr after potential reallocation
-                    stack_ptr = lua_state.stack_ptr_mut();
-                }
+                let stack = lua_state.stack_mut();
+                stack[base + a] = stack[base + b];
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rb = stack_ptr.add(base + b);
-                    *ra = *rb; // Direct copy (setobjs2s)
-                }
-                
                 // Update frame.top if we're writing beyond current top
+                let write_pos = base + a;
                 let call_info = lua_state.get_call_info_mut(frame_idx);
                 if write_pos >= call_info.top {
                     call_info.top = write_pos + 1;
@@ -403,20 +175,16 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let sbx = instr.get_sbx();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    setivalue(ra, sbx as i64);
-                }
+                let stack = lua_state.stack_mut();
+                setivalue(&mut stack[base + a], sbx as i64);
             }
             OpCode::LoadF => {
                 // R[A] := (float)sBx
                 let a = instr.get_a() as usize;
                 let sbx = instr.get_sbx();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    setfltvalue(ra, sbx as f64);
-                }
+                let stack = lua_state.stack_mut();
+                setfltvalue(&mut stack[base + a], sbx as f64);
             }
             OpCode::LoadK => {
                 // R[A] := K[Bx]
@@ -428,11 +196,9 @@ fn execute_frame(
                     return Err(lua_state.error(format!("LOADK: invalid constant index {}", bx)));
                 }
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rb = &constants[bx];
-                    *ra = *rb; // setobj2s
-                }
+                let value = constants[bx];
+                let stack = lua_state.stack_mut();
+                stack[base + a] = value; // setobj2s
             }
             OpCode::LoadKX => {
                 // R[A] := K[extra_arg]; pc++
@@ -457,52 +223,43 @@ fn execute_frame(
                     return Err(lua_state.error(format!("LOADKX: invalid constant index {}", ax)));
                 }
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rb = &constants[ax];
-                    *ra = *rb; // setobj2s
-                }
+                let value = constants[ax];
+                let stack = lua_state.stack_mut();
+                stack[base + a] = value; // setobj2s
             }
             OpCode::LoadFalse => {
                 // R[A] := false
                 let a = instr.get_a() as usize;
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    setbfvalue(ra);
-                }
+                let stack = lua_state.stack_mut();
+                setbfvalue(&mut stack[base + a]);
             }
             OpCode::LFalseSkip => {
                 // R[A] := false; pc++
                 let a = instr.get_a() as usize;
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    setbfvalue(ra);
-                }
+                let stack = lua_state.stack_mut();
+                setbfvalue(&mut stack[base + a]);
                 pc += 1; // Skip next instruction
             }
             OpCode::LoadTrue => {
                 // R[A] := true
                 let a = instr.get_a() as usize;
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    setbtvalue(ra);
-                }
+                let stack = lua_state.stack_mut();
+                setbtvalue(&mut stack[base + a]);
             }
             OpCode::LoadNil => {
                 // R[A], R[A+1], ..., R[A+B] := nil
                 let a = instr.get_a() as usize;
                 let mut b = instr.get_b() as usize;
 
-                unsafe {
-                    let mut ra = stack_ptr.add(base + a);
-                    loop {
-                        setnilvalue(ra);
-                        if b == 0 {
-                            break;
-                        }
-                        b -= 1;
-                        ra = ra.add(1);
+                let stack = lua_state.stack_mut();
+                let mut idx = base + a;
+                loop {
+                    setnilvalue(&mut stack[idx]);
+                    if b == 0 {
+                        break;
                     }
+                    b -= 1;
+                    idx += 1;
                 }
             }
             OpCode::Add => {
@@ -512,28 +269,26 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    // Fast path: both integers
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
+                // Fast path: both integers
+                if ttisinteger(v1) && ttisinteger(v2) {
+                    let i1 = ivalue(v1);
+                    let i2 = ivalue(v2);
+                    pc += 1; // Skip metamethod on success
+                    setivalue(&mut stack[base + a], i1.wrapping_add(i2));
+                }
+                // Slow path: try float conversion
+                else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
                         pc += 1; // Skip metamethod on success
-                        setivalue(ra, i1.wrapping_add(i2));
+                        setfltvalue(&mut stack[base + a], n1 + n2);
                     }
-                    // Slow path: try float conversion
-                    else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                            pc += 1; // Skip metamethod on success
-                            setfltvalue(ra, n1 + n2);
-                        }
-                        // else: fall through to MMBIN (next instruction)
-                    }
+                    // else: fall through to MMBIN (next instruction)
                 }
             }
             OpCode::AddI => {
@@ -543,25 +298,23 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let sc = instr.get_sc();
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
 
-                    // Fast path: integer
-                    if ttisinteger(v1) {
-                        let iv1 = ivalue(v1);
-                        pc += 1; // Skip metamethod on success
-                        setivalue(ra, iv1.wrapping_add(sc as i64));
-                    }
-                    // Slow path: float
-                    else if ttisfloat(v1) {
-                        let nb = fltvalue(v1);
-                        let fimm = sc as f64;
-                        pc += 1; // Skip metamethod on success
-                        setfltvalue(ra, nb + fimm);
-                    }
-                    // else: fall through to MMBINI (next instruction)
+                // Fast path: integer
+                if ttisinteger(v1) {
+                    let iv1 = ivalue(v1);
+                    pc += 1; // Skip metamethod on success
+                    setivalue(&mut stack[base + a], iv1.wrapping_add(sc as i64));
                 }
+                // Slow path: float
+                else if ttisfloat(v1) {
+                    let nb = fltvalue(v1);
+                    let fimm = sc as f64;
+                    pc += 1; // Skip metamethod on success
+                    setfltvalue(&mut stack[base + a], nb + fimm);
+                }
+                // else: fall through to MMBINI (next instruction)
             }
             OpCode::Sub => {
                 // op_arith(L, l_subi, luai_numsub)
@@ -569,23 +322,21 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
+                if ttisinteger(v1) && ttisinteger(v2) {
+                    let i1 = ivalue(v1);
+                    let i2 = ivalue(v2);
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1.wrapping_sub(i2));
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
                         pc += 1;
-                        setivalue(ra, i1.wrapping_sub(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(ra, n1 - n2);
-                        }
+                        setfltvalue(&mut stack[base + a], n1 - n2);
                     }
                 }
             }
@@ -595,23 +346,21 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
+                if ttisinteger(v1) && ttisinteger(v2) {
+                    let i1 = ivalue(v1);
+                    let i2 = ivalue(v2);
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1.wrapping_mul(i2));
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
                         pc += 1;
-                        setivalue(ra, i1.wrapping_mul(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(ra, n1 * n2);
-                        }
+                        setfltvalue(&mut stack[base + a], n1 * n2);
                     }
                 }
             }
@@ -621,17 +370,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(ra, n1 / n2);
-                    }
+                let mut n1 = 0.0;
+                let mut n2 = 0.0;
+                if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                    pc += 1;
+                    setfltvalue(&mut stack[base + a], n1 / n2);
                 }
             }
             OpCode::IDiv => {
@@ -640,25 +387,23 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        if i2 != 0 {
-                            pc += 1;
-                            setivalue(ra, i1.div_euclid(i2));
-                        }
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(ra, (n1 / n2).floor());
-                        }
+                if ttisinteger(v1) && ttisinteger(v2) {
+                    let i1 = ivalue(v1);
+                    let i2 = ivalue(v2);
+                    if i2 != 0 {
+                        pc += 1;
+                        setivalue(&mut stack[base + a], i1.div_euclid(i2));
+                    }
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                        pc += 1;
+                        setfltvalue(&mut stack[base + a], (n1 / n2).floor());
                     }
                 }
             }
@@ -668,24 +413,22 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        if i2 != 0 {
-                            pc += 1;
-                            setivalue(ra, i1.rem_euclid(i2));
-                        }
+                if ttisinteger(v1) && ttisinteger(v2) {
+                    let i1 = ivalue(v1);
+                    let i2 = ivalue(v2);
+                    if i2 != 0 {
+                        pc += 1;
+                        setivalue(&mut stack[base + a], i1.rem_euclid(i2));
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
                             pc += 1;
-                            setfltvalue(ra, n1 - (n1 / n2).floor() * n2);
+                            setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
                         }
                     }
                 }
@@ -1390,7 +1133,7 @@ fn execute_frame(
                             .ok_or(LuaError::RuntimeError)?;
 
                         let result = table.get_int(c as i64).unwrap_or(LuaValue::nil());
-                        
+
                         // Update frame.top FIRST if we're writing beyond current top
                         // This must happen BEFORE we calculate the pointer and write,
                         // because set_top might trigger reallocation
@@ -1403,7 +1146,7 @@ fn execute_frame(
                             // Refresh stack_ptr after potential reallocation
                             stack_ptr = lua_state.stack_ptr_mut();
                         }
-                        
+
                         // NOW calculate pointer from fresh stack_ptr and write
                         let ra = stack_ptr.add(base + a);
                         *ra = result;
@@ -1607,8 +1350,12 @@ fn execute_frame(
                                     if let Some(index_value) = mt.raw_get(&index_key) {
                                         // __index should be the string library table
                                         if let Some(string_lib_id) = index_value.as_table_id() {
-                                            if let Some(string_lib) = vm.object_pool.get_table(string_lib_id) {
-                                                let result = string_lib.raw_get(key).unwrap_or(LuaValue::nil());
+                                            if let Some(string_lib) =
+                                                vm.object_pool.get_table(string_lib_id)
+                                            {
+                                                let result = string_lib
+                                                    .raw_get(key)
+                                                    .unwrap_or(LuaValue::nil());
                                                 *ra = result;
                                             } else {
                                                 setnilvalue(ra);
@@ -2554,7 +2301,11 @@ fn execute_frame(
                 let touse = if wanted < 0 {
                     nargs // Get all
                 } else {
-                    if (wanted as usize) > nargs { nargs } else { wanted as usize }
+                    if (wanted as usize) > nargs {
+                        nargs
+                    } else {
+                        wanted as usize
+                    }
                 };
 
                 // Always update stack_top and frame.top to accommodate the results
@@ -2573,7 +2324,11 @@ fn execute_frame(
                         // After buildhiddenargs: new_func is copied to base-1
                         // varargs are at (base-1) - nargs (matching Lua 5.5's ci->func.p - nargs)
                         let new_func_pos = base - 1;
-                        let vararg_start = if new_func_pos >= nargs { new_func_pos - nargs } else { 0 };
+                        let vararg_start = if new_func_pos >= nargs {
+                            new_func_pos - nargs
+                        } else {
+                            0
+                        };
 
                         for i in 0..touse {
                             let src = stack_ptr.add(vararg_start + i);
@@ -2584,7 +2339,11 @@ fn execute_frame(
                         // Get from vararg table at R[B]
                         let table_val = *stack_ptr.add(base + b);
                         if let Some(table_id) = table_val.as_table_id() {
-                            let table = lua_state.vm_mut().object_pool.get_table(table_id).ok_or(LuaError::RuntimeError)?;
+                            let table = lua_state
+                                .vm_mut()
+                                .object_pool
+                                .get_table(table_id)
+                                .ok_or(LuaError::RuntimeError)?;
                             for i in 0..touse {
                                 let val = table.get_int((i + 1) as i64).unwrap_or(LuaValue::nil());
                                 *ra.add(i) = val;
@@ -2618,12 +2377,18 @@ fn execute_frame(
                 // Get nextraargs from CallInfo
                 let call_info = lua_state.get_call_info(frame_idx);
                 let nextra = call_info.nextraargs as usize;
-                let func_id = call_info.func.as_function_id().ok_or(LuaError::RuntimeError)?;
-                
+                let func_id = call_info
+                    .func
+                    .as_function_id()
+                    .ok_or(LuaError::RuntimeError)?;
+
                 // Get param_count from the function's chunk
                 let param_count = {
                     let vm = lua_state.vm_mut();
-                    let func_obj = vm.object_pool.get_function(func_id).ok_or(LuaError::RuntimeError)?;
+                    let func_obj = vm
+                        .object_pool
+                        .get_function(func_id)
+                        .ok_or(LuaError::RuntimeError)?;
                     let chunk = func_obj.chunk().ok_or(LuaError::RuntimeError)?;
                     chunk.param_count
                 };
@@ -2733,7 +2498,9 @@ fn execute_frame(
 
                 // Implement buildhiddenargs (ltm.c:245-270)
                 if nextra > 0 {
-                    let new_base = buildhiddenargs(lua_state, frame_idx, &chunk, totalargs, nfixparams, nextra)?;
+                    let new_base = buildhiddenargs(
+                        lua_state, frame_idx, &chunk, totalargs, nfixparams, nextra,
+                    )?;
                     base = new_base;
                     // Refresh stack pointer after potential reallocation
                     stack_ptr = lua_state.stack_ptr_mut();
