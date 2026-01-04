@@ -75,7 +75,8 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
         }
         LuaTokenKind::TkDbColon => {
             fs.lexer.bump(); // skip ::
-            labelstat(fs)?;
+            let name = str_checkname(fs)?;
+            labelstat(fs, &name, line)?;
         }
         LuaTokenKind::TkReturn => {
             fs.lexer.bump(); // skip RETURN
@@ -592,9 +593,7 @@ fn gotostat(fs: &mut FuncState) -> Result<(), String> {
 
 // Port of labelstat from lparser.c:1457-1466
 // labelstat -> '::' NAME '::' {no-op-stat}
-fn labelstat(fs: &mut FuncState) -> Result<(), String> {
-    let line = fs.lexer.line;
-    let name = str_checkname(fs)?;
+fn labelstat(fs: &mut FuncState, name: &str, line: usize) -> Result<(), String> {
     check(fs, LuaTokenKind::TkDbColon)?;
     fs.lexer.bump(); // skip second '::'
 
@@ -606,11 +605,11 @@ fn labelstat(fs: &mut FuncState) -> Result<(), String> {
     }
 
     // Check for repeated labels (lparser.c:1463)
-    checkrepeated(fs, &name)?;
+    checkrepeated(fs, name)?;
 
     // Create label and solve pending gotos (lparser.c:1464)
     let is_last = block_follow(fs, false);
-    createlabel(fs, &name, line, is_last);
+    createlabel(fs, name, line, is_last);
 
     Ok(())
 }

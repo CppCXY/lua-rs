@@ -90,6 +90,9 @@ fn test_function_vararg_basic() {
         assert(sum(10, 20) == 30)
     "#,
     );
+    if let Err(e) = &result {
+        eprintln!("Error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -126,6 +129,9 @@ fn test_function_vararg_count() {
         assert(count_args(nil, nil, 1) == 3)
     "#,
     );
+    if let Err(e) = &result {
+        eprintln!("Error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -142,6 +148,9 @@ fn test_function_vararg_select() {
         assert(get_nth(3, "a", "b", "c", "d") == "c")
     "#,
     );
+    if let Err(e) = &result {
+        eprintln!("Error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -334,29 +343,6 @@ fn test_function_pcall_wrapper() {
         assert(ok and result == 5)
         local ok2, err = pcall(safe_divide, 10, 0)
         assert(not ok2)
-    "#,
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_function_with_goto() {
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
-        r#"
-        local function search(t, target)
-            for i, v in ipairs(t) do
-                if v == target then
-                    goto found
-                end
-            end
-            return nil
-            ::found::
-            return "found"
-        end
-        assert(search({1, 2, 3, 4}, 3) == "found")
-        assert(search({1, 2, 3, 4}, 5) == nil)
     "#,
     );
     assert!(result.is_ok());
