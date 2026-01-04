@@ -148,7 +148,7 @@ fn execute_frame(
     loop {
         // Fetch instruction and advance PC
         // NOTE: No bounds check - compiler guarantees valid bytecode
-        let instr = unsafe { *code.get_unchecked(pc) };
+        let instr = code[pc]; // unsafe { *code.get_unchecked(pc) };
         pc += 1;
 
         // Dispatch instruction
