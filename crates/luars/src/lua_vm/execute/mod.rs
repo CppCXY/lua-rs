@@ -28,15 +28,11 @@ use call::FrameAction;
 use std::rc::Rc;
 
 use crate::{
-    Chunk, UpvalueId,
-    lua_value::{LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT, LuaValue},
-    lua_vm::{
-        LuaError, LuaResult, LuaState, OpCode,
+    lua_value::{LuaValue, LUA_VFALSE, LUA_VNUMFLT, LUA_VNUMINT}, lua_vm::{
         execute::helper::{
-            fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
-            tonumberns, ttisfloat, ttisinteger,
-        },
-    },
+            fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger
+        }, LuaError, LuaResult, LuaState, OpCode
+    }, Chunk, UpvalueId
 };
 pub use metamethod::TmKind;
 
@@ -439,17 +435,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(ra, n1.powf(n2));
-                    }
+                let mut n1 = 0.0;
+                let mut n2 = 0.0;
+                if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                    pc += 1;
+                    setfltvalue(&mut stack[base + a], n1.powf(n2));
                 }
             }
             OpCode::Unm => {
@@ -457,20 +451,18 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
 
-                    if ttisinteger(rb) {
-                        let ib = ivalue(rb);
-                        setivalue(ra, ib.wrapping_neg());
-                    } else {
-                        let mut nb = 0.0;
-                        if tonumberns(rb, &mut nb) {
-                            setfltvalue(ra, -nb);
-                        }
-                        // else: metamethod
+                if ttisinteger(rb) {
+                    let ib = ivalue(rb);
+                    setivalue(&mut stack[base + a], ib.wrapping_neg());
+                } else {
+                    let mut nb = 0.0;
+                    if tonumberns(rb, &mut nb) {
+                        setfltvalue(&mut stack[base + a], -nb);
                     }
+                    // else: metamethod
                 }
             }
             OpCode::AddK => {
@@ -480,23 +472,21 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c); // K[C]
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c]; // K[C]
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
-                        let i1 = ivalue(v1);
+                let mut i2 = 0i64;
+                if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    let i1 = ivalue(v1);
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1.wrapping_add(i2));
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
                         pc += 1;
-                        setivalue(ra, i1.wrapping_add(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(ra, n1 + n2);
-                        }
+                        setfltvalue(&mut stack[base + a], n1 + n2);
                     }
                 }
             }
@@ -506,23 +496,21 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
-                        let i1 = ivalue(v1);
+                let mut i2 = 0i64;
+                if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    let i1 = ivalue(v1);
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1.wrapping_sub(i2));
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
                         pc += 1;
-                        setivalue(ra, i1.wrapping_sub(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(ra, n1 - n2);
-                        }
+                        setfltvalue(&mut stack[base + a], n1 - n2);
                     }
                 }
             }
@@ -532,23 +520,21 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
-                        let i1 = ivalue(v1);
+                let mut i2 = 0i64;
+                if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    let i1 = ivalue(v1);
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1.wrapping_mul(i2));
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
                         pc += 1;
-                        setivalue(ra, i1.wrapping_mul(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(ra, n1 * n2);
-                        }
+                        setfltvalue(&mut stack[base + a], n1 * n2);
                     }
                 }
             }
@@ -558,27 +544,25 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
-                        let i1 = ivalue(v1);
-                        if i2 != 0 {
+                let mut i2 = 0i64;
+                if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    let i1 = ivalue(v1);
+                    if i2 != 0 {
+                        pc += 1;
+                        let result = i1 - (i1 / i2) * i2;
+                        setivalue(&mut stack[base + a], result);
+                    }
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                        if n2 != 0.0 {
                             pc += 1;
-                            let result = i1 - (i1 / i2) * i2;
-                            setivalue(ra, result);
-                        }
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            if n2 != 0.0 {
-                                pc += 1;
-                                setfltvalue(ra, n1 - (n1 / n2).floor() * n2);
-                            }
+                            setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
                         }
                     }
                 }
@@ -589,17 +573,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(ra, n1.powf(n2));
-                    }
+                let mut n1 = 0.0;
+                let mut n2 = 0.0;
+                if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                    pc += 1;
+                    setfltvalue(&mut stack[base + a], n1.powf(n2));
                 }
             }
             OpCode::DivK => {
@@ -608,17 +590,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(ra, n1 / n2);
-                    }
+                let mut n1 = 0.0;
+                let mut n2 = 0.0;
+                if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                    pc += 1;
+                    setfltvalue(&mut stack[base + a], n1 / n2);
                 }
             }
             OpCode::IDivK => {
@@ -627,31 +607,29 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
-                        let i1 = ivalue(v1);
-                        if i2 != 0 {
+                let mut i2 = 0i64;
+                if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    let i1 = ivalue(v1);
+                    if i2 != 0 {
+                        pc += 1;
+                        let result = if (i1 ^ i2) >= 0 {
+                            i1 / i2
+                        } else {
+                            (i1 / i2) - if i1 % i2 != 0 { 1 } else { 0 }
+                        };
+                        setivalue(&mut stack[base + a], result);
+                    }
+                } else {
+                    let mut n1 = 0.0;
+                    let mut n2 = 0.0;
+                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                        if n2 != 0.0 {
                             pc += 1;
-                            let result = if (i1 ^ i2) >= 0 {
-                                i1 / i2
-                            } else {
-                                (i1 / i2) - if i1 % i2 != 0 { 1 } else { 0 }
-                            };
-                            setivalue(ra, result);
-                        }
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            if n2 != 0.0 {
-                                pc += 1;
-                                setfltvalue(ra, (n1 / n2).floor());
-                            }
+                            setfltvalue(&mut stack[base + a], (n1 / n2).floor());
                         }
                     }
                 }
@@ -662,17 +640,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(ra, i1 & i2);
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1 & i2);
                 }
             }
             OpCode::BOrK => {
@@ -681,17 +657,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(ra, i1 | i2);
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1 | i2);
                 }
             }
             OpCode::BXorK => {
@@ -700,17 +674,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = constants.get_unchecked(c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &constants[c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(ra, i1 ^ i2);
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1 ^ i2);
                 }
             }
             OpCode::BAnd => {
@@ -719,17 +691,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(ra, i1 & i2);
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1 & i2);
                 }
             }
             OpCode::BOr => {
@@ -738,17 +708,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(ra, i1 | i2);
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1 | i2);
                 }
             }
             OpCode::BXor => {
@@ -757,17 +725,15 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(ra, i1 ^ i2);
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                    pc += 1;
+                    setivalue(&mut stack[base + a], i1 ^ i2);
                 }
             }
             OpCode::Shl => {
@@ -776,19 +742,17 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        // Lua wraps shift amount to 0-63
-                        let shift = (i2 & 63) as u32;
-                        setivalue(ra, i1.wrapping_shl(shift));
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                    pc += 1;
+                    // Lua wraps shift amount to 0-63
+                    let shift = (i2 & 63) as u32;
+                    setivalue(&mut stack[base + a], i1.wrapping_shl(shift));
                 }
             }
             OpCode::Shr => {
@@ -797,19 +761,17 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let v1 = stack_ptr.add(base + b);
-                    let v2 = stack_ptr.add(base + c);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
+                let v2 = &stack[base + c];
 
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        // Lua wraps shift amount to 0-63
-                        let shift = (i2 & 63) as u32;
-                        setivalue(ra, (i1 as u64).wrapping_shr(shift) as i64);
-                    }
+                let mut i1 = 0i64;
+                let mut i2 = 0i64;
+                if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                    pc += 1;
+                    // Lua wraps shift amount to 0-63
+                    let shift = (i2 & 63) as u32;
+                    setivalue(&mut stack[base + a], (i1 as u64).wrapping_shr(shift) as i64);
                 }
             }
             OpCode::BNot => {
@@ -817,16 +779,14 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let v1 = &stack[base + b];
 
-                    let mut ib = 0i64;
-                    if tointegerns(rb, &mut ib) {
-                        setivalue(ra, !ib);
-                    }
-                    // else: metamethod
+                let mut ib = 0i64;
+                if tointegerns(v1, &mut ib) {
+                    setivalue(&mut stack[base + a], !ib);
                 }
+                // else: metamethod
             }
             OpCode::ShlI => {
                 // R[A] := sC << R[B]
@@ -835,29 +795,27 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let ic = instr.get_sc(); // shift amount from immediate
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
 
-                    let mut ib = 0i64;
-                    if tointegerns(rb, &mut ib) {
-                        pc += 1;
-                        // luaV_shiftl(ic, ib): shift ic left by ib
-                        let result = if ib >= 0 {
-                            if ib >= 64 { 0 } else { (ic as i64) << ib }
+                let mut ib = 0i64;
+                if tointegerns(rb, &mut ib) {
+                    pc += 1;
+                    // luaV_shiftl(ic, ib): shift ic left by ib
+                    let result = if ib >= 0 {
+                        if ib >= 64 { 0 } else { (ic as i64) << ib }
+                    } else {
+                        // negative shift = right shift
+                        let shift = -ib;
+                        if shift >= 64 {
+                            if ic < 0 { -1 } else { 0 }
                         } else {
-                            // negative shift = right shift
-                            let shift = -ib;
-                            if shift >= 64 {
-                                if ic < 0 { -1 } else { 0 }
-                            } else {
-                                (ic as i64) >> shift
-                            }
-                        };
-                        setivalue(ra, result);
-                    }
-                    // else: metamethod
+                            (ic as i64) >> shift
+                        }
+                    };
+                    setivalue(&mut stack[base + a], result);
                 }
+                // else: metamethod
             }
             OpCode::ShrI => {
                 // R[A] := R[B] >> sC
@@ -866,34 +824,32 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let ic = instr.get_sc(); // shift amount
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
 
-                    let mut ib = 0i64;
-                    if tointegerns(rb, &mut ib) {
-                        pc += 1;
-                        // luaV_shiftl(ib, -ic): shift ib left by -ic (i.e., right by ic)
-                        let shift_amount = -ic;
-                        let result = if shift_amount >= 0 {
-                            if shift_amount >= 64 {
-                                0
-                            } else {
-                                ib << shift_amount
-                            }
+                let mut ib = 0i64;
+                if tointegerns(rb, &mut ib) {
+                    pc += 1;
+                    // luaV_shiftl(ib, -ic): shift ib left by -ic (i.e., right by ic)
+                    let shift_amount = -ic;
+                    let result = if shift_amount >= 0 {
+                        if shift_amount >= 64 {
+                            0
                         } else {
-                            // right shift
-                            let shift = -shift_amount;
-                            if shift >= 64 {
-                                if ib < 0 { -1 } else { 0 }
-                            } else {
-                                ib >> shift
-                            }
-                        };
-                        setivalue(ra, result);
-                    }
-                    // else: metamethod
+                            ib << shift_amount
+                        }
+                    } else {
+                        // right shift
+                        let shift = -shift_amount;
+                        if shift >= 64 {
+                            if ib < 0 { -1 } else { 0 }
+                        } else {
+                            ib >> shift
+                        }
+                    };
+                    setivalue(&mut stack[base + a], result);
                 }
+                // else: metamethod
             }
             OpCode::Jmp => {
                 // pc += sJ
@@ -960,10 +916,8 @@ fn execute_frame(
                     upvalue.get_closed_value().unwrap()
                 };
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    *ra = value;
-                }
+                let stack = lua_state.stack_mut();
+                stack[base + a] = value;
             }
             OpCode::SetUpval => {
                 // UpValue[B] := R[A]
@@ -971,9 +925,9 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
 
                 // Get value to set
-                let value = unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    *ra
+                let value = {
+                    let stack = lua_state.stack_mut();
+                    stack[base + a]
                 };
 
                 // 优化：直接使用缓存的upvalues_vec
@@ -1064,13 +1018,8 @@ fn execute_frame(
                 // Create table with pre-allocated sizes
                 let value = lua_state.create_table(vc, hash_size);
 
-                // IMPORTANT: create_table may trigger GC, refresh stack_ptr
-                stack_ptr = lua_state.stack_ptr_mut();
-
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    *ra = value;
-                }
+                let stack = lua_state.stack_mut();
+                stack[base + a] = value;
             }
             OpCode::GetTable => {
                 // R[A] := R[B][R[C]]
@@ -1078,42 +1027,38 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let rc = stack_ptr.add(base + c);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
+                let rc = &stack[base + c];
 
-                    // Fast path for table with integer key
-                    if let Some(table_id) = (*rb).as_table_id() {
-                        if ttisinteger(rc) {
-                            let key = ivalue(rc);
-                            let table = lua_state
-                                .vm_mut()
-                                .object_pool
-                                .get_table(table_id)
-                                .ok_or(LuaError::RuntimeError)?;
+                // Fast path for table with integer key
+                if let Some(table_id) = rb.as_table_id() {
+                    if ttisinteger(rc) {
+                        let key = ivalue(rc);
+                        let table = lua_state
+                            .vm_mut()
+                            .object_pool
+                            .get_table(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
 
-                            let result = table.get_int(key).unwrap_or(LuaValue::nil());
-                            let ra = stack_ptr.add(base + a);
-                            *ra = result;
-                        } else {
-                            // General case: use key as LuaValue
-                            let key = *rc;
-                            let table = lua_state
-                                .vm_mut()
-                                .object_pool
-                                .get_table(table_id)
-                                .ok_or(LuaError::RuntimeError)?;
-
-                            let result = table.raw_get(&key).unwrap_or(LuaValue::nil());
-                            let ra = stack_ptr.add(base + a);
-                            *ra = result;
-                        }
+                        let result = table.get_int(key).unwrap_or(LuaValue::nil());
+                        stack[base + a] = result;
                     } else {
-                        // Not a table - should trigger metamethod
-                        // For now, return nil
-                        let ra = stack_ptr.add(base + a);
-                        setnilvalue(ra);
+                        // General case: use key as LuaValue
+                        let key = *rc;
+                        let table = lua_state
+                            .vm_mut()
+                            .object_pool
+                            .get_table(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+
+                        let result = table.raw_get(&key).unwrap_or(LuaValue::nil());
+                        stack[base + a] = result;
                     }
+                } else {
+                    // Not a table - should trigger metamethod
+                    // For now, return nil
+                    setnilvalue(&mut stack[base + a]);
                 }
             }
             OpCode::GetI => {
@@ -1122,39 +1067,33 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
 
-                    if let Some(table_id) = (*rb).as_table_id() {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
+                if let Some(table_id) = rb.as_table_id() {
+                    let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
 
-                        let result = table.get_int(c as i64).unwrap_or(LuaValue::nil());
+                    let result = table.get_int(c as i64).unwrap_or(LuaValue::nil());
 
-                        // Update frame.top FIRST if we're writing beyond current top
-                        // This must happen BEFORE we calculate the pointer and write,
-                        // because set_top might trigger reallocation
-                        let write_pos = base + a;
-                        let call_info = lua_state.get_call_info_mut(frame_idx);
-                        if write_pos >= call_info.top {
-                            call_info.top = write_pos + 1;
-                            // Also update lua_state's stack_top
-                            lua_state.set_top(write_pos + 1);
-                            // Refresh stack_ptr after potential reallocation
-                            stack_ptr = lua_state.stack_ptr_mut();
-                        }
-
-                        // NOW calculate pointer from fresh stack_ptr and write
-                        let ra = stack_ptr.add(base + a);
-                        *ra = result;
-                    } else {
-                        // Not a table - should trigger metamethod
-                        let ra = stack_ptr.add(base + a);
-                        setnilvalue(ra);
+                    // Update frame.top FIRST if we're writing beyond current top
+                    let write_pos = base + a;
+                    let call_info = lua_state.get_call_info_mut(frame_idx);
+                    if write_pos >= call_info.top {
+                        call_info.top = write_pos + 1;
+                        // Also update lua_state's stack_top
+                        lua_state.set_top(write_pos + 1);
                     }
+
+                    // Now write the result
+                    let stack = lua_state.stack_mut();
+                    stack[base + a] = result;
+                } else {
+                    // Not a table - should trigger metamethod
+                    setnilvalue(&mut stack[base + a]);
                 }
             }
             OpCode::GetField => {
@@ -1168,25 +1107,23 @@ fn execute_frame(
                     return Err(lua_state.error(format!("GETFIELD: invalid constant index {}", c)));
                 }
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let key = &constants[c];
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
+                let key = &constants[c];
 
-                    if let Some(table_id) = (*rb).as_table_id() {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
+                if let Some(table_id) = rb.as_table_id() {
+                    let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
 
-                        let result = table.raw_get(key).unwrap_or(LuaValue::nil());
-                        let ra = stack_ptr.add(base + a);
-                        *ra = result;
-                    } else {
-                        // Not a table
-                        let ra = stack_ptr.add(base + a);
-                        setnilvalue(ra);
-                    }
+                    let result = table.raw_get(key).unwrap_or(LuaValue::nil());
+                    let stack = lua_state.stack_mut();
+                    stack[base + a] = result;
+                } else {
+                    // Not a table
+                    setnilvalue(&mut stack[base + a]);
                 }
             }
             OpCode::SetTable => {
@@ -1196,45 +1133,43 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let rb = stack_ptr.add(base + b);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
+                let rb = &stack[base + b];
 
-                    // Get value (RK: register or constant)
-                    let value = if k {
-                        if c >= constants.len() {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("SETTABLE: invalid constant".to_string()));
-                        }
-                        constants[c]
-                    } else {
-                        let rc = stack_ptr.add(base + c);
-                        *rc
-                    };
-
-                    if let Some(table_id) = (*ra).as_table_id() {
-                        let key = *rb;
-
-                        // Fast path for integer key
-                        if ttisinteger(rb) {
-                            let int_key = ivalue(rb);
-                            let table = lua_state
-                                .vm_mut()
-                                .object_pool
-                                .get_table_mut(table_id)
-                                .ok_or(LuaError::RuntimeError)?;
-                            table.set_int(int_key, value);
-                        } else {
-                            let table = lua_state
-                                .vm_mut()
-                                .object_pool
-                                .get_table_mut(table_id)
-                                .ok_or(LuaError::RuntimeError)?;
-                            table.raw_set(key, value);
-                        }
+                // Get value (RK: register or constant)
+                let value = if k {
+                    if c >= constants.len() {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("SETTABLE: invalid constant".to_string()));
                     }
-                    // else: should trigger metamethod
+                    constants[c]
+                } else {
+                    stack[base + c]
+                };
+
+                if let Some(table_id) = ra.as_table_id() {
+                    let key = *rb;
+
+                    // Fast path for integer key
+                    if ttisinteger(rb) {
+                        let int_key = ivalue(rb);
+                        let table = lua_state
+                            .vm_mut()
+                            .object_pool
+                            .get_table_mut(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        table.set_int(int_key, value);
+                    } else {
+                        let table = lua_state
+                            .vm_mut()
+                            .object_pool
+                            .get_table_mut(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        table.raw_set(key, value);
+                    }
                 }
+                // else: should trigger metamethod
             }
             OpCode::SetI => {
                 // R[A][B] := RK(C) (integer key)
@@ -1243,31 +1178,29 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    // Get value (RK: register or constant)
-                    let value = if k {
-                        if c >= constants.len() {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("SETI: invalid constant".to_string()));
-                        }
-                        constants[c]
-                    } else {
-                        let rc = stack_ptr.add(base + c);
-                        *rc
-                    };
-
-                    if let Some(table_id) = (*ra).as_table_id() {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table_mut(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
-                        table.set_int(b as i64, value);
+                // Get value (RK: register or constant)
+                let value = if k {
+                    if c >= constants.len() {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("SETI: invalid constant".to_string()));
                     }
-                    // else: should trigger metamethod
+                    constants[c]
+                } else {
+                    stack[base + c]
+                };
+
+                if let Some(table_id) = ra.as_table_id() {
+                    let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table_mut(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
+                    table.set_int(b as i64, value);
                 }
+                // else: should trigger metamethod
             }
             OpCode::SetField => {
                 // R[A][K[B]:string] := RK(C)
@@ -1281,32 +1214,30 @@ fn execute_frame(
                     return Err(lua_state.error(format!("SETFIELD: invalid constant index {}", b)));
                 }
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
-                    let key = &constants[b];
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
+                let key = &constants[b];
 
-                    // Get value (RK: register or constant)
-                    let value = if k {
-                        if c >= constants.len() {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("SETFIELD: invalid constant".to_string()));
-                        }
-                        constants[c]
-                    } else {
-                        let rc = stack_ptr.add(base + c);
-                        *rc
-                    };
-
-                    if let Some(table_id) = (*ra).as_table_id() {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table_mut(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
-                        table.raw_set(*key, value);
+                // Get value (RK: register or constant)
+                let value = if k {
+                    if c >= constants.len() {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("SETFIELD: invalid constant".to_string()));
                     }
-                    // else: should trigger metamethod
+                    constants[c]
+                } else {
+                    stack[base + c]
+                };
+
+                if let Some(table_id) = ra.as_table_id() {
+                    let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table_mut(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
+                    table.raw_set(*key, value);
                 }
+                // else: should trigger metamethod
             }
             OpCode::Self_ => {
                 // R[A+1] := R[B]; R[A] := R[B][K[C]:string]
@@ -1319,66 +1250,72 @@ fn execute_frame(
                     return Err(lua_state.error(format!("SELF: invalid constant index {}", c)));
                 }
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
-                    let ra1 = ra.add(1);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
+                
+                // R[A+1] := R[B] (save object)
+                stack[base + a + 1] = *rb;
 
-                    // R[A+1] := R[B] (save object)
-                    *ra1 = *rb;
+                // R[A] := R[B][K[C]] (get method)
+                let key = &constants[c];
 
-                    // R[A] := R[B][K[C]] (get method)
-                    let key = &constants[c];
+                if let Some(table_id) = rb.as_table_id() {
+                    let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
 
-                    if let Some(table_id) = (*rb).as_table_id() {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
-
-                        let result = table.raw_get(key).unwrap_or(LuaValue::nil());
-                        *ra = result;
-                    } else if (*rb).is_string() {
-                        // For strings, check the string metatable
-                        let vm = lua_state.vm_mut();
-                        if let Some(string_mt) = &vm.string_mt {
-                            // Get __index from the metatable
-                            if let Some(mt_table_id) = string_mt.as_table_id() {
-                                let index_key = vm.create_string("__index");
-                                if let Some(mt) = vm.object_pool.get_table(mt_table_id) {
-                                    if let Some(index_value) = mt.raw_get(&index_key) {
-                                        // __index should be the string library table
-                                        if let Some(string_lib_id) = index_value.as_table_id() {
-                                            if let Some(string_lib) =
-                                                vm.object_pool.get_table(string_lib_id)
-                                            {
-                                                let result = string_lib
-                                                    .raw_get(key)
-                                                    .unwrap_or(LuaValue::nil());
-                                                *ra = result;
-                                            } else {
-                                                setnilvalue(ra);
-                                            }
+                    let result = table.raw_get(key).unwrap_or(LuaValue::nil());
+                    let stack = lua_state.stack_mut();
+                    stack[base + a] = result;
+                } else if rb.is_string() {
+                    // For strings, check the string metatable
+                    let vm = lua_state.vm_mut();
+                    if let Some(string_mt) = &vm.string_mt {
+                        // Get __index from the metatable
+                        if let Some(mt_table_id) = string_mt.as_table_id() {
+                            let index_key = vm.create_string("__index");
+                            if let Some(mt) = vm.object_pool.get_table(mt_table_id) {
+                                if let Some(index_value) = mt.raw_get(&index_key) {
+                                    // __index should be the string library table
+                                    if let Some(string_lib_id) = index_value.as_table_id() {
+                                        if let Some(string_lib) =
+                                            vm.object_pool.get_table(string_lib_id)
+                                        {
+                                            let result = string_lib
+                                                .raw_get(key)
+                                                .unwrap_or(LuaValue::nil());
+                                            let stack = lua_state.stack_mut();
+                                            stack[base + a] = result;
                                         } else {
-                                            setnilvalue(ra);
+                                            let stack = lua_state.stack_mut();
+                                            setnilvalue(&mut stack[base + a]);
                                         }
                                     } else {
-                                        setnilvalue(ra);
+                                        let stack = lua_state.stack_mut();
+                                        setnilvalue(&mut stack[base + a]);
                                     }
                                 } else {
-                                    setnilvalue(ra);
+                                    let stack = lua_state.stack_mut();
+                                    setnilvalue(&mut stack[base + a]);
                                 }
                             } else {
-                                setnilvalue(ra);
+                                let stack = lua_state.stack_mut();
+                                setnilvalue(&mut stack[base + a]);
                             }
                         } else {
-                            setnilvalue(ra);
+                            let stack = lua_state.stack_mut();
+                            setnilvalue(&mut stack[base + a]);
                         }
                     } else {
-                        // Not a table or string - should trigger metamethod
-                        setnilvalue(ra);
+                        let stack = lua_state.stack_mut();
+                        setnilvalue(&mut stack[base + a]);
                     }
+                } else {
+                    // Not a table or string - should trigger metamethod
+                    let stack = lua_state.stack_mut();
+                    setnilvalue(&mut stack[base + a]);
                 }
             }
             OpCode::Call => {
@@ -1393,8 +1330,7 @@ fn execute_frame(
                 // Delegate to call handler - returns FrameAction
                 match call::handle_call(lua_state, base, a, b, c) {
                     Ok(FrameAction::Continue) => {
-                        // IMPORTANT: function call may grow stack, refresh stack_ptr
-                        stack_ptr = lua_state.stack_ptr_mut();
+                        // Continue execution
                     }
                     other => return other,
                 }
@@ -1410,8 +1346,7 @@ fn execute_frame(
                 // Delegate to tailcall handler (returns FrameAction)
                 match call::handle_tailcall(lua_state, base, a, b) {
                     Ok(FrameAction::Continue) => {
-                        // IMPORTANT: tail call may grow stack, refresh stack_ptr
-                        stack_ptr = lua_state.stack_ptr_mut();
+                        // Continue execution
                     }
                     other => return other,
                 }
@@ -1421,17 +1356,15 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
 
-                    // l_isfalse: nil or false
-                    let is_false = (*rb).tt_ == LUA_VFALSE || (*rb).is_nil();
-                    if is_false {
-                        setbtvalue(ra);
-                    } else {
-                        setbfvalue(ra);
-                    }
+                // l_isfalse: nil or false
+                let is_false = rb.tt_ == LUA_VFALSE || rb.is_nil();
+                if is_false {
+                    setbtvalue(&mut stack[base + a]);
+                } else {
+                    setbfvalue(&mut stack[base + a]);
                 }
             }
             OpCode::ForLoop => {
@@ -1623,20 +1556,19 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = base + a;
 
-                    // Swap control and closing variables
-                    let temp = *ra.add(3); // closing
-                    *ra.add(3) = *ra.add(2); // control -> closing position
-                    *ra.add(2) = temp; // closing -> control position
+                // Swap control and closing variables
+                let temp = stack[ra + 3]; // closing
+                stack[ra + 3] = stack[ra + 2]; // control -> closing position
+                stack[ra + 2] = temp; // closing -> control position
 
-                    // TODO: Mark ra+2 as to-be-closed if not nil
-                    // For now, skip TBC handling
+                // TODO: Mark ra+2 as to-be-closed if not nil
+                // For now, skip TBC handling
 
-                    // Jump to loop end (+ Bx)
-                    pc += bx;
-                }
+                // Jump to loop end (+ Bx)
+                pc += bx;
             }
             OpCode::TForCall => {
                 // Generic for loop call
@@ -1647,9 +1579,10 @@ fn execute_frame(
 
                 // Get values before modifying stack
                 let ra_base = base + a;
-                let iterator = unsafe { *stack_ptr.add(ra_base) };
-                let state = unsafe { *stack_ptr.add(ra_base + 1) };
-                let control = unsafe { *stack_ptr.add(ra_base + 3) };
+                let (iterator, state, control) = {
+                    let stack = lua_state.stack_mut();
+                    (stack[ra_base], stack[ra_base + 1], stack[ra_base + 3])
+                };
 
                 // Setup call stack using safe API:
                 // ra+3: function (copy from ra)
@@ -1667,8 +1600,6 @@ fn execute_frame(
                 // Results: c (number of loop variables)
                 match call::handle_call(lua_state, base, a + 3, 3, c + 1) {
                     Ok(FrameAction::Continue) => {
-                        // IMPORTANT: iterator call may grow stack, refresh stack_ptr
-                        stack_ptr = lua_state.stack_ptr_mut();
                         // C function completed, results already in place
                         // Fall through to next instruction (TFORLOOP)
                     }
@@ -1681,22 +1612,21 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = base + a;
 
-                    // Check if ra+3 (new control value) is not nil
-                    if !(*ra.add(3)).is_nil() {
-                        // Continue loop: update control variable and jump back
-                        *ra.add(2) = *ra.add(3);
+                // Check if ra+3 (new control value) is not nil
+                if !stack[ra + 3].is_nil() {
+                    // Continue loop: update control variable and jump back
+                    stack[ra + 2] = stack[ra + 3];
 
-                        if bx > pc {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("TFORLOOP: invalid jump".to_string()));
-                        }
-                        pc -= bx;
+                    if bx > pc {
+                        lua_state.set_frame_pc(frame_idx, pc as u32);
+                        return Err(lua_state.error("TFORLOOP: invalid jump".to_string()));
                     }
-                    // else: exit loop (control variable is nil)
+                    pc -= bx;
                 }
+                // else: exit loop (control variable is nil)
             }
             OpCode::MmBin => {
                 // Call metamethod over R[A] and R[B]
@@ -2147,24 +2077,23 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let ra = stack_ptr.add(base + a);
+                let stack = lua_state.stack_mut();
+                let ra = &stack[base + a];
 
-                    // l_isfalse: nil or false
-                    let is_false =
-                        (*ra).is_nil() || ((*ra).is_boolean() && (*ra).tt_ == LUA_VFALSE);
-                    let cond = !is_false;
+                // l_isfalse: nil or false
+                let is_false =
+                    ra.is_nil() || (ra.is_boolean() && ra.tt_ == LUA_VFALSE);
+                let cond = !is_false;
 
-                    if cond != k {
-                        pc += 1; // Skip next instruction (JMP)
-                    } else {
-                        // Execute next instruction (must be JMP)
-                        let next_instr = *chunk.code.get_unchecked(pc);
-                        debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
-                        pc += 1; // Move past the JMP
-                        let sj = next_instr.get_sj();
-                        pc = (pc as i32 + sj) as usize; // Execute the jump
-                    }
+                if cond != k {
+                    pc += 1; // Skip next instruction (JMP)
+                } else {
+                    // Execute next instruction (must be JMP)
+                    let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                    debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
+                    pc += 1; // Move past the JMP
+                    let sj = next_instr.get_sj();
+                    pc = (pc as i32 + sj) as usize; // Execute the jump
                 }
             }
 
@@ -2174,24 +2103,22 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                unsafe {
-                    let rb = stack_ptr.add(base + b);
-                    let is_false =
-                        (*rb).is_nil() || ((*rb).is_boolean() && (*rb).tt_ == LUA_VFALSE);
+                let stack = lua_state.stack_mut();
+                let rb = &stack[base + b];
+                let is_false =
+                    rb.is_nil() || (rb.is_boolean() && rb.tt_ == LUA_VFALSE);
 
-                    if is_false == k {
-                        pc += 1; // Condition failed - skip next instruction (JMP)
-                    } else {
-                        // Condition succeeded - copy value and EXECUTE next instruction (must be JMP)
-                        let ra = stack_ptr.add(base + a);
-                        *ra = *rb;
-                        // donextjump: fetch and execute next JMP instruction
-                        let next_instr = *chunk.code.get_unchecked(pc);
-                        debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
-                        pc += 1; // Move past the JMP instruction
-                        let sj = next_instr.get_sj();
-                        pc = (pc as i32 + sj) as usize; // Execute the jump
-                    }
+                if is_false == k {
+                    pc += 1; // Condition failed - skip next instruction (JMP)
+                } else {
+                    // Condition succeeded - copy value and EXECUTE next instruction (must be JMP)
+                    stack[base + a] = *rb;
+                    // donextjump: fetch and execute next JMP instruction
+                    let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                    debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
+                    pc += 1; // Move past the JMP instruction
+                    let sj = next_instr.get_sj();
+                    pc = (pc as i32 + sj) as usize; // Execute the jump
                 }
             }
 
