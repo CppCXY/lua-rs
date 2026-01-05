@@ -93,11 +93,11 @@ fn create_stdout(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file = LuaFile::stdout();
     let file_mt = create_file_metatable(l)?;
     let userdata = l.create_userdata(LuaUserdata::new(file));
-    if let Some(ud_id) = userdata.as_userdata_id() {
-        if let Some(ud) = l.get_userdata_mut(&userdata) {
-            ud.set_metatable(file_mt);
-        }
+
+    if let Some(ud) = l.get_userdata_mut(&userdata) {
+        ud.set_metatable(file_mt);
     }
+
     Ok(userdata)
 }
 

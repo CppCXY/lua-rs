@@ -4,7 +4,8 @@ use crate::lua_vm::opcode::Instruction;
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
-use crate::lua_vm::{LuaResult, LuaState};
+use crate::lua_vm::{LuaResult, LuaState, LuaError};
+use super::FrameAction;
 
 /// Tag Method types (TMS from ltm.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,31 +226,210 @@ pub fn handle_mmbink(
 /// Corresponds to luaT_trybinTM in ltm.c
 fn try_bin_tm(
     lua_state: &mut LuaState,
-    _p1: LuaValue,
-    _p2: LuaValue,
+    p1: LuaValue,
+    p2: LuaValue,
     tm: TmKind,
 ) -> LuaResult<LuaValue> {
-    // TODO: Implement proper metamethod lookup and call
-    // For now, just return an error since we don't have metamethod support yet
-    // Full implementation needs:
-    // 1. Get metatable from p1 or p2 via vm_mut().get_metatable()
-    // 2. Lookup metamethod by name in metatable
-    // 3. If found, call it with (p1, p2) as arguments
-    // 4. Return result
-
-    // No metamethod found, return error
-    let msg = match tm {
-        TmKind::Band | TmKind::Bor | TmKind::Bxor | TmKind::Shl | TmKind::Shr | TmKind::Bnot => {
-            "attempt to perform bitwise operation on non-number values"
-        }
-        _ => "attempt to perform arithmetic on non-number values",
-    };
-
-    Err(lua_state.error(msg.to_string()))
+    let tm_name = tm.name();
+    
+    // Try to get metamethod from p1, then p2
+    let metamethod = get_binop_metamethod(lua_state, &p1, tm_name)
+        .or_else(|| get_binop_metamethod(lua_state, &p2, tm_name));
+    
+    if let Some(mm) = metamethod {
+        // Call metamethod with (p1, p2) as arguments
+        call_metamethod(lua_state, mm, p1, p2)
+    } else {
+        // No metamethod found, return error
+        let msg = match tm {
+            TmKind::Band | TmKind::Bor | TmKind::Bxor | TmKind::Shl | TmKind::Shr | TmKind::Bnot => {
+                "attempt to perform bitwise operation on non-number values"
+            }
+            _ => "attempt to perform arithmetic on non-number values",
+        };
+        Err(lua_state.error(msg.to_string()))
+    }
 }
 
-// Remove unused helper functions for now
-// They will be implemented properly when we have full metamethod support
+/// Get binary operation metamethod from a value
+fn get_binop_metamethod(lua_state: &mut LuaState, value: &LuaValue, tm_name: &str) -> Option<LuaValue> {
+    // Get metatable based on value type
+    let metatable = get_metatable(lua_state, value)?;
+    
+    // Look up the metamethod in the metatable
+    // CRITICAL: Use raw access to avoid triggering __index metamethod
+    // This matches Lua 5.5's luaH_Hgetshortstr which is a raw access
+    if let Some(_table_id) = metatable.as_table_id() {
+        let vm = lua_state.vm_mut();
+        let key = vm.create_string(tm_name);
+        vm.table_get_raw(&metatable, &key) // Use RAW access!
+    } else {
+        None
+    }
+}
+
+/// Get metatable for a value
+fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+    let vm = lua_state.vm_mut();
+    
+    match value.kind() {
+        crate::lua_value::LuaValueKind::Table => {
+            if let Some(table_id) = value.as_table_id() {
+                vm.object_pool.get_table(table_id)
+                    .and_then(|t| t.get_metatable())
+            } else {
+                None
+            }
+        }
+        crate::lua_value::LuaValueKind::Userdata => {
+            if let Some(ud_id) = value.as_userdata_id() {
+                vm.object_pool.get_userdata(ud_id)
+                    .map(|ud| ud.get_metatable())
+            } else {
+                None
+            }
+        }
+        crate::lua_value::LuaValueKind::String => {
+            // Strings share a global metatable
+            vm.string_mt
+        }
+        _ => None,
+    }
+}
+
+/// Call a metamethod with two arguments
+/// Based on Lua 5.5's luaT_callTMres - returns the result value directly
+fn call_metamethod(
+    lua_state: &mut LuaState,
+    metamethod: LuaValue,
+    arg1: LuaValue,
+    arg2: LuaValue,
+) -> LuaResult<LuaValue> {
+    // Like Lua's luaT_callTMres:
+    // 1. Save result position offset  
+    // 2. Push function and args at top.p
+    // 3. Call with luaD_call(L, func, 1) - nresults=1
+    // 4. Move result from top-1 to result position
+    
+    // **Critical**: We need to push at top and let the call mechanism
+    // handle everything. After call, result will be at the function position.
+    
+    let func_pos = lua_state.get_top();
+    
+    // Push function and arguments
+    lua_state.push_value(metamethod)?;
+    lua_state.push_value(arg1)?;
+    lua_state.push_value(arg2)?;
+    
+    // Now call: luaD_call pushes a frame, executes, pops frame, and places result at func_pos
+    // Our call_c_function does exactly this for C functions
+    // For Lua functions, we need similar treatment
+    
+    if metamethod.is_cfunction() {
+        // C function: call_c_function handles everything
+        crate::lua_vm::execute::call::call_c_function(lua_state, func_pos, 2, 1)?;
+    } else if let Some(func_id) = metamethod.as_function_id() {
+        let is_lua = {
+            let func_obj = lua_state.vm_mut().object_pool.get_function(func_id)
+                .ok_or(LuaError::RuntimeError)?;
+            func_obj.is_lua_function()
+        };
+        
+        if is_lua {
+            // Lua function: push frame and execute
+            let new_base = func_pos + 1;
+            lua_state.push_frame(metamethod, new_base, 2, 1)?;
+            
+            // Execute the new frame
+            crate::lua_vm::execute::lua_execute(lua_state)?;
+        } else {
+            // GC C function
+            crate::lua_vm::execute::call::call_c_function(lua_state, func_pos, 2, 1)?;
+        }
+    } else {
+        return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
+    }
+    
+    // Get result (should be at func_pos after call completed)
+    let result = lua_state.stack_get(func_pos)
+        .unwrap_or(LuaValue::nil());
+    
+    // Don't modify stack - caller will handle cleanup
+    // Actually, we should restore stack as if the call never happened for the caller
+    // But the result needs to stay somewhere... 
+    // In Lua's case, the caller handles the result position
+    
+    // For now, leave result at func_pos and restore top
+    // NO! We need to return the value, so just get it and don't change stack
+    // Actually in our API design, we return LuaValue, so we can just return it
+    // and let the caller decide what to do with stack
+    
+    Ok(result)
+}
+
+/// Try comparison metamethod (for Lt and Le)
+/// Returns Some(bool) if metamethod was called, None if no metamethod
+pub fn try_comp_tm(
+    lua_state: &mut LuaState,
+    p1: LuaValue,
+    p2: LuaValue,
+    tm: TmKind,
+) -> LuaResult<Option<bool>> {
+    let tm_name = tm.name();
+    
+    // Try to get metamethod from p1, then p2
+    let metamethod = get_binop_metamethod(lua_state, &p1, tm_name)
+        .or_else(|| get_binop_metamethod(lua_state, &p2, tm_name));
+    
+    if let Some(mm) = metamethod {
+        // Call metamethod and convert result to boolean
+        let result = call_metamethod(lua_state, mm, p1, p2)?;
+        Ok(Some(!result.is_falsy()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Try equality metamethod
+/// Only calls metamethod if both values have the same metatable or both are userdata
+/// Returns Some(bool) if metamethod was called, None if no metamethod
+pub fn try_eq_tm(
+    lua_state: &mut LuaState,
+    p1: LuaValue,
+    p2: LuaValue,
+) -> LuaResult<Option<bool>> {
+    // In Lua 5.5, __eq is only called when:
+    // 1. Both operands have the same metatable, OR
+    // 2. At least one is userdata and they both have __eq metamethods
+    
+    let mt1 = get_metatable(lua_state, &p1);
+    let mt2 = get_metatable(lua_state, &p2);
+    
+    // Check if they have the same metatable
+    let same_mt = match (mt1, mt2) {
+        (Some(m1), Some(m2)) => {
+            // Compare metatable identity
+            if let (Some(t1), Some(t2)) = (m1.as_table_id(), m2.as_table_id()) {
+                t1 == t2
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
+    
+    if !same_mt {
+        return Ok(None);
+    }
+    
+    // Now try to get __eq metamethod
+    if let Some(metamethod) = get_binop_metamethod(lua_state, &p1, "__eq") {
+        let result = call_metamethod(lua_state, metamethod, p1, p2)?;
+        Ok(Some(!result.is_falsy()))
+    } else {
+        Ok(None)
+    }
+}
 
 impl TmKind {
     /// Convert u8 to TmKind

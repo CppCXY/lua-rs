@@ -1793,12 +1793,22 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                let stack = lua_state.stack_mut();
-                let ra = stack[base + a];
-                let rb = stack[base + b];
-
-                // Simple equality check (TODO: metamethod)
-                let cond = ra.raw_equal(&rb, &lua_state.vm_mut().object_pool);
+                let (ra, rb) = {
+                    let stack = lua_state.stack_mut();
+                    (stack[base + a], stack[base + b])
+                };
+                
+                // First try raw equality
+                let mut cond = ra.raw_equal(&rb, &lua_state.vm_mut().object_pool);
+                
+                // If not equal, try metamethod
+                if !cond {
+                    match metamethod::try_eq_tm(lua_state, ra, rb)? {
+                        Some(result) => cond = result,
+                        None => {} // No metamethod, keep cond = false
+                    }
+                }
+                
                 if cond != k {
                     pc += 1; // Condition failed - skip next instruction
                 }
@@ -1841,7 +1851,17 @@ fn execute_frame(
                             false
                         }
                     } else {
-                        false // TODO: metamethod
+                        // Try metamethod
+                        let va = *ra;
+                        let vb = *rb;
+                        drop(stack); // Release borrow
+                        
+                        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
+                            Some(result) => result,
+                            None => {
+                                return Err(lua_state.error("attempt to compare non-comparable values".to_string()));
+                            }
+                        }
                     }
                 };
 
@@ -1887,7 +1907,17 @@ fn execute_frame(
                             false
                         }
                     } else {
-                        false // TODO: metamethod
+                        // Try metamethod
+                        let va = *ra;
+                        let vb = *rb;
+                        drop(stack); // Release borrow
+                        
+                        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
+                            Some(result) => result,
+                            None => {
+                                return Err(lua_state.error("attempt to compare non-comparable values".to_string()));
+                            }
+                        }
                     }
                 };
 
