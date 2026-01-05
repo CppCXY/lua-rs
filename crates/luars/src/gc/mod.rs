@@ -203,7 +203,7 @@ pub struct GcStats {
 impl GC {
     pub fn new() -> Self {
         GC {
-            gc_debt: -(8 * 1024), // Start with 8KB credit (LUAI_GCPAUSE in Lua)
+            gc_debt: 0, // Start with 0 debt, will be set after first allocation
             total_bytes: 0,
             gc_marked: 0,
             gc_majorminor: 0,
@@ -213,12 +213,12 @@ impl GC {
             gc_emergency: false,
             gc_stopem: false,
             gc_params: [
-                DEFAULT_MINORMUL,
-                DEFAULT_MAJORMINOR,
-                DEFAULT_MINORMAJOR,
-                DEFAULT_PAUSE,
-                DEFAULT_STEPMUL,
-                DEFAULT_STEPSIZE,
+                DEFAULT_PAUSE,      // PAUSE = 0
+                DEFAULT_STEPMUL,    // STEPMUL = 1
+                DEFAULT_STEPSIZE,   // STEPSIZE = 2
+                DEFAULT_MINORMUL,   // MINORMUL = 3
+                DEFAULT_MINORMAJOR, // MINORMAJOR = 4
+                DEFAULT_MAJORMINOR, // MAJORMINOR = 5
             ],
             gray: Vec::with_capacity(128),
             grayagain: Vec::with_capacity(64),
@@ -245,6 +245,9 @@ impl GC {
     pub fn record_deallocation(&mut self, size: usize) {
         let size_signed = size as isize;
         self.total_bytes = self.total_bytes.saturating_sub(size_signed);
+        // When freeing memory, increase debt (less memory = further from collection)
+        // This matches Lua 5.5's behavior where debt = threshold - total_bytes
+        self.gc_debt += size_signed;
         self.stats.bytes_freed += size;
     }
 

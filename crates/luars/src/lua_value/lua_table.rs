@@ -41,6 +41,7 @@ const LOG_2: [u8; 256] = [
 /// Hash table节点
 ///
 /// 保持与Lua C一致的结构，但使用struct而非union (Rust安全)
+/// 添加hash缓存以避免频繁访问ObjectPool
 #[derive(Clone, Copy)]
 pub struct Node {
     /// 节点的value
@@ -54,6 +55,9 @@ pub struct Node {
 
     /// Key的值
     pub key_val: Value,
+    
+    /// 缓存的hash值(用于快速比较和mainposition计算)
+    pub key_hash: u64,
 }
 
 impl Node {
@@ -65,6 +69,7 @@ impl Node {
             key_tt: LUA_TDEADKEY,
             next: -1,
             key_val: Value { i: 0 },
+            key_hash: 0,
         }
     }
 
@@ -91,9 +96,10 @@ impl Node {
 
     /// 设置key
     #[inline(always)]
-    pub fn set_key(&mut self, key: &LuaValue) {
+    pub fn set_key(&mut self, key: &LuaValue, key_hash: u64) {
         self.key_val = key.value_;
         self.key_tt = key.tt_;
+        self.key_hash = key_hash;
     }
 
     /// 检查key是否为integer
@@ -275,42 +281,36 @@ impl LuaTable {
         // |1 确保除数是奇数，避免偶数hash值产生冲突
         let modulo = (sizenode - 1) | 1;
 
-        match key.kind() {
-            LuaValueKind::Integer => {
-                // hashint: 对integer取模
-                // 使用整数的位表示作为hash值（与Lua ltable.c的hashint一致）
-                let i = unsafe { key.value_.i };
-                (i as usize) % modulo
-            }
-            LuaValueKind::Float => {
-                // hashfloat: 对float取模，使用位表示作为hash
-                let n = unsafe { key.value_.n };
-                let bits = n.to_bits();
-                (bits as usize) % modulo
-            }
+        // Compute hash for the key
+        let hash = match key.kind() {
+            LuaValueKind::Integer => unsafe { key.value_.i as u64 },
+            LuaValueKind::Float => unsafe { key.value_.n.to_bits() },
             LuaValueKind::String => {
-                // 使用LuaString的hash
+                // Use cached hash from LuaString
                 let string_id = key.as_string_id().unwrap();
                 if let Some(s) = unsafe { &*self.object_pool }.get_string(string_id) {
-                    (s.hash as usize) % modulo
+                    s.hash
                 } else {
-                    // 字符串不存在，使用ID作为hash
-                    (string_id.raw() as usize) % modulo
+                    string_id.raw() as u64
                 }
             }
-            LuaValueKind::Boolean => {
-                let b = unsafe { key.value_.i }; // 布尔值存储在i字段
-                (b as usize) % modulo
-            }
-            LuaValueKind::Table => {
-                let id = unsafe { key.value_.gc_id };
-                (id as usize) % modulo
-            }
-            _ => {
-                let hash = unsafe { key.value_.i };
-                ((hash as u64) as usize) % modulo
-            }
+            LuaValueKind::Boolean => unsafe { key.value_.i as u64 },
+            LuaValueKind::Table => unsafe { key.value_.gc_id as u64 },
+            _ => unsafe { key.value_.i as u64 },
+        };
+
+        (hash as usize) % modulo
+    }
+    
+    /// Get mainposition from cached hash (faster version)
+    #[inline(always)]
+    fn mainposition_from_hash(&self, hash: u64) -> usize {
+        let sizenode = self.sizenode();
+        if sizenode == 0 {
+            return 0;
         }
+        let modulo = (sizenode - 1) | 1;
+        (hash as usize) % modulo
     }
 
     /// 在hash part中查找key
@@ -342,31 +342,6 @@ impl LuaTable {
     }
 
     /// 在hash part中查找key (可变版本)
-    fn getnode_mut<'a>(&'a mut self, key: &LuaValue) -> Option<&'a mut Node> {
-        if self.is_dummy() {
-            return None;
-        }
-
-        let mp = self.mainposition(key);
-        let mut idx = mp;
-        let object_pool = unsafe { &*self.object_pool };
-        loop {
-            let node_key = self.nodes[idx].key();
-            // SAFETY: pool指针来自caller，在调用期间保持有效
-            if !self.nodes[idx].is_dead() && node_key.raw_equal(key, object_pool) {
-                return Some(&mut self.nodes[idx]);
-            }
-
-            let next = self.nodes[idx].next;
-            if next < 0 {
-                break;
-            }
-            idx = next as usize;
-        }
-
-        None
-    }
-
     /// 查找第一个空闲节点
     fn get_free_pos(&self) -> Option<usize> {
         if self.is_dummy() {
@@ -407,7 +382,7 @@ impl LuaTable {
             if !old_node.is_dead() && !old_node.is_empty() {
                 let key = old_node.key();
                 let value = old_node.value;
-                self.set_hash_value(&key, value);
+                self.insert_new_key(&key, value);
             }
         }
     }
@@ -470,7 +445,7 @@ impl LuaTable {
 
         // 其他情况：Set in hash part
         let key_val = LuaValue::integer(key);
-        self.set_hash_value(&key_val, value);
+        self.insert_new_key_or_update(&key_val, value);
     }
 
     /// Get value by key
@@ -504,8 +479,108 @@ impl LuaTable {
             self.set_int(i, value);
             return;
         }
-        // Set in hash part for other key types
-        self.set_hash_value(&key, value);
+        
+        // OPTIMIZATION: For new keys, skip the lookup and insert directly
+        // This matches Lua 5.5's behavior where luaH_set calls luaH_newkey
+        // which uses insertkey() that assumes key doesn't exist
+        // The VM layer should ensure we don't insert duplicate keys
+        self.insert_new_key_or_update(&key, value);
+    }
+    
+    /// Insert new key or update existing one
+    /// This is optimized to do only one hash lookup
+    fn insert_new_key_or_update(&mut self, key: &LuaValue, value: LuaValue) {
+        if self.is_dummy() {
+            self.resize_hash(4);
+        }
+        
+        // Compute hash once at the beginning
+        let key_hash = self.compute_hash_for_key(key);
+        let mp = self.mainposition_from_hash(key_hash);
+        let pool = unsafe { &*self.object_pool };
+        
+        // Check mainposition first
+        if self.nodes[mp].is_dead() {
+            // Empty slot, insert here
+            self.nodes[mp].set_key(key, key_hash);
+            self.nodes[mp].value = value;
+            self.nodes[mp].next = -1;
+            return;
+        }
+        
+        // Check if key already exists in the chain
+        let mut idx = mp;
+        loop {
+            // Fast path: compare cached hash first
+            if !self.nodes[idx].is_dead() && self.nodes[idx].key_hash == key_hash {
+                let node_key = self.nodes[idx].key();
+                if node_key.raw_equal(key, pool) {
+                    // Key exists, update value
+                    self.nodes[idx].value = value;
+                    return;
+                }
+            }
+            let next = self.nodes[idx].next;
+            if next < 0 {
+                break;
+            }
+            idx = next as usize;
+        }
+        
+        // Key doesn't exist, need to insert
+        let free_pos = match self.get_free_pos() {
+            Some(pos) => pos,
+            None => {
+                // Need rehash
+                let new_size = self.sizenode() * 2;
+                self.resize_hash(new_size);
+                self.insert_new_key_or_update(key, value);
+                return;
+            }
+        };
+        
+        // Insert logic (same as before)
+        let main_node_key = self.nodes[mp].key();
+        let other_mp = self.mainposition(&main_node_key);
+        
+        if other_mp == mp {
+            // Current node in correct position, chain new key
+            self.nodes[free_pos].set_key(key, key_hash);
+            self.nodes[free_pos].value = value;
+            self.nodes[free_pos].next = self.nodes[mp].next;
+            self.nodes[mp].next = free_pos as i32;
+        } else {
+            // Move current node, insert new key at mainposition
+            let mut prev_idx = other_mp;
+            while self.nodes[prev_idx].next as usize != mp {
+                prev_idx = self.nodes[prev_idx].next as usize;
+            }
+            self.nodes[free_pos] = self.nodes[mp];
+            self.nodes[prev_idx].next = free_pos as i32;
+            self.nodes[mp].set_key(key, key_hash);
+            self.nodes[mp].value = value;
+            self.nodes[mp].next = -1;
+        }
+    }
+    
+    /// Compute hash for a key using object pool
+    #[inline(always)]
+    fn compute_hash_for_key(&self, key: &LuaValue) -> u64 {
+        match key.kind() {
+            LuaValueKind::Integer => unsafe { key.value_.i as u64 },
+            LuaValueKind::Float => unsafe { key.value_.n.to_bits() },
+            LuaValueKind::String => {
+                let string_id = key.as_string_id().unwrap();
+                if let Some(s) = unsafe { &*self.object_pool }.get_string(string_id) {
+                    s.hash
+                } else {
+                    string_id.raw() as u64
+                }
+            }
+            LuaValueKind::Boolean => unsafe { key.value_.i as u64 },
+            LuaValueKind::Table => unsafe { key.value_.gc_id as u64 },
+            _ => unsafe { key.value_.i as u64 },
+        }
     }
 
     /// Set value by key (strict version for kcache - no numeric type conversion)
@@ -519,24 +594,19 @@ impl LuaTable {
                 return;
             }
         }
-        // Set in hash part for all other keys (including floats)
-        self.set_hash_value(&key, value);
+        
+        // Set in hash part
+        self.insert_new_key_or_update(&key, value);
     }
 
-    /// Set value in hash part
-    fn set_hash_value(&mut self, key: &LuaValue, value: LuaValue) {
+    /// Insert a new key into hash part (key must not exist)
+    /// This is like insertkey() in Lua 5.5 - assumes key doesn't exist
+    fn insert_new_key(&mut self, key: &LuaValue, value: LuaValue) {
         if self.is_dummy() {
             // 扩展hash part：分配初始大小为4的hash表
             self.resize_hash(4);
         }
 
-        // 查找已存在的key
-        if let Some(node) = self.getnode_mut(key) {
-            node.value = value;
-            return;
-        }
-
-        // Key不存在，需要插入新key
         // 查找空闲位置
         let free_pos = match self.get_free_pos() {
             Some(pos) => pos,
@@ -544,31 +614,28 @@ impl LuaTable {
                 // 需要rehash：扩大一倍
                 let new_size = self.sizenode() * 2;
                 self.resize_hash(new_size);
-                // 重新设置值
-                self.set_hash_value(key, value);
+                // 重新插入（resize_hash后表是空的，需要重新插入）
+                self.insert_new_key(key, value);
                 return;
             }
         };
 
-        // 获取mainposition
-        let mp = self.mainposition(key);
+        // Compute hash once
+        let key_hash = self.compute_hash_for_key(key);
+        let mp = self.mainposition_from_hash(key_hash);
         let main_node_key = self.nodes[mp].key();
-        let pool = unsafe { &*self.object_pool };
         if self.nodes[mp].is_dead() {
             // mainposition是空的，直接插入
-            self.nodes[mp].set_key(key);
+            self.nodes[mp].set_key(key, key_hash);
             self.nodes[mp].value = value;
             self.nodes[mp].next = -1;
-        } else if main_node_key.raw_equal(key, pool) {
-            // Key已存在（理论上不应该到这里，因为上面已经处理了）
-            self.nodes[mp].value = value;
         } else {
             // Collision: mainposition被占用
             let other_mp = self.mainposition(&main_node_key);
 
             if other_mp == mp {
                 // 当前节点在正确位置，新key插入free_pos，链到mp
-                self.nodes[free_pos].set_key(key);
+                self.nodes[free_pos].set_key(key, key_hash);
                 self.nodes[free_pos].value = value;
                 self.nodes[free_pos].next = self.nodes[mp].next;
                 self.nodes[mp].next = free_pos as i32;
@@ -585,7 +652,7 @@ impl LuaTable {
                 // 更新链表
                 self.nodes[prev_idx].next = free_pos as i32;
                 // 在mp位置插入新key
-                self.nodes[mp].set_key(key);
+                self.nodes[mp].set_key(key, key_hash);
                 self.nodes[mp].value = value;
                 self.nodes[mp].next = -1;
             }
