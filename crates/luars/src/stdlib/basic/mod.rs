@@ -835,7 +835,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
-
 /// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
 fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let chunk_val = l

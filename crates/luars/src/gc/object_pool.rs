@@ -1196,11 +1196,14 @@ impl ObjectPool {
 
     #[inline]
     pub fn create_thread(&mut self, thread: LuaState) -> ThreadId {
+        let data = Rc::new(RefCell::new(thread));
         let gc_thread = GcThread {
             header: GcHeader::default(),
-            data: Rc::new(RefCell::new(thread)),
+            data: data.clone(),
         };
-        ThreadId(self.threads.alloc(gc_thread))
+        let id = ThreadId(self.threads.alloc(gc_thread));
+        data.borrow_mut().set_thread_id(id);
+        id
     }
 
     #[inline(always)]

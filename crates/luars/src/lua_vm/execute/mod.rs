@@ -1818,7 +1818,9 @@ fn execute_frame(
 
                     if ttisinteger(ra) && ttisinteger(rb) {
                         ivalue(ra) < ivalue(rb)
-                    } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
+                    } else if (ttisinteger(ra) || ttisfloat(ra))
+                        && (ttisinteger(rb) || ttisfloat(rb))
+                    {
                         let mut na = 0.0;
                         let mut nb = 0.0;
                         tonumberns(ra, &mut na);
@@ -1829,9 +1831,11 @@ fn execute_frame(
                         let sid_a = ra.tsvalue();
                         let sid_b = rb.tsvalue();
                         drop(stack); // Release stack borrow
-                        
+
                         let pool = &lua_state.vm_mut().object_pool;
-                        if let (Some(sa), Some(sb)) = (pool.get_string(sid_a), pool.get_string(sid_b)) {
+                        if let (Some(sa), Some(sb)) =
+                            (pool.get_string(sid_a), pool.get_string(sid_b))
+                        {
                             sa.as_str() < sb.as_str()
                         } else {
                             false
@@ -1860,7 +1864,9 @@ fn execute_frame(
 
                     if ttisinteger(ra) && ttisinteger(rb) {
                         ivalue(ra) <= ivalue(rb)
-                    } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
+                    } else if (ttisinteger(ra) || ttisfloat(ra))
+                        && (ttisinteger(rb) || ttisfloat(rb))
+                    {
                         let mut na = 0.0;
                         let mut nb = 0.0;
                         tonumberns(ra, &mut na);
@@ -1870,10 +1876,12 @@ fn execute_frame(
                         // String comparison - copy IDs first
                         let sid_a = ra.tsvalue();
                         let sid_b = rb.tsvalue();
-                        drop(stack); // Release stack borrow
-                        
+                        let _ = stack;
+
                         let pool = &lua_state.vm_mut().object_pool;
-                        if let (Some(sa), Some(sb)) = (pool.get_string(sid_a), pool.get_string(sid_b)) {
+                        if let (Some(sa), Some(sb)) =
+                            (pool.get_string(sid_a), pool.get_string(sid_b))
+                        {
                             sa.as_str() <= sb.as_str()
                         } else {
                             false
@@ -2192,18 +2200,18 @@ fn execute_frame(
                     // After buildhiddenargs, varargs are still at their original position
                     // Original layout: func arg1 arg2 ... argN
                     // where arg1..argP are fixed params, arg(P+1)..argN are varargs
-                    // 
-                    // After buildhiddenargs: 
+                    //
+                    // After buildhiddenargs:
                     // [old_func_pos is cleared] vararg1 vararg2 ... newfunc fixparam1 fixparam2 ...
-                    // 
+                    //
                     // So varargs start at: old_func_pos + 1 + nfixparams
                     // old_func_pos = newfunc_pos - totalargs - 1
                     // where newfunc_pos = base - 1
-                    
+
                     // Get nfixparams from chunk
                     let nfixparams = chunk.param_count;
                     let totalargs = nfixparams + nargs;
-                    
+
                     let new_func_pos = base - 1;
                     let old_func_pos = if totalargs > 0 && new_func_pos > totalargs {
                         new_func_pos - totalargs - 1
@@ -2230,7 +2238,7 @@ fn execute_frame(
                         let table_val = stack[base + b];
                         table_val.as_table_id()
                     };
-                    
+
                     if let Some(table_id) = table_id {
                         // Collect values from table first
                         let mut values = Vec::with_capacity(touse);
@@ -2300,7 +2308,10 @@ fn execute_frame(
 
                 // Check if R[C] is string "n" (get vararg count)
                 if let Some(string_id) = rc.as_string_id() {
-                    let is_n = lua_state.vm_mut().object_pool.get_string(string_id)
+                    let is_n = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_string(string_id)
                         .map(|s| s.as_str() == "n")
                         .unwrap_or(false);
                     if is_n {
@@ -2404,11 +2415,12 @@ fn execute_frame(
                 if nextra > 0 {
                     // Ensure stack has enough space for buildhiddenargs
                     // It needs: func_pos + totalargs + 1 (for func copy) + nfixparams (for fixparam copies)
-                    let required_size = func_pos + totalargs + 1 + nfixparams + chunk.max_stack_size;
+                    let required_size =
+                        func_pos + totalargs + 1 + nfixparams + chunk.max_stack_size;
                     if lua_state.stack_len() < required_size {
-                        lua_state.grow_stack(required_size)?;  // grow_stack takes target size, not amount to grow!
+                        lua_state.grow_stack(required_size)?; // grow_stack takes target size, not amount to grow!
                     }
-                    
+
                     let new_base = buildhiddenargs(
                         lua_state, frame_idx, &chunk, totalargs, nfixparams, nextra,
                     )?;

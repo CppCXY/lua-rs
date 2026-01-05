@@ -253,13 +253,13 @@ impl LuaVM {
         // Create a metatable with __index pointing to the string library
         let mt_id = self.object_pool.create_table(0, 1);
         let mt_value = LuaValue::table(mt_id);
-        
+
         // Set __index to point to the string library
         let index_key = self.create_string("__index");
         if let Some(mt) = self.object_pool.get_table_mut(mt_id) {
             mt.raw_set(index_key, string_lib_table);
         }
-        
+
         // Store in the VM
         self.string_mt = Some(mt_value);
     }
@@ -294,6 +294,10 @@ impl LuaVM {
         let Some(thread_id) = thread_val.as_thread_id() else {
             return Err(self.error("invalid thread".to_string()));
         };
+
+        if thread_id.is_main() {
+            return Err(self.error("cannot resume main thread".to_string()));
+        }
 
         // Get thread's Rc<RefCell<LuaState>>
         let Some(thread_rc) = self.object_pool.get_thread(thread_id) else {
@@ -787,7 +791,7 @@ impl LuaVM {
     fn check_gc_slow(&mut self) {
         // Collect roots for GC (like luaC_step in Lua 5.5)
         let roots = self.collect_roots();
-        
+
         // Perform GC step with complete root set
         self.gc.step(&roots, &mut self.object_pool);
     }
@@ -835,7 +839,7 @@ impl LuaVM {
     fn full_gc(&mut self, is_emergency: bool) {
         let old_emergency = self.gc.gc_emergency;
         self.gc.gc_emergency = is_emergency;
-        
+
         // Dispatch based on GC mode (from luaC_fullgc)
         match self.gc.gc_kind {
             crate::gc::GcKind::GenMinor => {
@@ -851,7 +855,7 @@ impl LuaVM {
                 self.gc.gc_kind = crate::gc::GcKind::GenMajor;
             }
         }
-        
+
         self.gc.gc_emergency = old_emergency;
     }
 
@@ -859,19 +863,22 @@ impl LuaVM {
     fn full_inc(&mut self) {
         // Collect roots
         let roots = self.collect_roots();
-        
+
         // If we're keeping invariant (in marking phase), sweep first
         if self.gc.keep_invariant() {
             self.gc.enter_sweep(&mut self.object_pool);
         }
-        
+
         // Run until pause state
-        self.gc.run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
+        self.gc
+            .run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
         // Run finalizers
-        self.gc.run_until_state(crate::gc::GcState::CallFin, &roots, &mut self.object_pool);
+        self.gc
+            .run_until_state(crate::gc::GcState::CallFin, &roots, &mut self.object_pool);
         // Complete the cycle
-        self.gc.run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
-        
+        self.gc
+            .run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
+
         // Set pause for next cycle
         self.gc.set_pause();
     }

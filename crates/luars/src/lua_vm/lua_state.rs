@@ -10,7 +10,7 @@ use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, LuaVM};
+use crate::{Chunk, LuaVM, ThreadId};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -43,6 +43,8 @@ pub struct LuaState {
     /// Yield values storage (for coroutine yield)
     yield_values: Vec<LuaValue>,
 
+    thread_id: ThreadId,
+
     /// Hook mask and count (for debug hooks)
     hook_mask: u8,
     hook_count: i32,
@@ -67,6 +69,7 @@ impl LuaState {
             open_upvalues: Vec::new(),
             error_msg: String::new(),
             yield_values: Vec::new(),
+            thread_id: ThreadId::main_id(),
             hook_mask: 0,
             hook_count: 0,
             safe_option,
@@ -75,6 +78,14 @@ impl LuaState {
 
     pub(crate) fn set_vm(&mut self, vm: *mut LuaVM) {
         self.vm = vm;
+    }
+
+    pub(crate) fn set_thread_id(&mut self, id: ThreadId) {
+        self.thread_id = id;
+    }
+
+    pub fn get_thread_id(&self) -> ThreadId {
+        self.thread_id
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)
@@ -1170,39 +1181,37 @@ impl LuaState {
             }
         } else {
             // Resuming after yield
-            let has_yield_values = !self.yield_values.is_empty();
+            // The yield function's frame is still on the stack, we need to:
+            // 1. Pop the yield frame
+            // 2. Place resume arguments as yield's return values
+            // 3. Continue execution from the caller's frame
 
-            if has_yield_values {
-                // Restore yield values to stack
-                let yield_vals = self.take_yield();
-
-                if let Some(frame) = self.current_frame() {
-                    let return_base = frame.base;
-
-                    if let Err(_) = self.grow_stack(return_base + yield_vals.len()) {
-                        return Err(self.error("stack overflow during resume".to_string()));
-                    }
-
-                    for (i, val) in yield_vals.into_iter().enumerate() {
-                        let _ = self.stack_set(return_base + i, val);
-                    }
-                }
+            // Get the yield frame info before popping
+            let (func_idx, nresults) = if let Some(frame) = self.current_frame() {
+                // func_idx is base - 1 (where the yield function was called)
+                let func_idx = if frame.base > 0 { frame.base - 1 } else { 0 };
+                let nresults = frame.nresults;
+                (func_idx, nresults)
             } else {
-                // Push new arguments onto stack at the current frame's base
-                // These will become the return values of the yield call
-                if let Some(frame) = self.current_frame() {
-                    let base = frame.base;
+                return Err(self.error("cannot resume: no frame".to_string()));
+            };
 
-                    // Ensure stack has enough space
-                    if let Err(_) = self.grow_stack(base + args.len()) {
-                        return Err(self.error("stack overflow during resume".to_string()));
-                    }
+            // Pop the yield frame
+            self.pop_frame();
 
-                    // Place args at base positions (they become yield's return values)
-                    for (i, arg) in args.into_iter().enumerate() {
-                        let _ = self.stack_set(base + i, arg);
-                    }
-                }
+            // Place resume arguments at func_idx as yield's return values
+            // This simulates the yield function returning normally
+            let actual_nresults = args.len();
+            for (i, arg) in args.into_iter().enumerate() {
+                let _ = self.stack_set(func_idx + i, arg);
+            }
+
+            // Update stack top and current frame's top
+            let new_top = func_idx + actual_nresults;
+            self.set_top(new_top);
+
+            if let Some(frame) = self.current_frame_mut() {
+                frame.top = new_top;
             }
 
             // Execute until yield or completion

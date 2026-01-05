@@ -227,19 +227,27 @@ pub fn lookup_from_metatable(
         let mt_val = lua_state.vm_mut().string_mt?;
         return lookup_index_from_metatable_value(lua_state, mt_val, key);
     }
-    
+
     // For userdata: use userdata's metatable
     if let Some(ud_id) = obj.as_userdata_id() {
-        let mt_val = lua_state.vm_mut().object_pool.get_userdata(ud_id)?.get_metatable();
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_userdata(ud_id)?
+            .get_metatable();
         return lookup_index_from_metatable_value(lua_state, mt_val, key);
     }
-    
+
     // For table: check if it has metatable
     if let Some(table_id) = obj.as_table_id() {
-        let mt_val = lua_state.vm_mut().object_pool.get_table(table_id)?.get_metatable()?;
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_table(table_id)?
+            .get_metatable()?;
         return lookup_index_from_metatable_value(lua_state, mt_val, key);
     }
-    
+
     None
 }
 

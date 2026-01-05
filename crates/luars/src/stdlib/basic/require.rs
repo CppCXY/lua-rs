@@ -1,5 +1,4 @@
-use crate::{lua_vm::LuaState, LuaResult, LuaValue};
-
+use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 
 /// require(modname) - Load a module  
 /// Simplified implementation - loads from package.preload or package.path
@@ -61,7 +60,10 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(b) = already_loaded.as_boolean() {
             if !b {
                 // false means loading, prevent recursive require
-                return Err(l.error(format!("loop or previous error loading module '{}'", modname_str)));
+                return Err(l.error(format!(
+                    "loop or previous error loading module '{}'",
+                    modname_str
+                )));
             }
         } else {
             // Non-nil, non-false value means already loaded
@@ -116,7 +118,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         let func_idx = l.get_top() - 2;
 
         let (success, _) = l.pcall_stack_based(func_idx, 1)?;
-        
+
         // pcall_stack_based 对C函数可能不正确更新 stack_top
         // 手动检查结果（searchers 最多返回 2 个值）
         let mut result_count = 0;
@@ -126,7 +128,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
                 result_count = 2;
             }
         }
-        
+
         if !success {
             // Searcher threw an error
             let error_msg = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
@@ -159,7 +161,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
         // Check if result is a function (loader found!)
         let is_function = first_result.is_function() || first_result.is_cfunction();
-        
+
         // If result is not a function, it must be a string error message
         if !is_function {
             if let Some(msg_id) = first_result.as_string_id() {
@@ -184,10 +186,10 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         // Call loader(modname, loader_data)
         // 注意：不要在获取 loader 后立即清理栈，因为 LuaValue 可能包含对栈的引用
         // 我们直接在现有栈上继续操作
-        
+
         // 清理 searcher 的参数和结果，准备调用 loader
         l.set_top(func_idx);
-        
+
         l.push_value(loader)?;
         l.push_value(modname_val)?;
         if !loader_data.is_nil() {
@@ -196,8 +198,9 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         let loader_func_idx = l.get_top() - if loader_data.is_nil() { 2 } else { 3 };
         let loader_nargs = if loader_data.is_nil() { 1 } else { 2 };
 
-        let (loader_success, loader_result_count) = l.pcall_stack_based(loader_func_idx, loader_nargs)?;
-        
+        let (loader_success, loader_result_count) =
+            l.pcall_stack_based(loader_func_idx, loader_nargs)?;
+
         if !loader_success {
             // Loader failed
             let error_val = l.stack_get(loader_func_idx).unwrap_or(LuaValue::nil());
@@ -211,7 +214,10 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             } else {
                 "error loading module".to_string()
             };
-            return Err(l.error(format!("error loading module '{}': {}", modname_str, error_msg)));
+            return Err(l.error(format!(
+                "error loading module '{}': {}",
+                modname_str, error_msg
+            )));
         }
 
         // Get the result from loader
@@ -250,11 +256,15 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             loaded_table.raw_set(modname_val, LuaValue::nil());
         }
     }
-    
+
     let error_msg = if error_messages.is_empty() {
         format!("module '{}' not found", modname_str)
     } else {
-        format!("module '{}' not found:{}", modname_str, error_messages.join(""))
+        format!(
+            "module '{}' not found:{}",
+            modname_str,
+            error_messages.join("")
+        )
     };
 
     Err(l.error(error_msg))

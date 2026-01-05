@@ -30,7 +30,7 @@ pub struct CallInfo {
     /// Equivalent to Lua's CallInfo.func (but we store index, not pointer)
     /// NOTE: This may be updated by VARARGPREP after stack rearrangement
     pub base: usize,
-    
+
     /// Offset from original base to func position (for vararg functions after buildhiddenargs)
     /// When nextraargs > 0 and buildhiddenargs was called:
     /// - func_offset = totalargs + 1 (the shift amount)

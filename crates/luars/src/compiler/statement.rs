@@ -1409,7 +1409,7 @@ fn adjust_assign(fs: &mut FuncState, nvars: usize, nexps: usize, e: &mut ExpDesc
     use ExpKind;
 
     let needed = nvars as isize - nexps as isize;
-    
+
     // lparser.c:485: luaK_checkstack(fs, needed);
     // Check stack BEFORE any operations that might use the space
     if needed > 0 {

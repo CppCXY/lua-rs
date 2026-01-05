@@ -102,7 +102,7 @@ pub fn concat_strings(
             all_strings = false;
         }
     }
-    
+
     // Now check lengths (can mutably borrow vm)
     for id_opt in &string_ids {
         if let Some(string_id) = id_opt {
@@ -180,14 +180,14 @@ pub fn concat_strings(
     // Collect all parts first, then concatenate
     let mut parts: Vec<String> = Vec::with_capacity(n);
     let mut total_len = 0;
-    
+
     // Collect values first
     let stack = lua_state.stack_mut();
     let mut values = Vec::with_capacity(n);
     for i in 0..n {
         values.push(stack[base + a + i]);
     }
-    
+
     // Convert to strings (can mutably borrow lua_state)
     for val in &values {
         let (s, _was_string) = value_to_string_content(lua_state, val)?;

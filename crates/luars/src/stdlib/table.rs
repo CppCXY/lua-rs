@@ -400,7 +400,11 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
 
     // Check if we have a custom comparison function
     let has_comp = comp.is_some() && !comp.as_ref().map(|v| v.is_nil()).unwrap_or(true);
-    let comp_func = if has_comp { comp.unwrap() } else { LuaValue::nil() };
+    let comp_func = if has_comp {
+        comp.unwrap()
+    } else {
+        LuaValue::nil()
+    };
 
     // Extract values
     let mut values = Vec::with_capacity(len);
@@ -433,10 +437,10 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(comp_func).ok();
             l.push_value(*a).ok();
             l.push_value(*b).ok();
-            
+
             let func_idx = l.get_top() - 3;
             let result = l.pcall_stack_based(func_idx, 2);
-            
+
             match result {
                 Ok((true, result_count)) => {
                     // Get the result
@@ -445,10 +449,10 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
                     } else {
                         LuaValue::nil()
                     };
-                    
+
                     // Clean up stack
                     l.set_top(func_idx);
-                    
+
                     // Convert to bool: nil and false are false, everything else is true
                     let is_less = if cmp_result.is_nil() {
                         false
@@ -457,7 +461,7 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
                     } else {
                         true
                     };
-                    
+
                     if is_less {
                         std::cmp::Ordering::Less
                     } else {

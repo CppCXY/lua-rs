@@ -749,8 +749,9 @@ impl LuaValue {
         // Numbers need special handling because integer and float can be equal
         if self.tt_ != other.tt_ {
             // Allow comparison between integer and float
-            if !((self.ttisinteger() && other.ttisfloat()) || 
-                 (self.ttisfloat() && other.ttisinteger())) {
+            if !((self.ttisinteger() && other.ttisfloat())
+                || (self.ttisfloat() && other.ttisinteger()))
+            {
                 return false;
             }
         }

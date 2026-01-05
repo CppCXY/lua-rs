@@ -49,6 +49,7 @@ fn test_coroutine_yield() {
 
     if let Err(e) = &result {
         eprintln!("test_coroutine_yield Error: {}", e);
+        eprintln!("Error message: {}", vm.get_error_message());
     }
     assert!(result.is_ok());
 }
@@ -93,7 +94,8 @@ fn test_coroutine_running() {
     );
 
     if let Err(e) = &result {
-        eprintln!("Error: {}", e);
+        eprintln!("test_coroutine_running Error: {}", e);
+        eprintln!("Error message: {}", vm.get_error_message());
     }
     assert!(result.is_ok());
 }
@@ -117,7 +119,8 @@ fn test_coroutine_wrap() {
     );
 
     if let Err(e) = &result {
-        eprintln!("Error: {}", e);
+        eprintln!("test_coroutine_wrap Error: {}", e);
+        eprintln!("Error message: {}", vm.get_error_message());
     }
     assert!(result.is_ok());
 }

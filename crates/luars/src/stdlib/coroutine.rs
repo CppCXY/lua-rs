@@ -74,9 +74,16 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1 + result_count)
         }
         Err(e) => {
-            // Error occurred during resume
-            let error_msg = format!("{:?}", e);
-            let error_str = l.create_string(&error_msg);
+            // Error occurred during resume - get detailed error message
+            let error_msg = {
+                let vm = l.vm_mut();
+                vm.get_error_message().to_string()
+            };
+            let error_str = if error_msg.is_empty() {
+                l.create_string(&format!("{:?}", e))
+            } else {
+                l.create_string(&error_msg)
+            };
             l.push_value(LuaValue::boolean(false))?; // success=false
             l.push_value(error_str)?;
             Ok(2)
@@ -139,9 +146,10 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 /// coroutine.running() - Get currently running coroutine
 fn coroutine_running(l: &mut LuaState) -> LuaResult<usize> {
     // In the main thread, return nil and true
-    // TODO: Track current executing thread properly
-    l.push_value(LuaValue::nil())?;
-    l.push_value(LuaValue::boolean(true))?;
+    let thread_id = l.get_thread_id();
+
+    l.push_value(LuaValue::thread(thread_id))?;
+    l.push_value(LuaValue::boolean(thread_id.is_main()))?;
     Ok(2)
 }
 

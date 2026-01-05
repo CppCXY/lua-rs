@@ -161,7 +161,15 @@ pub fn call_c_function(
     let result = c_func(lua_state);
 
     // Now handle the result
-    let n = result?;
+    let n = match result {
+        Ok(n) => n,
+        Err(LuaError::Yield) => {
+            // Special case: C function yielded
+            // Keep the frame on stack so resume can continue
+            return Err(LuaError::Yield);
+        }
+        Err(e) => return Err(e),
+    };
 
     // Get logical stack top BEFORE popping frame (L->top.p in Lua)
     // C function pushes results, so first result is at top - n
@@ -365,7 +373,7 @@ pub fn handle_tailcall(
                 let result = lua_state.stack_get(func_idx + i).unwrap_or(LuaValue::nil());
                 lua_state.stack_set(base + i, result)?;
             }
-            
+
             // CRITICAL: Update frame top after moving results
             // The next RETURN instruction will use frame.top to determine how many values to return
             let new_top = base + nresults;
@@ -456,14 +464,14 @@ fn call_c_function_tailcall(
     } else {
         call_base
     };
-    
+
     // Pop the frame
     lua_state.pop_frame();
 
     // For tail call, move results to func_idx (not base)
     // Because the next RETURN instruction will return from R[A] where A is from TAILCALL
     move_results(lua_state, func_idx, first_result, n, -1)?;
-    
+
     // CRITICAL FIX: Update frame top so next RETURN instruction knows the correct top
     // After moving results to func_idx, the new top should be func_idx + n
     let new_top = func_idx + n;

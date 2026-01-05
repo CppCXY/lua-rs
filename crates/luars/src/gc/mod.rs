@@ -44,19 +44,19 @@ pub use gc_object::*;
 pub use object_pool::*;
 
 // GC Parameters (from lua.h)
-pub const PAUSE: usize = 0;       // Pause between GC cycles (default 200%)
-pub const STEPMUL: usize = 1;     // GC speed multiplier (default 200)
-pub const STEPSIZE: usize = 2;    // Step size in KB (default 13KB)
-pub const MINORMUL: usize = 3;    // Minor collection multiplier (default 20%)
-pub const MINORMAJOR: usize = 4;  // Shift from minor to major (default 100%)
-pub const MAJORMINOR: usize = 5;  // Shift from major to minor (default 100%)
+pub const PAUSE: usize = 0; // Pause between GC cycles (default 200%)
+pub const STEPMUL: usize = 1; // GC speed multiplier (default 200)
+pub const STEPSIZE: usize = 2; // Step size in KB (default 13KB)
+pub const MINORMUL: usize = 3; // Minor collection multiplier (default 20%)
+pub const MINORMAJOR: usize = 4; // Shift from minor to major (default 100%)
+pub const MAJORMINOR: usize = 5; // Shift from major to minor (default 100%)
 pub const GCPARAM_COUNT: usize = 6;
 
 // Default GC parameters (from luaconf.h)
-const DEFAULT_PAUSE: i32 = 200;      // 200%
-const DEFAULT_STEPMUL: i32 = 200;    // 200%
-const DEFAULT_STEPSIZE: i32 = 13;    // 13 KB
-const DEFAULT_MINORMUL: i32 = 20;    // 20%
+const DEFAULT_PAUSE: i32 = 200; // 200%
+const DEFAULT_STEPMUL: i32 = 200; // 200%
+const DEFAULT_STEPSIZE: i32 = 13; // 13 KB
+const DEFAULT_MINORMUL: i32 = 20; // 20%
 const DEFAULT_MINORMAJOR: i32 = 100; // 100%
 const DEFAULT_MAJORMINOR: i32 = 100; // 100%
 
@@ -64,9 +64,9 @@ const DEFAULT_MAJORMINOR: i32 = 100; // 100%
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcKind {
-    Inc = 0,        // KGC_INC - Incremental mode
-    GenMinor = 1,   // KGC_GENMINOR - Generational minor collections
-    GenMajor = 2,   // KGC_GENMAJOR - Generational major collections (temporary inc mode)
+    Inc = 0,      // KGC_INC - Incremental mode
+    GenMinor = 1, // KGC_GENMINOR - Generational minor collections
+    GenMajor = 2, // KGC_GENMAJOR - Generational major collections (temporary inc mode)
 }
 
 /// Object age for generational GC (from lgc.h)
@@ -95,7 +95,7 @@ impl GcAge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcColor {
     White0 = 0, // object is white (type 0)
-    White1 = 1, // object is white (type 1)  
+    White1 = 1, // object is white (type 1)
     Gray = 2,   // object is gray (marked but not scanned)
     Black = 3,  // object is black (fully marked)
 }
@@ -104,21 +104,24 @@ pub enum GcColor {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcState {
-    Propagate = 0,    // GCSpropagate
-    EnterAtomic = 1,  // GCSenteratomic
-    Atomic = 2,       // GCSatomic (not used directly)
-    SwpAllGc = 3,     // GCSswpallgc - sweep regular objects
-    SwpFinObj = 4,    // GCSswpfinobj - sweep objects with finalizers
-    SwpToBeFnz = 5,   // GCSswptobefnz - sweep objects to be finalized
-    SwpEnd = 6,       // GCSswpend - sweep finished
-    CallFin = 7,      // GCScallfin - call finalizers
-    Pause = 8,        // GCSpause - between cycles
+    Propagate = 0,   // GCSpropagate
+    EnterAtomic = 1, // GCSenteratomic
+    Atomic = 2,      // GCSatomic (not used directly)
+    SwpAllGc = 3,    // GCSswpallgc - sweep regular objects
+    SwpFinObj = 4,   // GCSswpfinobj - sweep objects with finalizers
+    SwpToBeFnz = 5,  // GCSswptobefnz - sweep objects to be finalized
+    SwpEnd = 6,      // GCSswpend - sweep finished
+    CallFin = 7,     // GCScallfin - call finalizers
+    Pause = 8,       // GCSpause - between cycles
 }
 
 impl GcState {
     /// Check if in sweep phase
     pub fn is_sweep_phase(self) -> bool {
-        matches!(self, GcState::SwpAllGc | GcState::SwpFinObj | GcState::SwpToBeFnz | GcState::SwpEnd)
+        matches!(
+            self,
+            GcState::SwpAllGc | GcState::SwpFinObj | GcState::SwpToBeFnz | GcState::SwpEnd
+        )
     }
 
     /// Check if must keep invariant (black cannot point to white)
@@ -133,26 +136,26 @@ pub struct GC {
     /// GCdebt from Lua: bytes allocated but not yet "paid for"
     /// When debt > 0, a GC step should run
     pub gc_debt: isize,
-    
+
     /// GCtotalbytes: total bytes allocated + debt
     pub total_bytes: isize,
-    
+
     /// GCmarked: bytes marked in current cycle (or bytes added in gen mode)
     pub gc_marked: isize,
-    
+
     /// GCmajorminor: auxiliary counter for mode shifts in generational GC
     pub gc_majorminor: isize,
 
     // === GC state ===
     pub gc_state: GcState,
     pub gc_kind: GcKind,
-    
+
     /// current white color (0 or 1, flips each cycle)
     pub current_white: u8,
-    
+
     /// is this an emergency collection?
     pub gc_emergency: bool,
-    
+
     /// stops emergency collections during finalizers
     pub gc_stopem: bool,
 
@@ -162,20 +165,20 @@ pub struct GC {
     // === Gray lists (for marking) ===
     /// Regular gray objects waiting to be visited
     pub gray: Vec<GcId>,
-    
+
     /// Objects to be revisited at atomic phase
     pub grayagain: Vec<GcId>,
 
     // === Generational collector pointers ===
     /// Points to first survival object in allgc list
     pub survival: Option<usize>,
-    
+
     /// Points to first old1 object
     pub old1: Option<usize>,
-    
+
     /// Points to first really old object
     pub reallyold: Option<usize>,
-    
+
     /// Points to first OLD1 object (optimization for markold)
     pub firstold1: Option<usize>,
 
@@ -255,13 +258,13 @@ impl GC {
     pub fn set_debt(&mut self, debt: isize) {
         const MAX_DEBT: isize = isize::MAX / 2;
         let real_bytes = self.total_bytes - self.gc_debt;
-        
+
         let debt = if debt > MAX_DEBT - real_bytes {
             MAX_DEBT - real_bytes
         } else {
             debt
         };
-        
+
         self.total_bytes = real_bytes + debt;
         self.gc_debt = debt;
     }
@@ -283,7 +286,7 @@ impl GC {
     }
 
     // ============ Core GC Implementation ============
-    
+
     /// Main GC step function (like luaC_step in Lua 5.5)
     pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         if self.gc_debt <= 0 {
@@ -307,13 +310,13 @@ impl GC {
         // Calculate work to do based on STEPSIZE and STEPMUL parameters
         let step_size = self.apply_param(STEPSIZE, 100) * 1024; // Convert KB to bytes
         let work_to_do = self.apply_param(STEPMUL, step_size / 8); // Divide by pointer size estimate
-        
+
         let mut work_done = 0isize;
         let fast = work_to_do == 0; // Special case: do full collection
 
         loop {
             let step_result = self.single_step(roots, pool, fast);
-            
+
             match step_result {
                 StepResult::Pause | StepResult::Atomic if !fast => break,
                 StepResult::MinorMode => return, // Returned to minor collections
@@ -340,7 +343,7 @@ impl GC {
         if self.gc_stopem {
             return StepResult::Work(0); // Emergency stop
         }
-        
+
         self.gc_stopem = true; // Prevent reentrancy
 
         let result = match self.gc_state {
@@ -424,7 +427,7 @@ impl GC {
     /// Make all objects white (prepare for new cycle)
     fn make_all_white(&mut self, pool: &mut ObjectPool) {
         let white = self.current_white;
-        
+
         for (_id, table) in pool.tables.iter_mut() {
             if !table.header.is_fixed() {
                 table.header.make_white(white);
@@ -506,7 +509,7 @@ impl GC {
                 } else {
                     return 0;
                 };
-                
+
                 // Then mark them (this may mutably borrow pool again)
                 for (k, v) in &entries {
                     self.mark_value(k, pool);
@@ -525,7 +528,7 @@ impl GC {
                 } else {
                     return 0;
                 };
-                
+
                 // Then process them
                 for upval_id in &upvalues {
                     if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
@@ -549,7 +552,7 @@ impl GC {
                 } else {
                     return 0;
                 };
-                
+
                 // Then mark it
                 if let Some(val) = closed_value {
                     self.mark_value(&val, pool);
@@ -570,23 +573,23 @@ impl GC {
     /// Atomic phase (like atomic in Lua 5.5)
     fn atomic(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         self.gc_state = GcState::Atomic;
-        
+
         // Mark roots again (they may have changed)
         for value in roots {
             self.mark_value(value, pool);
         }
-        
+
         // Propagate all marks
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
-        
+
         // Process grayagain list
         let grayagain = std::mem::take(&mut self.grayagain);
         for gc_id in grayagain {
             self.mark_one(gc_id, pool);
         }
-        
+
         // Flip white color for next cycle
         self.current_white ^= 1;
     }
@@ -601,17 +604,19 @@ impl GC {
     fn sweep_step(&mut self, pool: &mut ObjectPool, fast: bool) -> bool {
         let max_sweep = if fast { usize::MAX } else { 100 }; // GCSWEEPMAX
         let mut swept = 0;
-        
+
         // Get the "other white" - objects from the previous GC cycle that weren't marked
         let other_white = 1 - self.current_white;
 
         // Sweep tables
-        let dead_tables: Vec<_> = pool.tables.iter()
+        let dead_tables: Vec<_> = pool
+            .tables
+            .iter()
             .filter(|(_, t)| !t.header.is_fixed() && t.header.is_dead(other_white))
             .map(|(id, _)| id)
             .take(max_sweep)
             .collect();
-        
+
         for id in dead_tables {
             pool.tables.free(id);
             self.record_deallocation(256);
@@ -621,12 +626,14 @@ impl GC {
 
         // Sweep functions
         if swept < max_sweep {
-            let dead_funcs: Vec<_> = pool.functions.iter()
+            let dead_funcs: Vec<_> = pool
+                .functions
+                .iter()
                 .filter(|(_, f)| !f.header.is_fixed() && f.header.is_dead(other_white))
                 .map(|(id, _)| id)
                 .take(max_sweep - swept)
                 .collect();
-            
+
             for id in dead_funcs {
                 pool.functions.free(id);
                 self.record_deallocation(128);
@@ -637,12 +644,14 @@ impl GC {
 
         // Sweep upvalues
         if swept < max_sweep {
-            let dead_upvals: Vec<_> = pool.upvalues.iter()
+            let dead_upvals: Vec<_> = pool
+                .upvalues
+                .iter()
                 .filter(|(_, u)| !u.header.is_fixed() && u.header.is_dead(other_white))
                 .map(|(id, _)| id)
                 .take(max_sweep - swept)
                 .collect();
-            
+
             for id in dead_upvals {
                 pool.upvalues.free(id);
                 self.record_deallocation(64);
@@ -651,14 +660,16 @@ impl GC {
             }
         }
 
-        // Sweep strings  
+        // Sweep strings
         if swept < max_sweep {
-            let dead_strings: Vec<_> = pool.strings.iter()
+            let dead_strings: Vec<_> = pool
+                .strings
+                .iter()
                 .filter(|(_, s)| !s.header.is_fixed() && s.header.is_dead(other_white))
                 .map(|(id, _)| id)
                 .take(max_sweep - swept)
                 .collect();
-            
+
             for id in dead_strings {
                 pool.strings.free(id);
                 self.record_deallocation(64);
@@ -679,45 +690,53 @@ impl GC {
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
     /// During marking phase, the invariant must be kept
     pub fn keep_invariant(&self) -> bool {
-        matches!(self.gc_state, GcState::Propagate | GcState::EnterAtomic | GcState::Atomic)
+        matches!(
+            self.gc_state,
+            GcState::Propagate | GcState::EnterAtomic | GcState::Atomic
+        )
     }
 
     /// Run GC until reaching a specific state (like luaC_runtilstate in Lua 5.5)
-    pub fn run_until_state(&mut self, target_state: GcState, roots: &[LuaValue], pool: &mut ObjectPool) {
+    pub fn run_until_state(
+        &mut self,
+        target_state: GcState,
+        roots: &[LuaValue],
+        pool: &mut ObjectPool,
+    ) {
         const MAX_ITERATIONS: usize = 1000;
         let mut iterations = 0;
-        
+
         // Already at target state? Done.
         if self.gc_state == target_state {
             return;
         }
-        
+
         // Special case: If we're trying to reach CallFin from Pause,
         // and we don't have finalizer support yet, CallFin will immediately
         // transition to Pause. We need to detect when we pass through CallFin.
         let mut just_left_callfin = false;
-        
+
         loop {
             let prev_state = self.gc_state;
             self.single_step(roots, pool, true);
             let new_state = self.gc_state;
             iterations += 1;
-            
+
             // Track if we just transitioned FROM CallFin to Pause
             if prev_state == GcState::CallFin && new_state == GcState::Pause {
                 just_left_callfin = true;
             }
-            
+
             // Check if we reached the target state
             if new_state == target_state {
                 break;
             }
-            
+
             // Special case: If target is CallFin and we just left it
             if target_state == GcState::CallFin && just_left_callfin {
                 break;
             }
-            
+
             if iterations >= MAX_ITERATIONS {
                 // Safety check - should never happen in normal operation
                 break;
@@ -729,20 +748,20 @@ impl GC {
     pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         // For generational mode, do a major collection
         // Similar to fullinc in Lua 5.5
-        
+
         // Restart collection
         self.restart_collection(roots, pool);
-        
+
         // Mark all roots
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
-        
+
         // Sweep using run_until_state
         self.enter_sweep(pool);
         self.run_until_state(GcState::CallFin, roots, pool);
         self.run_until_state(GcState::Pause, roots, pool);
-        
+
         self.set_pause();
     }
 
@@ -755,16 +774,16 @@ impl GC {
     /// Young collection for generational mode (placeholder)
     fn young_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         self.stats.minor_collections += 1;
-        
+
         // For now, just do a simple mark-sweep of young objects
         self.restart_collection(roots, pool);
-        
+
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
-        
+
         self.sweep_step(pool, true);
-        
+
         self.gc_state = GcState::Pause;
     }
 
@@ -803,10 +822,10 @@ impl GC {
 
 /// Result of a GC step
 enum StepResult {
-    Work(isize),      // Amount of work done
-    Pause,            // Reached pause state
-    Atomic,           // Completed atomic phase
-    MinorMode,        // Returned to minor mode
+    Work(isize), // Amount of work done
+    Pause,       // Reached pause state
+    Atomic,      // Completed atomic phase
+    MinorMode,   // Returned to minor mode
 }
 
 impl Default for GC {

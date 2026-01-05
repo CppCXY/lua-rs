@@ -62,7 +62,7 @@ pub fn handle_return(
     // After buildhiddenargs, we need to use func_offset to find original position
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = call_info.base - call_info.func_offset;
-    
+
     let wanted_results = if call_info.nresults < 0 {
         nres // LUA_MULTRET: return all results
     } else {
@@ -168,11 +168,15 @@ pub fn handle_return1(
     // Get caller's frame to find where return values should go
     // In Lua 5.5, return values go to the position where the function was called
     let call_info = lua_state.get_call_info(frame_idx);
-    
+
     // Check if we're the main frame or have a caller
     let func_pos = if frame_idx == 0 {
         // Main frame - use base - 1
-        if call_info.base > 0 { call_info.base - 1 } else { 0 }
+        if call_info.base > 0 {
+            call_info.base - 1
+        } else {
+            0
+        }
     } else {
         // Use func_offset to find original position after buildhiddenargs
         call_info.base - call_info.func_offset
