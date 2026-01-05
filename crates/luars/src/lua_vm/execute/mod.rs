@@ -1101,9 +1101,12 @@ fn execute_frame(
                         .ok_or(LuaError::RuntimeError)?;
                     table.get_int(c as i64)
                 } else {
-                    // Try metatable lookup with integer key
+                    // Try metatable lookup with integer key - use Protect pattern
                     let key = LuaValue::integer(c as i64);
-                    helper::lookup_from_metatable(lua_state, &rb, &key)
+                    save_pc!();
+                    let result = helper::lookup_from_metatable(lua_state, &rb, &key);
+                    restore_state!();
+                    result
                 };
 
                 // Update frame.top FIRST if we're writing beyond current top
@@ -1201,7 +1204,7 @@ fn execute_frame(
                 let k = instr.get_k();
 
                 let stack = lua_state.stack_mut();
-                let ra = &stack[base + a];
+                let ra = stack[base + a];
 
                 // Get value (RK: register or constant)
                 let value = if k {
@@ -1214,6 +1217,7 @@ fn execute_frame(
                     stack[base + c]
                 };
 
+                // Try direct table set first
                 if let Some(table_id) = ra.as_table_id() {
                     let table = lua_state
                         .vm_mut()
@@ -1221,8 +1225,13 @@ fn execute_frame(
                         .get_table_mut(table_id)
                         .ok_or(LuaError::RuntimeError)?;
                     table.set_int(b as i64, value);
+                } else {
+                    // Not a table, use __newindex metamethod with Protect pattern
+                    let key = LuaValue::integer(b as i64);
+                    save_pc!();
+                    helper::store_to_metatable(lua_state, &ra, &key, value)?;
+                    restore_state!();
                 }
-                // else: should trigger metamethod
             }
             OpCode::SetField => {
                 // R[A][K[B]:string] := RK(C)
@@ -1290,8 +1299,11 @@ fn execute_frame(
                         .ok_or(LuaError::RuntimeError)?;
                     table.raw_get(key)
                 } else {
-                    // Try metatable lookup
-                    helper::lookup_from_metatable(lua_state, &rb, key)
+                    // Try metatable lookup - use Protect pattern
+                    save_pc!();
+                    let result = helper::lookup_from_metatable(lua_state, &rb, key);
+                    restore_state!();
+                    result
                 };
 
                 let stack = lua_state.stack_mut();
@@ -1610,11 +1622,10 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
-                // Save PC before metamethod call
-                lua_state.set_frame_pc(frame_idx, pc as u32);
-
-                // Delegate to metamethod handler
+                // Protect metamethod call
+                save_pc!();
                 metamethod::handle_mmbin(lua_state, base, a, b, c, pc, code)?;
+                restore_state!();
             }
             OpCode::MmBinI => {
                 // Call metamethod over R[A] and immediate sB
@@ -1623,11 +1634,10 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                // Save PC before metamethod call
-                lua_state.set_frame_pc(frame_idx, pc as u32);
-
-                // Delegate to metamethod handler
+                // Protect metamethod call
+                save_pc!();
                 metamethod::handle_mmbini(lua_state, base, a, sb, c, k, pc, code)?;
+                restore_state!();
             }
             OpCode::MmBinK => {
                 // Call metamethod over R[A] and K[B]
@@ -1636,11 +1646,10 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                // Save PC before metamethod call
-                lua_state.set_frame_pc(frame_idx, pc as u32);
-
-                // Delegate to metamethod handler
+                // Protect metamethod call
+                save_pc!();
                 metamethod::handle_mmbink(lua_state, base, a, b, c, k, pc, code, constants)?;
+                restore_state!();
             }
 
             // ============================================================

@@ -1,7 +1,7 @@
 use crate::{
     Chunk, LuaResult, LuaValue,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
-    lua_vm::LuaState,
+    lua_vm::{LuaState, LuaError},
 };
 
 /// Build hidden arguments for vararg functions
@@ -222,10 +222,75 @@ pub fn lookup_from_metatable(
     obj: &LuaValue,
     key: &LuaValue,
 ) -> Option<LuaValue> {
+    // Port of luaV_finishget from lvm.c:291
+    const MAXTAGLOOP: usize = 2000;
+    
+    let mut t = *obj;
+    
+    for _ in 0..MAXTAGLOOP {
+        // Get __index metamethod
+        let tm = get_index_metamethod(lua_state, &t)?;
+        
+        // If __index is a function, call it
+        if tm.is_function() {
+            // Call metamethod: tm(t, key) -> result
+            let caller_depth = lua_state.call_depth();
+            let top = lua_state.get_top();
+            
+            // Push arguments onto stack
+            {
+                let stack = lua_state.stack_mut();
+                stack[top] = t;
+                stack[top + 1] = *key;
+            }
+            lua_state.set_top(top + 2);
+            
+            // Push frame and execute
+            match lua_state.push_frame(tm, top, 2, 1) {
+                Ok(_) => {},
+                Err(_) => return None,
+            }
+            
+            match crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth) {
+                Ok(_) => {},
+                Err(_) => return None,
+            }
+            
+            // Get result from stack
+            let result = {
+                let stack = lua_state.stack_mut();
+                stack[top]
+            };
+            lua_state.set_top(top); // Clean up stack
+            
+            return Some(result);
+        }
+        
+        // __index is a table, try to access tm[key]
+        t = tm;
+        
+        // Try direct table access first (fast path)
+        if let Some(table_id) = t.as_table_id() {
+            if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
+                if let Some(value) = table.raw_get(key) {
+                    return Some(value);
+                }
+            }
+        }
+        
+        // If not found, loop again to check if tm has __index
+    }
+    
+    // Too many iterations - possible loop
+    None
+}
+
+/// Get __index metamethod for a value
+fn get_index_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<LuaValue> {
     // For string: use string_mt
     if obj.is_string() {
         let mt_val = lua_state.vm_mut().string_mt?;
-        return lookup_index_from_metatable_value(lua_state, mt_val, key);
+        return get_metamethod_from_metatable(lua_state, mt_val, "__index");
     }
 
     // For userdata: use userdata's metatable
@@ -235,7 +300,7 @@ pub fn lookup_from_metatable(
             .object_pool
             .get_userdata(ud_id)?
             .get_metatable();
-        return lookup_index_from_metatable_value(lua_state, mt_val, key);
+        return get_metamethod_from_metatable(lua_state, mt_val, "__index");
     }
 
     // For table: check if it has metatable
@@ -245,24 +310,151 @@ pub fn lookup_from_metatable(
             .object_pool
             .get_table(table_id)?
             .get_metatable()?;
-        return lookup_index_from_metatable_value(lua_state, mt_val, key);
+        return get_metamethod_from_metatable(lua_state, mt_val, "__index");
     }
 
     None
 }
 
-/// Helper: lookup from metatable's __index field
-fn lookup_index_from_metatable_value(
+/// Get a metamethod from a metatable value
+fn get_metamethod_from_metatable(
     lua_state: &mut LuaState,
     mt_val: LuaValue,
-    key: &LuaValue,
+    event: &str,
 ) -> Option<LuaValue> {
     let mt_table_id = mt_val.as_table_id()?;
     let vm = lua_state.vm_mut();
-    let index_key = vm.create_string("__index");
+    let event_key = vm.create_string(event);
     let mt = vm.object_pool.get_table(mt_table_id)?;
-    let index_value = mt.raw_get(&index_key)?;
-    let index_table_id = index_value.as_table_id()?;
-    let index_table = vm.object_pool.get_table(index_table_id)?;
-    index_table.raw_get(key)
+    mt.raw_get(&event_key)
+}
+
+/// Store a value using __newindex metamethod if table doesn't exist
+/// Port of luaV_finishset from lvm.c:332
+pub fn store_to_metatable(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+    value: LuaValue,
+) -> LuaResult<bool> {
+    const MAXTAGLOOP: usize = 2000;
+    
+    let mut t = *obj;
+    
+    for _ in 0..MAXTAGLOOP {
+        // Check if t is a table without __newindex
+        if let Some(table_id) = t.as_table_id() {
+            // Check for __newindex metamethod
+            let mt_val = lua_state
+                .vm_mut()
+                .object_pool
+                .get_table(table_id)
+                .and_then(|tbl| tbl.get_metatable());
+            
+            if let Some(mt) = mt_val {
+                if let Some(tm) = get_metamethod_from_metatable(lua_state, mt, "__newindex") {
+                    // Has __newindex metamethod
+                    if tm.is_function() {
+                        // Call metamethod using direct frame management
+                        let caller_depth = lua_state.call_depth();
+                        let top = lua_state.get_top();
+                        
+                        // Push arguments: t, key, value
+                        {
+                            let stack = lua_state.stack_mut();
+                            stack[top] = t;
+                            stack[top + 1] = *key;
+                            stack[top + 2] = value;
+                        }
+                        lua_state.set_top(top + 3);
+                        
+                        // Call metamethod
+                        lua_state.push_frame(tm, top, 3, 0)?;
+                        crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
+                        
+                        return Ok(true);
+                    }
+                    
+                    // __newindex is a table, repeat assignment over it
+                    t = tm;
+                    continue;
+                }
+            }
+            
+            // No __newindex metamethod, do direct assignment
+            let table = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table_mut(table_id)
+                        .ok_or(LuaError::RuntimeError)?;
+            table.raw_set(key.clone(), value);
+            return Ok(true);
+        }
+        
+        // Not a table, get __newindex metamethod
+        let tm = get_newindex_metamethod(lua_state, &t);
+        if tm.is_none() {
+            return Err(lua_state.error(format!("attempt to index a {} value", t.type_name())));
+        }
+        
+        let tm = tm.unwrap();
+        
+        // If __newindex is a function, call it
+        if tm.is_function() {
+            let caller_depth = lua_state.call_depth();
+            let top = lua_state.get_top();
+            
+            // Push arguments: t, key, value
+            {
+                let stack = lua_state.stack_mut();
+                stack[top] = t;
+                stack[top + 1] = *key;
+                stack[top + 2] = value;
+            }
+            lua_state.set_top(top + 3);
+            
+            // Call metamethod
+            lua_state.push_frame(tm, top, 3, 0)?;
+            crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
+            
+            return Ok(true);
+        }
+        
+        // __newindex is a table, repeat assignment over it
+        t = tm;
+    }
+    
+    // Too many iterations - possible loop
+    Err(lua_state.error("'__newindex' chain too long; possible loop".to_string()))
+}
+
+/// Get __newindex metamethod for a value
+fn get_newindex_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<LuaValue> {
+    // For string: use string_mt
+    if obj.is_string() {
+        let mt_val = lua_state.vm_mut().string_mt?;
+        return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
+    }
+
+    // For userdata: use userdata's metatable
+    if let Some(ud_id) = obj.as_userdata_id() {
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_userdata(ud_id)?
+            .get_metatable();
+        return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
+    }
+
+    // For table: check if it has metatable
+    if let Some(table_id) = obj.as_table_id() {
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_table(table_id)?
+            .get_metatable()?;
+        return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
+    }
+
+    None
 }

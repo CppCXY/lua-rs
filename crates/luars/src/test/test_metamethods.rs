@@ -411,6 +411,9 @@ fn test_lt_metamethod() {
         assert(a < b)
     "#,
     );
+    if let Err(e) = &result {
+        eprintln!("test_lt_metamethod error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 
