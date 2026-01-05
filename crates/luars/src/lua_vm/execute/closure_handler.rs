@@ -87,28 +87,10 @@ fn find_or_create_upvalue(
     lua_state: &mut LuaState,
     stack_index: usize,
 ) -> LuaResult<crate::gc::UpvalueId> {
-    // Search for existing open upvalue at this stack position
-    let existing = lua_state
-        .vm_mut()
-        .object_pool
-        .iter_upvalues()
-        .find_map(|(id, upval)| {
-            if upval.points_to_index(stack_index) {
-                Some(id)
-            } else {
-                None
-            }
-        });
-
-    if let Some(upval_id) = existing {
-        // Found existing open upvalue
-        Ok(upval_id)
-    } else {
-        // Create new open upvalue
-        let upvalue = crate::lua_value::LuaUpvalue::new_open(stack_index);
-        let upval_id = lua_state.vm_mut().object_pool.create_upvalue(upvalue);
-        Ok(upval_id)
-    }
+    // Use LuaState's find_or_create_upvalue which uses the open_upvalues list
+    // This is O(n) where n is the number of open upvalues for THIS thread,
+    // not all upvalues in the system
+    lua_state.find_or_create_upvalue(stack_index)
 }
 
 /// Close all open upvalues at or above the given level

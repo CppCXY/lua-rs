@@ -1830,7 +1830,7 @@ fn execute_frame(
                         // String comparison - copy IDs first
                         let sid_a = ra.tsvalue();
                         let sid_b = rb.tsvalue();
-                        drop(stack); // Release stack borrow
+                        let _ = stack; // Release stack borrow
 
                         let pool = &lua_state.vm_mut().object_pool;
                         if let (Some(sa), Some(sb)) =

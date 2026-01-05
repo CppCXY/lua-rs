@@ -2,6 +2,7 @@
 // Represents a single thread/coroutine execution context
 // Multiple LuaStates can share the same LuaVM (global_State)
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::gc::UpvalueId;
@@ -32,10 +33,11 @@ pub struct LuaState {
     /// Similar to Lua's CallInfo *ci in lua_State
     pub(crate) call_stack: Vec<CallInfo>,
 
-    /// Open upvalues list - upvalues pointing to stack locations
-    /// Must be kept sorted by stack index for correct closure semantics
-    /// Similar to Lua's UpVal *openupval in lua_State
-    open_upvalues: Vec<UpvalueId>,
+    /// Open upvalues - upvalues pointing to stack locations
+    /// Uses HashMap for O(1) lookup by stack index (unlike Lua's sorted linked list)
+    /// Also maintains a sorted Vec for efficient traversal during close operations
+    open_upvalues_map: HashMap<usize, UpvalueId>,
+    open_upvalues_list: Vec<UpvalueId>,
 
     /// Error message storage (lightweight error handling)
     error_msg: String,
@@ -66,7 +68,8 @@ impl LuaState {
             stack,
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
-            open_upvalues: Vec::new(),
+            open_upvalues_map: HashMap::new(),
+            open_upvalues_list: Vec::new(),
             error_msg: String::new(),
             yield_values: Vec::new(),
             thread_id: ThreadId::main_id(),
@@ -288,13 +291,13 @@ impl LuaState {
     /// Get open upvalues list
     #[inline(always)]
     pub fn open_upvalues(&self) -> &[UpvalueId] {
-        &self.open_upvalues
+        &self.open_upvalues_list
     }
 
     /// Get mutable open upvalues list
     #[inline(always)]
     pub fn open_upvalues_mut(&mut self) -> &mut Vec<UpvalueId> {
-        &mut self.open_upvalues
+        &mut self.open_upvalues_list
     }
 
     /// Set error message (without traceback - will be added later by top-level handler)
@@ -426,8 +429,8 @@ impl LuaState {
     pub fn close_upvalues(&mut self, level: usize, object_pool: &mut crate::ObjectPool) {
         // Find all open upvalues pointing to indices >= level
         let mut i = 0;
-        while i < self.open_upvalues.len() {
-            let upval_id = self.open_upvalues[i];
+        while i < self.open_upvalues_list.len() {
+            let upval_id = self.open_upvalues_list[i];
             if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
                 if let Some(stack_idx) = upval.get_stack_index() {
                     if stack_idx >= level {
@@ -435,13 +438,59 @@ impl LuaState {
                         if let Some(value) = self.stack_get(stack_idx) {
                             upval.close(value);
                         }
-                        self.open_upvalues.remove(i);
+                        // Remove from both map and list
+                        self.open_upvalues_map.remove(&stack_idx);
+                        self.open_upvalues_list.remove(i);
                         continue;
                     }
                 }
             }
             i += 1;
         }
+    }
+
+    /// Find or create an open upvalue for the given stack index
+    /// Uses HashMap for O(1) lookup instead of O(n) linear search
+    /// This is a major optimization over the naive linked list approach
+    pub fn find_or_create_upvalue(&mut self, stack_index: usize) -> LuaResult<UpvalueId> {
+        // O(1) lookup in HashMap
+        if let Some(&upval_id) = self.open_upvalues_map.get(&stack_index) {
+            return Ok(upval_id);
+        }
+
+        // Not found, create a new one
+        let upvalue = crate::lua_value::LuaUpvalue::new_open(stack_index);
+        let upval_id = {
+            let vm = self.vm_mut();
+            vm.object_pool.create_upvalue(upvalue)
+        };
+
+        // Add to HashMap for O(1) future lookups
+        self.open_upvalues_map.insert(stack_index, upval_id);
+
+        // Also add to sorted list for traversal (insert in sorted position, higher indices first)
+        // Collect existing upvalue IDs and their stack indices
+        let upval_ids: Vec<_> = self.open_upvalues_list.iter().copied().collect();
+        let stack_indices: Vec<usize> = {
+            let vm = self.vm_mut();
+            upval_ids
+                .iter()
+                .filter_map(|&id| {
+                    vm.object_pool
+                        .get_upvalue(id)
+                        .and_then(|upval| upval.get_stack_index())
+                })
+                .collect()
+        };
+
+        let insert_pos = stack_indices
+            .iter()
+            .position(|&idx| idx < stack_index)
+            .unwrap_or(stack_indices.len());
+
+        self.open_upvalues_list.insert(insert_pos, upval_id);
+
+        Ok(upval_id)
     }
 
     /// Get stack reference (for GC tracing)
@@ -518,7 +567,7 @@ impl LuaState {
     /// Get all open upvalues (for GC root collection)
     #[inline(always)]
     pub fn get_open_upvalues(&self) -> &[UpvalueId] {
-        &self.open_upvalues
+        &self.open_upvalues_list
     }
 
     /// Set frame PC by index
@@ -1187,7 +1236,7 @@ impl LuaState {
             // 3. Continue execution from the caller's frame
 
             // Get the yield frame info before popping
-            let (func_idx, nresults) = if let Some(frame) = self.current_frame() {
+            let (func_idx, _nresults) = if let Some(frame) = self.current_frame() {
                 // func_idx is base - 1 (where the yield function was called)
                 let func_idx = if frame.base > 0 { frame.base - 1 } else { 0 };
                 let nresults = frame.nresults;
