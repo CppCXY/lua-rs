@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use crate::gc::UpvalueId;
 use crate::lua_value::{LuaString, LuaUserdata, LuaValue};
+use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::safe_option::SafeOption;
@@ -128,7 +129,6 @@ impl LuaState {
         }
 
         // Determine call status based on function type
-        use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
         let call_status = if func.is_cfunction()
             || func
                 .as_function_id()

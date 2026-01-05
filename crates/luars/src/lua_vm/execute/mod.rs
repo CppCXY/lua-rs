@@ -136,6 +136,11 @@ fn execute_frame(
     let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
     let mut base = lua_state.get_frame_base(frame_idx);
 
+    // CRITICAL: Sync stack_top with current frame's top before execution
+    // This ensures metamethod calls use correct stack positions
+    let frame_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top(frame_top);
+
     // PRE-GROW STACK: Ensure enough space for this frame
     // This prevents reallocation during normal instruction execution
     let needed_size = base + chunk.max_stack_size;
@@ -1067,12 +1072,20 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
+                // CRITICAL: Update frame.top before potential metamethod call
+                let write_pos = base + a;
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                if write_pos + 1 > call_info.top {
+                    call_info.top = write_pos + 1;
+                    lua_state.set_top(write_pos + 1);
+                }
+
                 let rb = lua_state.stack_mut()[base + b];
                 let rc = lua_state.stack_mut()[base + c];
 
                 let result = if let Some(table_id) = rb.as_table_id() {
                     // Fast path for table
-                    if ttisinteger(&rc) {
+                    let direct_result = if ttisinteger(&rc) {
                         let key = ivalue(&rc);
                         let table = lua_state
                             .vm_mut()
@@ -1087,10 +1100,23 @@ fn execute_frame(
                             .get_table(table_id)
                             .ok_or(LuaError::RuntimeError)?;
                         table.raw_get(&rc)
+                    };
+                    
+                    if direct_result.is_some() {
+                        direct_result
+                    } else {
+                        // Key not found in table, try __index metamethod
+                        save_pc!();
+                        let result = helper::lookup_from_metatable(lua_state, &rb, &rc);
+                        restore_state!();
+                        result
                     }
                 } else {
-                    // Try metatable lookup
-                    helper::lookup_from_metatable(lua_state, &rb, &rc)
+                    // Not a table, try __index metamethod with Protect pattern
+                    save_pc!();
+                    let result = helper::lookup_from_metatable(lua_state, &rb, &rc);
+                    restore_state!();
+                    result
                 };
 
                 lua_state.stack_mut()[base + a] = result.unwrap_or(LuaValue::nil());
@@ -1148,6 +1174,14 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
+
+                // CRITICAL: Update frame.top before potential metamethod call
+                let write_pos = base + a;
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                if write_pos + 1 > call_info.top {
+                    call_info.top = write_pos + 1;
+                    lua_state.set_top(write_pos + 1);
+                }
 
                 if c >= constants.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
@@ -1657,7 +1691,7 @@ fn execute_frame(
 
                 // Protect metamethod call
                 save_pc!();
-                metamethod::handle_mmbin(lua_state, base, a, b, c, pc, code)?;
+                metamethod::handle_mmbin(lua_state, base, a, b, c, pc, code, frame_idx)?;
                 restore_state!();
             }
             OpCode::MmBinI => {
@@ -1669,7 +1703,7 @@ fn execute_frame(
 
                 // Protect metamethod call
                 save_pc!();
-                metamethod::handle_mmbini(lua_state, base, a, sb, c, k, pc, code)?;
+                metamethod::handle_mmbini(lua_state, base, a, sb, c, k, pc, code, frame_idx)?;
                 restore_state!();
             }
             OpCode::MmBinK => {
@@ -1681,7 +1715,7 @@ fn execute_frame(
 
                 // Protect metamethod call
                 save_pc!();
-                metamethod::handle_mmbink(lua_state, base, a, b, c, k, pc, code, constants)?;
+                metamethod::handle_mmbink(lua_state, base, a, b, c, k, pc, code, constants, frame_idx)?;
                 restore_state!();
             }
 
@@ -1693,6 +1727,15 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
+
+                // CRITICAL: Update frame.top before potential metamethod call
+                // This ensures metamethods don't overwrite active registers
+                let write_pos = base + a;
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                if write_pos + 1 > call_info.top {
+                    call_info.top = write_pos + 1;
+                    lua_state.set_top(write_pos + 1);
+                }
 
                 // Get upvalue B (usually _ENV for global access)
                 if b >= upvalues_vec.len() {
@@ -1729,10 +1772,23 @@ fn execute_frame(
                         .object_pool
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
-                    table.raw_get(key).unwrap_or(LuaValue::nil())
+                    let direct_result = table.raw_get(key);
+                    
+                    if direct_result.is_some() {
+                        direct_result.unwrap()
+                    } else {
+                        // Key not found, try __index metamethod with Protect pattern
+                        save_pc!();
+                        let result = helper::lookup_from_metatable(lua_state, &table_value, key);
+                        restore_state!();
+                        result.unwrap_or(LuaValue::nil())
+                    }
                 } else {
-                    // Not a table - return nil (or should trigger metamethod)
-                    LuaValue::nil()
+                    // Not a table, try __index metamethod
+                    save_pc!();
+                    let result = helper::lookup_from_metatable(lua_state, &table_value, key);
+                    restore_state!();
+                    result.unwrap_or(LuaValue::nil())
                 };
 
                 let stack = lua_state.stack_mut();

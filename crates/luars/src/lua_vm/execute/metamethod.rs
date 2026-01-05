@@ -89,12 +89,13 @@ pub fn try_unary_tm(
 #[inline]
 pub fn handle_mmbin(
     lua_state: &mut LuaState,
-    base: usize,
+    _base: usize,         // Unused, kept for compatibility
     a: usize,             // First operand register
     b: usize,             // Second operand register
     c: usize,             // Tag method (TMS)
     pc: usize,            // Current PC
     code: &[Instruction], // Code array to get previous instruction
+    frame_idx: usize,     // Frame index for accessing current base
 ) -> LuaResult<()> {
     // Get the original arithmetic instruction (pc-2)
     if pc < 2 {
@@ -103,6 +104,9 @@ pub fn handle_mmbin(
 
     let pi = code[pc - 2]; // Previous instruction (the original arithmetic op)
     let result_reg = (pi.as_u32() & 0xFF) as usize; // RA(pi) - result register from original instruction
+
+    // CRITICAL: Get base from frame, not parameter (parameter may be stale)
+    let base = lua_state.get_frame_base(frame_idx);
 
     // Get operands
     let v1 = lua_state
@@ -116,11 +120,14 @@ pub fn handle_mmbin(
     let tm = TmKind::from_u8(c as u8)
         .ok_or_else(|| lua_state.error(format!("MMBIN: invalid tag method {}", c)))?;
 
-    // Call metamethod
+    // Call metamethod (may change stack/base)
     let result = try_bin_tm(lua_state, v1, v2, tm)?;
 
+    // CRITICAL: Reload base after metamethod call as it may have changed
+    let current_base = lua_state.get_frame_base(frame_idx);
+
     // Store result
-    lua_state.stack_set(base + result_reg, result)?;
+    lua_state.stack_set(current_base + result_reg, result)?;
 
     Ok(())
 }
@@ -144,13 +151,14 @@ pub fn handle_mmbin(
 #[inline]
 pub fn handle_mmbini(
     lua_state: &mut LuaState,
-    base: usize,
+    _base: usize, // Unused, kept for compatibility
     a: usize, // Operand register
     sb: i32,  // Immediate value
     c: usize, // Tag method (TMS)
     k: bool,  // flip flag
     pc: usize,
     code: &[Instruction],
+    frame_idx: usize,     // Frame index for accessing current base
 ) -> LuaResult<()> {
     // Get the original arithmetic instruction
     if pc < 2 {
@@ -159,6 +167,9 @@ pub fn handle_mmbini(
 
     let pi = code[pc - 2];
     let result_reg = (pi.as_u32() & 0xFF) as usize;
+
+    // CRITICAL: Get base from frame, not parameter
+    let base = lua_state.get_frame_base(frame_idx);
 
     // Get operand
     let v1 = lua_state
@@ -172,7 +183,7 @@ pub fn handle_mmbini(
     let tm = TmKind::from_u8(c as u8)
         .ok_or_else(|| lua_state.error(format!("MMBINI: invalid tag method {}", c)))?;
 
-    // Call metamethod (flip if needed)
+    // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
         // flip: v2 op v1
         try_bin_tm(lua_state, v2, v1, tm)?
@@ -181,8 +192,11 @@ pub fn handle_mmbini(
         try_bin_tm(lua_state, v1, v2, tm)?
     };
 
+    // CRITICAL: Reload base after metamethod call
+    let current_base = lua_state.get_frame_base(frame_idx);
+
     // Store result
-    lua_state.stack_set(base + result_reg, result)?;
+    lua_state.stack_set(current_base + result_reg, result)?;
 
     Ok(())
 }
@@ -206,7 +220,7 @@ pub fn handle_mmbini(
 #[inline]
 pub fn handle_mmbink(
     lua_state: &mut LuaState,
-    base: usize,
+    _base: usize, // Unused, kept for compatibility
     a: usize, // Operand register
     b: usize, // Constant index
     c: usize, // Tag method (TMS)
@@ -214,6 +228,7 @@ pub fn handle_mmbink(
     pc: usize,
     code: &[Instruction],
     constants: &[LuaValue],
+    frame_idx: usize,     // Frame index for accessing current base
 ) -> LuaResult<()> {
     // Get the original arithmetic instruction
     if pc < 2 {
@@ -222,6 +237,9 @@ pub fn handle_mmbink(
 
     let pi = code[pc - 2];
     let result_reg = (pi.as_u32() & 0xFF) as usize;
+
+    // CRITICAL: Get base from frame, not parameter
+    let base = lua_state.get_frame_base(frame_idx);
 
     // Get operand
     let v1 = lua_state
@@ -238,7 +256,7 @@ pub fn handle_mmbink(
     let tm = TmKind::from_u8(c as u8)
         .ok_or_else(|| lua_state.error(format!("MMBINK: invalid tag method {}", c)))?;
 
-    // Call metamethod (flip if needed)
+    // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
         // flip: v2 op v1
         try_bin_tm(lua_state, v2, v1, tm)?
@@ -247,8 +265,11 @@ pub fn handle_mmbink(
         try_bin_tm(lua_state, v1, v2, tm)?
     };
 
+    // CRITICAL: Reload base after metamethod call
+    let current_base = lua_state.get_frame_base(frame_idx);
+
     // Store result
-    lua_state.stack_set(base + result_reg, result)?;
+    lua_state.stack_set(current_base + result_reg, result)?;
 
     Ok(())
 }
@@ -354,7 +375,9 @@ pub fn call_metamethod(
     // **Critical**: We need to push at top and let the call mechanism
     // handle everything. After call, result will be at the function position.
 
-    let func_pos = lua_state.get_top();
+    // CRITICAL: Save current stack_top to restore later
+    let saved_top = lua_state.get_top();
+    let func_pos = saved_top;
 
     // Push function and arguments
     lua_state.push_value(metamethod)?;
@@ -408,9 +431,9 @@ pub fn call_metamethod(
     // Get result from func_pos (where return handler placed it)
     let result = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
 
-    // Restore stack to before the call - this is critical!
-    // In Lua 5.5, the call mechanism ensures stack is cleaned up
-    lua_state.set_top(func_pos);
+    // CRITICAL: Restore saved stack_top, not func_pos!
+    // This ensures caller's frame.top is not corrupted
+    lua_state.set_top(saved_top);
 
     Ok(result)
 }

@@ -215,7 +215,16 @@ pub fn lookup_from_metatable(
         if tm.is_function() {
             // Call metamethod: tm(t, key) -> result
             // Similar to call_metamethod in metamethod.rs
-            let func_pos = lua_state.get_top();
+            
+            // CRITICAL: Save current stack_top to restore later
+            let saved_top = lua_state.get_top();
+            let func_pos = saved_top;
+            
+            // Ensure stack has enough space for function call
+            let needed_size = func_pos + 3;
+            if let Err(_) = lua_state.grow_stack(needed_size) {
+                return None;
+            }
             
             // Push function and arguments onto stack
             {
@@ -232,12 +241,20 @@ pub fn lookup_from_metatable(
             // Push frame and execute
             match lua_state.push_frame(tm, new_base, 2, 1) {
                 Ok(_) => {},
-                Err(_) => return None,
+                Err(_) => {
+                    // Restore stack_top on error
+                    lua_state.set_top(saved_top);
+                    return None;
+                }
             }
             
             match crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth) {
                 Ok(_) => {},
-                Err(_) => return None,
+                Err(_) => {
+                    // Restore stack_top on error
+                    lua_state.set_top(saved_top);
+                    return None;
+                }
             }
             
             // Get result from func_pos (where function was)
@@ -245,7 +262,10 @@ pub fn lookup_from_metatable(
                 let stack = lua_state.stack_mut();
                 stack[func_pos]
             };
-            lua_state.set_top(func_pos); // Clean up stack
+            
+            // CRITICAL: Restore saved stack_top, not func_pos
+            // This ensures caller's frame.top is not corrupted
+            lua_state.set_top(saved_top);
             
             return Some(result);
         }

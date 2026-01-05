@@ -253,10 +253,16 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
     // Check for __tostring metamethod
     if let Some(mm) = get_tostring_metamethod(l, &value) {
         // Call __tostring metamethod
-        // We'll use a workaround: execute a small Lua snippet
-        // But that's too complex. Let's just skip metamethod for now
-        // and return the default representation.
-        // TODO: Implement proper metamethod calling from C functions
+        let (succ, results) = l.pcall(mm, vec![value])?;
+        if !succ {
+            return Err(l.error("error in __tostring metamethod".to_string()));
+        }
+        if let Some(result) = results.get(0) {
+            l.push_value(result.clone())?;
+            return Ok(1);
+        } else {
+            return Err(l.error("error in __tostring metamethod: no result".to_string()));
+        }
     }
 
     // No metamethod: use default representation
@@ -276,14 +282,14 @@ fn get_tostring_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option
             .object_pool
             .get_table(table_id)?
             .get_metatable()?;
-        
+
         let mt_table_id = mt_val.as_table_id()?;
         let vm = lua_state.vm_mut();
         let key = vm.create_string("__tostring");
         let mt = vm.object_pool.get_table(mt_table_id)?;
         return mt.raw_get(&key);
     }
-    
+
     // For userdata: check metatable
     if let Some(ud_id) = value.as_userdata_id() {
         let ud = lua_state.vm_mut().object_pool.get_userdata(ud_id)?;
@@ -296,7 +302,7 @@ fn get_tostring_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option
             return mt.raw_get(&key);
         }
     }
-    
+
     None
 }
 
@@ -462,7 +468,7 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     if table.is_none() {
         return Err(l.error("table not found".to_string()));
     }
-    
+
     // First, if index is not nil, verify it exists in the table
     // This distinguishes "key not found" from "no more keys"
     if !index_val.is_nil() {
@@ -471,7 +477,7 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error("invalid key to 'next'".to_string()));
         }
     }
-    
+
     let result = table.unwrap().lua_next(&index_val, &vm.object_pool);
 
     // Return next key-value pair, or nil if at end
@@ -575,9 +581,9 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'getmetatable' (value expected)".to_string()))?;
 
-    let vm = l.vm_mut();
     match value.kind() {
         LuaValueKind::Table => {
+            let vm = l.vm_mut();
             let Some(table_id) = value.as_table_id() else {
                 return Err(l.error("Invalid table".to_string()));
             };
@@ -611,11 +617,12 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
             }
         }
         LuaValueKind::String => {
-            // TODO: Implement shared string metatable
-            l.push_value(LuaValue::nil())?;
+            let mt = l.vm_mut().string_mt.unwrap_or(LuaValue::nil());
+            l.push_value(mt)?;
             Ok(1)
         }
         LuaValueKind::Userdata => {
+            let vm = l.vm_mut();
             // Return userdata metatable
             if let Some(ud_id) = value.as_userdata_id() {
                 if let Some(ud) = vm.object_pool.get_userdata(ud_id) {
