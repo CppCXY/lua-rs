@@ -446,7 +446,7 @@ impl GC {
                 upval.header.make_white(white);
             }
         }
-        for (_id, string) in pool.strings.iter_mut() {
+        for (_id, string) in pool.iter_strings_mut() {
             if !string.header.is_fixed() {
                 string.header.make_white(white);
             }
@@ -478,7 +478,7 @@ impl GC {
             }
             LuaValueKind::String => {
                 if let Some(id) = value.as_string_id() {
-                    if let Some(s) = pool.strings.get_mut(id.index()) {
+                    if let Some(s) = pool.get_string_gc_mut(id) {
                         // Strings are leaves - mark black directly
                         s.header.make_black();
                     }
@@ -563,7 +563,7 @@ impl GC {
                 return 1;
             }
             GcId::StringId(id) => {
-                if let Some(s) = pool.strings.get_mut(id.index()) {
+                if let Some(s) = pool.get_string_gc_mut(id) {
                     s.header.make_black();
                 }
                 return 1;
@@ -666,15 +666,14 @@ impl GC {
         // Sweep strings
         if swept < max_sweep {
             let dead_strings: Vec<_> = pool
-                .strings
-                .iter()
+                .iter_strings()
                 .filter(|(_, s)| !s.header.is_fixed() && s.header.is_dead(other_white))
                 .map(|(id, _)| id)
                 .take(max_sweep - swept)
                 .collect();
 
             for id in dead_strings {
-                pool.strings.free(id);
+                pool.remove_string(StringId::from_raw(id));
                 self.record_deallocation(64);
                 self.stats.objects_collected += 1;
             }

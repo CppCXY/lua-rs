@@ -347,24 +347,150 @@ impl<T> Default for BoxPool<T> {
 // Keep Arena as an alias for backward compatibility
 pub type Arena<T> = Pool<T>;
 
+// ============ String Interner (Complete Interning) ============
+
+/// Complete string interner - ALL strings are interned for maximum performance
+/// - Same content always returns same StringId
+/// - StringId equality = content equality (no string comparison needed)
+/// - O(1) hash lookup for new strings
+/// - GC can collect unused strings via mark-sweep
+struct StringInterner {
+    // StringId -> String data (Vec-based for O(1) access)
+    strings: Pool<GcString>,
+    
+    // Content -> StringId mapping for deduplication
+    // Key is (hash, start_idx) where start_idx is index into strings pool
+    // This avoids storing string content twice
+    map: std::collections::HashMap<u64, Vec<u32>>,  // hash -> list of StringIds with that hash
+}
+
+impl StringInterner {
+    fn new() -> Self {
+        Self {
+            strings: Pool::with_capacity(256),
+            map: std::collections::HashMap::with_capacity(256),
+        }
+    }
+
+    /// Intern a string - returns existing StringId if already interned, creates new otherwise
+    fn intern(&mut self, s: &str) -> (StringId, bool) {
+        let hash = Self::hash_string(s);
+        
+        // Check if already interned
+        if let Some(ids) = self.map.get(&hash) {
+            // Hash collision possible - check actual content
+            for &id in ids {
+                if let Some(gs) = self.strings.get(id) {
+                    if gs.data.as_str() == s {
+                        // Found! Return existing StringId
+                        return (StringId::from_raw(id), false);
+                    }
+                }
+            }
+        }
+        
+        // Not found - create new string
+        let gc_string = GcString {
+            header: GcHeader::default(),
+            data: LuaString::with_hash(s.to_string(), hash),
+        };
+        let id = self.strings.alloc(gc_string);
+        
+        // Add to map
+        self.map.entry(hash).or_insert_with(Vec::new).push(id);
+        
+        (StringId::from_raw(id), true)
+    }
+
+    /// Intern an owned string (avoids clone)
+    fn intern_owned(&mut self, s: String) -> (StringId, bool) {
+        let hash = Self::hash_string(&s);
+        
+        // Check if already interned
+        if let Some(ids) = self.map.get(&hash) {
+            for &id in ids {
+                if let Some(gs) = self.strings.get(id) {
+                    if gs.data.as_str() == s.as_str() {
+                        // Found! Drop the owned string
+                        return (StringId::from_raw(id), false);
+                    }
+                }
+            }
+        }
+        
+        // Not found - use owned string directly
+        let gc_string = GcString {
+            header: GcHeader::default(),
+            data: LuaString::with_hash(s, hash),
+        };
+        let id = self.strings.alloc(gc_string);
+        
+        self.map.entry(hash).or_insert_with(Vec::new).push(id);
+        
+        (StringId::from_raw(id), true)
+    }
+
+    /// Get string by ID
+    #[inline(always)]
+    fn get(&self, id: StringId) -> Option<&GcString> {
+        self.strings.get(id.index())
+    }
+
+    /// Get string by ID (mutable)
+    #[inline(always)]
+    fn get_mut(&mut self, id: StringId) -> Option<&mut GcString> {
+        self.strings.get_mut(id.index())
+    }
+
+    /// Fast hash function - FNV-1a for good distribution
+    #[inline(always)]
+    fn hash_string(s: &str) -> u64 {
+        let bytes = s.as_bytes();
+        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+        for &byte in bytes {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+        }
+        hash
+    }
+
+    /// Remove dead strings (called by GC)
+    fn remove_dead(&mut self, id: StringId, hash: u64) {
+        self.strings.free(id.index());
+        
+        // Remove from map
+        if let Some(ids) = self.map.get_mut(&hash) {
+            ids.retain(|&i| i != id.index());
+            if ids.is_empty() {
+                self.map.remove(&hash);
+            }
+        }
+    }
+
+    /// Iterate over all strings
+    fn iter(&self) -> impl Iterator<Item = (u32, &GcString)> {
+        self.strings.iter()
+    }
+
+    /// Iterate over all strings (mutable)
+    fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut GcString)> {
+        self.strings.iter_mut()
+    }
+}
+
 // ============ Object Pool V3 ============
 
 /// High-performance object pool for the Lua VM
 /// - Small objects (String, Function, Upvalue) use Pool<T> with direct Vec storage
 /// - Large objects (Table, Thread) use BoxPool<T> to avoid copy on resize
+/// - ALL strings are interned via StringInterner for O(1) equality checks
 pub struct ObjectPool {
-    pub strings: Pool<GcString>,
+    strings: StringInterner,  // Private - use create_string() to intern
     pub tables: BoxPool<GcTable>,
     pub functions: Pool<GcFunction>,
     pub upvalues: Pool<GcUpvalue>,
     pub userdata: Pool<LuaUserdata>,
     pub threads: BoxPool<GcThread>,
-
-    // String interning table using Lua-style open addressing
-    // Key: (hash, StringId) pairs in a flat array for cache efficiency
-    // Uses linear probing with string content comparison for collision handling
-    string_intern: StringInternTable,
-    max_intern_length: usize,
 
     // Pre-cached metamethod name StringIds (like Lua's G(L)->tmname[])
     // These are created at initialization and never collected
@@ -407,200 +533,15 @@ pub struct ObjectPool {
     pub str_dead: StringId,      // "dead"
 }
 
-// ============ Lua-style String Interning Table ============
-
-/// Lua-style string interning with open addressing hash table
-/// Based on Lua 5.4's stringtable (lstring.c)
-#[allow(dead_code)]
-struct StringInternTable {
-    // Each bucket stores Option<(hash, StringId)>
-    // None = empty slot, Some = occupied
-    buckets: Vec<Option<(u64, StringId)>>,
-    count: usize,
-    // Size is always power of 2 for fast modulo via bitwise AND
-    size_mask: usize,
-}
-
-#[allow(unused)]
-impl StringInternTable {
-    const INITIAL_SIZE: usize = 128; // Must be power of 2
-    const LOAD_FACTOR: f64 = 0.75;
-
-    fn new() -> Self {
-        Self {
-            buckets: vec![None; Self::INITIAL_SIZE],
-            count: 0,
-            size_mask: Self::INITIAL_SIZE - 1,
-        }
-    }
-
-    fn with_capacity(cap: usize) -> Self {
-        // Round up to next power of 2
-        let size = cap.next_power_of_two().max(Self::INITIAL_SIZE);
-        Self {
-            buckets: vec![None; size],
-            count: 0,
-            size_mask: size - 1,
-        }
-    }
-
-    /// Find existing string or return insertion index
-    /// Returns: Ok(StringId) if found, Err(insert_index) if not found
-    #[inline]
-    fn find_or_insert_index<F>(&self, hash: u64, compare: F) -> Result<StringId, usize>
-    where
-        F: Fn(StringId) -> bool,
-    {
-        let mut idx = (hash as usize) & self.size_mask;
-        let start_idx = idx;
-
-        loop {
-            match &self.buckets[idx] {
-                None => {
-                    // Empty slot - string not found, can insert here
-                    return Err(idx);
-                }
-                Some((stored_hash, id)) => {
-                    // Check hash first (fast rejection), then compare content
-                    if *stored_hash == hash && compare(*id) {
-                        return Ok(*id);
-                    }
-                }
-            }
-            // Linear probing
-            idx = (idx + 1) & self.size_mask;
-            if idx == start_idx {
-                // Table is full (shouldn't happen with proper load factor)
-                panic!("String intern table is full");
-            }
-        }
-    }
-
-    /// Insert a new string (caller must ensure it doesn't exist)
-    #[inline]
-    fn insert(&mut self, hash: u64, id: StringId, idx: usize) {
-        self.buckets[idx] = Some((hash, id));
-        self.count += 1;
-    }
-
-    /// Check if resize is needed and perform it
-    fn maybe_resize<F>(&mut self, get_string_hash: F)
-    where
-        F: Fn(StringId) -> u64,
-    {
-        let threshold = ((self.buckets.len() as f64) * Self::LOAD_FACTOR) as usize;
-        if self.count < threshold {
-            return;
-        }
-
-        // Double the size
-        let new_size = self.buckets.len() * 2;
-        let new_mask = new_size - 1;
-        let mut new_buckets = vec![None; new_size];
-
-        // Rehash all entries
-        for bucket in self.buckets.iter() {
-            if let Some((hash, id)) = bucket {
-                let mut idx = (*hash as usize) & new_mask;
-                // Find empty slot (linear probing)
-                while new_buckets[idx].is_some() {
-                    idx = (idx + 1) & new_mask;
-                }
-                new_buckets[idx] = Some((*hash, *id));
-            }
-        }
-
-        self.buckets = new_buckets;
-        self.size_mask = new_mask;
-    }
-
-    /// Remove a string from the table (for GC)
-    fn remove(&mut self, hash: u64, id: StringId) {
-        let mut idx = (hash as usize) & self.size_mask;
-        let start_idx = idx;
-
-        loop {
-            match &self.buckets[idx] {
-                None => return, // Not found
-                Some((stored_hash, stored_id)) => {
-                    if *stored_hash == hash && *stored_id == id {
-                        // Found - remove it
-                        // Note: With linear probing, we need to handle deletion carefully
-                        // Simple approach: mark as deleted (tombstone) or rehash following entries
-                        // For simplicity, we'll just clear and let rehash fix it on resize
-                        self.buckets[idx] = None;
-                        self.count -= 1;
-                        // Rehash subsequent entries to maintain probe chain
-                        self.rehash_after_delete(idx);
-                        return;
-                    }
-                }
-            }
-            idx = (idx + 1) & self.size_mask;
-            if idx == start_idx {
-                return; // Not found (wrapped around)
-            }
-        }
-    }
-
-    /// Rehash entries after deletion to maintain probe chains
-    fn rehash_after_delete(&mut self, deleted_idx: usize) {
-        let mut idx = (deleted_idx + 1) & self.size_mask;
-
-        while let Some((hash, id)) = self.buckets[idx] {
-            // Check if this entry needs to be moved
-            let natural_idx = (hash as usize) & self.size_mask;
-
-            // If the entry's natural position is "before" the deleted slot
-            // in the probe sequence, it might need to move
-            if self.should_move(natural_idx, deleted_idx, idx) {
-                self.buckets[deleted_idx] = Some((hash, id));
-                self.buckets[idx] = None;
-                // Continue rehashing from this newly emptied slot
-                self.rehash_after_delete(idx);
-                return;
-            }
-
-            idx = (idx + 1) & self.size_mask;
-            if idx == deleted_idx {
-                break;
-            }
-        }
-    }
-
-    /// Check if entry at `current` with natural index `natural` should move to `target`
-    fn should_move(&self, natural: usize, target: usize, current: usize) -> bool {
-        // Entry should move if target is between natural and current in probe order
-        if natural <= current {
-            // No wraparound in probe sequence
-            target >= natural && target < current
-        } else {
-            // Probe sequence wrapped around
-            target >= natural || target < current
-        }
-    }
-
-    fn shrink_to_fit(&mut self) {
-        // Could implement shrinking, but usually not needed
-    }
-
-    fn clear(&mut self) {
-        self.buckets.fill(None);
-        self.count = 0;
-    }
-}
-
 impl ObjectPool {
     pub fn new() -> Self {
         let mut pool = Self {
-            strings: Pool::with_capacity(256),
+            strings: StringInterner::new(),
             tables: BoxPool::with_capacity(64),
             functions: Pool::with_capacity(32),
             upvalues: Pool::with_capacity(32),
             userdata: Pool::new(),
             threads: BoxPool::with_capacity(8),
-            string_intern: StringInternTable::with_capacity(256),
-            max_intern_length: 40, // Strings <= 40 bytes are interned (LUAI_MAXSHORTLEN)
             // Placeholder values - will be initialized below
             tm_index: StringId::default(),
             tm_newindex: StringId::default(),
@@ -761,137 +702,51 @@ impl ObjectPool {
     /// Create or intern a string (Lua-style with proper hash collision handling)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     #[inline]
-    pub fn create_string(&mut self, s: &str) -> (StringId, bool) {
-        let len = s.len();
-        let hash = Self::hash_string(s);
-
-        // Intern short strings for deduplication
-        if len <= self.max_intern_length {
-            // Use closure to compare string content (handles hash collisions correctly)
-            let compare = |id: StringId| -> bool {
-                self.strings
-                    .get(id.index())
-                    .map(|gs| gs.data.as_str() == s)
-                    .unwrap_or(false)
-            };
-
-            match self.string_intern.find_or_insert_index(hash, compare) {
-                Ok(existing_id) => {
-                    // Found existing string with same content
-                    return (existing_id, false);
-                }
-                Err(insert_idx) => {
-                    // Not found, create new interned string with pre-computed hash
-                    let gc_string = GcString {
-                        header: GcHeader::default(),
-                        data: LuaString::with_hash(s.to_string(), hash),
-                    };
-                    let id = StringId::short(self.strings.alloc(gc_string));
-                    self.string_intern.insert(hash, id, insert_idx);
-
-                    // Check if resize needed (pass dummy closure since we just inserted)
-                    self.string_intern.maybe_resize(|_| hash);
-
-                    return (id, true);
-                }
-            }
-        } else {
-            // Long strings are not interned, but still use pre-computed hash
-            let gc_string = GcString {
-                header: GcHeader::default(),
-                data: LuaString::with_hash(s.to_string(), hash),
-            };
-            (StringId::long(self.strings.alloc(gc_string)), true)
-        }
-    }
-
-    /// Create string from owned String (avoids clone if not interned)
+    /// Create string (COMPLETE INTERNING - all strings)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
-    #[inline]
-    pub fn create_string_owned(&mut self, s: String) -> (StringId, bool) {
-        let len = s.len();
-        let hash = Self::hash_string(&s);
-
-        if len <= self.max_intern_length {
-            // Use closure to compare string content
-            let compare = |id: StringId| -> bool {
-                self.strings
-                    .get(id.index())
-                    .map(|gs| gs.data.as_str() == s.as_str())
-                    .unwrap_or(false)
-            };
-
-            match self.string_intern.find_or_insert_index(hash, compare) {
-                Ok(existing_id) => {
-                    // Found existing string - drop the owned string
-                    return (existing_id, false);
-                }
-                Err(insert_idx) => {
-                    // Not found, create new interned string with owned data and pre-computed hash
-                    let gc_string = GcString {
-                        header: GcHeader::default(),
-                        data: LuaString::with_hash(s, hash),
-                    };
-                    let id = StringId::short(self.strings.alloc(gc_string));
-                    self.string_intern.insert(hash, id, insert_idx);
-
-                    // Check if resize needed
-                    self.string_intern.maybe_resize(|_| hash);
-
-                    return (id, true);
-                }
-            }
-        } else {
-            // Long strings use pre-computed hash
-            let gc_string = GcString {
-                header: GcHeader::default(),
-                data: LuaString::with_hash(s, hash),
-            };
-            (StringId::long(self.strings.alloc(gc_string)), true)
-        }
+    pub fn create_string(&mut self, s: &str) -> (StringId, bool) {
+        self.strings.intern(s)
     }
 
-    /// Fast hash function - use byte-level mixing for better distribution
-    /// Especially for strings with common prefixes like "key1", "key2", etc.
-    #[inline(always)]
-    fn hash_string(s: &str) -> u64 {
-        // Use a simple but effective hash: FNV-1a variant
-        // This has better distribution for similar strings than FxHash
-        let bytes = s.as_bytes();
-        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
-        for &byte in bytes {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
-        }
-        hash
+    /// Create string from owned String (avoids clone if already interned)
+    /// Returns (StringId, is_new) where is_new indicates if a new string was created
+    pub fn create_string_owned(&mut self, s: String) -> (StringId, bool) {
+        self.strings.intern_owned(s)
     }
 
     #[inline(always)]
     pub fn get_string(&self, id: StringId) -> Option<&LuaString> {
-        self.strings.get(id.index()).map(|gs| &gs.data)
+        self.strings.get(id).map(|gs| &gs.data)
     }
 
     #[inline(always)]
     pub fn get_string_str(&self, id: StringId) -> Option<&str> {
-        self.strings.get(id.index()).map(|gs| gs.data.as_str())
+        self.strings.get(id).map(|gs| gs.data.as_str())
     }
 
-    pub fn is_short_string(&self, id: StringId) -> bool {
-        if let Some(gs) = self.strings.get(id.index()) {
-            gs.data.as_str().len() <= self.max_intern_length
-        } else {
-            false
-        }
+    #[inline(always)]
+    pub fn get_string_gc(&self, id: StringId) -> Option<&GcString> {
+        self.strings.get(id)
+    }
+
+    #[inline(always)]
+    pub fn get_string_gc_mut(&mut self, id: StringId) -> Option<&mut GcString> {
+        self.strings.get_mut(id)
+    }
+
+    /// ALL strings are now interned, no distinction needed
+    pub fn is_short_string(&self, _id: StringId) -> bool {
+        true  // All strings are interned
     }
 
     /// Create a substring from an existing string (optimized for string.sub)
     /// Returns the original string ID if the range covers the entire string.
-    /// This avoids allocating a new String until we know it's actually needed.
+    /// With complete interning, substrings are automatically deduplicated.
     #[inline]
     pub fn create_substring(&mut self, source_id: StringId, start: usize, end: usize) -> StringId {
-        // First phase: get substring info and check intern table
-        let intern_result = {
-            let Some(gs) = self.strings.get(source_id.index()) else {
+        // Extract substring info first
+        let substring = {
+            let Some(gs) = self.strings.get(source_id) else {
                 return self.create_string("").0;
             };
             let s = gs.data.as_str();
@@ -909,65 +764,19 @@ impl ObjectPool {
                 return source_id;
             }
 
-            let slice = &s[start..end];
-            let len = slice.len();
-            let hash = Self::hash_string(slice);
-
-            // For short strings, check intern table first before allocating
-            if len <= self.max_intern_length {
-                let compare = |id: StringId| -> bool {
-                    self.strings
-                        .get(id.index())
-                        .map(|gs| gs.data.as_str() == slice)
-                        .unwrap_or(false)
-                };
-
-                match self.string_intern.find_or_insert_index(hash, compare) {
-                    Ok(existing_id) => {
-                        // Found existing interned string! No allocation needed!
-                        return existing_id;
-                    }
-                    Err(insert_idx) => {
-                        // Need to allocate - save slice content and insert index
-                        Some((slice.to_string(), hash, insert_idx))
-                    }
-                }
-            } else {
-                // Long strings - just need to allocate
-                Some((slice.to_string(), hash, usize::MAX))
-            }
+            // Copy substring to avoid borrowing issue
+            s[start..end].to_string()
         };
 
-        // Second phase: allocate and insert (if needed)
-        if let Some((substring, hash, insert_idx)) = intern_result {
-            if insert_idx != usize::MAX {
-                // Short string - insert into intern table at saved index
-                let gc_string = GcString {
-                    header: GcHeader::default(),
-                    data: LuaString::with_hash(substring, hash),
-                };
-                let id = StringId::short(self.strings.alloc(gc_string));
-                self.string_intern.insert(hash, id, insert_idx);
-                self.string_intern.maybe_resize(|_| hash);
-                id
-            } else {
-                // Long string - just allocate
-                let gc_string = GcString {
-                    header: GcHeader::default(),
-                    data: LuaString::with_hash(substring, hash),
-                };
-                StringId::long(self.strings.alloc(gc_string))
-            }
-        } else {
-            unreachable!()
-        }
+        // Intern the substring - will be deduplicated if it already exists
+        self.create_string_owned(substring).0
     }
 
     /// Mark a string as fixed (never collected) - like Lua's luaC_fix()
     /// Used for metamethod names and other permanent strings
     #[inline]
     pub fn fix_string(&mut self, id: StringId) {
-        if let Some(gs) = self.strings.get_mut(id.index()) {
+        if let Some(gs) = self.strings.get_mut(id) {
             gs.header.set_fixed();
             gs.header.make_black(); // Always considered marked
         }
@@ -980,6 +789,18 @@ impl ObjectPool {
             gt.header.set_fixed();
             gt.header.make_black();
         }
+    }
+
+    // ==================== Iteration (for GC) ====================
+
+    /// Iterate over all strings (for GC marking/sweeping)
+    pub fn iter_strings(&self) -> impl Iterator<Item = (u32, &GcString)> {
+        self.strings.iter()
+    }
+
+    /// Iterate over all strings (mutable, for GC marking)
+    pub fn iter_strings_mut(&mut self) -> impl Iterator<Item = (u32, &mut GcString)> {
+        self.strings.iter_mut()
     }
 
     // ==================== Table Operations ====================
@@ -1225,7 +1046,7 @@ impl ObjectPool {
 
     /// Clear all mark bits before GC mark phase (make all objects white)
     pub fn clear_marks(&mut self) {
-        for (_, gs) in self.strings.iter_mut() {
+        for (_, gs) in self.iter_strings_mut() {
             gs.header.make_white(0);
         }
         for (_, gt) in self.tables.iter_mut() {
@@ -1247,8 +1068,7 @@ impl ObjectPool {
         // Collect IDs to free (can't free while iterating)
         // White objects are unmarked and should be collected
         let strings_to_free: Vec<u32> = self
-            .strings
-            .iter()
+            .iter_strings()
             .filter(|(_, gs)| gs.header.is_white())
             .map(|(id, _)| id)
             .collect();
@@ -1279,12 +1099,11 @@ impl ObjectPool {
 
         // Free collected IDs
         for id in strings_to_free {
-            // Remove from intern table if interned
-            if let Some(gs) = self.strings.get(id) {
-                let hash = Self::hash_string(gs.data.as_str());
-                self.string_intern.remove(hash, StringId::short(id));
+            // Remove from intern map - StringInterner handles this
+            if let Some(gs) = self.strings.get(StringId::from_raw(id)) {
+                let hash = gs.data.hash;
+                self.strings.remove_dead(StringId::from_raw(id), hash);
             }
-            self.strings.free(id);
         }
         for id in tables_to_free {
             self.tables.free(id);
@@ -1301,19 +1120,22 @@ impl ObjectPool {
     }
 
     pub fn shrink_to_fit(&mut self) {
-        self.strings.shrink_to_fit();
+        // StringInterner manages its own internal structures
         self.tables.shrink_to_fit();
         self.functions.shrink_to_fit();
         self.upvalues.shrink_to_fit();
         self.threads.shrink_to_fit();
-        self.string_intern.shrink_to_fit();
     }
 
     // ==================== Remove Operations (for GC) ====================
 
     #[inline]
     pub fn remove_string(&mut self, id: StringId) {
-        self.strings.free(id.index());
+        // Get hash before removing
+        if let Some(gs) = self.strings.get(id) {
+            let hash = gs.data.hash;
+            self.strings.remove_dead(id, hash);
+        }
     }
 
     #[inline]
@@ -1345,7 +1167,7 @@ impl ObjectPool {
 
     #[inline]
     pub fn string_count(&self) -> usize {
-        self.strings.len()
+        self.strings.strings.len()
     }
     #[inline]
     pub fn table_count(&self) -> usize {

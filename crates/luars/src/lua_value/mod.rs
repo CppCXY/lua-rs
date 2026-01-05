@@ -25,7 +25,7 @@ use crate::Instruction;
 /// Lua string (immutable, interned with cached hash)
 #[derive(Debug, Clone)]
 pub struct LuaString {
-    hash: u64, // Keep hash first for alignment
+    pub hash: u64, // Keep hash first for alignment - PUBLIC for StringInterner
     data: String,
 }
 

@@ -323,11 +323,18 @@ impl LuaTable {
         let mut node = &self.nodes[mp];
 
         let object_pool = unsafe { &*self.object_pool };
-        // 沿着collision chain查找
+        // Walk collision chain
         loop {
             if !node.is_dead() {
                 let node_key = node.key();
-                if node_key.raw_equal(key, object_pool) {
+                // CRITICAL OPTIMIZATION: For strings, compare StringId directly
+                let keys_equal = if key.kind() == LuaValueKind::String && node_key.kind() == LuaValueKind::String {
+                    key.as_string_id() == node_key.as_string_id()
+                } else {
+                    node_key.raw_equal(key, object_pool)
+                };
+                
+                if keys_equal {
                     return Some(node);
                 }
             }
@@ -514,7 +521,16 @@ impl LuaTable {
             // Fast path: compare cached hash first
             if !self.nodes[idx].is_dead() && self.nodes[idx].key_hash == key_hash {
                 let node_key = self.nodes[idx].key();
-                if node_key.raw_equal(key, pool) {
+                // CRITICAL OPTIMIZATION: For strings, just compare StringId
+                // Complete interning guarantees: same StringId = same content
+                // This eliminates ObjectPool access in hot path!
+                let keys_equal = if key.kind() == LuaValueKind::String && node_key.kind() == LuaValueKind::String {
+                    key.as_string_id() == node_key.as_string_id()
+                } else {
+                    node_key.raw_equal(key, pool)
+                };
+                
+                if keys_equal {
                     // Key exists, update value
                     self.nodes[idx].value = value;
                     return;
