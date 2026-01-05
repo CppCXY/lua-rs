@@ -103,7 +103,7 @@ pub fn handle_mmbin(
     }
 
     let pi = code[pc - 2]; // Previous instruction (the original arithmetic op)
-    let result_reg = (pi.as_u32() & 0xFF) as usize; // RA(pi) - result register from original instruction
+    let result_reg = pi.get_a() as usize; // RA(pi) - result register from original instruction
 
     // CRITICAL: Get base from frame, not parameter (parameter may be stale)
     let base = lua_state.get_frame_base(frame_idx);
@@ -166,7 +166,7 @@ pub fn handle_mmbini(
     }
 
     let pi = code[pc - 2];
-    let result_reg = (pi.as_u32() & 0xFF) as usize;
+    let result_reg = pi.get_a() as usize;
 
     // CRITICAL: Get base from frame, not parameter
     let base = lua_state.get_frame_base(frame_idx);
@@ -236,7 +236,7 @@ pub fn handle_mmbink(
     }
 
     let pi = code[pc - 2];
-    let result_reg = (pi.as_u32() & 0xFF) as usize;
+    let result_reg = pi.get_a() as usize;
 
     // CRITICAL: Get base from frame, not parameter
     let base = lua_state.get_frame_base(frame_idx);
@@ -375,9 +375,7 @@ pub fn call_metamethod(
     // **Critical**: We need to push at top and let the call mechanism
     // handle everything. After call, result will be at the function position.
 
-    // CRITICAL: Save current stack_top to restore later
-    let saved_top = lua_state.get_top();
-    let func_pos = saved_top;
+    let func_pos = lua_state.get_top();
 
     // Push function and arguments
     lua_state.push_value(metamethod)?;
@@ -431,9 +429,9 @@ pub fn call_metamethod(
     // Get result from func_pos (where return handler placed it)
     let result = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
 
-    // CRITICAL: Restore saved stack_top, not func_pos!
-    // This ensures caller's frame.top is not corrupted
-    lua_state.set_top(saved_top);
+    // Clean up stack by setting top back to func_pos
+    // The result is already copied above, so we can safely clean up
+    lua_state.set_top(func_pos);
 
     Ok(result)
 }

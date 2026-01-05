@@ -1263,6 +1263,8 @@ fn execute_frame(
                             .ok_or(LuaError::RuntimeError)?;
                         table.raw_set(key, value);
                     }
+                    // GC write barrier: check GC after table modification
+                    lua_state.vm_mut().check_gc();
                 }
                 // else: should trigger metamethod
             }
@@ -1295,6 +1297,8 @@ fn execute_frame(
                         .get_table_mut(table_id)
                         .ok_or(LuaError::RuntimeError)?;
                     table.set_int(b as i64, value);
+                    // GC write barrier: check GC after table modification
+                    lua_state.vm_mut().check_gc();
                 } else {
                     // Not a table, use __newindex metamethod with Protect pattern
                     let key = LuaValue::integer(b as i64);

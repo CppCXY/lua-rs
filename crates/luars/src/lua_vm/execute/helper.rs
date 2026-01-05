@@ -428,6 +428,8 @@ pub fn store_to_metatable(
                         .get_table_mut(table_id)
                         .ok_or(LuaError::RuntimeError)?;
             table.raw_set(key.clone(), value);
+            // GC write barrier: check GC after table modification
+            lua_state.vm_mut().check_gc();
             return Ok(true);
         }
         

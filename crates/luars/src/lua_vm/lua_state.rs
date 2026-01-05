@@ -49,8 +49,8 @@ pub struct LuaState {
     thread_id: ThreadId,
 
     /// Hook mask and count (for debug hooks)
-    hook_mask: u8,
-    hook_count: i32,
+    _hook_mask: u8,
+    _hook_count: i32,
 
     safe_option: SafeOption,
 }
@@ -74,8 +74,8 @@ impl LuaState {
             error_msg: String::new(),
             yield_values: Vec::new(),
             thread_id: ThreadId::main_id(),
-            hook_mask: 0,
-            hook_count: 0,
+            _hook_mask: 0,
+            _hook_count: 0,
             safe_option,
         }
     }
