@@ -483,17 +483,21 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
 
                 let stack = lua_state.stack_mut();
-                let rb = &stack[base + b];
+                let rb = stack[base + b];
 
-                if ttisinteger(rb) {
-                    let ib = ivalue(rb);
+                if ttisinteger(&rb) {
+                    let ib = ivalue(&rb);
                     setivalue(&mut stack[base + a], ib.wrapping_neg());
                 } else {
                     let mut nb = 0.0;
-                    if tonumberns(rb, &mut nb) {
+                    if tonumberns(&rb, &mut nb) {
                         setfltvalue(&mut stack[base + a], -nb);
+                    } else {
+                        // Try __unm metamethod with Protect pattern
+                        save_pc!();
+                        metamethod::try_unary_tm(lua_state, rb, base + a, metamethod::TmKind::Unm)?;
+                        restore_state!();
                     }
-                    // else: metamethod
                 }
             }
             OpCode::AddK => {
@@ -811,13 +815,17 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
 
                 let stack = lua_state.stack_mut();
-                let v1 = &stack[base + b];
+                let v1 = stack[base + b];
 
                 let mut ib = 0i64;
-                if tointegerns(v1, &mut ib) {
+                if tointegerns(&v1, &mut ib) {
                     setivalue(&mut stack[base + a], !ib);
+                } else {
+                    // Try __bnot metamethod with Protect pattern
+                    save_pc!();
+                    metamethod::try_unary_tm(lua_state, v1, base + a, metamethod::TmKind::Bnot)?;
+                    restore_state!();
                 }
-                // else: metamethod
             }
             OpCode::ShlI => {
                 // R[A] := sC << R[B]
@@ -1094,14 +1102,26 @@ fn execute_frame(
                 let rb = stack[base + b];
 
                 let result = if let Some(table_id) = rb.as_table_id() {
+                    // Fast path: try direct table access
                     let table = lua_state
                         .vm_mut()
                         .object_pool
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
-                    table.get_int(c as i64)
+                    let direct_result = table.get_int(c as i64);
+                    
+                    if direct_result.is_some() {
+                        direct_result
+                    } else {
+                        // Key not found, try __index metamethod with Protect pattern
+                        let key = LuaValue::integer(c as i64);
+                        save_pc!();
+                        let result = helper::lookup_from_metatable(lua_state, &rb, &key);
+                        restore_state!();
+                        result
+                    }
                 } else {
-                    // Try metatable lookup with integer key - use Protect pattern
+                    // Not a table, try __index metamethod with Protect pattern
                     let key = LuaValue::integer(c as i64);
                     save_pc!();
                     let result = helper::lookup_from_metatable(lua_state, &rb, &key);
@@ -1136,16 +1156,29 @@ fn execute_frame(
                 let key = &constants[c];
 
                 let result = if let Some(table_id) = rb.as_table_id() {
-                    // Fast path: direct table access
+                    // Fast path: try direct table access
                     let table = lua_state
                         .vm_mut()
                         .object_pool
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
-                    table.raw_get(key)
+                    let direct_result = table.raw_get(key);
+                    
+                    if direct_result.is_some() {
+                        direct_result
+                    } else {
+                        // Key not found, try __index metamethod with Protect pattern
+                        save_pc!();
+                        let result = helper::lookup_from_metatable(lua_state, &rb, key);
+                        restore_state!();
+                        result
+                    }
                 } else {
-                    // Try metatable lookup
-                    helper::lookup_from_metatable(lua_state, &rb, key)
+                    // Not a table, try metatable lookup with Protect pattern
+                    save_pc!();
+                    let result = helper::lookup_from_metatable(lua_state, &rb, key);
+                    restore_state!();
+                    result
                 };
 
                 let stack = lua_state.stack_mut();
@@ -1246,8 +1279,8 @@ fn execute_frame(
                 }
 
                 let stack = lua_state.stack_mut();
-                let ra = &stack[base + a];
-                let key = &constants[b];
+                let ra = stack[base + a];
+                let key = constants[b];
 
                 // Get value (RK: register or constant)
                 let value = if k {
@@ -1260,15 +1293,12 @@ fn execute_frame(
                     stack[base + c]
                 };
 
-                if let Some(table_id) = ra.as_table_id() {
-                    let table = lua_state
-                        .vm_mut()
-                        .object_pool
-                        .get_table_mut(table_id)
-                        .ok_or(LuaError::RuntimeError)?;
-                    table.raw_set(*key, value);
-                }
-                // else: should trigger metamethod
+                // Always use store_to_metatable which handles both cases:
+                // - If table without __newindex: does raw_set
+                // - If table with __newindex or not a table: calls metamethod
+                save_pc!();
+                helper::store_to_metatable(lua_state, &ra, &key, value)?;
+                restore_state!();
             }
             OpCode::Self_ => {
                 // R[A+1] := R[B]; R[A] := R[B][K[C]:string]
@@ -1770,12 +1800,13 @@ fn execute_frame(
             // ============================================================
             OpCode::Len => {
                 // R[A] := #R[B]
+                // Port of luaV_objlen from lvm.c:731-757
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
                 let rb = lua_state.stack_mut()[base + b];
 
-                // Get length based on type
+                // Try to get length based on type
                 if let Some(string_id) = rb.as_string_id() {
                     // String: get length from object pool
                     if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
@@ -1785,18 +1816,54 @@ fn execute_frame(
                         setivalue(&mut lua_state.stack_mut()[base + a], 0);
                     }
                 } else if let Some(table_id) = rb.as_table_id() {
-                    // Table: use raw length (array part length)
-                    // Note: __len metamethod excluded per user request
-                    if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
-                        let len = table.len();
-                        setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                    // Table: check for __len metamethod first
+                    let has_metatable = lua_state
+                        .vm_mut()
+                        .object_pool
+                        .get_table(table_id)
+                        .and_then(|t| t.get_metatable())
+                        .is_some();
+
+                    if has_metatable {
+                        // Try __len metamethod
+                        if let Some(mm) = helper::get_len_metamethod(lua_state, &rb) {
+                            // Call metamethod with Protect pattern
+                            save_pc!();
+                            let result = metamethod::call_metamethod(lua_state, mm, rb, rb)?;
+                            restore_state!();
+                            lua_state.stack_mut()[base + a] = result;
+                        } else {
+                            // No metamethod, use primitive length
+                            if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
+                                let len = table.len();
+                                setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                            } else {
+                                setivalue(&mut lua_state.stack_mut()[base + a], 0);
+                            }
+                        }
                     } else {
-                        setivalue(&mut lua_state.stack_mut()[base + a], 0);
+                        // No metatable, use primitive length
+                        if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
+                            let len = table.len();
+                            setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                        } else {
+                            setivalue(&mut lua_state.stack_mut()[base + a], 0);
+                        }
                     }
                 } else {
-                    // Other types: length is 0
-                    // Note: __len metamethod excluded per user request
-                    setivalue(&mut lua_state.stack_mut()[base + a], 0);
+                    // Other types: try __len metamethod
+                    if let Some(mm) = helper::get_len_metamethod(lua_state, &rb) {
+                        save_pc!();
+                        let result = metamethod::call_metamethod(lua_state, mm, rb, rb)?;
+                        restore_state!();
+                        lua_state.stack_mut()[base + a] = result;
+                    } else {
+                        // No metamethod: type error
+                        return Err(lua_state.error(format!(
+                            "attempt to get length of a {} value",
+                            rb.type_name()
+                        )));
+                    }
                 }
             }
 

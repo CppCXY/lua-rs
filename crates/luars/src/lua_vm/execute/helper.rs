@@ -234,19 +234,23 @@ pub fn lookup_from_metatable(
         // If __index is a function, call it
         if tm.is_function() {
             // Call metamethod: tm(t, key) -> result
-            let caller_depth = lua_state.call_depth();
-            let top = lua_state.get_top();
+            // Similar to call_metamethod in metamethod.rs
+            let func_pos = lua_state.get_top();
             
-            // Push arguments onto stack
+            // Push function and arguments onto stack
             {
                 let stack = lua_state.stack_mut();
-                stack[top] = t;
-                stack[top + 1] = *key;
+                stack[func_pos] = tm;
+                stack[func_pos + 1] = t;
+                stack[func_pos + 2] = *key;
             }
-            lua_state.set_top(top + 2);
+            lua_state.set_top(func_pos + 3);
+            
+            let caller_depth = lua_state.call_depth();
+            let new_base = func_pos + 1;
             
             // Push frame and execute
-            match lua_state.push_frame(tm, top, 2, 1) {
+            match lua_state.push_frame(tm, new_base, 2, 1) {
                 Ok(_) => {},
                 Err(_) => return None,
             }
@@ -256,12 +260,12 @@ pub fn lookup_from_metatable(
                 Err(_) => return None,
             }
             
-            // Get result from stack
+            // Get result from func_pos (where function was)
             let result = {
                 let stack = lua_state.stack_mut();
-                stack[top]
+                stack[func_pos]
             };
-            lua_state.set_top(top); // Clean up stack
+            lua_state.set_top(func_pos); // Clean up stack
             
             return Some(result);
         }
@@ -282,6 +286,38 @@ pub fn lookup_from_metatable(
     }
     
     // Too many iterations - possible loop
+    None
+}
+
+/// Get __len metamethod for a value
+/// Similar to get_index_metamethod but for __len
+pub fn get_len_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<LuaValue> {
+    // For string: use string_mt
+    if obj.is_string() {
+        let mt_val = lua_state.vm_mut().string_mt?;
+        return get_metamethod_from_metatable(lua_state, mt_val, "__len");
+    }
+
+    // For userdata: use userdata's metatable
+    if let Some(ud_id) = obj.as_userdata_id() {
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_userdata(ud_id)?
+            .get_metatable();
+        return get_metamethod_from_metatable(lua_state, mt_val, "__len");
+    }
+
+    // For table: check if it has metatable
+    if let Some(table_id) = obj.as_table_id() {
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_table(table_id)?
+            .get_metatable()?;
+        return get_metamethod_from_metatable(lua_state, mt_val, "__len");
+    }
+
     None
 }
 
@@ -355,23 +391,27 @@ pub fn store_to_metatable(
                 if let Some(tm) = get_metamethod_from_metatable(lua_state, mt, "__newindex") {
                     // Has __newindex metamethod
                     if tm.is_function() {
-                        // Call metamethod using direct frame management
-                        let caller_depth = lua_state.call_depth();
-                        let top = lua_state.get_top();
+                        // Call metamethod: tm(t, key, value)
+                        let func_pos = lua_state.get_top();
                         
-                        // Push arguments: t, key, value
+                        // Push function and arguments
                         {
                             let stack = lua_state.stack_mut();
-                            stack[top] = t;
-                            stack[top + 1] = *key;
-                            stack[top + 2] = value;
+                            stack[func_pos] = tm;
+                            stack[func_pos + 1] = t;
+                            stack[func_pos + 2] = *key;
+                            stack[func_pos + 3] = value;
                         }
-                        lua_state.set_top(top + 3);
+                        lua_state.set_top(func_pos + 4);
                         
-                        // Call metamethod
-                        lua_state.push_frame(tm, top, 3, 0)?;
+                        let caller_depth = lua_state.call_depth();
+                        let new_base = func_pos + 1;
+                        
+                        // Call metamethod (0 results expected)
+                        lua_state.push_frame(tm, new_base, 3, 0)?;
                         crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
                         
+                        lua_state.set_top(func_pos); // Clean up stack
                         return Ok(true);
                     }
                     
@@ -401,22 +441,26 @@ pub fn store_to_metatable(
         
         // If __newindex is a function, call it
         if tm.is_function() {
-            let caller_depth = lua_state.call_depth();
-            let top = lua_state.get_top();
+            let func_pos = lua_state.get_top();
             
-            // Push arguments: t, key, value
+            // Push function and arguments: tm(t, key, value)
             {
                 let stack = lua_state.stack_mut();
-                stack[top] = t;
-                stack[top + 1] = *key;
-                stack[top + 2] = value;
+                stack[func_pos] = tm;
+                stack[func_pos + 1] = t;
+                stack[func_pos + 2] = *key;
+                stack[func_pos + 3] = value;
             }
-            lua_state.set_top(top + 3);
+            lua_state.set_top(func_pos + 4);
             
-            // Call metamethod
-            lua_state.push_frame(tm, top, 3, 0)?;
+            let caller_depth = lua_state.call_depth();
+            let new_base = func_pos + 1;
+            
+            // Call metamethod (0 results expected)
+            lua_state.push_frame(tm, new_base, 3, 0)?;
             crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
             
+            lua_state.set_top(func_pos); // Clean up stack
             return Ok(true);
         }
         

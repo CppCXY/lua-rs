@@ -38,6 +38,38 @@ pub enum TmKind {
     N = 25, // number of tag methods
 }
 
+/// Try unary metamethod (for __unm, __bnot)
+/// Port of luaT_trybinTM for unary operations
+pub fn try_unary_tm(
+    lua_state: &mut LuaState,
+    operand: LuaValue,
+    result_pos: usize,
+    tm: TmKind,
+) -> LuaResult<()> {
+    // For unary operations, Lua passes the same operand twice
+    let tm_name = tm.name();
+    
+    // Try to get metamethod from operand
+    let metamethod = get_binop_metamethod(lua_state, &operand, tm_name);
+    
+    if let Some(mm) = metamethod {
+        // Call metamethod: mm(operand, operand) -> result
+        let result = call_metamethod(lua_state, mm, operand, operand)?;
+        
+        // Store result
+        let stack = lua_state.stack_mut();
+        stack[result_pos] = result;
+        Ok(())
+    } else {
+        // No metamethod found
+        Err(lua_state.error(format!(
+            "attempt to perform '{}' on a {} value",
+            tm_name,
+            operand.type_name()
+        )))
+    }
+}
+
 /// Handle MMBIN opcode
 /// Call metamethod over R[A] and R[B]
 ///
@@ -307,7 +339,7 @@ fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue>
 
 /// Call a metamethod with two arguments
 /// Based on Lua 5.5's luaT_callTMres - returns the result value directly
-fn call_metamethod(
+pub fn call_metamethod(
     lua_state: &mut LuaState,
     metamethod: LuaValue,
     arg1: LuaValue,

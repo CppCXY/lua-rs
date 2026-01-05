@@ -100,8 +100,9 @@ fn test_mod_metamethod() {
         local c = a % 5
         assert(c.val == 2)
     "#,
-    );
-    assert!(result.is_ok());
+    );    if let Err(e) = &result {
+        eprintln!("test_index_metamethod_table error: {:?}", e);
+    }    assert!(result.is_ok());
 }
 
 #[test]
@@ -260,6 +261,9 @@ fn test_index_metamethod_function() {
         assert(t.foo == "value_foo")
     "#,
     );
+    if let Err(e) = &result {
+        eprintln!("test_index_metamethod_function error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -371,6 +375,9 @@ fn test_len_metamethod() {
         assert(#t == 3)
     "#,
     );
+    if result.is_err() {
+        eprintln!("test_len_metamethod error: {:?}", result.as_ref().err());
+    }
     assert!(result.is_ok());
 }
 
