@@ -701,6 +701,76 @@ impl LuaTable {
 
         array_iter.chain(hash_iter)
     }
+
+    /// Efficient next() implementation - port of Lua 5.5's luaH_next
+    /// Returns Some((key, value)) for next pair, or None if at end
+    /// If input_key is nil, returns first pair
+    /// If input_key is not found, returns None (error condition)
+    pub fn lua_next(&self, input_key: &LuaValue, object_pool: &ObjectPool) -> Option<(LuaValue, LuaValue)> {
+        // Port of luaH_next from ltable.c:188
+        // Strategy: 
+        // 1. If input_key is nil, start from beginning (array index 0)
+        // 2. Otherwise, find input_key in table
+        // 3. Return next non-nil entry
+
+        if input_key.is_nil() {
+            // Start from beginning - find first non-nil in array
+            for i in 0..self.asize() {
+                if !self.array[i].is_nil() {
+                    return Some((LuaValue::integer((i + 1) as i64), self.array[i]));
+                }
+            }
+            // Array is empty or all nil, continue to hash part
+            for node in self.nodes.iter() {
+                if !node.is_empty() && !node.is_dead() {
+                    return Some((node.key(), node.value));
+                }
+            }
+            // Table is completely empty
+            return None;
+        }
+
+        // Find position of input_key
+        // First try array part
+        if let Some(i) = input_key.as_integer() {
+            if i > 0 && (i as usize) <= self.asize() {
+                // Key is in array part, find next
+                let start_idx = i as usize; // i is 1-based, start_idx is where we found it
+                // Look for next non-nil in array
+                for idx in start_idx..self.asize() {
+                    if !self.array[idx].is_nil() {
+                        return Some((LuaValue::integer((idx + 1) as i64), self.array[idx]));
+                    }
+                }
+                // Reached end of array, continue to hash part
+                for node in self.nodes.iter() {
+                    if !node.is_empty() && !node.is_dead() {
+                        return Some((node.key(), node.value));
+                    }
+                }
+                return None;
+            }
+        }
+
+        // Key must be in hash part - find it
+        let found_idx = self.nodes.iter().position(|node| {
+            !node.is_dead() && !node.is_empty() && node.key().raw_equal(input_key, object_pool)
+        });
+
+        if let Some(idx) = found_idx {
+            // Found the key, return next entry in hash part
+            for node in self.nodes[idx + 1..].iter() {
+                if !node.is_empty() && !node.is_dead() {
+                    return Some((node.key(), node.value));
+                }
+            }
+            // No more entries
+            return None;
+        }
+
+        // Key not found - this is an error condition in Lua
+        None
+    }
 }
 
 #[cfg(test)]

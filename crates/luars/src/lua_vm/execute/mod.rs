@@ -155,14 +155,17 @@ fn execute_frame(
     
     // Macro-like helper to restore state after operations that may change frames
     // Matches Lua 5.5's updatebase(ci) and updatetrap(ci) in Protect() macro
+    // NOTE: We do NOT restore PC! The PC has already been incremented in the main loop.
+    // Restoring PC would cause us to execute the wrong instruction or re-execute the current one.
+    // Lua 5.5's updatebase() only updates the base pointer, not the PC.
     macro_rules! restore_state {
         () => {
             // SAFETY: After metamethod calls, we must ensure the frame still exists
             // The frame_idx parameter refers to THIS frame, which should not have been popped
             // (only called frames are popped, not the caller frame)
             if frame_idx < lua_state.call_depth() {
-                // Reload PC and base from frame (may have changed due to metamethod calls)
-                pc = lua_state.get_frame_pc(frame_idx) as usize;
+                // Reload base from frame (may have changed due to stack reallocations)
+                // DO NOT reload PC - it's already been updated by the main loop
                 base = lua_state.get_frame_base(frame_idx);
             } else {
                 // This should never happen - if it does, it's a bug in frame management

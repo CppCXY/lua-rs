@@ -127,9 +127,18 @@ pub fn handle_call(
             // Set metamethod as the function to call
             lua_state.stack_set(func_idx, mm)?;
             
+            // Update frame top to include the shifted argument
+            let new_top = first_arg + nargs + 1;
+            if let Some(frame) = lua_state.current_frame_mut() {
+                frame.top = new_top;
+            }
+            lua_state.set_top(new_top);
+            
             // Now call the metamethod with nargs+1 (including original func)
-            // Recursive call to handle_call
-            return handle_call(lua_state, base, a, b + 1, c);
+            // We need to adjust b: if b was 0 (varargs), keep it 0
+            // otherwise increment it to account for the extra argument
+            let new_b = if b == 0 { 0 } else { b + 1 };
+            return handle_call(lua_state, base, a, new_b, c);
         } else {
             Err(lua_state.error(format!(
                 "attempt to call a {} value",

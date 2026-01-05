@@ -433,8 +433,6 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'pairs' (table expected)".to_string()));
     }
 
-    // TODO: Check for __pairs metamethod
-
     // Return next function, table, and nil (3 values)
     let next_func = LuaValue::cfunction(lua_next);
     l.push_value(next_func)?;
@@ -444,7 +442,7 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// next(table [, index]) - Return next key-value pair
-/// TODO: Implement table.next() method on LuaTable
+/// Port of Lua 5.5's luaB_next using luaH_next
 fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     // next(table [, index])
     // Returns the next index-value pair in the table
@@ -458,39 +456,22 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
 
     let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
 
-    // Get all key-value pairs from the table
+    // Use efficient luaH_next implementation
     let vm = l.vm_mut();
-    let table = match vm.object_pool.get_table(table_id) {
-        Some(t) => t,
-        None => return Err(l.error("table not found".to_string())),
-    };
-
-    // Collect all key-value pairs first (to avoid borrow issues)
-    let all_pairs: Vec<(LuaValue, LuaValue)> =
-        table.iter_all().filter(|(_, v)| !v.is_nil()).collect();
-
-    // Find next key-value pair
-    // If index is nil, return first pair
-    // Otherwise, find the key after index
-    let mut found_current = index_val.is_nil();
-    let mut next_pair: Option<(LuaValue, LuaValue)> = None;
-
-    for (k, v) in all_pairs {
-        if found_current {
-            next_pair = Some((k, v));
-            break;
-        } else if k.raw_equal(&index_val, &vm.object_pool) {
-            found_current = true;
-        }
+    let table = vm.object_pool.get_table(table_id);
+    if table.is_none() {
+        return Err(l.error("table not found".to_string()));
     }
+    
+    let result = table.unwrap().lua_next(&index_val, &vm.object_pool);
 
-    // If we didn't find the current key, error
-    if !found_current && !index_val.is_nil() {
+    // If we didn't find a next pair and index was not nil, error
+    if result.is_none() && !index_val.is_nil() {
         return Err(l.error("invalid key to 'next'".to_string()));
     }
 
     // Return next key-value pair, or nil if at end
-    if let Some((k, v)) = next_pair {
+    if let Some((k, v)) = result {
         l.push_value(k)?;
         l.push_value(v)?;
         Ok(2)
