@@ -456,19 +456,23 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
 
     let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
 
-    // Use efficient luaH_next implementation
+    // Use efficient lua_next implementation
     let vm = l.vm_mut();
     let table = vm.object_pool.get_table(table_id);
     if table.is_none() {
         return Err(l.error("table not found".to_string()));
     }
     
-    let result = table.unwrap().lua_next(&index_val, &vm.object_pool);
-
-    // If we didn't find a next pair and index was not nil, error
-    if result.is_none() && !index_val.is_nil() {
-        return Err(l.error("invalid key to 'next'".to_string()));
+    // First, if index is not nil, verify it exists in the table
+    // This distinguishes "key not found" from "no more keys"
+    if !index_val.is_nil() {
+        let key_exists = table.unwrap().raw_get(&index_val).is_some();
+        if !key_exists {
+            return Err(l.error("invalid key to 'next'".to_string()));
+        }
     }
+    
+    let result = table.unwrap().lua_next(&index_val, &vm.object_pool);
 
     // Return next key-value pair, or nil if at end
     if let Some((k, v)) = result {

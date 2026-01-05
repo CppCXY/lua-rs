@@ -734,21 +734,24 @@ impl LuaTable {
         // First try array part
         if let Some(i) = input_key.as_integer() {
             if i > 0 && (i as usize) <= self.asize() {
-                // Key is in array part, find next
-                let start_idx = i as usize; // i is 1-based, start_idx is where we found it
-                // Look for next non-nil in array
-                for idx in start_idx..self.asize() {
-                    if !self.array[idx].is_nil() {
-                        return Some((LuaValue::integer((idx + 1) as i64), self.array[idx]));
+                let idx = (i - 1) as usize; // Convert 1-based to 0-based
+                // Verify key exists (value is not nil)
+                if !self.array[idx].is_nil() {
+                    // Found in array, look for next non-nil
+                    for next_idx in (idx + 1)..self.asize() {
+                        if !self.array[next_idx].is_nil() {
+                            return Some((LuaValue::integer((next_idx + 1) as i64), self.array[next_idx]));
+                        }
                     }
-                }
-                // Reached end of array, continue to hash part
-                for node in self.nodes.iter() {
-                    if !node.is_empty() && !node.is_dead() {
-                        return Some((node.key(), node.value));
+                    // Reached end of array, continue to hash part
+                    for node in self.nodes.iter() {
+                        if !node.is_empty() && !node.is_dead() {
+                            return Some((node.key(), node.value));
+                        }
                     }
+                    return None;
                 }
-                return None;
+                // Value is nil, key doesn't really exist, fall through to check hash
             }
         }
 
