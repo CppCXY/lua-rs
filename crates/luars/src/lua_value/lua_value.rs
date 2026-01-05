@@ -745,9 +745,14 @@ impl LuaValue {
     // ============ Equality ============
 
     pub fn raw_equal(&self, other: &LuaValue, pool: &ObjectPool) -> bool {
-        // Fast path: if type tags differ, not equal
+        // Fast path: if type tags differ AND they're not both numbers, not equal
+        // Numbers need special handling because integer and float can be equal
         if self.tt_ != other.tt_ {
-            return false;
+            // Allow comparison between integer and float
+            if !((self.ttisinteger() && other.ttisfloat()) || 
+                 (self.ttisfloat() && other.ttisinteger())) {
+                return false;
+            }
         }
 
         // Type-specific comparison

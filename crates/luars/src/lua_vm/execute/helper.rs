@@ -90,6 +90,12 @@ pub fn ttisnumber(v: &LuaValue) -> bool {
     (*v).tt_ == LUA_VNUMINT || (*v).tt_ == LUA_VNUMFLT
 }
 
+/// ttisstring - 检查是否是字符串
+#[inline(always)]
+pub fn ttisstring(v: &LuaValue) -> bool {
+    v.is_string()
+}
+
 // ============ 值访问宏 (对应 Lua 的 ivalue/fltvalue) ============
 
 /// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)

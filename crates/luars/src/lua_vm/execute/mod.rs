@@ -35,6 +35,7 @@ use crate::{
         execute::helper::{
             buildhiddenargs, fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue,
             setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger,
+            ttisstring,
         },
     },
 };
@@ -1810,20 +1811,34 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                let stack = lua_state.stack_mut();
-                let ra = &stack[base + a];
-                let rb = &stack[base + b];
+                let cond = {
+                    let stack = lua_state.stack_mut();
+                    let ra = &stack[base + a];
+                    let rb = &stack[base + b];
 
-                let cond = if ttisinteger(ra) && ttisinteger(rb) {
-                    ivalue(ra) < ivalue(rb)
-                } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
-                    let mut na = 0.0;
-                    let mut nb = 0.0;
-                    tonumberns(ra, &mut na);
-                    tonumberns(rb, &mut nb);
-                    na < nb
-                } else {
-                    false // TODO: metamethod
+                    if ttisinteger(ra) && ttisinteger(rb) {
+                        ivalue(ra) < ivalue(rb)
+                    } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
+                        let mut na = 0.0;
+                        let mut nb = 0.0;
+                        tonumberns(ra, &mut na);
+                        tonumberns(rb, &mut nb);
+                        na < nb
+                    } else if ttisstring(ra) && ttisstring(rb) {
+                        // String comparison - copy IDs first
+                        let sid_a = ra.tsvalue();
+                        let sid_b = rb.tsvalue();
+                        drop(stack); // Release stack borrow
+                        
+                        let pool = &lua_state.vm_mut().object_pool;
+                        if let (Some(sa), Some(sb)) = (pool.get_string(sid_a), pool.get_string(sid_b)) {
+                            sa.as_str() < sb.as_str()
+                        } else {
+                            false
+                        }
+                    } else {
+                        false // TODO: metamethod
+                    }
                 };
 
                 if cond != k {
@@ -1838,20 +1853,34 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
 
-                let stack = lua_state.stack_mut();
-                let ra = &stack[base + a];
-                let rb = &stack[base + b];
+                let cond = {
+                    let stack = lua_state.stack_mut();
+                    let ra = &stack[base + a];
+                    let rb = &stack[base + b];
 
-                let cond = if ttisinteger(ra) && ttisinteger(rb) {
-                    ivalue(ra) <= ivalue(rb)
-                } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
-                    let mut na = 0.0;
-                    let mut nb = 0.0;
-                    tonumberns(ra, &mut na);
-                    tonumberns(rb, &mut nb);
-                    na <= nb
-                } else {
-                    false // TODO: metamethod
+                    if ttisinteger(ra) && ttisinteger(rb) {
+                        ivalue(ra) <= ivalue(rb)
+                    } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
+                        let mut na = 0.0;
+                        let mut nb = 0.0;
+                        tonumberns(ra, &mut na);
+                        tonumberns(rb, &mut nb);
+                        na <= nb
+                    } else if ttisstring(ra) && ttisstring(rb) {
+                        // String comparison - copy IDs first
+                        let sid_a = ra.tsvalue();
+                        let sid_b = rb.tsvalue();
+                        drop(stack); // Release stack borrow
+                        
+                        let pool = &lua_state.vm_mut().object_pool;
+                        if let (Some(sa), Some(sb)) = (pool.get_string(sid_a), pool.get_string(sid_b)) {
+                            sa.as_str() <= sb.as_str()
+                        } else {
+                            false
+                        }
+                    } else {
+                        false // TODO: metamethod
+                    }
                 };
 
                 if cond != k {
