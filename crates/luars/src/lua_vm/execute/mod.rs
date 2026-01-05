@@ -1987,7 +1987,6 @@ fn execute_frame(
                         // Try metamethod - use Protect pattern
                         let va = *ra;
                         let vb = *rb;
-                        drop(stack); // Release borrow before calling metamethod
                         
                         save_pc!();
                         let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
@@ -2045,7 +2044,6 @@ fn execute_frame(
                         // Try metamethod - use Protect pattern
                         let va = *ra;
                         let vb = *rb;
-                        drop(stack); // Release borrow before calling metamethod
                         
                         save_pc!();
                         let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {

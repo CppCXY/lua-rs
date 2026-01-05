@@ -798,35 +798,6 @@ impl LuaVM {
 
     // ============ GC Management ============
 
-    fn register_chunk_constants(&mut self, chunk: &Chunk) {
-        for value in &chunk.constants {
-            match value.kind() {
-                LuaValueKind::String | LuaValueKind::Table => {
-                    // Table IDs are managed by object pool, no direct GC registration needed
-                    // The object pool will handle lifetime management
-                }
-                LuaValueKind::Function => {
-                    // Function IDs are managed by object pool, no direct GC registration needed
-                    // Recursively register nested function chunks if needed
-                    if let Some(func_id) = value.as_function_id() {
-                        // Extract child chunk before recursion to avoid borrow conflicts
-                        let child_chunk =
-                            if let Some(func_ref) = self.object_pool.get_function(func_id) {
-                                func_ref.chunk().cloned()
-                            } else {
-                                None
-                            };
-
-                        if let Some(child_chunk) = child_chunk {
-                            self.register_chunk_constants(&child_chunk);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// Perform garbage collection (like luaC_fullgc in Lua 5.5)
     /// Performs a complete GC cycle, running until pause state is reached
     /// If isemergency is true, avoids operations that might change interpreter state
@@ -975,31 +946,6 @@ impl LuaVM {
     #[inline]
     pub fn get_error_message(&self) -> &str {
         self.main_state.error_msg()
-    }
-
-    /// Try to get a metamethod from a value
-    fn get_metamethod(&mut self, value: &LuaValue, event: &str) -> Option<LuaValue> {
-        match value.kind() {
-            LuaValueKind::Table => {
-                if let Some(table_id) = value.as_table_id() {
-                    let metatable = {
-                        let table = self.object_pool.get_table(table_id)?;
-                        table.get_metatable()
-                    };
-                    if let Some(metatable) = metatable {
-                        let key = self.create_string(event);
-                        self.table_get_with_meta(&metatable, &key)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            LuaValueKind::String => None,
-            // TODO: Support metatables for userdata
-            _ => None,
-        }
     }
 
     /// Generate a stack traceback string

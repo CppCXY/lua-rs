@@ -84,12 +84,6 @@ pub fn ttisfloat(v: &LuaValue) -> bool {
     (*v).tt_ == LUA_VNUMFLT
 }
 
-/// ttisnumber - 检查是否是任意数字 (整数或浮点)
-#[inline(always)]
-pub fn ttisnumber(v: &LuaValue) -> bool {
-    (*v).tt_ == LUA_VNUMINT || (*v).tt_ == LUA_VNUMFLT
-}
-
 /// ttisstring - 检查是否是字符串
 #[inline(always)]
 pub fn ttisstring(v: &LuaValue) -> bool {
@@ -117,25 +111,11 @@ pub fn setivalue(v: &mut LuaValue, i: i64) {
     (*v).tt_ = LUA_VNUMINT;
 }
 
-/// chgivalue - 只修改整数值，不修改类型标签（Lua的chgivalue宏）
-/// 调用前必须确认类型已经是整数！
-#[inline(always)]
-pub fn chgivalue(v: &mut LuaValue, i: i64) {
-    (*v).value_.i = i;
-}
-
 /// setfltvalue - 设置浮点值
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
     (*v).value_.n = n;
     (*v).tt_ = LUA_VNUMFLT;
-}
-
-/// chgfltvalue - 只修改浮点值，不修改类型标签
-/// 调用前必须确认类型已经是浮点！
-#[inline(always)]
-pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
-    (*v).value_.n = n;
 }
 
 /// setbfvalue - 设置false

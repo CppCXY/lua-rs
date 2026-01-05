@@ -577,55 +577,6 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
     Ok(false)
 }
 
-/// Try equality metamethod (DEPRECATED - use equalobj instead)
-/// Only calls metamethod if both values have the same metatable or both are userdata
-/// Returns Some(bool) if metamethod was called, None if no metamethod
-pub fn try_eq_tm(lua_state: &mut LuaState, p1: LuaValue, p2: LuaValue) -> LuaResult<Option<bool>> {
-    // CRITICAL: In Lua 5.5, __eq is ONLY called for tables and userdata!
-    // Numbers, strings, booleans, nil, functions etc. are compared directly without metamethods.
-    // See lvm.c:582 luaV_equalobj - only LUA_VTABLE and LUA_VUSERDATA reach the metamethod code path.
-    // Other types (numbers, strings, etc.) return immediately after direct comparison.
-    
-    // First check: only tables and userdata can have __eq metamethod
-    let is_table_or_userdata = |v: &LuaValue| {
-        v.as_table_id().is_some() || v.as_userdata_id().is_some()
-    };
-    
-    if !is_table_or_userdata(&p1) && !is_table_or_userdata(&p2) {
-        // Not table or userdata - no metamethod applies
-        // This prevents infinite recursion when comparing numbers, strings, etc.
-        return Ok(None);
-    }
-
-    let mt1 = get_metatable(lua_state, &p1);
-    let mt2 = get_metatable(lua_state, &p2);
-
-    // Check if they have the same metatable
-    let same_mt = match (mt1, mt2) {
-        (Some(m1), Some(m2)) => {
-            // Compare metatable identity
-            if let (Some(t1), Some(t2)) = (m1.as_table_id(), m2.as_table_id()) {
-                t1 == t2
-            } else {
-                false
-            }
-        }
-        _ => false,
-    };
-
-    if !same_mt {
-        return Ok(None);
-    }
-
-    // Now try to get __eq metamethod
-    if let Some(metamethod) = get_binop_metamethod(lua_state, &p1, "__eq") {
-        let result = call_metamethod(lua_state, metamethod, p1, p2)?;
-        Ok(Some(!result.is_falsy()))
-    } else {
-        Ok(None)
-    }
-}
-
 impl TmKind {
     /// Convert u8 to TmKind
     pub fn from_u8(value: u8) -> Option<Self> {

@@ -118,14 +118,14 @@ pub fn handle_call(
             let first_arg = func_idx + 1;
             for i in (0..nargs).rev() {
                 let val = lua_state.stack_get(first_arg + i).unwrap_or(LuaValue::nil());
-                lua_state.stack_set(first_arg + i + 1, val);
+                lua_state.stack_set(first_arg + i + 1, val)?;
             }
             
             // Set func as first arg of metamethod
-            lua_state.stack_set(first_arg, func);
+            lua_state.stack_set(first_arg, func)?;
             
             // Set metamethod as the function to call
-            lua_state.stack_set(func_idx, mm);
+            lua_state.stack_set(func_idx, mm)?;
             
             // Now call the metamethod with nargs+1 (including original func)
             // Recursive call to handle_call
@@ -141,8 +141,6 @@ pub fn handle_call(
 
 /// Get __call metamethod for a value
 fn get_call_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
-    use super::helper;
-    
     // For table: check metatable
     if let Some(table_id) = value.as_table_id() {
         let mt_val = lua_state
@@ -471,7 +469,7 @@ fn call_c_function_tailcall(
     lua_state: &mut LuaState,
     func_idx: usize,
     nargs: usize,
-    base: usize,
+    _base: usize,
 ) -> LuaResult<()> {
     // Get the function
     let func = lua_state
