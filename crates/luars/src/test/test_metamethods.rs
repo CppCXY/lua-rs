@@ -385,9 +385,16 @@ fn test_eq_metamethod() {
         local mt = {__eq = function(x, y) return x.val == y.val end}
         setmetatable(a, mt)
         setmetatable(b, mt)
-        assert(a == b)
+        local result = (a == b)
+        -- Don't use assert to avoid potential issue with print/assert
+        if not result then
+            error("Expected a == b to be true")
+        end
     "#,
     );
+    if let Err(e) = &result {
+        println!("ERROR in test_eq_metamethod: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 

@@ -144,6 +144,32 @@ fn execute_frame(
     // Constants and code pointers (avoid repeated dereferencing)
     let constants = &chunk.constants;
     let code = &chunk.code;
+    
+    // Macro-like helper to save PC before operations that may call functions
+    // Matches Lua 5.5's savepc(ci) in Protect() macro
+    macro_rules! save_pc {
+        () => {
+            lua_state.set_frame_pc(frame_idx, pc as u32);
+        };
+    }
+    
+    // Macro-like helper to restore state after operations that may change frames
+    // Matches Lua 5.5's updatebase(ci) and updatetrap(ci) in Protect() macro
+    macro_rules! restore_state {
+        () => {
+            // SAFETY: After metamethod calls, we must ensure the frame still exists
+            // The frame_idx parameter refers to THIS frame, which should not have been popped
+            // (only called frames are popped, not the caller frame)
+            if frame_idx < lua_state.call_depth() {
+                // Reload PC and base from frame (may have changed due to metamethod calls)
+                pc = lua_state.get_frame_pc(frame_idx) as usize;
+                base = lua_state.get_frame_base(frame_idx);
+            } else {
+                // This should never happen - if it does, it's a bug in frame management
+                panic!("restore_state: frame_idx {} >= call_depth {}", frame_idx, lua_state.call_depth());
+            }
+        };
+    }
 
     // Main interpreter loop
     loop {
@@ -1788,7 +1814,7 @@ fn execute_frame(
             // ============================================================
             OpCode::Eq => {
                 // if ((R[A] == R[B]) ~= k) then pc++; else donextjump
-                // Lua 5.5: docondjump() - if cond != k, skip next; else execute next (JMP)
+                // Direct port of Lua 5.5's OP_EQ: Protect(cond = luaV_equalobj(L, s2v(ra), rb))
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
                 let k = instr.get_k();
@@ -1798,16 +1824,10 @@ fn execute_frame(
                     (stack[base + a], stack[base + b])
                 };
                 
-                // First try raw equality
-                let mut cond = ra.raw_equal(&rb, &lua_state.vm_mut().object_pool);
-                
-                // If not equal, try metamethod
-                if !cond {
-                    match metamethod::try_eq_tm(lua_state, ra, rb)? {
-                        Some(result) => cond = result,
-                        None => {} // No metamethod, keep cond = false
-                    }
-                }
+                // Protect(exp): save PC → execute → restore state
+                save_pc!();
+                let cond = metamethod::equalobj(lua_state, ra, rb)?;
+                restore_state!();
                 
                 if cond != k {
                     pc += 1; // Condition failed - skip next instruction
@@ -1851,17 +1871,20 @@ fn execute_frame(
                             false
                         }
                     } else {
-                        // Try metamethod
+                        // Try metamethod - use Protect pattern
                         let va = *ra;
                         let vb = *rb;
-                        drop(stack); // Release borrow
+                        drop(stack); // Release borrow before calling metamethod
                         
-                        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
+                        save_pc!();
+                        let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
                             Some(result) => result,
                             None => {
                                 return Err(lua_state.error("attempt to compare non-comparable values".to_string()));
                             }
-                        }
+                        };
+                        restore_state!();
+                        result
                     }
                 };
 
@@ -1896,7 +1919,6 @@ fn execute_frame(
                         // String comparison - copy IDs first
                         let sid_a = ra.tsvalue();
                         let sid_b = rb.tsvalue();
-                        let _ = stack;
 
                         let pool = &lua_state.vm_mut().object_pool;
                         if let (Some(sa), Some(sb)) =
@@ -1907,17 +1929,20 @@ fn execute_frame(
                             false
                         }
                     } else {
-                        // Try metamethod
+                        // Try metamethod - use Protect pattern
                         let va = *ra;
                         let vb = *rb;
-                        drop(stack); // Release borrow
+                        drop(stack); // Release borrow before calling metamethod
                         
-                        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
+                        save_pc!();
+                        let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
                             Some(result) => result,
                             None => {
                                 return Err(lua_state.error("attempt to compare non-comparable values".to_string()));
                             }
-                        }
+                        };
+                        restore_state!();
+                        result
                     }
                 };
 

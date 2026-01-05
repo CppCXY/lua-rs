@@ -1,15 +1,13 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
+mod file;
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::{LuaResult, LuaState};
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
-
-mod file;
 pub use file::{LuaFile, create_file_metatable};
+use std::fs::OpenOptions;
+use std::io::{self, BufRead, Write};
 
 pub fn create_io_lib() -> LibraryModule {
     crate::lib_module!("io", {
@@ -80,11 +78,11 @@ fn create_stdin(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file = LuaFile::stdin();
     let file_mt = create_file_metatable(l)?;
     let userdata = l.create_userdata(LuaUserdata::new(file));
-    if let Some(ud_id) = userdata.as_userdata_id() {
-        if let Some(ud) = l.get_userdata_mut(&userdata) {
-            ud.set_metatable(file_mt);
-        }
+
+    if let Some(ud) = l.get_userdata_mut(&userdata) {
+        ud.set_metatable(file_mt);
     }
+
     Ok(userdata)
 }
 
