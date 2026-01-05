@@ -502,3 +502,54 @@ fn get_newindex_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<L
 
     None
 }
+
+/// Get binary operation metamethod from either of two values
+/// Checks v1's metatable first, then v2's if not found
+pub fn get_binop_metamethod(
+    lua_state: &mut LuaState,
+    v1: &LuaValue,
+    v2: &LuaValue,
+    event: &str,
+) -> Option<LuaValue> {
+    // Try v1's metatable first
+    if let Some(mt) = get_value_metatable(lua_state, v1) {
+        if let Some(mm) = get_metamethod_from_metatable(lua_state, mt, event) {
+            return Some(mm);
+        }
+    }
+    
+    // Try v2's metatable
+    if let Some(mt) = get_value_metatable(lua_state, v2) {
+        if let Some(mm) = get_metamethod_from_metatable(lua_state, mt, event) {
+            return Some(mm);
+        }
+    }
+    
+    None
+}
+
+/// Get metatable for any value type
+fn get_value_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+    if value.is_string() {
+        return lua_state.vm_mut().string_mt;
+    }
+    
+    if let Some(table_id) = value.as_table_id() {
+        return lua_state
+            .vm_mut()
+            .object_pool
+            .get_table(table_id)
+            .and_then(|t| t.get_metatable());
+    }
+    
+    if let Some(ud_id) = value.as_userdata_id() {
+        if let Some(ud) = lua_state.vm_mut().object_pool.get_userdata(ud_id) {
+            let mt = ud.get_metatable();
+            if !mt.is_nil() {
+                return Some(mt);
+            }
+        }
+    }
+    
+    None
+}

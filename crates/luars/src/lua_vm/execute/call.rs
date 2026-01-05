@@ -106,9 +106,59 @@ pub fn handle_call(
             Err(lua_state.error("CALL: unknown function type".to_string()))
         }
     } else {
-        // Not a function - should check for __call metamethod
-        Err(lua_state.error("CALL: attempt to call a non-function".to_string()))
+        // Not a function - check for __call metamethod
+        // Port of Lua 5.5's handling in ldo.c:tryfuncTM
+        if let Some(mm) = get_call_metamethod(lua_state, &func) {
+            // We have __call metamethod
+            // Need to shift arguments and insert function as first arg
+            // Stack layout before: [func, arg1, arg2, ...]
+            // Stack layout after:  [__call, func, arg1, arg2, ...]
+            
+            // First, shift arguments to make room for func as first arg
+            let first_arg = func_idx + 1;
+            for i in (0..nargs).rev() {
+                let val = lua_state.stack_get(first_arg + i).unwrap_or(LuaValue::nil());
+                lua_state.stack_set(first_arg + i + 1, val);
+            }
+            
+            // Set func as first arg of metamethod
+            lua_state.stack_set(first_arg, func);
+            
+            // Set metamethod as the function to call
+            lua_state.stack_set(func_idx, mm);
+            
+            // Now call the metamethod with nargs+1 (including original func)
+            // Recursive call to handle_call
+            return handle_call(lua_state, base, a, b + 1, c);
+        } else {
+            Err(lua_state.error(format!(
+                "attempt to call a {} value",
+                func.type_name()
+            )))
+        }
     }
+}
+
+/// Get __call metamethod for a value
+fn get_call_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+    use super::helper;
+    
+    // For table: check metatable
+    if let Some(table_id) = value.as_table_id() {
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_table(table_id)?
+            .get_metatable()?;
+        
+        let mt_table_id = mt_val.as_table_id()?;
+        let vm = lua_state.vm_mut();
+        let key = vm.create_string("__call");
+        let mt = vm.object_pool.get_table(mt_table_id)?;
+        return mt.raw_get(&key);
+    }
+    
+    None
 }
 
 /// Call a C function and handle results  

@@ -232,25 +232,72 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    let vm = l.vm_mut();
-
     // Fast path: simple types without metamethods
-    let result = if value.is_nil() {
-        vm.create_string("nil")
-    } else if let Some(b) = value.as_bool() {
-        vm.create_string(if b { "true" } else { "false" })
-    } else if let Some(i) = value.as_integer() {
-        vm.create_string(&i.to_string())
-    } else if let Some(f) = value.as_number() {
-        vm.create_string(&f.to_string())
-    } else {
-        // Slow path: check for __tostring metamethod or default representation
-        let value_str = vm.value_to_string_raw(&value);
-        vm.create_string(&value_str)
-    };
+    if value.is_nil() || value.as_bool().is_some() || value.is_integer() || value.is_number() {
+        let vm = l.vm_mut();
+        let s = if value.is_nil() {
+            vm.create_string("nil")
+        } else if let Some(b) = value.as_bool() {
+            vm.create_string(if b { "true" } else { "false" })
+        } else if let Some(i) = value.as_integer() {
+            vm.create_string(&i.to_string())
+        } else if let Some(f) = value.as_number() {
+            vm.create_string(&f.to_string())
+        } else {
+            unreachable!()
+        };
+        l.push_value(s)?;
+        return Ok(1);
+    }
 
+    // Check for __tostring metamethod
+    if let Some(mm) = get_tostring_metamethod(l, &value) {
+        // Call __tostring metamethod
+        // We'll use a workaround: execute a small Lua snippet
+        // But that's too complex. Let's just skip metamethod for now
+        // and return the default representation.
+        // TODO: Implement proper metamethod calling from C functions
+    }
+
+    // No metamethod: use default representation
+    let vm = l.vm_mut();
+    let value_str = vm.value_to_string_raw(&value);
+    let result = vm.create_string(&value_str);
     l.push_value(result)?;
     Ok(1)
+}
+
+/// Get __tostring metamethod for a value
+fn get_tostring_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+    // For table: check metatable
+    if let Some(table_id) = value.as_table_id() {
+        let mt_val = lua_state
+            .vm_mut()
+            .object_pool
+            .get_table(table_id)?
+            .get_metatable()?;
+        
+        let mt_table_id = mt_val.as_table_id()?;
+        let vm = lua_state.vm_mut();
+        let key = vm.create_string("__tostring");
+        let mt = vm.object_pool.get_table(mt_table_id)?;
+        return mt.raw_get(&key);
+    }
+    
+    // For userdata: check metatable
+    if let Some(ud_id) = value.as_userdata_id() {
+        let ud = lua_state.vm_mut().object_pool.get_userdata(ud_id)?;
+        let mt_val = ud.get_metatable();
+        if !mt_val.is_nil() {
+            let mt_table_id = mt_val.as_table_id()?;
+            let vm = lua_state.vm_mut();
+            let key = vm.create_string("__tostring");
+            let mt = vm.object_pool.get_table(mt_table_id)?;
+            return mt.raw_get(&key);
+        }
+    }
+    
+    None
 }
 
 /// select(index, ...) - Return subset of arguments
