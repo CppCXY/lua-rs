@@ -1,4 +1,4 @@
-use crate::{LuaResult, LuaValue, lua_value::LuaTableImpl, lua_vm::LuaState};
+use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 
 /// require(modname) - Load a module  
 /// Simplified implementation - loads from package.preload or package.path

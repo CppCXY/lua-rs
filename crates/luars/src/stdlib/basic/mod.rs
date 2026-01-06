@@ -7,7 +7,7 @@ mod require;
 use std::rc::Rc;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaTableImpl, LuaValue, LuaValueKind};
+use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaError, LuaResult, LuaState};
 use require::lua_require;
 

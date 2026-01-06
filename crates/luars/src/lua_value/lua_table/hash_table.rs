@@ -1,5 +1,6 @@
 use crate::{
-    lua_value::{lua_table::LuaInsertResult, LuaTableImpl}, LuaResult, LuaValue
+    LuaResult, LuaValue,
+    lua_value::{LuaTableImpl, lua_table::LuaInsertResult},
 };
 use hashbrown::HashTable;
 use std::hash::{Hash, Hasher};

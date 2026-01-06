@@ -9,7 +9,7 @@ mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
-use crate::lua_value::{Chunk, LuaTable, LuaTableImpl, LuaUserdata, LuaValue, LuaValueKind};
+use crate::lua_value::{Chunk, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;

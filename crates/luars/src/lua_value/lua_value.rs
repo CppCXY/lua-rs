@@ -44,10 +44,14 @@ pub const LUA_TUSERDATA: u8 = 7;
 pub const LUA_TTHREAD: u8 = 8;
 
 // Extra types for non-values
+#[allow(unused)]
 pub const LUA_NUMTYPES: u8 = 9;
+#[allow(unused)]
 pub const LUA_TUPVAL: u8 = LUA_NUMTYPES; // upvalues
+#[allow(unused)]
 pub const LUA_TPROTO: u8 = LUA_NUMTYPES + 1; // function prototypes  
-pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2; // removed keys in tables
+#[allow(unused)]
+pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2; // removed keys in table
 
 // ============ Variant tags (with bits 4-5) ============
 // makevariant(t,v) = ((t) | ((v) << 4))
@@ -56,6 +60,7 @@ pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2; // removed keys in tables
 pub const LUA_VNIL: u8 = 0; // makevariant(LUA_TNIL, 0)
 pub const LUA_VEMPTY: u8 = 0x10; // makevariant(LUA_TNIL, 1) - empty slot in table
 pub const LUA_VABSTKEY: u8 = 0x20; // makevariant(LUA_TNIL, 2) - absent key in table
+#[allow(unused)]
 pub const LUA_VNOTABLE: u8 = 0x30; // makevariant(LUA_TNIL, 3) - fast get non-table signal
 
 // Boolean variants
@@ -81,9 +86,9 @@ pub const LUA_VTHREAD: u8 = LUA_TTHREAD | BIT_ISCOLLECTABLE; // 0x48
 // Light C function (NOT collectable - function pointer stored directly)
 pub const LUA_VLCF: u8 = 0x06; // makevariant(LUA_TFUNCTION, 0) - light C function
 
-// Helper macros as functions
+#[allow(unused)]
 #[inline(always)]
-pub const fn makevariant(t: u8, v: u8) -> u8 {
+const fn makevariant(t: u8, v: u8) -> u8 {
     t | (v << 4)
 }
 
@@ -95,18 +100,6 @@ pub const fn novariant(tt: u8) -> u8 {
 #[inline(always)]
 pub const fn withvariant(tt: u8) -> u8 {
     tt & 0x3F
-}
-
-/// ctb - mark a tag as collectable
-#[inline(always)]
-pub const fn ctb(t: u8) -> u8 {
-    t | BIT_ISCOLLECTABLE
-}
-
-/// tagisempty - check if tag represents empty slot
-#[inline(always)]
-pub const fn tagisempty(tag: u8) -> bool {
-    novariant(tag) == LUA_TNIL
 }
 
 // ============ Value union ============

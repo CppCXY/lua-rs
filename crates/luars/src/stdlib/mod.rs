@@ -9,6 +9,7 @@ pub mod io;
 pub mod math;
 pub mod os;
 pub mod package;
+mod sort_table;
 pub mod string;
 pub mod table;
 pub mod utf8;

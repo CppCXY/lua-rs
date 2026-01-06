@@ -8,7 +8,6 @@
 /// - TAILCALL: replace current frame, return FrameAction::TailCall (main loop loads new chunk)
 use crate::{
     LuaValue,
-    lua_value::LuaTableImpl,
     lua_vm::{CFunction, LuaError, LuaResult, LuaState},
 };
 

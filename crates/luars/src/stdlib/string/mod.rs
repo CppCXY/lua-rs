@@ -6,7 +6,7 @@ mod pattern;
 mod string_format;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaTableImpl, LuaValue};
+use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_string_lib() -> LibraryModule {

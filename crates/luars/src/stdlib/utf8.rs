@@ -2,7 +2,6 @@
 // Implements: char, charpattern, codes, codepoint, len, offset
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::LuaTableImpl;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaState;

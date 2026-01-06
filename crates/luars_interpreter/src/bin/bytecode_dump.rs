@@ -74,8 +74,7 @@ fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
             }
         } else if val.is_string() {
             // 获取实际字符串内容（对齐luac）
-            if let Some(s) = vm.get_string(val) {
-                let content = s.as_str();
+            if let Some(content) = vm.get_string(val) {
                 // Escape special characters like official luac (including all control characters)
                 let mut escaped = String::new();
                 for ch in content.chars() {

@@ -5,12 +5,14 @@ mod value_array;
 
 use super::lua_value::LuaValue;
 use crate::{
+    LuaResult, TableId,
     lua_value::{
         lua_table::{
             hash_table::LuaHashTable, type_array::LuaTypedArray, value_array::LuaValueArray,
         },
         lua_value::Value,
-    }, lua_vm::{LuaError, LuaState}, LuaResult, TableId
+    },
+    lua_vm::LuaError,
 };
 
 pub struct LuaTable {
@@ -20,7 +22,7 @@ pub struct LuaTable {
     /// metatable_id为n+1表示TableId(n) (1-based以避免0冲突)
     meta: u64,
 
-    impl_table: LuaTableDetail,
+    pub(crate) impl_table: LuaTableDetail,
 }
 
 impl LuaTable {
@@ -48,18 +50,6 @@ impl LuaTable {
             Some(TableId(id)) => (id as u64) + 1, // 1-based以避免0
         };
         (flags as u64) | ((lsizenode as u64) << 8) | (metatable_bits << 16)
-    }
-
-    /// 获取flags
-    #[inline(always)]
-    fn flags(&self) -> u8 {
-        (self.meta & 0xFF) as u8
-    }
-
-    /// 设置flags
-    #[inline(always)]
-    fn set_flags(&mut self, flags: u8) {
-        self.meta = (self.meta & !0xFF) | (flags as u64);
     }
 
     /// 获取metatable
@@ -295,10 +285,6 @@ impl LuaTable {
         }
 
         result
-    }
-
-    pub fn sort_by_comp(l: &mut LuaState) -> LuaResult<()> {
-        Ok(())
     }
 }
 

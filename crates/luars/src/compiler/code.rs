@@ -4,7 +4,7 @@ use crate::compiler::expression::{ExpDesc, ExpKind};
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::compiler::{ExpUnion, IndVars};
-use crate::lua_value::{LuaTableImpl, LuaValueKind};
+use crate::lua_value::LuaValueKind;
 use crate::lua_vm::{Instruction, OpCode, TmKind};
 use crate::{LuaValue, StringId};
 

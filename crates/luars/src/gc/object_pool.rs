@@ -699,6 +699,7 @@ impl ObjectPool {
         self.strings.get(id).map(|gs| gs.data.as_str())
     }
 
+    #[allow(unused)]
     #[inline(always)]
     pub(crate) fn get_string_gc(&self, id: StringId) -> Option<&GcString> {
         self.strings.get(id)
@@ -803,11 +804,13 @@ impl ObjectPool {
         self.tables.get_mut(id.0).map(|gt| &mut gt.data)
     }
 
+    #[allow(unused)]
     #[inline(always)]
     pub(crate) fn get_table_gc(&self, id: TableId) -> Option<&GcTable> {
         self.tables.get(id.0)
     }
 
+    #[allow(unused)]
     #[inline(always)]
     pub(crate) fn get_table_gc_mut(&mut self, id: TableId) -> Option<&mut GcTable> {
         self.tables.get_mut(id.0)
@@ -1106,8 +1109,6 @@ impl Default for ObjectPool {
 
 #[cfg(test)]
 mod tests {
-    use crate::lua_value::LuaTableImpl;
-
     use super::*;
 
     #[test]

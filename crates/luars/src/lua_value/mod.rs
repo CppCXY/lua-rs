@@ -10,7 +10,7 @@ use std::fmt;
 use std::rc::Rc;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
-pub use lua_table::{LuaTable, LuaTableImpl};
+pub use lua_table::{LuaTable, LuaTableDetail, LuaTableImpl};
 pub use lua_value::{LuaValue, LuaValueKind};
 
 // Re-export type tag constants for VM execution

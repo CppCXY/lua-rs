@@ -11,10 +11,13 @@ pub mod call_status {
     pub const CIST_C: u8 = 1 << 1;
     /// Function is a tail call
     pub const CIST_TAIL: u8 = 1 << 2;
+    #[allow(unused)]
     /// Call is running a for loop
     pub const CIST_HOOKYIELD: u8 = 1 << 3;
+    #[allow(unused)]
     /// Last hook yielded
     pub const CIST_YPCALL: u8 = 1 << 4;
+    #[allow(unused)]
     /// Call is in error-protected mode (pcall/xpcall)
     pub const CIST_FRESH: u8 = 1 << 5;
 }

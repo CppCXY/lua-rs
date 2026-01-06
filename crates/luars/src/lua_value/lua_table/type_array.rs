@@ -1,5 +1,7 @@
 use crate::{
-    lua_value::{lua_table::LuaInsertResult, lua_value::Value, LuaTableImpl}, lua_vm::LuaError, LuaResult, LuaValue
+    LuaResult, LuaValue,
+    lua_value::{LuaTableImpl, lua_table::LuaInsertResult, lua_value::Value},
+    lua_vm::LuaError,
 };
 
 pub struct LuaTypedArray {
@@ -112,10 +114,7 @@ impl LuaTableImpl for LuaTypedArray {
     fn remove_at(&mut self, index: usize) -> LuaResult<LuaValue> {
         if index < self.array.len() {
             let value = self.array.remove(index);
-            let lua_value = LuaValue {
-                tt: self.tt,
-                value,
-            };
+            let lua_value = LuaValue { tt: self.tt, value };
             Ok(lua_value)
         } else {
             Err(LuaError::IndexOutOfBounds)

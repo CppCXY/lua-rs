@@ -3,7 +3,7 @@
 mod file;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaTableImpl, LuaUserdata, LuaValue};
+use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::{LuaResult, LuaState};
 pub use file::{LuaFile, create_file_metatable};
 use std::fs::OpenOptions;

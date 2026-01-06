@@ -826,7 +826,8 @@ enum StepResult {
     Work(isize), // Amount of work done
     Pause,       // Reached pause state
     Atomic,      // Completed atomic phase
-    MinorMode,   // Returned to minor mode
+    #[allow(unused)]
+    MinorMode, // Returned to minor mode
 }
 
 impl Default for GC {

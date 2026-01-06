@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 use crate::{
     Chunk, UpvalueId,
-    lua_value::{LUA_VFALSE, LuaTableImpl, LuaValue},
+    lua_value::{LUA_VFALSE, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
         execute::helper::{

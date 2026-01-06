@@ -1,6 +1,6 @@
 use crate::{
     Chunk, LuaResult, LuaValue,
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT, LuaTableImpl},
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
     lua_vm::{LuaError, LuaState},
 };
 
