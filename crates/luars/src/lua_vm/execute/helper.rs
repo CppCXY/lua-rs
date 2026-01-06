@@ -421,15 +421,11 @@ pub fn store_to_metatable(
                         // Call metamethod: tm(t, key, value)
                         let func_pos = lua_state.get_top();
 
-                        // Push function and arguments
-                        {
-                            let stack = lua_state.stack_mut();
-                            stack[func_pos] = tm;
-                            stack[func_pos + 1] = t;
-                            stack[func_pos + 2] = *key;
-                            stack[func_pos + 3] = value;
-                        }
-                        lua_state.set_top(func_pos + 4);
+                        // Push function and arguments using push_value to ensure stack grows
+                        lua_state.push_value(tm)?;
+                        lua_state.push_value(t)?;
+                        lua_state.push_value(*key)?;
+                        lua_state.push_value(value)?;
 
                         let caller_depth = lua_state.call_depth();
                         let new_base = func_pos + 1;
