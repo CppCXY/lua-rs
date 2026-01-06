@@ -131,6 +131,15 @@ pub fn handle_mmbin(
     // Store result
     lua_state.stack_set(current_base + result_reg, result)?;
 
+    // CRITICAL: Update frame.top to protect the result register
+    // This prevents subsequent operations from overwriting this result
+    let result_pos = current_base + result_reg;
+    let call_info = lua_state.get_call_info_mut(frame_idx);
+    if result_pos + 1 > call_info.top {
+        call_info.top = result_pos + 1;
+        lua_state.set_top(result_pos + 1);
+    }
+
     Ok(())
 }
 
@@ -199,6 +208,14 @@ pub fn handle_mmbini(
 
     // Store result
     lua_state.stack_set(current_base + result_reg, result)?;
+
+    // CRITICAL: Update frame.top to protect the result register
+    let result_pos = current_base + result_reg;
+    let call_info = lua_state.get_call_info_mut(frame_idx);
+    if result_pos + 1 > call_info.top {
+        call_info.top = result_pos + 1;
+        lua_state.set_top(result_pos + 1);
+    }
 
     Ok(())
 }
@@ -272,6 +289,14 @@ pub fn handle_mmbink(
 
     // Store result
     lua_state.stack_set(current_base + result_reg, result)?;
+
+    // CRITICAL: Update frame.top to protect the result register
+    let result_pos = current_base + result_reg;
+    let call_info = lua_state.get_call_info_mut(frame_idx);
+    if result_pos + 1 > call_info.top {
+        call_info.top = result_pos + 1;
+        lua_state.set_top(result_pos + 1);
+    }
 
     Ok(())
 }
@@ -431,9 +456,8 @@ pub fn call_metamethod(
     // Get result from func_pos (where return handler placed it)
     let result = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
 
-    // Clean up stack by setting top back to func_pos
-    // The result is already copied above, so we can safely clean up
-    lua_state.set_top(func_pos);
+    // Don't clean up the stack here - the caller (handle_mmbin) will manage it
+    // Calling set_top(func_pos) here would destroy values stored at higher positions
 
     Ok(result)
 }

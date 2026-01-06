@@ -1247,30 +1247,12 @@ fn execute_frame(
                     stack[base + c]
                 };
 
-                if let Some(table_id) = ra.as_table_id() {
-                    let key = *rb;
-
-                    // Fast path for integer key
-                    if ttisinteger(rb) {
-                        let int_key = ivalue(rb);
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table_mut(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
-                        table.set_int(int_key, value);
-                    } else {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table_mut(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
-                        table.raw_set(&key, value);
-                    }
-                    // GC write barrier: check GC after table modification
-                    lua_state.vm_mut().check_gc();
-                }
-                // else: should trigger metamethod
+                // Always use store_to_metatable which handles __newindex metamethod
+                let ra_value = *ra;
+                let key = *rb;
+                save_pc!();
+                helper::store_to_metatable(lua_state, &ra_value, &key, value)?;
+                restore_state!();
             }
             OpCode::SetI => {
                 // R[A][B] := RK(C) (integer key)

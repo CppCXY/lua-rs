@@ -365,7 +365,7 @@ fn get_metamethod_from_metatable(
     mt.raw_get(&event_key)
 }
 
-/// Store a value using __newindex metamethod if table doesn't exist
+/// Store a value using __newindex metamethod if key doesn't exist
 /// Port of luaV_finishset from lvm.c:332
 pub fn store_to_metatable(
     lua_state: &mut LuaState,
@@ -378,15 +378,42 @@ pub fn store_to_metatable(
     let mut t = *obj;
 
     for _ in 0..MAXTAGLOOP {
-        // Check if t is a table without __newindex
+        // Check if t is a table
         if let Some(table_id) = t.as_table_id() {
-            // Check for __newindex metamethod
-            let mt_val = lua_state
-                .vm_mut()
-                .object_pool
-                .get_table(table_id)
-                .and_then(|tbl| tbl.get_metatable());
+            // Check if key exists and get metatable in one go
+            let (key_exists, mt_val) = {
+                let vm = lua_state.vm_mut();
+                let table_opt = vm.object_pool.get_table(table_id);
 
+                if let Some(tbl) = table_opt {
+                    let ke = tbl.raw_get(key).is_some();
+                    let mt = tbl.get_metatable();
+                    (ke, mt)
+                } else {
+                    return Err(lua_state.error(format!(
+                        "Cannot get table reference for table_id {:?}",
+                        table_id
+                    )));
+                }
+            };
+
+            if key_exists {
+                // Key exists, do direct assignment (no __newindex)
+                let table_result = lua_state.vm_mut().object_pool.get_table_mut(table_id);
+
+                if table_result.is_none() {
+                    return Err(lua_state.error(format!(
+                        "Cannot get mutable table for existing key, table_id {:?}",
+                        table_id
+                    )));
+                }
+
+                table_result.unwrap().raw_set(key, value);
+                lua_state.vm_mut().check_gc();
+                return Ok(true);
+            }
+
+            // Key doesn't exist, check for __newindex metamethod
             if let Some(mt) = mt_val {
                 if let Some(tm) = get_metamethod_from_metatable(lua_state, mt, "__newindex") {
                     // Has __newindex metamethod
@@ -422,12 +449,16 @@ pub fn store_to_metatable(
             }
 
             // No __newindex metamethod, do direct assignment
-            let table = lua_state
-                .vm_mut()
-                .object_pool
-                .get_table_mut(table_id)
-                .ok_or(LuaError::RuntimeError)?;
-            table.raw_set(&key, value);
+            let table_result = lua_state.vm_mut().object_pool.get_table_mut(table_id);
+
+            if table_result.is_none() {
+                return Err(lua_state.error(format!(
+                    "Cannot get mutable table reference for table_id {:?}",
+                    table_id
+                )));
+            }
+
+            table_result.unwrap().raw_set(key, value);
             // GC write barrier: check GC after table modification
             lua_state.vm_mut().check_gc();
             return Ok(true);

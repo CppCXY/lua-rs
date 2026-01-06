@@ -292,16 +292,24 @@ fn test_newindex_metamethod_function() {
         r#"
         local storage = {}
         local t = {}
-        setmetatable(t, {
+        local mt = {
             __newindex = function(tbl, key, value)
+                print("__newindex called with", key, value)
                 storage[key] = value * 2
             end,
             __index = storage
-        })
+        }
+        setmetatable(t, mt)
+        print("Metatable set:", getmetatable(t) == mt)
+        print("About to set t.val = 5")
         t.val = 5
+        print("storage.val =", storage.val)
         assert(storage.val == 10)
     "#,
     );
+    if let Err(e) = &result {
+        eprintln!("Error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 
@@ -503,6 +511,9 @@ fn test_multiple_metamethods_same_object() {
         assert(r1.x == 15 and r2.x == 7 and s == "Obj(10)")
     "#,
     );
+    if let Err(e) = &result {
+        eprintln!("Error: {:?}", e);
+    }
     assert!(result.is_ok());
 }
 

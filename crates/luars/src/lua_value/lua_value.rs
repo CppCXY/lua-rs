@@ -133,7 +133,7 @@ impl Value {
 
     #[inline(always)]
     pub fn gc(id: u32) -> Self {
-        Value { gc_id: id as u64}
+        Value { gc_id: id as u64 }
     }
 
     #[inline(always)]

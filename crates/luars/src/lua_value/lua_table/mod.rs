@@ -322,8 +322,8 @@ pub enum LuaInsertResult {
 
 #[cfg(test)]
 mod test {
-    use crate::{lua_value::LuaValue, ObjectPool};
     use super::LuaTable;
+    use crate::{ObjectPool, lua_value::LuaValue};
 
     #[test]
     fn test_table_set_get() {
@@ -337,7 +337,11 @@ mod test {
         assert_eq!(table.get_int(1).unwrap().as_integer().unwrap(), 42);
         assert_eq!(table.get_int(2).unwrap(), LuaValue::string(s));
         assert_eq!(
-            table.raw_get(&LuaValue::string(s)).unwrap().as_integer().unwrap(),
+            table
+                .raw_get(&LuaValue::string(s))
+                .unwrap()
+                .as_integer()
+                .unwrap(),
             100
         );
     }
