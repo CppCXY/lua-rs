@@ -34,6 +34,7 @@
 //
 // Tri-color invariant: Black objects cannot point to white objects
 
+mod const_string;
 mod gc_id;
 mod gc_object;
 mod object_pool;
@@ -83,8 +84,6 @@ pub enum GcAge {
 }
 
 impl GcAge {
-    const AGE_BITS: u8 = 0x07; // 111 in binary
-
     pub fn is_old(self) -> bool {
         self as u8 > GcAge::Survival as u8
     }
@@ -527,13 +526,13 @@ impl GC {
                 // First collect upvalues
                 let upvalues = if let Some(func) = pool.functions.get_mut(id.0) {
                     func.header.make_black();
-                    func.upvalues.clone()
+                    func.data.inline_upvalue()
                 } else {
                     return 0;
                 };
 
                 // Then process them
-                for upval_id in &upvalues {
+                for upval_id in upvalues {
                     if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
                         if uv.header.is_white() {
                             uv.header.make_gray();
@@ -673,7 +672,7 @@ impl GC {
                 .collect();
 
             for id in dead_strings {
-                pool.remove_string(StringId::from_raw(id));
+                pool.remove_string(StringId(id));
                 self.record_deallocation(64);
                 self.stats.objects_collected += 1;
             }

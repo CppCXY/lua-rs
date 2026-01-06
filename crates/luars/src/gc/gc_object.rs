@@ -3,7 +3,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    Chunk, LuaString, LuaTable, LuaValue, UpvalueId,
+    Chunk, LuaTable, LuaValue, UpvalueId,
     lua_vm::{CFunction, LuaState},
 };
 
@@ -36,7 +36,7 @@ pub const AGEBITS: u8 = 0x07; // Bits 0-2 for age
 /// - Bit 5: BLACK (fully marked)
 /// - Bit 6: FIXED (never collected)
 /// - Bit 7: Reserved
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
     pub marked: u8, // Color and age bits combined
@@ -176,92 +176,73 @@ impl GcHeader {
     }
 }
 
-// Legacy field accessors for compatibility
-impl GcHeader {
-    #[inline(always)]
-    pub fn get_fixed(&self) -> bool {
-        self.is_fixed()
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gc<T> {
+    pub header: GcHeader,
+    pub data: T,
+}
+
+impl<T> Gc<T> {
+    /// Create a new GC object with default header
+    pub fn new(data: T) -> Self {
+        Gc {
+            header: GcHeader::default(),
+            data,
+        }
     }
 }
 
 // ============ GC-managed Objects ============
 
-/// Table with embedded GC header
-pub struct GcTable {
-    pub header: GcHeader,
-    pub data: LuaTable,
-}
+pub type GcTable = Gc<LuaTable>;
 
 /// Function body - either Lua bytecode or C function
 pub enum FunctionBody {
     /// Lua function with bytecode chunk
-    Lua(Rc<Chunk>),
+    Lua(Rc<Chunk>, Vec<UpvalueId>),
     /// C function (native Rust function) - no upvalues
-    C(CFunction),
-    /// C closure with single inline upvalue (fast path for common case)
-    /// Used by coroutine.wrap, ipairs iterator, etc.
-    CClosureInline1(CFunction, LuaValue),
+    CClosure(CFunction, Vec<UpvalueId>),
 }
 
-/// Unified function with embedded GC header
-/// Supports both Lua closures and C closures (with upvalues)
-pub struct GcFunction {
-    pub header: GcHeader,
-    pub body: FunctionBody,
-    pub upvalues: Vec<UpvalueId>, // Upvalue IDs - used for Lua closures and C closures with >1 upvalue
-}
+pub type GcFunction = Gc<FunctionBody>;
 
-impl GcFunction {
+impl FunctionBody {
     /// Check if this is a C function (any C variant)
     #[inline(always)]
     pub fn is_c_function(&self) -> bool {
-        matches!(
-            self.body,
-            FunctionBody::C(_) | FunctionBody::CClosureInline1(_, _)
-        )
+        matches!(self, FunctionBody::CClosure(_, _))
     }
 
     /// Check if this is a Lua function
     #[inline(always)]
     pub fn is_lua_function(&self) -> bool {
-        matches!(self.body, FunctionBody::Lua(_))
+        matches!(self, FunctionBody::Lua(_, _))
     }
 
     /// Get the chunk if this is a Lua function
     #[inline(always)]
     pub fn chunk(&self) -> Option<&Rc<Chunk>> {
-        match &self.body {
-            FunctionBody::Lua(chunk) => Some(chunk),
+        match &self {
+            FunctionBody::Lua(chunk, _) => Some(chunk),
             _ => None,
-        }
-    }
-
-    /// Get the chunk reference for Lua functions (panics if C function)
-    /// Use this in contexts where we know it's a Lua function
-    #[inline(always)]
-    pub fn lua_chunk(&self) -> &Rc<Chunk> {
-        match &self.body {
-            FunctionBody::Lua(chunk) => chunk,
-            _ => panic!("Called lua_chunk() on a C function"),
         }
     }
 
     /// Get the C function pointer if this is any C function variant
     #[inline(always)]
     pub fn c_function(&self) -> Option<CFunction> {
-        match &self.body {
-            FunctionBody::C(f) => Some(*f),
-            FunctionBody::CClosureInline1(f, _) => Some(*f),
-            FunctionBody::Lua(_) => None,
+        match &self {
+            FunctionBody::CClosure(f, _) => Some(*f),
+            FunctionBody::Lua(_, _) => None,
         }
     }
 
     /// Get inline upvalue 1 for CClosureInline1
     #[inline(always)]
-    pub fn inline_upvalue1(&self) -> Option<LuaValue> {
-        match &self.body {
-            FunctionBody::CClosureInline1(_, uv) => Some(*uv),
-            _ => None,
+    pub fn inline_upvalue(&self) -> &Vec<UpvalueId> {
+        match &self {
+            FunctionBody::CClosure(_, uv) => uv,
+            FunctionBody::Lua(_, uv) => uv,
         }
     }
 }
@@ -274,7 +255,7 @@ impl GcFunction {
 ///
 /// Note: We cannot use raw pointers for open upvalues because
 /// register_stack may reallocate, invalidating the pointers.
-pub struct GcUpvalue {
+pub struct Upvalue {
     pub header: GcHeader,
     /// The stack index when open (used for accessing stack value)
     pub stack_index: usize,
@@ -284,7 +265,9 @@ pub struct GcUpvalue {
     pub is_open: bool,
 }
 
-impl GcUpvalue {
+pub type GcUpvalue = Gc<Upvalue>;
+
+impl Upvalue {
     /// Check if this upvalue points to the given absolute stack index
     #[inline]
     pub fn points_to_index(&self, index: usize) -> bool {
@@ -347,13 +330,7 @@ impl GcUpvalue {
 }
 
 /// String with embedded GC header
-pub struct GcString {
-    pub header: GcHeader,
-    pub data: LuaString,
-}
+pub type GcString = Gc<String>;
 
 /// Thread (coroutine) with embedded GC header
-pub struct GcThread {
-    pub header: GcHeader,
-    pub data: Rc<RefCell<LuaState>>,
-}
+pub type GcThread = Gc<Rc<RefCell<LuaState>>>;

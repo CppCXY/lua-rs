@@ -9,13 +9,13 @@
 // 6. GC headers embedded in objects for mark-sweep
 
 use crate::gc::gc_object::FunctionBody;
-use crate::lua_value::{Chunk, LuaUserdata};
+use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaString, LuaTable,
-    LuaValue, StringId, TableId, ThreadId, UpvalueId, UserdataId,
+    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaTable, LuaValue, StringId, TableId, ThreadId, UpvalueId, UserdataId
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 // ============ Pool Storage ============
@@ -361,45 +361,20 @@ struct StringInterner {
     // Content -> StringId mapping for deduplication
     // Key is (hash, start_idx) where start_idx is index into strings pool
     // This avoids storing string content twice
-    map: std::collections::HashMap<u64, Vec<u32>>,  // hash -> list of StringIds with that hash
+    map: HashMap<u64, Vec<u32>>,  // hash -> list of StringIds with that hash
 }
 
 impl StringInterner {
     fn new() -> Self {
         Self {
             strings: Pool::with_capacity(256),
-            map: std::collections::HashMap::with_capacity(256),
+            map: HashMap::with_capacity(256),
         }
     }
 
     /// Intern a string - returns existing StringId if already interned, creates new otherwise
     fn intern(&mut self, s: &str) -> (StringId, bool) {
-        let hash = Self::hash_string(s);
-        
-        // Check if already interned
-        if let Some(ids) = self.map.get(&hash) {
-            // Hash collision possible - check actual content
-            for &id in ids {
-                if let Some(gs) = self.strings.get(id) {
-                    if gs.data.as_str() == s {
-                        // Found! Return existing StringId
-                        return (StringId::from_raw(id), false);
-                    }
-                }
-            }
-        }
-        
-        // Not found - create new string
-        let gc_string = GcString {
-            header: GcHeader::default(),
-            data: LuaString::with_hash(s.to_string(), hash),
-        };
-        let id = self.strings.alloc(gc_string);
-        
-        // Add to map
-        self.map.entry(hash).or_insert_with(Vec::new).push(id);
-        
-        (StringId::from_raw(id), true)
+        self.intern_owned(s.to_string())
     }
 
     /// Intern an owned string (avoids clone)
@@ -412,7 +387,7 @@ impl StringInterner {
                 if let Some(gs) = self.strings.get(id) {
                     if gs.data.as_str() == s.as_str() {
                         // Found! Drop the owned string
-                        return (StringId::from_raw(id), false);
+                        return (StringId(id), false);
                     }
                 }
             }
@@ -421,25 +396,19 @@ impl StringInterner {
         // Not found - use owned string directly
         let gc_string = GcString {
             header: GcHeader::default(),
-            data: LuaString::with_hash(s, hash),
+            data: s,
         };
         let id = self.strings.alloc(gc_string);
         
         self.map.entry(hash).or_insert_with(Vec::new).push(id);
         
-        (StringId::from_raw(id), true)
+        (StringId(id), true)
     }
 
     /// Get string by ID
     #[inline(always)]
     fn get(&self, id: StringId) -> Option<&GcString> {
-        self.strings.get(id.index())
-    }
-
-    /// Get string by ID (mutable)
-    #[inline(always)]
-    fn get_mut(&mut self, id: StringId) -> Option<&mut GcString> {
-        self.strings.get_mut(id.index())
+        self.strings.get(id.0)
     }
 
     /// Fast hash function - FNV-1a for good distribution
@@ -455,12 +424,17 @@ impl StringInterner {
     }
 
     /// Remove dead strings (called by GC)
-    fn remove_dead(&mut self, id: StringId, hash: u64) {
-        self.strings.free(id.index());
+    fn remove_dead(&mut self, id: StringId) {
+        let hash = if let Some(gs) = self.strings.get(id) {
+            Self::hash_string(&gs.data)
+        } else {
+            return; // Already removed
+        };
+        self.strings.free(id.0);
         
         // Remove from map
         if let Some(ids) = self.map.get_mut(&hash) {
-            ids.retain(|&i| i != id.index());
+            ids.retain(|&i| i != id.0);
             if ids.is_empty() {
                 self.map.remove(&hash);
             }
@@ -864,8 +838,7 @@ impl ObjectPool {
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> FunctionId {
         let gc_func = GcFunction {
             header: GcHeader::default(),
-            body: FunctionBody::Lua(chunk),
-            upvalues: upvalue_ids,
+            data: FunctionBody::Lua(chunk, upvalue_ids),
         };
         FunctionId(self.functions.alloc(gc_func))
     }
@@ -875,20 +848,7 @@ impl ObjectPool {
     pub fn create_c_closure(&mut self, func: CFunction, upvalue_ids: Vec<UpvalueId>) -> FunctionId {
         let gc_func = GcFunction {
             header: GcHeader::default(),
-            body: FunctionBody::C(func),
-            upvalues: upvalue_ids,
-        };
-        FunctionId(self.functions.alloc(gc_func))
-    }
-
-    /// Create a C closure with single inline upvalue (fast path)
-    /// This avoids UpvalueId allocation for common single-upvalue C closures
-    #[inline]
-    pub fn create_c_closure_inline1(&mut self, func: CFunction, upvalue: LuaValue) -> FunctionId {
-        let gc_func = GcFunction {
-            header: GcHeader::default(),
-            body: FunctionBody::CClosureInline1(func, upvalue),
-            upvalues: Vec::new(),
+            data: FunctionBody::CClosure(func, upvalue_ids),
         };
         FunctionId(self.functions.alloc(gc_func))
     }
@@ -896,13 +856,6 @@ impl ObjectPool {
     #[inline(always)]
     pub fn get_function(&self, id: FunctionId) -> Option<&GcFunction> {
         self.functions.get(id.0)
-    }
-
-    /// Get function without bounds checking (caller must ensure validity)
-    /// SAFETY: id must be a valid FunctionId from create_function
-    #[inline(always)]
-    pub unsafe fn get_function_unchecked(&self, id: FunctionId) -> &GcFunction {
-        unsafe { self.functions.get_unchecked(id.0) }
     }
 
     #[inline(always)]
@@ -941,23 +894,9 @@ impl ObjectPool {
         self.upvalues.get(id.0)
     }
 
-    /// Get upvalue without bounds checking
-    /// SAFETY: id must be a valid UpvalueId
-    #[inline(always)]
-    pub unsafe fn get_upvalue_unchecked(&self, id: UpvalueId) -> &GcUpvalue {
-        unsafe { self.upvalues.get_unchecked(id.0) }
-    }
-
     #[inline(always)]
     pub fn get_upvalue_mut(&mut self, id: UpvalueId) -> Option<&mut GcUpvalue> {
         self.upvalues.get_mut(id.0)
-    }
-
-    /// Get mutable upvalue without bounds checking
-    /// SAFETY: id must be a valid UpvalueId
-    #[inline(always)]
-    pub unsafe fn get_upvalue_mut_unchecked(&mut self, id: UpvalueId) -> &mut GcUpvalue {
-        unsafe { self.upvalues.get_mut_unchecked(id.0) }
     }
 
     /// Iterator over all upvalues
@@ -970,7 +909,7 @@ impl ObjectPool {
     /// Create upvalue from LuaUpvalue
     pub fn create_upvalue(
         &mut self,
-        upvalue: std::rc::Rc<crate::lua_value::LuaUpvalue>,
+        upvalue: Rc<LuaUpvalue>,
     ) -> UpvalueId {
         // Check if open and get stack index
         let (is_open, stack_index, closed_value) = if upvalue.is_open() {
@@ -1032,16 +971,6 @@ impl ObjectPool {
         self.threads.get(id.0).map(|gt| gt.data.clone())
     }
 
-    #[inline(always)]
-    pub fn get_thread_gc(&self, id: ThreadId) -> Option<&GcThread> {
-        self.threads.get(id.0)
-    }
-
-    #[inline(always)]
-    pub fn get_thread_gc_mut(&mut self, id: ThreadId) -> Option<&mut GcThread> {
-        self.threads.get_mut(id.0)
-    }
-
     // ==================== GC Support ====================
 
     /// Clear all mark bits before GC mark phase (make all objects white)
@@ -1100,7 +1029,7 @@ impl ObjectPool {
         // Free collected IDs
         for id in strings_to_free {
             // Remove from intern map - StringInterner handles this
-            if let Some(gs) = self.strings.get(StringId::from_raw(id)) {
+            if let Some(gs) = self.strings.get(StringId(id)) {
                 let hash = gs.data.hash;
                 self.strings.remove_dead(StringId::from_raw(id), hash);
             }
@@ -1133,8 +1062,7 @@ impl ObjectPool {
     pub fn remove_string(&mut self, id: StringId) {
         // Get hash before removing
         if let Some(gs) = self.strings.get(id) {
-            let hash = gs.data.hash;
-            self.strings.remove_dead(id, hash);
+            self.strings.remove_dead(id);
         }
     }
 

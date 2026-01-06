@@ -22,61 +22,6 @@ pub use lua_value::{
 
 use crate::Instruction;
 
-/// Lua string (immutable, interned with cached hash)
-#[derive(Debug, Clone)]
-pub struct LuaString {
-    pub hash: u64, // Keep hash first for alignment - PUBLIC for StringInterner
-    data: String,
-}
-
-impl LuaString {
-    pub fn new(s: String) -> Self {
-        // Use FNV-1a hash for consistency with ObjectPool
-        let bytes = s.as_bytes();
-        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
-        for &byte in bytes {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
-        }
-
-        LuaString { data: s, hash }
-    }
-
-    /// Create LuaString with pre-computed hash (avoids double hashing)
-    #[inline]
-    pub fn with_hash(s: String, hash: u64) -> Self {
-        LuaString { data: s, hash }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.data
-    }
-
-    #[inline]
-    pub fn cached_hash(&self) -> u64 {
-        self.hash
-    }
-}
-
-impl PartialEq for LuaString {
-    fn eq(&self, other: &Self) -> bool {
-        // Fast path: compare hashes first
-        if self.hash != other.hash {
-            return false;
-        }
-        self.data == other.data
-    }
-}
-
-impl Eq for LuaString {}
-
-impl std::hash::Hash for LuaString {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Use cached hash
-        state.write_u64(self.hash);
-    }
-}
-
 /// Lua function
 /// Runtime upvalue - can be open (pointing to stack) or closed (owns value)
 /// This matches Lua's UpVal implementation
