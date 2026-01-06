@@ -1,7 +1,7 @@
 use crate::{
     Chunk, LuaResult, LuaValue,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
-    lua_vm::{LuaError, LuaState},
+    lua_vm::LuaState,
 };
 
 /// Build hidden arguments for vararg functions

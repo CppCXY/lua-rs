@@ -3,7 +3,6 @@ use crate::{
     lua_value::{LuaTableImpl, lua_table::LuaInsertResult},
 };
 use hashbrown::HashTable;
-use std::hash::{Hash, Hasher};
 
 pub struct LuaHashTable {
     pub(crate) table: HashTable<(LuaValue, LuaValue)>,
@@ -16,12 +15,30 @@ impl LuaHashTable {
         }
     }
 
-    /// 计算LuaValue的hash
-    #[inline]
+    /// 计算LuaValue的hash - 优化版本避免创建hasher
+    #[inline(always)]
     fn hash_key(key: &LuaValue) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
+        // 直接使用LuaValue内部数据计算hash，避免创建Hasher
+        use crate::lua_value::lua_value::*;
+
+        match key.ttype() {
+            LUA_TNIL => 0,
+            LUA_TBOOLEAN => unsafe { key.value.i as u64 }, // boolean stored in i field
+            LUA_TNUMBER => unsafe {
+                if key.tt & 1 == 0 {
+                    // Float: use bit pattern
+                    key.value.n.to_bits()
+                } else {
+                    // Integer: use value directly
+                    key.value.i as u64
+                }
+            },
+            _ => unsafe {
+                // GC类型：使用ID with fibonacci hash for better distribution
+                let id = key.value.gc_id as u64;
+                id.wrapping_mul(0x9e3779b97f4a7c15)
+            },
+        }
     }
 }
 

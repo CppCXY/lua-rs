@@ -150,6 +150,27 @@ fn execute_frame(
     let constants = &chunk.constants;
     let code = &chunk.code;
 
+    // PERFORMANCE OPTIMIZATION: Pre-resolve upvalue values to avoid object_pool lookups
+    // Lua C does: cl->upvals[B]->v.p (1 pointer dereference)
+    // We were doing: get_upvalue(id) + is_open() + stack_get() (3+ indirections + HashMap!)
+    // This cache reduces per-instruction overhead from ~10 cycles to ~1 cycle
+    let mut upvalue_cache: Vec<LuaValue> = Vec::with_capacity(upvalues_vec.len());
+    for upval_id in &upvalues_vec {
+        let upvalue = lua_state
+            .vm_mut()
+            .object_pool
+            .get_upvalue(*upval_id)
+            .ok_or(LuaError::RuntimeError)?;
+        
+        let value = if upvalue.data.is_open() {
+            let stack_idx = upvalue.data.get_stack_index().unwrap();
+            lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
+        } else {
+            upvalue.data.get_closed_value().unwrap()
+        };
+        upvalue_cache.push(value);
+    }
+
     // Macro-like helper to save PC before operations that may call functions
     // Matches Lua 5.5's savepc(ci) in Protect() macro
     macro_rules! save_pc {
@@ -942,31 +963,14 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
-                // 优化：直接使用缓存的upvalues_vec，避免查找function
-                if b >= upvalues_vec.len() {
+                // PERFORMANCE: Use pre-cached upvalue value
+                if b >= upvalue_cache.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("GETUPVAL: invalid upvalue index {}", b)));
                 }
 
-                let upval_id = upvalues_vec[b];
-                let upvalue = lua_state
-                    .vm_mut()
-                    .object_pool
-                    .get_upvalue(upval_id)
-                    .ok_or(LuaError::RuntimeError)?;
-
-                // Get value from upvalue
-                let value = if upvalue.data.is_open() {
-                    // Open: read from stack
-                    let stack_idx = upvalue.data.get_stack_index().unwrap();
-                    lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
-                } else {
-                    // Closed: read from upvalue storage
-                    upvalue.data.get_closed_value().unwrap()
-                };
-
                 let stack = lua_state.stack_mut();
-                stack[base + a] = value;
+                stack[base + a] = upvalue_cache[b];
             }
             OpCode::SetUpval => {
                 // UpValue[B] := R[A]
@@ -979,7 +983,6 @@ fn execute_frame(
                     stack[base + a]
                 };
 
-                // 优化：直接使用缓存的upvalues_vec
                 if b >= upvalues_vec.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("SETUPVAL: invalid upvalue index {}", b)));
@@ -998,11 +1001,18 @@ fn execute_frame(
                     // Open: write to stack
                     let stack_idx = upvalue.data.get_stack_index().unwrap();
                     lua_state.stack_set(stack_idx, value)?;
+                    
+                    // CRITICAL: Update cache to reflect the change
+                    // This ensures subsequent GetUpval reads the new value
+                    upvalue_cache[b] = value;
                 } else {
                     // Closed: write to upvalue storage
                     unsafe {
                         upvalue.data.set_closed_value_unchecked(value);
                     }
+                    
+                    // CRITICAL: Update cache for closed upvalue too
+                    upvalue_cache[b] = value;
                 }
 
                 // TODO: GC barrier (luaC_barrier)
@@ -1729,26 +1739,14 @@ fn execute_frame(
                     lua_state.set_top(write_pos + 1);
                 }
 
-                // Get upvalue B (usually _ENV for global access)
-                if b >= upvalues_vec.len() {
+                // PERFORMANCE: Use pre-cached upvalue value instead of object_pool lookup
+                // OLD: get_upvalue(id) + is_open() + stack_get() → ~10 cycles + HashMap
+                // NEW: upvalue_cache[b] → ~1 cycle
+                if b >= upvalue_cache.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("GETTABUP: invalid upvalue index {}", b)));
                 }
-
-                let upval_id = upvalues_vec[b];
-                let upvalue = lua_state
-                    .vm_mut()
-                    .object_pool
-                    .get_upvalue(upval_id)
-                    .ok_or(LuaError::RuntimeError)?;
-
-                // Get table value from upvalue
-                let table_value = if upvalue.data.is_open() {
-                    let stack_idx = upvalue.data.get_stack_index().unwrap();
-                    lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
-                } else {
-                    upvalue.data.get_closed_value().unwrap()
-                };
+                let table_value = upvalue_cache[b];
 
                 // Get key from constants (K[C])
                 if c >= constants.len() {
@@ -1794,26 +1792,12 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                // Get upvalue A (usually _ENV for global access)
-                if a >= upvalues_vec.len() {
+                // PERFORMANCE: Use pre-cached upvalue value instead of object_pool lookup
+                if a >= upvalue_cache.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("SETTABUP: invalid upvalue index {}", a)));
                 }
-
-                let upval_id = upvalues_vec[a];
-                let upvalue = lua_state
-                    .vm_mut()
-                    .object_pool
-                    .get_upvalue(upval_id)
-                    .ok_or(LuaError::RuntimeError)?;
-
-                // Get table value from upvalue
-                let table_value = if upvalue.data.is_open() {
-                    let stack_idx = upvalue.data.get_stack_index().unwrap();
-                    lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
-                } else {
-                    upvalue.data.get_closed_value().unwrap()
-                };
+                let table_value = upvalue_cache[a];
 
                 // Get key from constants (K[B])
                 if b >= constants.len() {
