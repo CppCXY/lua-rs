@@ -1,11 +1,6 @@
 // ============ Object IDs ============
 // All IDs are simple u32 indices - compact and efficient
 
-/// String ID with embedded long/short flag
-/// Layout: [is_long: 1 bit][index: 31 bits]
-/// - Bit 31 (0x8000_0000): 1 = long string, 0 = short string
-/// - Bits 0-30: actual index in string pool
-/// Supports up to 2 billion strings per type (short/long)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[repr(transparent)]
 pub struct StringId(pub u32);

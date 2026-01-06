@@ -22,7 +22,7 @@ impl LuaTableImpl for LuaTypedArray {
     fn get_int(&self, key: i64) -> Option<LuaValue> {
         self.array.get((key - 1) as usize).map(|v| LuaValue {
             tt: self.tt,
-            value: v.clone(),
+            value: *v,
         })
     }
 
@@ -68,18 +68,18 @@ impl LuaTableImpl for LuaTypedArray {
 
     fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
         let next_index = if input_key.is_nil() {
-            1
+            0  // 第一个元素的索引是0
         } else if let Some(idx) = input_key.as_integer() {
-            idx as usize + 1
+            idx as usize  // idx已经是1-based，转为0-based需要的下一个索引
         } else {
             return None;
         };
 
         if let Some(value) = self.array.get(next_index) {
-            let key = LuaValue::integer((next_index + 1) as i64);
+            let key = LuaValue::integer((next_index + 1) as i64);  // 返回1-based的key
             let val = LuaValue {
                 tt: self.tt,
-                value: value.clone(),
+                value: *value,
             };
             Some((key, val))
         } else {

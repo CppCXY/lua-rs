@@ -318,3 +318,26 @@ pub enum LuaInsertResult {
     NeedConvertToHashTable,
     Failure,
 }
+
+#[cfg(test)]
+mod test {
+    use crate::{lua_value::LuaValue, ObjectPool};
+    use super::LuaTable;
+
+    #[test]
+    fn test_table_set_get() {
+        let mut table = LuaTable::new(0, 0);
+        let mut pool = ObjectPool::new();
+        let s = pool.create_string("hello").0;
+        table.set_int(1, LuaValue::integer(42));
+        table.set_int(2, LuaValue::string(s));
+        table.raw_set(&LuaValue::string(s), LuaValue::integer(100));
+
+        assert_eq!(table.get_int(1).unwrap().as_integer().unwrap(), 42);
+        assert_eq!(table.get_int(2).unwrap(), LuaValue::string(s));
+        assert_eq!(
+            table.raw_get(&LuaValue::string(s)).unwrap().as_integer().unwrap(),
+            100
+        );
+    }
+}
