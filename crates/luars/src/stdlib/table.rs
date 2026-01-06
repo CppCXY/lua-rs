@@ -231,7 +231,7 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Remove the element using the proper method
-    let removed = match table_ref.remove_array_at(pos as usize) {
+    let removed = match table_ref.remove_array_at(pos) {
         Ok(val) => val,
         Err(e) => {
             return Err(l.error(format!("error removing from table: {}", e)));

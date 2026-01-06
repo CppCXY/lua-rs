@@ -248,7 +248,8 @@ impl LuaTable {
         Ok(())
     }
 
-    pub fn remove_array_at(&mut self, index: usize) -> LuaResult<LuaValue> {
+    pub fn remove_array_at(&mut self, i: i64) -> LuaResult<LuaValue> {
+        let index = (i - 1) as usize;
         match &mut self.impl_table {
             LuaTableDetail::TypedArray(arr) => arr.remove_at(index),
             LuaTableDetail::ValueArray(arr) => arr.remove_at(index),

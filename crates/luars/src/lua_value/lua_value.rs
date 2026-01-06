@@ -108,7 +108,7 @@ pub const fn withvariant(tt: u8) -> u8 {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub union Value {
-    pub gc_id: u32, // GC object ID (String/Table/Function/Userdata/Thread)
+    pub gc_id: u64, // GC object ID (String/Table/Function/Userdata/Thread)
     pub p: u64,     // light userdata pointer
     pub f: u64,     // light C function pointer
     pub i: i64,     // integer number
@@ -133,7 +133,7 @@ impl Value {
 
     #[inline(always)]
     pub fn gc(id: u32) -> Self {
-        Value { gc_id: id }
+        Value { gc_id: id as u64}
     }
 
     #[inline(always)]
@@ -459,27 +459,27 @@ impl LuaValue {
     #[inline(always)]
     pub fn gcvalue(&self) -> u32 {
         debug_assert!(self.iscollectable());
-        unsafe { self.value.gc_id }
+        unsafe { self.value.gc_id as u32 }
     }
 
     // Specific GC type extraction
     #[inline(always)]
     pub fn tsvalue(&self) -> StringId {
         debug_assert!(self.ttisstring());
-        let index = unsafe { self.value.gc_id };
+        let index = unsafe { self.value.gc_id as u32 };
         StringId(index)
     }
 
     #[inline(always)]
     pub fn hvalue(&self) -> TableId {
         debug_assert!(self.ttistable());
-        TableId(unsafe { self.value.gc_id })
+        TableId(unsafe { self.value.gc_id as u32 })
     }
 
     #[inline(always)]
     pub fn clvalue(&self) -> FunctionId {
         debug_assert!(self.ttisluafunction());
-        FunctionId(unsafe { self.value.gc_id })
+        FunctionId(unsafe { self.value.gc_id as u32 })
     }
 
     #[inline(always)]
@@ -491,13 +491,13 @@ impl LuaValue {
     #[inline(always)]
     pub fn uvalue(&self) -> UserdataId {
         debug_assert!(self.ttisfulluserdata());
-        UserdataId(unsafe { self.value.gc_id })
+        UserdataId(unsafe { self.value.gc_id as u32 })
     }
 
     #[inline(always)]
     pub fn thvalue(&self) -> ThreadId {
         debug_assert!(self.ttisthread());
-        ThreadId(unsafe { self.value.gc_id })
+        ThreadId(unsafe { self.value.gc_id as u32 })
     }
 
     // ============ Compatibility layer with old API ============
@@ -749,7 +749,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn gc_object_id(&self) -> Option<(u8, u32)> {
         if self.iscollectable() {
-            Some((self.ttype(), unsafe { self.value.gc_id }))
+            Some((self.ttype(), unsafe { self.value.gc_id as u32 }))
         } else {
             None
         }
@@ -851,8 +851,8 @@ impl std::hash::Hash for LuaValue {
                 }
             },
             _ => unsafe {
-                // For all other types, hash the raw u64
-                self.value.i.hash(state);
+                // For GC types (string, table, function, etc.), hash the gc_id
+                self.value.gc_id.hash(state);
             },
         }
     }
