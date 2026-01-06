@@ -95,12 +95,8 @@ fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
         if v.is_nil() {
             None
         } else {
-            v.as_string_id().and_then(|id| {
-                l.vm_mut()
-                    .object_pool
-                    .get_string(id)
-                    .map(|s| s.as_str().to_string())
-            })
+            v.as_string_id()
+                .and_then(|id| l.vm_mut().object_pool.get_string(id).map(|s| s.to_string()))
         }
     });
 
@@ -141,15 +137,10 @@ fn os_getenv(l: &mut LuaState) -> LuaResult<usize> {
     let varname = l
         .get_arg(1)
         .and_then(|v| v.as_string_id())
-        .and_then(|id| {
-            l.vm_mut()
-                .object_pool
-                .get_string(id)
-                .map(|s| s.as_str().to_string())
-        })
+        .and_then(|id| l.vm_mut().object_pool.get_string(id).map(|s| s.to_string()))
         .ok_or_else(|| l.error("getenv: argument 1 must be a string".to_string()))?;
 
-    match std::env::var(varname.as_str()) {
+    match std::env::var(&varname) {
         Ok(value) => {
             let result = l.vm_mut().create_string(&value);
             l.push_value(result)?;
@@ -166,15 +157,10 @@ fn os_remove(l: &mut LuaState) -> LuaResult<usize> {
     let filename = l
         .get_arg(1)
         .and_then(|v| v.as_string_id())
-        .and_then(|id| {
-            l.vm_mut()
-                .object_pool
-                .get_string(id)
-                .map(|s| s.as_str().to_string())
-        })
+        .and_then(|id| l.vm_mut().object_pool.get_string(id).map(|s| s.to_string()))
         .ok_or_else(|| l.error("remove: argument 1 must be a string".to_string()))?;
 
-    match std::fs::remove_file(filename.as_str()) {
+    match std::fs::remove_file(&filename) {
         Ok(_) => {
             l.push_value(LuaValue::boolean(true))?;
             Ok(1)
@@ -192,25 +178,15 @@ fn os_rename(l: &mut LuaState) -> LuaResult<usize> {
     let oldname = l
         .get_arg(1)
         .and_then(|v| v.as_string_id())
-        .and_then(|id| {
-            l.vm_mut()
-                .object_pool
-                .get_string(id)
-                .map(|s| s.as_str().to_string())
-        })
+        .and_then(|id| l.vm_mut().object_pool.get_string(id).map(|s| s.to_string()))
         .ok_or_else(|| l.error("rename: argument 1 must be a string".to_string()))?;
     let newname = l
         .get_arg(2)
         .and_then(|v| v.as_string_id())
-        .and_then(|id| {
-            l.vm_mut()
-                .object_pool
-                .get_string(id)
-                .map(|s| s.as_str().to_string())
-        })
+        .and_then(|id| l.vm_mut().object_pool.get_string(id).map(|s| s.to_string()))
         .ok_or_else(|| l.error("rename: argument 2 must be a string".to_string()))?;
 
-    match std::fs::rename(oldname.as_str(), newname.as_str()) {
+    match std::fs::rename(&oldname, &newname) {
         Ok(_) => {
             l.push_value(LuaValue::boolean(true))?;
             Ok(1)
@@ -229,12 +205,7 @@ fn os_setlocale(l: &mut LuaState) -> LuaResult<usize> {
     let locale = l
         .get_arg(1)
         .and_then(|v| v.as_string_id())
-        .and_then(|id| {
-            l.vm_mut()
-                .object_pool
-                .get_string(id)
-                .map(|s| s.as_str().to_string())
-        })
+        .and_then(|id| l.vm_mut().object_pool.get_string(id).map(|s| s.to_string()))
         .unwrap_or_else(|| "C".to_string());
 
     let result = l.vm_mut().create_string(&locale);

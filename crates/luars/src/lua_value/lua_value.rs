@@ -28,8 +28,6 @@
 // - Bits 0-3: 基础类型 (LUA_TNIL, LUA_TBOOLEAN, LUA_TNUMBER, etc.)
 // - Bits 4-5: variant bits (区分子类型,如integer/float, short/long string)
 // - Bit 6: BIT_ISCOLLECTABLE (标记是否是GC对象)
-
-use crate::ObjectPool;
 use crate::gc::{FunctionId, StringId, TableId, ThreadId, UserdataId};
 use crate::lua_vm::CFunction;
 
@@ -68,16 +66,13 @@ pub const LUA_VTRUE: u8 = 0x11; // makevariant(LUA_TBOOLEAN, 1)
 pub const LUA_VNUMINT: u8 = 0x03; // makevariant(LUA_TNUMBER, 0) - integer
 pub const LUA_VNUMFLT: u8 = 0x13; // makevariant(LUA_TNUMBER, 1) - float
 
-// String variants (bit 6 set = collectable)
-pub const LUA_VSHRSTR: u8 = 0x44; // makevariant(LUA_TSTRING, 0) | BIT_ISCOLLECTABLE
-pub const LUA_VLNGSTR: u8 = 0x54; // makevariant(LUA_TSTRING, 1) | BIT_ISCOLLECTABLE
-
 // Light userdata (NOT collectable)
 pub const LUA_VLIGHTUSERDATA: u8 = 0x02; // makevariant(LUA_TLIGHTUSERDATA, 0)
 
 // Collectable types (bit 6 set)
 pub const BIT_ISCOLLECTABLE: u8 = 1 << 6;
 
+pub const LUA_VSTR: u8 = LUA_TSTRING | BIT_ISCOLLECTABLE; // 0x44 - short string
 pub const LUA_VTABLE: u8 = LUA_TTABLE | BIT_ISCOLLECTABLE; // 0x45
 pub const LUA_VFUNCTION: u8 = LUA_TFUNCTION | BIT_ISCOLLECTABLE; // 0x46  
 pub const LUA_VUSERDATA: u8 = LUA_TUSERDATA | BIT_ISCOLLECTABLE; // 0x47
@@ -159,6 +154,10 @@ impl Value {
             f: f as usize as u64,
         }
     }
+
+    pub fn raw(&self) -> u64 {
+        unsafe { self.i as u64 }
+    }
 }
 
 // ============ TValue ============
@@ -167,9 +166,8 @@ impl Value {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct LuaValue {
-    pub value_: Value, // 8 bytes
-    pub tt_: u8,       // 1 byte type tag
-                       // 7 bytes padding for 16-byte alignment
+    pub value: Value, // 8 bytes
+    pub tt: u8,       // 1 byte type tag
 }
 
 impl LuaValue {
@@ -178,48 +176,48 @@ impl LuaValue {
     #[inline(always)]
     pub const fn nil() -> Self {
         Self {
-            value_: Value::nil(),
-            tt_: LUA_VNIL,
+            value: Value::nil(),
+            tt: LUA_VNIL,
         }
     }
 
     #[inline(always)]
     pub const fn empty() -> Self {
         Self {
-            value_: Value::nil(),
-            tt_: LUA_VEMPTY,
+            value: Value::nil(),
+            tt: LUA_VEMPTY,
         }
     }
 
     #[inline(always)]
     pub const fn abstkey() -> Self {
         Self {
-            value_: Value::nil(),
-            tt_: LUA_VABSTKEY,
+            value: Value::nil(),
+            tt: LUA_VABSTKEY,
         }
     }
 
     #[inline(always)]
     pub const fn boolean(b: bool) -> Self {
         Self {
-            value_: Value::nil(),
-            tt_: if b { LUA_VTRUE } else { LUA_VFALSE },
+            value: Value::nil(),
+            tt: if b { LUA_VTRUE } else { LUA_VFALSE },
         }
     }
 
     #[inline(always)]
     pub const fn integer(i: i64) -> Self {
         Self {
-            value_: Value::integer(i),
-            tt_: LUA_VNUMINT,
+            value: Value::integer(i),
+            tt: LUA_VNUMINT,
         }
     }
 
     #[inline(always)]
     pub fn float(n: f64) -> Self {
         Self {
-            value_: Value::float(n),
-            tt_: LUA_VNUMFLT,
+            value: Value::float(n),
+            tt: LUA_VNUMFLT,
         }
     }
 
@@ -228,46 +226,28 @@ impl LuaValue {
         Self::float(n)
     }
 
-    // String constructors
-    #[inline(always)]
-    pub fn shrstring(id: StringId) -> Self {
-        Self {
-            value_: Value::gc(id.index()),
-            tt_: LUA_VSHRSTR,
-        }
-    }
-
-    #[inline(always)]
-    pub fn lngstring(id: StringId) -> Self {
-        Self {
-            value_: Value::gc(id.index()),
-            tt_: LUA_VLNGSTR,
-        }
-    }
-
     /// Create a string value from StringId (automatically selects short/long based on flag)
     #[inline(always)]
     pub fn string(id: StringId) -> Self {
-        if id.is_short() {
-            Self::shrstring(id)
-        } else {
-            Self::lngstring(id)
+        Self {
+            value: Value::gc(id.0),
+            tt: LUA_VSTR,
         }
     }
 
     #[inline(always)]
     pub fn table(id: TableId) -> Self {
         Self {
-            value_: Value::gc(id.0),
-            tt_: LUA_VTABLE,
+            value: Value::gc(id.0),
+            tt: LUA_VTABLE,
         }
     }
 
     #[inline(always)]
     pub fn function(id: FunctionId) -> Self {
         Self {
-            value_: Value::gc(id.0),
-            tt_: LUA_VFUNCTION,
+            value: Value::gc(id.0),
+            tt: LUA_VFUNCTION,
         }
     }
 
@@ -280,40 +260,40 @@ impl LuaValue {
     #[inline(always)]
     pub fn cfunction(f: CFunction) -> Self {
         Self {
-            value_: Value::cfunction(f),
-            tt_: LUA_VLCF,
+            value: Value::cfunction(f),
+            tt: LUA_VLCF,
         }
     }
 
     #[inline(always)]
     pub fn cfunction_ptr(f_ptr: usize) -> Self {
         Self {
-            value_: Value { f: f_ptr as u64 },
-            tt_: LUA_VLCF,
+            value: Value { f: f_ptr as u64 },
+            tt: LUA_VLCF,
         }
     }
 
     #[inline(always)]
     pub fn lightuserdata(p: *mut std::ffi::c_void) -> Self {
         Self {
-            value_: Value::lightuserdata(p),
-            tt_: LUA_VLIGHTUSERDATA,
+            value: Value::lightuserdata(p),
+            tt: LUA_VLIGHTUSERDATA,
         }
     }
 
     #[inline(always)]
     pub fn userdata(id: UserdataId) -> Self {
         Self {
-            value_: Value::gc(id.0),
-            tt_: LUA_VUSERDATA,
+            value: Value::gc(id.0),
+            tt: LUA_VUSERDATA,
         }
     }
 
     #[inline(always)]
     pub fn thread(id: ThreadId) -> Self {
         Self {
-            value_: Value::gc(id.0),
-            tt_: LUA_VTHREAD,
+            value: Value::gc(id.0),
+            tt: LUA_VTHREAD,
         }
     }
 
@@ -322,37 +302,37 @@ impl LuaValue {
     /// rawtt(o) - raw type tag
     #[inline(always)]
     pub fn rawtt(&self) -> u8 {
-        self.tt_
+        self.tt
     }
 
     /// ttype(o) - type without variants (bits 0-3)
     #[inline(always)]
     pub fn ttype(&self) -> u8 {
-        novariant(self.tt_)
+        novariant(self.tt)
     }
 
     /// ttypetag(o) - type tag with variants (bits 0-5)
     #[inline(always)]
     pub fn ttypetag(&self) -> u8 {
-        withvariant(self.tt_)
+        withvariant(self.tt)
     }
 
     /// checktag(o, t) - exact tag match
     #[inline(always)]
     pub fn checktag(&self, t: u8) -> bool {
-        self.tt_ == t
+        self.tt == t
     }
 
     /// checktype(o, t) - type match (ignoring variants)
     #[inline(always)]
     pub fn checktype(&self, t: u8) -> bool {
-        novariant(self.tt_) == t
+        novariant(self.tt) == t
     }
 
     /// iscollectable(o) - is this a GC object?
     #[inline(always)]
     pub fn iscollectable(&self) -> bool {
-        (self.tt_ & BIT_ISCOLLECTABLE) != 0
+        (self.tt & BIT_ISCOLLECTABLE) != 0
     }
 
     // Specific type checks
@@ -412,16 +392,6 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn ttisshrstring(&self) -> bool {
-        self.checktag(LUA_VSHRSTR)
-    }
-
-    #[inline(always)]
-    pub fn ttislngstring(&self) -> bool {
-        self.checktag(LUA_VLNGSTR)
-    }
-
-    #[inline(always)]
     pub fn ttistable(&self) -> bool {
         self.checktag(LUA_VTABLE)
     }
@@ -461,19 +431,19 @@ impl LuaValue {
     #[inline(always)]
     pub fn bvalue(&self) -> bool {
         debug_assert!(self.ttisboolean());
-        self.tt_ == LUA_VTRUE
+        self.tt == LUA_VTRUE
     }
 
     #[inline(always)]
     pub fn ivalue(&self) -> i64 {
         debug_assert!(self.ttisinteger());
-        unsafe { self.value_.i }
+        unsafe { self.value.i }
     }
 
     #[inline(always)]
     pub fn fltvalue(&self) -> f64 {
         debug_assert!(self.ttisfloat());
-        unsafe { self.value_.n }
+        unsafe { self.value.n }
     }
 
     /// nvalue - convert any number to f64
@@ -481,65 +451,60 @@ impl LuaValue {
     pub fn nvalue(&self) -> f64 {
         debug_assert!(self.ttisnumber());
         if self.ttisinteger() {
-            unsafe { self.value_.i as f64 }
+            unsafe { self.value.i as f64 }
         } else {
-            unsafe { self.value_.n }
+            unsafe { self.value.n }
         }
     }
 
     #[inline(always)]
     pub fn pvalue(&self) -> *mut std::ffi::c_void {
         debug_assert!(self.ttislightuserdata());
-        unsafe { self.value_.p as *mut std::ffi::c_void }
+        unsafe { self.value.p as *mut std::ffi::c_void }
     }
 
     #[inline(always)]
     pub fn gcvalue(&self) -> u32 {
         debug_assert!(self.iscollectable());
-        unsafe { self.value_.gc_id }
+        unsafe { self.value.gc_id }
     }
 
     // Specific GC type extraction
     #[inline(always)]
     pub fn tsvalue(&self) -> StringId {
         debug_assert!(self.ttisstring());
-        let index = unsafe { self.value_.gc_id };
-        // Reconstruct StringId with correct long/short flag based on type tag
-        if self.ttisshrstring() {
-            StringId::short(index)
-        } else {
-            StringId::long(index)
-        }
+        let index = unsafe { self.value.gc_id };
+        StringId(index)
     }
 
     #[inline(always)]
     pub fn hvalue(&self) -> TableId {
         debug_assert!(self.ttistable());
-        TableId(unsafe { self.value_.gc_id })
+        TableId(unsafe { self.value.gc_id })
     }
 
     #[inline(always)]
     pub fn clvalue(&self) -> FunctionId {
         debug_assert!(self.ttisluafunction());
-        FunctionId(unsafe { self.value_.gc_id })
+        FunctionId(unsafe { self.value.gc_id })
     }
 
     #[inline(always)]
     pub fn fvalue(&self) -> CFunction {
         debug_assert!(self.ttiscfunction());
-        unsafe { std::mem::transmute(self.value_.f as usize) }
+        unsafe { std::mem::transmute(self.value.f as usize) }
     }
 
     #[inline(always)]
     pub fn uvalue(&self) -> UserdataId {
         debug_assert!(self.ttisfulluserdata());
-        UserdataId(unsafe { self.value_.gc_id })
+        UserdataId(unsafe { self.value.gc_id })
     }
 
     #[inline(always)]
     pub fn thvalue(&self) -> ThreadId {
         debug_assert!(self.ttisthread());
-        ThreadId(unsafe { self.value_.gc_id })
+        ThreadId(unsafe { self.value.gc_id })
     }
 
     // ============ Compatibility layer with old API ============
@@ -742,71 +707,6 @@ impl LuaValue {
         self.ttisnil() || self.ttisfalse()
     }
 
-    // ============ Equality ============
-
-    pub fn raw_equal(&self, other: &LuaValue, pool: &ObjectPool) -> bool {
-        // Fast path: if type tags differ AND they're not both numbers, not equal
-        // Numbers need special handling because integer and float can be equal
-        if self.tt_ != other.tt_ {
-            // Allow comparison between integer and float
-            if !((self.ttisinteger() && other.ttisfloat())
-                || (self.ttisfloat() && other.ttisinteger()))
-            {
-                return false;
-            }
-        }
-
-        // Type-specific comparison
-        match self.ttype() {
-            LUA_TNIL => true,                      // All nils are equal
-            LUA_TBOOLEAN => self.tt_ == other.tt_, // Already checked above
-            LUA_TNUMBER => {
-                // Both are numbers, but could be integer or float
-                if self.ttisinteger() && other.ttisinteger() {
-                    self.ivalue() == other.ivalue()
-                } else {
-                    // Convert both to float for comparison
-                    let v1 = if self.ttisinteger() {
-                        self.ivalue() as f64
-                    } else {
-                        self.fltvalue()
-                    };
-                    let v2 = if other.ttisinteger() {
-                        other.ivalue() as f64
-                    } else {
-                        other.fltvalue()
-                    };
-                    v1 == v2
-                }
-            }
-            LUA_TSTRING => {
-                let sid1 = self.tsvalue();
-                let sid2 = other.tsvalue();
-
-                // Short strings are interned, so ID comparison is enough
-                if self.ttisshrstring() && other.ttisshrstring() {
-                    return sid1.index() == sid2.index();
-                }
-
-                // Long strings need content comparison
-                let s1 = pool.get_string(sid1);
-                let s2 = pool.get_string(sid2);
-                s1 == s2
-            }
-            LUA_TLIGHTUSERDATA => unsafe { self.value_.p == other.value_.p },
-            LUA_TFUNCTION => {
-                if self.ttiscfunction() {
-                    unsafe { self.value_.f == other.value_.f }
-                } else {
-                    unsafe { self.value_.gc_id == other.value_.gc_id }
-                }
-            }
-            // All other collectable types: compare GC IDs
-            _ if self.iscollectable() => unsafe { self.value_.gc_id == other.value_.gc_id },
-            _ => false,
-        }
-    }
-
     // ============ Type name ============
 
     pub fn type_name(&self) -> &'static str {
@@ -856,10 +756,24 @@ impl LuaValue {
     #[inline(always)]
     pub fn gc_object_id(&self) -> Option<(u8, u32)> {
         if self.iscollectable() {
-            Some((self.ttype(), unsafe { self.value_.gc_id }))
+            Some((self.ttype(), unsafe { self.value.gc_id }))
         } else {
             None
         }
+    }
+}
+
+impl PartialEq for LuaValue {
+    fn eq(&self, other: &Self) -> bool {
+        if self.tt == other.tt && self.value.raw() == other.value.raw() {
+            return true; // Exact match
+        } else if self.ttisinteger() && other.ttisfloat() {
+            return self.ivalue() as f64 == other.fltvalue();
+        } else if self.ttisfloat() && other.ttisinteger() {
+            return self.fltvalue() == other.ivalue() as f64;
+        }
+
+        false
     }
 }
 
@@ -895,10 +809,10 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Boolean => write!(f, "{}", self.bvalue()),
             LuaValueKind::Integer => write!(f, "{}", self.ivalue()),
             LuaValueKind::Float => write!(f, "{}", self.fltvalue()),
-            LuaValueKind::String => write!(f, "string({})", self.tsvalue().raw()),
+            LuaValueKind::String => write!(f, "string({})", self.tsvalue().0),
             LuaValueKind::Table => write!(f, "table({})", self.hvalue().0),
             LuaValueKind::Function => write!(f, "function({})", self.clvalue().0),
-            LuaValueKind::CFunction => write!(f, "cfunction({:#x})", unsafe { self.value_.f }),
+            LuaValueKind::CFunction => write!(f, "cfunction({:#x})", unsafe { self.value.f }),
             LuaValueKind::Userdata => write!(f, "userdata({})", self.uvalue().0),
             LuaValueKind::Thread => write!(f, "thread({})", self.thvalue().0),
         }
@@ -919,10 +833,10 @@ impl std::fmt::Display for LuaValue {
                     write!(f, "{}", n)
                 }
             }
-            LuaValueKind::String => write!(f, "string({})", self.tsvalue().raw()),
+            LuaValueKind::String => write!(f, "string({})", self.tsvalue().0),
             LuaValueKind::Table => write!(f, "table: {:x}", self.hvalue().0),
             LuaValueKind::Function => write!(f, "function: {:x}", self.clvalue().0),
-            LuaValueKind::CFunction => write!(f, "function: {:x}", unsafe { self.value_.f }),
+            LuaValueKind::CFunction => write!(f, "function: {:x}", unsafe { self.value.f }),
             LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.uvalue().0),
             LuaValueKind::Thread => write!(f, "thread: {:x}", self.thvalue().0),
         }
@@ -931,21 +845,21 @@ impl std::fmt::Display for LuaValue {
 
 impl std::hash::Hash for LuaValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.tt_.hash(state);
+        self.tt.hash(state);
         // Hash the value based on type
         match self.ttype() {
             LUA_TNIL => {}
             LUA_TBOOLEAN => {}
             LUA_TNUMBER => unsafe {
                 if self.ttisinteger() {
-                    self.value_.i.hash(state);
+                    self.value.i.hash(state);
                 } else {
-                    self.value_.n.to_bits().hash(state);
+                    self.value.n.to_bits().hash(state);
                 }
             },
             _ => unsafe {
                 // For all other types, hash the raw u64
-                self.value_.i.hash(state);
+                self.value.i.hash(state);
             },
         }
     }
@@ -1016,15 +930,10 @@ mod tests {
 
     #[test]
     fn test_string() {
-        let v = LuaValue::string(StringId::short(123));
+        let v = LuaValue::string(StringId(123));
         assert!(v.ttisstring());
-        assert!(v.ttisshrstring());
-        assert_eq!(v.tsvalue(), StringId::short(123));
-
-        let lng = LuaValue::lngstring(StringId::long(456));
-        assert!(lng.ttisstring());
-        assert!(lng.ttislngstring());
-        assert_eq!(lng.tsvalue(), StringId::long(456));
+        assert!(v.ttisstring());
+        assert_eq!(v.tsvalue(), StringId(123));
     }
 
     #[test]
@@ -1035,14 +944,14 @@ mod tests {
         assert_eq!(v.hvalue(), TableId(789));
     }
 
-    // #[test]
-    // fn test_equality() {
-    //     assert_eq!(LuaValue::nil(), LuaValue::nil());
-    //     assert_eq!(LuaValue::integer(42), LuaValue::integer(42));
-    //     assert_ne!(LuaValue::integer(42), LuaValue::integer(43));
-    //     assert_eq!(LuaValue::table(TableId(1)), LuaValue::table(TableId(1)));
-    //     assert_ne!(LuaValue::table(TableId(1)), LuaValue::table(TableId(2)));
-    // }
+    #[test]
+    fn test_equality() {
+        assert_eq!(LuaValue::nil(), LuaValue::nil());
+        assert_eq!(LuaValue::integer(42), LuaValue::integer(42));
+        assert_ne!(LuaValue::integer(42), LuaValue::integer(43));
+        assert_eq!(LuaValue::table(TableId(1)), LuaValue::table(TableId(1)));
+        assert_ne!(LuaValue::table(TableId(1)), LuaValue::table(TableId(2)));
+    }
 
     #[test]
     fn test_type_tags() {
@@ -1057,7 +966,7 @@ mod tests {
     fn test_collectable_bit() {
         let nil = LuaValue::nil();
         let int = LuaValue::integer(42);
-        let str = LuaValue::string(StringId::short(1));
+        let str = LuaValue::string(StringId(1));
         let tbl = LuaValue::table(TableId(1));
 
         assert!(!nil.iscollectable());

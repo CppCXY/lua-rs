@@ -20,7 +20,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         let vm = l.vm_mut();
         vm.object_pool
             .get_string(format_str_id)
-            .map(|s| s.as_str().to_string())
+            .map(|s| s.to_string())
             .ok_or_else(|| l.error("invalid string".to_string()))?
     };
 
@@ -243,7 +243,7 @@ fn format_string(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
             .vm_mut()
             .object_pool
             .get_string(str_id)
-            .map(|s| s.as_str().to_string())
+            .map(|s| s.to_string())
             .ok_or_else(|| l.error("invalid string".to_string()))?;
         buf.push_str(&s);
     } else if let Some(n) = arg.as_integer() {
@@ -267,7 +267,7 @@ fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
         .vm_mut()
         .object_pool
         .get_string(str_id)
-        .map(|s| s.as_str().to_string())
+        .map(|s| s.to_string())
         .ok_or_else(|| l.error("invalid string".to_string()))?;
 
     buf.push('"');

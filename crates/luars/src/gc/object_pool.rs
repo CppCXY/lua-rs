@@ -12,7 +12,8 @@ use crate::gc::gc_object::FunctionBody;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaTable, LuaValue, StringId, TableId, ThreadId, UpvalueId, UserdataId
+    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, LuaTable, LuaValue,
+    StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -357,11 +358,11 @@ pub type Arena<T> = Pool<T>;
 struct StringInterner {
     // StringId -> String data (Vec-based for O(1) access)
     strings: Pool<GcString>,
-    
+
     // Content -> StringId mapping for deduplication
     // Key is (hash, start_idx) where start_idx is index into strings pool
     // This avoids storing string content twice
-    map: HashMap<u64, Vec<u32>>,  // hash -> list of StringIds with that hash
+    map: HashMap<u64, Vec<u32>>, // hash -> list of StringIds with that hash
 }
 
 impl StringInterner {
@@ -380,7 +381,7 @@ impl StringInterner {
     /// Intern an owned string (avoids clone)
     fn intern_owned(&mut self, s: String) -> (StringId, bool) {
         let hash = Self::hash_string(&s);
-        
+
         // Check if already interned
         if let Some(ids) = self.map.get(&hash) {
             for &id in ids {
@@ -392,16 +393,16 @@ impl StringInterner {
                 }
             }
         }
-        
+
         // Not found - use owned string directly
         let gc_string = GcString {
             header: GcHeader::default(),
             data: s,
         };
         let id = self.strings.alloc(gc_string);
-        
+
         self.map.entry(hash).or_insert_with(Vec::new).push(id);
-        
+
         (StringId(id), true)
     }
 
@@ -409,6 +410,11 @@ impl StringInterner {
     #[inline(always)]
     fn get(&self, id: StringId) -> Option<&GcString> {
         self.strings.get(id.0)
+    }
+
+    #[inline(always)]
+    fn get_mut(&mut self, id: StringId) -> Option<&mut GcString> {
+        self.strings.get_mut(id.0)
     }
 
     /// Fast hash function - FNV-1a for good distribution
@@ -425,13 +431,13 @@ impl StringInterner {
 
     /// Remove dead strings (called by GC)
     fn remove_dead(&mut self, id: StringId) {
-        let hash = if let Some(gs) = self.strings.get(id) {
+        let hash = if let Some(gs) = self.strings.get(id.0) {
             Self::hash_string(&gs.data)
         } else {
             return; // Already removed
         };
         self.strings.free(id.0);
-        
+
         // Remove from map
         if let Some(ids) = self.map.get_mut(&hash) {
             ids.retain(|&i| i != id.0);
@@ -459,7 +465,7 @@ impl StringInterner {
 /// - Large objects (Table, Thread) use BoxPool<T> to avoid copy on resize
 /// - ALL strings are interned via StringInterner for O(1) equality checks
 pub struct ObjectPool {
-    strings: StringInterner,  // Private - use create_string() to intern
+    strings: StringInterner, // Private - use create_string() to intern
     pub tables: BoxPool<GcTable>,
     pub functions: Pool<GcFunction>,
     pub upvalues: Pool<GcUpvalue>,
@@ -689,28 +695,18 @@ impl ObjectPool {
     }
 
     #[inline(always)]
-    pub fn get_string(&self, id: StringId) -> Option<&LuaString> {
-        self.strings.get(id).map(|gs| &gs.data)
-    }
-
-    #[inline(always)]
-    pub fn get_string_str(&self, id: StringId) -> Option<&str> {
+    pub fn get_string(&self, id: StringId) -> Option<&str> {
         self.strings.get(id).map(|gs| gs.data.as_str())
     }
 
     #[inline(always)]
-    pub fn get_string_gc(&self, id: StringId) -> Option<&GcString> {
+    pub(crate) fn get_string_gc(&self, id: StringId) -> Option<&GcString> {
         self.strings.get(id)
     }
 
     #[inline(always)]
-    pub fn get_string_gc_mut(&mut self, id: StringId) -> Option<&mut GcString> {
+    pub(crate) fn get_string_gc_mut(&mut self, id: StringId) -> Option<&mut GcString> {
         self.strings.get_mut(id)
-    }
-
-    /// ALL strings are now interned, no distinction needed
-    pub fn is_short_string(&self, _id: StringId) -> bool {
-        true  // All strings are interned
     }
 
     /// Create a substring from an existing string (optimized for string.sub)
@@ -783,7 +779,7 @@ impl ObjectPool {
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> TableId {
         let gc_table = GcTable {
             header: GcHeader::default(),
-            data: LuaTable::new(array_size as u32, hash_size as u32, self as *mut ObjectPool),
+            data: LuaTable::new(array_size as u32, hash_size as u32),
         };
         TableId(self.tables.alloc(gc_table))
     }
@@ -792,7 +788,7 @@ impl ObjectPool {
     pub fn create_table_default(&mut self) -> TableId {
         let gc_table = GcTable {
             header: GcHeader::default(),
-            data: LuaTable::new(0, 0, self as *mut ObjectPool),
+            data: LuaTable::new(0, 0),
         };
         TableId(self.tables.alloc(gc_table))
     }
@@ -802,32 +798,18 @@ impl ObjectPool {
         self.tables.get(id.0).map(|gt| &gt.data)
     }
 
-    /// Get table without bounds checking (caller must ensure validity)
-    /// SAFETY: id must be a valid TableId from create_table
-    #[inline(always)]
-    pub unsafe fn get_table_unchecked(&self, id: TableId) -> &LuaTable {
-        unsafe { &self.tables.get_unchecked(id.0).data }
-    }
-
     #[inline(always)]
     pub fn get_table_mut(&mut self, id: TableId) -> Option<&mut LuaTable> {
         self.tables.get_mut(id.0).map(|gt| &mut gt.data)
     }
 
-    /// Get mutable table without bounds checking (caller must ensure validity)
-    /// SAFETY: id must be a valid TableId from create_table
     #[inline(always)]
-    pub unsafe fn get_table_mut_unchecked(&mut self, id: TableId) -> &mut LuaTable {
-        unsafe { &mut self.tables.get_mut_unchecked(id.0).data }
-    }
-
-    #[inline(always)]
-    pub fn get_table_gc(&self, id: TableId) -> Option<&GcTable> {
+    pub(crate) fn get_table_gc(&self, id: TableId) -> Option<&GcTable> {
         self.tables.get(id.0)
     }
 
     #[inline(always)]
-    pub fn get_table_gc_mut(&mut self, id: TableId) -> Option<&mut GcTable> {
+    pub(crate) fn get_table_gc_mut(&mut self, id: TableId) -> Option<&mut GcTable> {
         self.tables.get_mut(id.0)
     }
 
@@ -854,12 +836,12 @@ impl ObjectPool {
     }
 
     #[inline(always)]
-    pub fn get_function(&self, id: FunctionId) -> Option<&GcFunction> {
+    pub(crate) fn get_function(&self, id: FunctionId) -> Option<&GcFunction> {
         self.functions.get(id.0)
     }
 
     #[inline(always)]
-    pub fn get_function_mut(&mut self, id: FunctionId) -> Option<&mut GcFunction> {
+    pub(crate) fn get_function_mut(&mut self, id: FunctionId) -> Option<&mut GcFunction> {
         self.functions.get_mut(id.0)
     }
 
@@ -870,9 +852,11 @@ impl ObjectPool {
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
-            stack_index,
-            closed_value: LuaValue::nil(),
-            is_open: true,
+            data: Upvalue {
+                stack_index,
+                closed_value: LuaValue::nil(),
+                is_open: true,
+            },
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
     }
@@ -882,20 +866,22 @@ impl ObjectPool {
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
-            stack_index: 0,
-            closed_value: value,
-            is_open: false,
+            data: Upvalue {
+                stack_index: 0,
+                closed_value: value,
+                is_open: false,
+            },
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
     }
 
     #[inline(always)]
-    pub fn get_upvalue(&self, id: UpvalueId) -> Option<&GcUpvalue> {
+    pub(crate) fn get_upvalue(&self, id: UpvalueId) -> Option<&GcUpvalue> {
         self.upvalues.get(id.0)
     }
 
     #[inline(always)]
-    pub fn get_upvalue_mut(&mut self, id: UpvalueId) -> Option<&mut GcUpvalue> {
+    pub(crate) fn get_upvalue_mut(&mut self, id: UpvalueId) -> Option<&mut GcUpvalue> {
         self.upvalues.get_mut(id.0)
     }
 
@@ -907,10 +893,7 @@ impl ObjectPool {
     }
 
     /// Create upvalue from LuaUpvalue
-    pub fn create_upvalue(
-        &mut self,
-        upvalue: Rc<LuaUpvalue>,
-    ) -> UpvalueId {
+    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>) -> UpvalueId {
         // Check if open and get stack index
         let (is_open, stack_index, closed_value) = if upvalue.is_open() {
             (
@@ -928,9 +911,11 @@ impl ObjectPool {
 
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
-            stack_index,
-            closed_value,
-            is_open,
+            data: Upvalue {
+                stack_index,
+                closed_value,
+                is_open,
+            },
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
     }
@@ -1029,10 +1014,7 @@ impl ObjectPool {
         // Free collected IDs
         for id in strings_to_free {
             // Remove from intern map - StringInterner handles this
-            if let Some(gs) = self.strings.get(StringId(id)) {
-                let hash = gs.data.hash;
-                self.strings.remove_dead(StringId::from_raw(id), hash);
-            }
+            self.strings.remove_dead(StringId(id));
         }
         for id in tables_to_free {
             self.tables.free(id);
@@ -1060,10 +1042,7 @@ impl ObjectPool {
 
     #[inline]
     pub fn remove_string(&mut self, id: StringId) {
-        // Get hash before removing
-        if let Some(gs) = self.strings.get(id) {
-            self.strings.remove_dead(id);
-        }
+        self.strings.remove_dead(id);
     }
 
     #[inline]
@@ -1127,6 +1106,8 @@ impl Default for ObjectPool {
 
 #[cfg(test)]
 mod tests {
+    use crate::lua_value::LuaTableImpl;
+
     use super::*;
 
     #[test]
@@ -1180,8 +1161,8 @@ mod tests {
         assert_ne!(id1, id3);
 
         // Verify content
-        assert_eq!(pool.get_string_str(id1), Some("hello"));
-        assert_eq!(pool.get_string_str(id3), Some("world"));
+        assert_eq!(pool.get_string(id1), Some("hello"));
+        assert_eq!(pool.get_string(id3), Some("world"));
     }
 
     #[test]
@@ -1192,17 +1173,12 @@ mod tests {
 
         // Modify table
         if let Some(table) = pool.get_table_mut(tid) {
-            table.raw_set(LuaValue::integer(1), LuaValue::integer(42));
+            table.raw_set(&LuaValue::integer(1), LuaValue::integer(42));
         }
 
         // Read back
         if let Some(table) = pool.get_table(tid) {
-            assert!(
-                table
-                    .raw_get(&LuaValue::integer(1))
-                    .unwrap()
-                    .raw_equal(&LuaValue::integer(42), &pool)
-            );
+            assert!(table.raw_get(&LuaValue::integer(1)) == Some(LuaValue::integer(42)));
         }
     }
 
@@ -1233,7 +1209,7 @@ mod tests {
 
         // Verify all strings are stored correctly
         for (s, id) in &ids {
-            let stored = pool.get_string_str(*id);
+            let stored = pool.get_string(*id);
             assert_eq!(
                 stored,
                 Some(s.as_str()),
@@ -1277,7 +1253,7 @@ mod tests {
 
         // Verify content
         for (i, s) in strings.iter().enumerate() {
-            assert_eq!(pool.get_string_str(ids[i]), Some(*s));
+            assert_eq!(pool.get_string(ids[i]), Some(*s));
         }
     }
 }

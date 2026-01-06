@@ -184,11 +184,11 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(func_id) = frame.func.as_function_id() {
             let vm = l.vm_mut();
             if let Some(func) = vm.object_pool.get_function(func_id) {
-                if !func.upvalues.is_empty() {
-                    let upval_id = func.upvalues[0];
+                if !func.data.upvalues().is_empty() {
+                    let upval_id = func.data.upvalues()[0];
                     if let Some(upval) = vm.object_pool.get_upvalue(upval_id) {
                         // Upvalue should be closed with the thread value
-                        upval.get_closed_value().unwrap_or(LuaValue::nil())
+                        upval.data.get_closed_value().unwrap_or(LuaValue::nil())
                     } else {
                         LuaValue::nil()
                     }

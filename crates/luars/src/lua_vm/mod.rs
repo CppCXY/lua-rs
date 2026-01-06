@@ -9,7 +9,7 @@ mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
-use crate::lua_value::{Chunk, LuaString, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
+use crate::lua_value::{Chunk, LuaTable, LuaTableImpl, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
@@ -122,7 +122,7 @@ impl LuaVM {
         let key_value = self.create_string(key);
 
         if let Some(reg_table) = self.object_pool.get_table_mut(self.registry) {
-            reg_table.raw_set(key_value, value);
+            reg_table.raw_set(&key_value, value);
         }
     }
 
@@ -243,7 +243,7 @@ impl LuaVM {
         let key = self.create_string(name);
 
         if let Some(global) = self.object_pool.get_table_mut(self.global) {
-            global.raw_set(key.clone(), value.clone());
+            global.raw_set(&key, value);
         }
     }
 
@@ -257,7 +257,7 @@ impl LuaVM {
         // Set __index to point to the string library
         let index_key = self.create_string("__index");
         if let Some(mt) = self.object_pool.get_table_mut(mt_id) {
-            mt.raw_set(index_key, string_lib_table);
+            mt.raw_set(&index_key, string_lib_table);
         }
 
         // Store in the VM
@@ -327,7 +327,7 @@ impl LuaVM {
         let Some(table) = self.object_pool.get_table_mut(table_id) else {
             return false;
         };
-        table.raw_set(key, value.clone());
+        table.raw_set(&key, value.clone());
         // Write barrier for GC
         self.gc_barrier_back_table(table_id, &value);
         true
@@ -476,7 +476,7 @@ impl LuaVM {
     }
 
     /// Get string by LuaValue (resolves ID from object pool)
-    pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
+    pub fn get_string(&self, value: &LuaValue) -> Option<&str> {
         if let Some(id) = value.as_string_id() {
             self.object_pool.get_string(id)
         } else {
@@ -577,7 +577,7 @@ impl LuaVM {
 
     pub fn table_set_raw(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) {
         if let Some(table_ref) = self.get_table_mut(table) {
-            table_ref.raw_set(key, value);
+            table_ref.raw_set(&key, value);
         }
     }
 
@@ -643,16 +643,6 @@ impl LuaVM {
         LuaValue::function(id)
     }
 
-    /// Create a C closure with a single inline upvalue (fast path)
-    /// This avoids all upvalue indirection and allocation overhead
-    #[inline]
-    pub fn create_c_closure_inline1(&mut self, func: CFunction, upvalue: LuaValue) -> LuaValue {
-        let id = self.object_pool.create_c_closure_inline1(func, upvalue);
-        self.check_gc();
-        self.gc.track_object(GcId::FunctionId(id), 128);
-        LuaValue::function(id)
-    }
-
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
@@ -710,7 +700,7 @@ impl LuaVM {
                 n.to_string()
             }
         } else if let Some(lua_str) = self.get_string(value) {
-            lua_str.as_str().to_string()
+            lua_str.to_string()
         } else if value.is_table() {
             if let Some(id) = value.as_table_id() {
                 format!("table: 0x{:x}", id.0)
@@ -745,7 +735,7 @@ impl LuaVM {
     /// Get the string content of a LuaValue if it is a string
     /// Returns None if the value is not a string
     pub fn value_as_string(&self, value: &LuaValue) -> Option<String> {
-        self.get_string(value).map(|s| s.as_str().to_string())
+        self.get_string(value).map(|s| s.to_string())
     }
 
     /// Get the type name of a LuaValue
@@ -895,7 +885,7 @@ impl LuaVM {
         // 6. Open upvalues
         for upval_id in self.main_state.get_open_upvalues() {
             if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
-                if let Some(val) = uv.get_closed_value() {
+                if let Some(val) = uv.data.get_closed_value() {
                     roots.push(val);
                 }
             }

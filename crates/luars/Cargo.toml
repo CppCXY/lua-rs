@@ -12,5 +12,5 @@ loadlib = ["dep:libloading"]
 [dependencies]
 libloading = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
-
+hashbrown = { version = "0.16.1", features = ["raw-entry"] }
 

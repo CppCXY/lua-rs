@@ -103,7 +103,7 @@ pub fn close_upvalues_at_level(lua_state: &mut LuaState, level: usize) -> LuaRes
         .object_pool
         .iter_upvalues()
         .filter_map(|(id, upval)| {
-            if let Some(stack_idx) = upval.get_stack_index() {
+            if let Some(stack_idx) = upval.data.get_stack_index() {
                 if stack_idx >= level {
                     Some((id, stack_idx))
                 } else {
@@ -123,7 +123,7 @@ pub fn close_upvalues_at_level(lua_state: &mut LuaState, level: usize) -> LuaRes
         // Close the upvalue (move value from stack to upvalue storage)
         if let Some(upval) = lua_state.vm_mut().object_pool.get_upvalue_mut(upval_id) {
             unsafe {
-                upval.close_with_value(value);
+                upval.data.close_with_value(value);
             }
         }
     }

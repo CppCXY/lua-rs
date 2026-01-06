@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaTableImpl, LuaValue};
 use crate::lua_vm::{LuaError, LuaResult, LuaState};
 
 pub fn create_package_lib() -> LibraryModule {
@@ -64,12 +64,12 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
 
     // Set all fields in package table
     let pkg = vm.object_pool.get_table_mut(package_id).unwrap();
-    pkg.raw_set(loaded_key, loaded_table);
-    pkg.raw_set(preload_key, preload_table);
-    pkg.raw_set(path_key, path_value);
-    pkg.raw_set(cpath_key, cpath_value);
-    pkg.raw_set(config_key, config_value);
-    pkg.raw_set(searchers_key, searchers_table);
+    pkg.raw_set(&loaded_key, loaded_table);
+    pkg.raw_set(&preload_key, preload_table);
+    pkg.raw_set(&path_key, path_value);
+    pkg.raw_set(&cpath_key, cpath_value);
+    pkg.raw_set(&config_key, config_value);
+    pkg.raw_set(&searchers_key, searchers_table);
 
     Ok(())
 }
@@ -89,7 +89,7 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
     //     let Some(s) = vm.object_pool.get_string(modname_id) else {
     //         return Err(l.error("module name expected".to_string()));
     //     };
-    //     s.as_str().to_string()
+    //     s.to_string()
     // };
 
     let package_table = l
@@ -149,7 +149,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(modname_id) else {
             return Err(l.error("module name expected".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     let package_table = l
@@ -175,7 +175,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
         let Some(path) = vm.object_pool.get_string(path_id) else {
             return Err(LuaError::RuntimeError);
         };
-        path.as_str().to_string()
+        path.to_string()
     };
 
     // Search for the file
@@ -224,7 +224,7 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(filepath_id) else {
             return Err(l.error("file path must be a string".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     if !std::fs::metadata(&filepath_str).is_ok() {
@@ -295,7 +295,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(name_id) else {
             return Err(l.error("bad argument #1 to 'searchpath' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     let Some(path_id) = path_val.as_string_id() else {
@@ -307,7 +307,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(path_id) else {
             return Err(l.error("bad argument #2 to 'searchpath' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     // Optional sep and rep arguments
@@ -316,9 +316,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
                 let vm = l.vm_mut();
-                vm.object_pool
-                    .get_string(id)
-                    .map(|s| s.as_str().to_string())
+                vm.object_pool.get_string(id).map(|s| s.to_string())
             })
         })
         .unwrap_or_else(|| ".".to_string());
@@ -328,9 +326,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
         .and_then(|v| {
             v.as_string_id().and_then(|id| {
                 let vm = l.vm_mut();
-                vm.object_pool
-                    .get_string(id)
-                    .map(|s| s.as_str().to_string())
+                vm.object_pool.get_string(id).map(|s| s.to_string())
             })
         })
         .unwrap_or_else(|| "/".to_string());

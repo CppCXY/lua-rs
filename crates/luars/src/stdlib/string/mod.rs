@@ -6,7 +6,7 @@ mod pattern;
 mod string_format;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaTableImpl, LuaValue};
 use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_string_lib() -> LibraryModule {
@@ -50,7 +50,7 @@ fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = l.vm_mut().object_pool.get_string(string_id) else {
             return Err(l.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
         };
-        s.as_str().as_bytes().to_vec()
+        s.as_bytes().to_vec()
     };
 
     let len = bytes_vec.len() as i64;
@@ -149,7 +149,7 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Check if it's a Lua function (not a C function)
-    let Some(chunk) = func.chunk() else {
+    let Some(chunk) = func.data.chunk() else {
         return Err(l.error("unable to dump given function".to_string()));
     };
 
@@ -186,7 +186,7 @@ fn string_len(l: &mut LuaState) -> LuaResult<usize> {
 
     // Lua string.len returns byte length, not UTF-8 character count
     // This is correct and much faster than chars().count()
-    let len = s.as_str().len() as i64;
+    let len = s.len() as i64;
     l.push_value(LuaValue::integer(len))?;
     Ok(1)
 }
@@ -206,7 +206,7 @@ fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(string_id) else {
             return Err(l.error("bad argument #1 to 'string.lower' (string expected)".to_string()));
         };
-        let str_ref = s.as_str();
+        let str_ref = s;
         // ASCII fast path: if all bytes are ASCII, use make_ascii_lowercase
         if str_ref.is_ascii() {
             str_ref.to_ascii_lowercase()
@@ -234,7 +234,7 @@ fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(string_id) else {
             return Err(l.error("bad argument #1 to 'string.upper' (string expected)".to_string()));
         };
-        let str_ref = s.as_str();
+        let str_ref = s;
         // ASCII fast path
         if str_ref.is_ascii() {
             str_ref.to_ascii_uppercase()
@@ -265,7 +265,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(string_id) else {
             return Err(l.error("bad argument #1 to 'string.rep' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     let Some(n_value) = n_value else {
@@ -286,7 +286,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
         Some(v) => {
             let sep_str = if let Some(sep_id) = v.as_string_id() {
                 if let Some(sep) = vm.object_pool.get_string(sep_id) {
-                    sep.as_str().to_string()
+                    sep.to_string()
                 } else {
                     return Err(
                         l.error("bad argument #3 to 'string.rep' (string expected)".to_string())
@@ -333,7 +333,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
                 l.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
             );
         };
-        s.as_str().chars().rev().collect::<String>()
+        s.chars().rev().collect::<String>()
     };
     let result = vm.create_string_owned(reversed);
     l.push_value(result)?;
@@ -365,7 +365,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(string_id) else {
             return Err(l.error("bad argument #1 to 'string.sub' (string expected)".to_string()));
         };
-        let byte_len = s.as_str().len() as i64;
+        let byte_len = s.len() as i64;
 
         // Lua string.sub uses byte positions, not character positions!
         let start = if i < 0 { byte_len + i + 1 } else { i };
@@ -420,7 +420,7 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
         let s_lua = vm.object_pool.get_string(s_id);
         let pattern_lua = vm.object_pool.get_string(pattern_id);
         match (s_lua, pattern_lua) {
-            (Some(s), Some(p)) => Ok((s.as_str().to_string(), p.as_str().to_string())),
+            (Some(s), Some(p)) => Ok((s.to_string(), p.to_string())),
             _ => Err("invalid string".to_string()),
         }
     }
@@ -520,9 +520,7 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
         let s = vm.object_pool.get_string(string_id);
         let p = vm.object_pool.get_string(pattern_id);
         match (s, p) {
-            (Some(s_obj), Some(p_obj)) => {
-                Ok((s_obj.as_str().to_string(), p_obj.as_str().to_string()))
-            }
+            (Some(s_obj), Some(p_obj)) => Ok((s_obj.to_string(), p_obj.to_string())),
             _ => Err("invalid string".to_string()),
         }
     }
@@ -594,11 +592,9 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         let r = vm.object_pool.get_string(repl_id);
 
         match (s, p, r) {
-            (Some(s_obj), Some(p_obj), Some(r_obj)) => Ok((
-                s_obj.as_str().to_string(),
-                p_obj.as_str().to_string(),
-                r_obj.as_str().to_string(),
-            )),
+            (Some(s_obj), Some(p_obj), Some(r_obj)) => {
+                Ok((s_obj.to_string(), p_obj.to_string(), r_obj.to_string()))
+            }
             _ => Err("invalid string".to_string()),
         }
     }
@@ -709,11 +705,7 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error("gmatch iterator: pattern invalid".to_string()));
         };
 
-        (
-            s_obj.as_str().to_string(),
-            pattern_obj.as_str().to_string(),
-            position,
-        )
+        (s_obj.to_string(), pattern_obj.to_string(), position)
     };
 
     // Parse pattern
@@ -830,8 +822,8 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
 //         };
 
 //         (
-//             s_obj.as_str().to_string(),
-//             pattern_obj.as_str().to_string(),
+//             s_obj.to_string(),
+//             pattern_obj.to_string(),
 //             position,
 //         )
 //     };
@@ -1013,7 +1005,7 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
 //                             vm.error("bad argument to 'string.pack' (string expected)".to_string())
 //                         );
 //                     };
-//                     s.as_str().to_string()
+//                     s.to_string()
 //                 };
 //                 result.extend_from_slice(s_str.as_bytes());
 //                 result.push(0); // null terminator
@@ -1048,7 +1040,7 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
 //                             vm.error("bad argument to 'string.pack' (string expected)".to_string())
 //                         );
 //                     };
-//                     s.as_str().to_string()
+//                     s.to_string()
 //                 };
 //                 let bytes = s_str.as_bytes();
 //                 result.extend_from_slice(&bytes[..size.min(bytes.len())]);
@@ -1191,7 +1183,7 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
 //                 vm.error("bad argument #2 to 'string.unpack' (string expected)".to_string())
 //             );
 //         };
-//         s.as_str().to_string()
+//         s.to_string()
 //     };
 //     let bytes = s_str.as_bytes();
 

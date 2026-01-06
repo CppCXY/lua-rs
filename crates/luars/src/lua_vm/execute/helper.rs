@@ -1,7 +1,7 @@
 use crate::{
     Chunk, LuaResult, LuaValue,
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
-    lua_vm::{LuaState, LuaError},
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT, LuaTableImpl},
+    lua_vm::{LuaError, LuaState},
 };
 
 /// Build hidden arguments for vararg functions
@@ -75,13 +75,13 @@ pub fn buildhiddenargs(
 /// ttisinteger - 检查是否是整数 (最快的类型检查)
 #[inline(always)]
 pub fn ttisinteger(v: &LuaValue) -> bool {
-    (*v).tt_ == LUA_VNUMINT
+    (*v).tt == LUA_VNUMINT
 }
 
 /// ttisfloat - 检查是否是浮点数
 #[inline(always)]
 pub fn ttisfloat(v: &LuaValue) -> bool {
-    (*v).tt_ == LUA_VNUMFLT
+    (*v).tt == LUA_VNUMFLT
 }
 
 /// ttisstring - 检查是否是字符串
@@ -95,27 +95,27 @@ pub fn ttisstring(v: &LuaValue) -> bool {
 /// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)
 #[inline(always)]
 pub fn ivalue(v: &LuaValue) -> i64 {
-    unsafe { (*v).value_.i }
+    unsafe { (*v).value.i }
 }
 
 /// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
 #[inline(always)]
 pub fn fltvalue(v: &LuaValue) -> f64 {
-    unsafe { (*v).value_.n }
+    unsafe { (*v).value.n }
 }
 
 /// setivalue - 设置整数值
 #[inline(always)]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
-    (*v).value_.i = i;
-    (*v).tt_ = LUA_VNUMINT;
+    (*v).value.i = i;
+    (*v).tt = LUA_VNUMINT;
 }
 
 /// setfltvalue - 设置浮点值
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
-    (*v).value_.n = n;
-    (*v).tt_ = LUA_VNUMFLT;
+    (*v).value.n = n;
+    (*v).tt = LUA_VNUMFLT;
 }
 
 /// setbfvalue - 设置false
@@ -167,14 +167,14 @@ pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
 /// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
 #[inline(always)]
 pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
-    if v.tt_ == LUA_VNUMFLT {
+    if v.tt == LUA_VNUMFLT {
         unsafe {
-            *out = v.value_.n;
+            *out = v.value.n;
         }
         true
-    } else if v.tt_ == LUA_VNUMINT {
+    } else if v.tt == LUA_VNUMINT {
         unsafe {
-            *out = v.value_.i as f64;
+            *out = v.value.i as f64;
         }
         true
     } else {
@@ -185,9 +185,9 @@ pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
 /// tointeger - 从LuaValue引用获取整数 (用于常量)
 #[inline(always)]
 pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
-    if v.tt_ == LUA_VNUMINT {
+    if v.tt == LUA_VNUMINT {
         unsafe {
-            *out = v.value_.i;
+            *out = v.value.i;
         }
         true
     } else {
@@ -204,28 +204,28 @@ pub fn lookup_from_metatable(
 ) -> Option<LuaValue> {
     // Port of luaV_finishget from lvm.c:291
     const MAXTAGLOOP: usize = 2000;
-    
+
     let mut t = *obj;
-    
+
     for _ in 0..MAXTAGLOOP {
         // Get __index metamethod
         let tm = get_index_metamethod(lua_state, &t)?;
-        
+
         // If __index is a function, call it
         if tm.is_function() {
             // Call metamethod: tm(t, key) -> result
             // Similar to call_metamethod in metamethod.rs
-            
+
             // CRITICAL: Save current stack_top to restore later
             let saved_top = lua_state.get_top();
             let func_pos = saved_top;
-            
+
             // Ensure stack has enough space for function call
             let needed_size = func_pos + 3;
             if let Err(_) = lua_state.grow_stack(needed_size) {
                 return None;
             }
-            
+
             // Push function and arguments onto stack
             {
                 let stack = lua_state.stack_mut();
@@ -234,45 +234,45 @@ pub fn lookup_from_metatable(
                 stack[func_pos + 2] = *key;
             }
             lua_state.set_top(func_pos + 3);
-            
+
             let caller_depth = lua_state.call_depth();
             let new_base = func_pos + 1;
-            
+
             // Push frame and execute
             match lua_state.push_frame(tm, new_base, 2, 1) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(_) => {
                     // Restore stack_top on error
                     lua_state.set_top(saved_top);
                     return None;
                 }
             }
-            
+
             match crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(_) => {
                     // Restore stack_top on error
                     lua_state.set_top(saved_top);
                     return None;
                 }
             }
-            
+
             // Get result from func_pos (where function was)
             let result = {
                 let stack = lua_state.stack_mut();
                 stack[func_pos]
             };
-            
+
             // CRITICAL: Restore saved stack_top, not func_pos
             // This ensures caller's frame.top is not corrupted
             lua_state.set_top(saved_top);
-            
+
             return Some(result);
         }
-        
+
         // __index is a table, try to access tm[key]
         t = tm;
-        
+
         // Try direct table access first (fast path)
         if let Some(table_id) = t.as_table_id() {
             if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
@@ -281,10 +281,10 @@ pub fn lookup_from_metatable(
                 }
             }
         }
-        
+
         // If not found, loop again to check if tm has __index
     }
-    
+
     // Too many iterations - possible loop
     None
 }
@@ -374,9 +374,9 @@ pub fn store_to_metatable(
     value: LuaValue,
 ) -> LuaResult<bool> {
     const MAXTAGLOOP: usize = 2000;
-    
+
     let mut t = *obj;
-    
+
     for _ in 0..MAXTAGLOOP {
         // Check if t is a table without __newindex
         if let Some(table_id) = t.as_table_id() {
@@ -386,14 +386,14 @@ pub fn store_to_metatable(
                 .object_pool
                 .get_table(table_id)
                 .and_then(|tbl| tbl.get_metatable());
-            
+
             if let Some(mt) = mt_val {
                 if let Some(tm) = get_metamethod_from_metatable(lua_state, mt, "__newindex") {
                     // Has __newindex metamethod
                     if tm.is_function() {
                         // Call metamethod: tm(t, key, value)
                         let func_pos = lua_state.get_top();
-                        
+
                         // Push function and arguments
                         {
                             let stack = lua_state.stack_mut();
@@ -403,48 +403,48 @@ pub fn store_to_metatable(
                             stack[func_pos + 3] = value;
                         }
                         lua_state.set_top(func_pos + 4);
-                        
+
                         let caller_depth = lua_state.call_depth();
                         let new_base = func_pos + 1;
-                        
+
                         // Call metamethod (0 results expected)
                         lua_state.push_frame(tm, new_base, 3, 0)?;
                         crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
-                        
+
                         lua_state.set_top(func_pos); // Clean up stack
                         return Ok(true);
                     }
-                    
+
                     // __newindex is a table, repeat assignment over it
                     t = tm;
                     continue;
                 }
             }
-            
+
             // No __newindex metamethod, do direct assignment
             let table = lua_state
-                        .vm_mut()
-                        .object_pool
-                        .get_table_mut(table_id)
-                        .ok_or(LuaError::RuntimeError)?;
-            table.raw_set(key.clone(), value);
+                .vm_mut()
+                .object_pool
+                .get_table_mut(table_id)
+                .ok_or(LuaError::RuntimeError)?;
+            table.raw_set(&key, value);
             // GC write barrier: check GC after table modification
             lua_state.vm_mut().check_gc();
             return Ok(true);
         }
-        
+
         // Not a table, get __newindex metamethod
         let tm = get_newindex_metamethod(lua_state, &t);
         if tm.is_none() {
             return Err(lua_state.error(format!("attempt to index a {} value", t.type_name())));
         }
-        
+
         let tm = tm.unwrap();
-        
+
         // If __newindex is a function, call it
         if tm.is_function() {
             let func_pos = lua_state.get_top();
-            
+
             // Push function and arguments: tm(t, key, value)
             {
                 let stack = lua_state.stack_mut();
@@ -454,22 +454,22 @@ pub fn store_to_metatable(
                 stack[func_pos + 3] = value;
             }
             lua_state.set_top(func_pos + 4);
-            
+
             let caller_depth = lua_state.call_depth();
             let new_base = func_pos + 1;
-            
+
             // Call metamethod (0 results expected)
             lua_state.push_frame(tm, new_base, 3, 0)?;
             crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
-            
+
             lua_state.set_top(func_pos); // Clean up stack
             return Ok(true);
         }
-        
+
         // __newindex is a table, repeat assignment over it
         t = tm;
     }
-    
+
     // Too many iterations - possible loop
     Err(lua_state.error("'__newindex' chain too long; possible loop".to_string()))
 }
@@ -519,14 +519,14 @@ pub fn get_binop_metamethod(
             return Some(mm);
         }
     }
-    
+
     // Try v2's metatable
     if let Some(mt) = get_value_metatable(lua_state, v2) {
         if let Some(mm) = get_metamethod_from_metatable(lua_state, mt, event) {
             return Some(mm);
         }
     }
-    
+
     None
 }
 
@@ -535,7 +535,7 @@ fn get_value_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<Lua
     if value.is_string() {
         return lua_state.vm_mut().string_mt;
     }
-    
+
     if let Some(table_id) = value.as_table_id() {
         return lua_state
             .vm_mut()
@@ -543,7 +543,7 @@ fn get_value_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<Lua
             .get_table(table_id)
             .and_then(|t| t.get_metatable());
     }
-    
+
     if let Some(ud_id) = value.as_userdata_id() {
         if let Some(ud) = lua_state.vm_mut().object_pool.get_userdata(ud_id) {
             let mt = ud.get_metatable();
@@ -552,6 +552,6 @@ fn get_value_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<Lua
             }
         }
     }
-    
+
     None
 }

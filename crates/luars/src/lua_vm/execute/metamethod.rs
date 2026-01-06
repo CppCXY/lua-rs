@@ -1,4 +1,6 @@
 use crate::lua_value::LuaValue;
+use crate::lua_vm::execute::call::call_c_function;
+use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::opcode::Instruction;
 /// Metamethod operations
 ///
@@ -48,14 +50,14 @@ pub fn try_unary_tm(
 ) -> LuaResult<()> {
     // For unary operations, Lua passes the same operand twice
     let tm_name = tm.name();
-    
+
     // Try to get metamethod from operand
     let metamethod = get_binop_metamethod(lua_state, &operand, tm_name);
-    
+
     if let Some(mm) = metamethod {
         // Call metamethod: mm(operand, operand) -> result
         let result = call_metamethod(lua_state, mm, operand, operand)?;
-        
+
         // Store result
         let stack = lua_state.stack_mut();
         stack[result_pos] = result;
@@ -152,13 +154,13 @@ pub fn handle_mmbin(
 pub fn handle_mmbini(
     lua_state: &mut LuaState,
     _base: usize, // Unused, kept for compatibility
-    a: usize, // Operand register
-    sb: i32,  // Immediate value
-    c: usize, // Tag method (TMS)
-    k: bool,  // flip flag
+    a: usize,     // Operand register
+    sb: i32,      // Immediate value
+    c: usize,     // Tag method (TMS)
+    k: bool,      // flip flag
     pc: usize,
     code: &[Instruction],
-    frame_idx: usize,     // Frame index for accessing current base
+    frame_idx: usize, // Frame index for accessing current base
 ) -> LuaResult<()> {
     // Get the original arithmetic instruction
     if pc < 2 {
@@ -221,14 +223,14 @@ pub fn handle_mmbini(
 pub fn handle_mmbink(
     lua_state: &mut LuaState,
     _base: usize, // Unused, kept for compatibility
-    a: usize, // Operand register
-    b: usize, // Constant index
-    c: usize, // Tag method (TMS)
-    k: bool,  // flip flag
+    a: usize,     // Operand register
+    b: usize,     // Constant index
+    c: usize,     // Tag method (TMS)
+    k: bool,      // flip flag
     pc: usize,
     code: &[Instruction],
     constants: &[LuaValue],
-    frame_idx: usize,     // Frame index for accessing current base
+    frame_idx: usize, // Frame index for accessing current base
 ) -> LuaResult<()> {
     // Get the original arithmetic instruction
     if pc < 2 {
@@ -402,25 +404,25 @@ pub fn call_metamethod(
                 .object_pool
                 .get_function(func_id)
                 .ok_or(LuaError::RuntimeError)?;
-            func_obj.is_lua_function()
+            func_obj.data.is_lua_function()
         };
 
         if is_lua {
             // Lua function: push frame and execute ONLY THIS FRAME
             let new_base = func_pos + 1;
-            
+
             // Record depth before pushing frame
             let caller_depth = lua_state.call_depth();
-            
+
             lua_state.push_frame(metamethod, new_base, 2, 1)?;
 
             // CRITICAL: Execute ONLY the new frame using lua_execute_until!
             // This matches Lua 5.5's luaD_call behavior - execute only the called function
             // After the called frame returns, we should be back at caller_depth
-            crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
+            lua_execute_until(lua_state, caller_depth)?;
         } else {
             // GC C function
-            crate::lua_vm::execute::call::call_c_function(lua_state, func_pos, 2, 1)?;
+            call_c_function(lua_state, func_pos, 2, 1)?;
         }
     } else {
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
@@ -464,14 +466,14 @@ pub fn try_comp_tm(
 /// Handles metamethods for tables and userdata
 pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResult<bool> {
     // Direct port of lvm.c:582 luaV_equalobj
-    
+
     // Step 1: Check if types are different
     if t1.ttype() != t2.ttype() {
         return Ok(false);
     }
-    
+
     // Step 2: Check if type tags are different (for number/string variants)
-    if t1.tt_ != t2.tt_ {
+    if t1.tt != t2.tt {
         // Handle integer/float comparison
         if t1.ttisinteger() && t2.ttisfloat() {
             let i1 = t1.ivalue();
@@ -490,55 +492,55 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
             let s1 = pool.get_string(s1_id);
             let s2 = pool.get_string(s2_id);
             if let (Some(str1), Some(str2)) = (s1, s2) {
-                return Ok(str1.as_str() == str2.as_str());
+                return Ok(str1 == str2);
             }
             return Ok(false);
         }
         // Other types with different tags cannot be equal
         return Ok(false);
     }
-    
+
     // Step 3: Same type and tag - compare by type
     // Use if-else chain instead of match to avoid pattern matching issues
-    
+
     if t1.ttisnil() || t1.ttisfalse() || t1.ttistrue() {
         // nil, false, true: if same type/tag, they're equal
         return Ok(true);
     }
-    
+
     if t1.ttisinteger() {
         return Ok(t1.ivalue() == t2.ivalue());
     }
-    
+
     if t1.ttisfloat() {
         return Ok(t1.fltvalue() == t2.fltvalue());
     }
-    
+
     if t1.ttislightuserdata() {
-        return Ok(unsafe { t1.value_.p == t2.value_.p });
+        return Ok(unsafe { t1.value.p == t2.value.p });
     }
-    
+
     if t1.ttisstring() {
         // Strings: for short strings, compare IDs (interned)
         // For long strings, compare content
         let s1_id = t1.tsvalue();
         let s2_id = t2.tsvalue();
-        
+
         // Short strings are interned, so ID comparison is enough
         if s1_id == s2_id {
             return Ok(true);
         }
-        
+
         // Different IDs: compare content
         let pool = &lua_state.vm_mut().object_pool;
         let s1 = pool.get_string(s1_id);
         let s2 = pool.get_string(s2_id);
         if let (Some(str1), Some(str2)) = (s1, s2) {
-            return Ok(str1.as_str() == str2.as_str());
+            return Ok(str1 == str2);
         }
         return Ok(false);
     }
-    
+
     if t1.ttisfulluserdata() {
         // Userdata: first check identity
         if let (Some(id1), Some(id2)) = (t1.as_userdata_id(), t2.as_userdata_id()) {
@@ -553,7 +555,7 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
             get_metatable(lua_state, &t2)
                 .and_then(|_mt| get_binop_metamethod(lua_state, &t2, "__eq"))
         });
-        
+
         if let Some(metamethod) = tm {
             let result = call_metamethod(lua_state, metamethod, t1, t2)?;
             return Ok(!result.is_falsy());
@@ -561,7 +563,7 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
             return Ok(false);
         }
     }
-    
+
     if t1.ttistable() {
         // Tables: first check identity
         if let (Some(id1), Some(id2)) = (t1.as_table_id(), t2.as_table_id()) {
@@ -576,7 +578,7 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
             get_metatable(lua_state, &t2)
                 .and_then(|_mt| get_binop_metamethod(lua_state, &t2, "__eq"))
         });
-        
+
         if let Some(metamethod) = tm {
             let result = call_metamethod(lua_state, metamethod, t1, t2)?;
             return Ok(!result.is_falsy());
@@ -584,17 +586,17 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
             return Ok(false);
         }
     }
-    
+
     if t1.ttiscfunction() {
         // C functions: compare function pointers
-        return Ok(unsafe { t1.value_.f == t2.value_.f });
+        return Ok(unsafe { t1.value.f == t2.value.f });
     }
-    
+
     // Lua functions, threads, etc.: compare GC pointers
     if let (Some(id1), Some(id2)) = (t1.as_function_id(), t2.as_function_id()) {
         return Ok(id1 == id2);
     }
-    
+
     Ok(false)
 }
 

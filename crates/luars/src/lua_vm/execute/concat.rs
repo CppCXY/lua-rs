@@ -29,7 +29,7 @@ fn value_to_string_content(
     // Fast path: already a string
     if let Some(string_id) = value.as_string_id() {
         if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
-            return Ok((s.as_str().to_string(), true));
+            return Ok((s.to_string(), true));
         }
     }
 
@@ -107,7 +107,7 @@ pub fn concat_strings(
     for id_opt in &string_ids {
         if let Some(string_id) = id_opt {
             if let Some(s) = lua_state.vm_mut().object_pool.get_string(*string_id) {
-                let len = s.as_str().len();
+                let len = s.len();
                 if len == 0 {
                     has_empty = true;
                 }
@@ -129,8 +129,8 @@ pub fn concat_strings(
             if let (Some(id1), Some(id2)) = (first.as_string_id(), second.as_string_id()) {
                 let (len1, len2) = {
                     let pool = &lua_state.vm_mut().object_pool;
-                    let l1 = pool.get_string(id1).map(|s| s.as_str().len()).unwrap_or(0);
-                    let l2 = pool.get_string(id2).map(|s| s.as_str().len()).unwrap_or(0);
+                    let l1 = pool.get_string(id1).map(|s| s.len()).unwrap_or(0);
+                    let l2 = pool.get_string(id2).map(|s| s.len()).unwrap_or(0);
                     (l1, l2)
                 };
 
@@ -151,7 +151,7 @@ pub fn concat_strings(
             for id_opt in &string_ids {
                 if let Some(string_id) = id_opt {
                     if let Some(s) = lua_state.vm_mut().object_pool.get_string(*string_id) {
-                        buffer.extend_from_slice(s.as_str().as_bytes());
+                        buffer.extend_from_slice(s.as_bytes());
                     }
                 }
             }
@@ -166,7 +166,7 @@ pub fn concat_strings(
             for id_opt in &string_ids {
                 if let Some(string_id) = id_opt {
                     if let Some(s) = lua_state.vm_mut().object_pool.get_string(*string_id) {
-                        result.push_str(s.as_str());
+                        result.push_str(s);
                     }
                 }
             }

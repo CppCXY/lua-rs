@@ -331,7 +331,7 @@ fn write_constant_with_pool(
     } else if let Some(string_id) = value.as_string_id() {
         if let Some(lua_string) = pool.get_string(string_id) {
             buf.push(TAG_STRING);
-            write_string(buf, lua_string.as_str());
+            write_string(buf, lua_string);
         } else {
             buf.push(TAG_NIL);
         }

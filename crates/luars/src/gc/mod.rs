@@ -505,7 +505,7 @@ impl GC {
                 // First collect entries and metatable to mark
                 let (entries, metatable) = if let Some(table) = pool.tables.get_mut(id.0) {
                     table.header.make_black();
-                    let entries: Vec<_> = table.data.iter_all().collect();
+                    let entries: Vec<_> = table.data.iter_all();
                     let metatable = table.data.get_metatable();
                     (entries, metatable)
                 } else {
@@ -526,7 +526,7 @@ impl GC {
                 // First collect upvalues
                 let upvalues = if let Some(func) = pool.functions.get_mut(id.0) {
                     func.header.make_black();
-                    func.data.inline_upvalue()
+                    func.data.upvalues()
                 } else {
                     return 0;
                 };
@@ -546,8 +546,8 @@ impl GC {
                 // First get the closed value
                 let closed_value = if let Some(upval) = pool.upvalues.get_mut(id.0) {
                     upval.header.make_black();
-                    if !upval.is_open {
-                        Some(upval.closed_value.clone())
+                    if !upval.data.is_open {
+                        Some(upval.data.closed_value.clone())
                     } else {
                         None
                     }

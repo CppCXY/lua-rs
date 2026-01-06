@@ -1,4 +1,4 @@
-use crate::{LuaResult, LuaValue, lua_vm::LuaState};
+use crate::{LuaResult, LuaValue, lua_value::LuaTableImpl, lua_vm::LuaState};
 
 /// require(modname) - Load a module  
 /// Simplified implementation - loads from package.preload or package.path
@@ -16,7 +16,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(modname_id) else {
             return Err(l.error("bad argument #1 to 'require' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     // Get package table
@@ -76,7 +76,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     {
         let vm = l.vm_mut();
         if let Some(loaded_table) = vm.object_pool.get_table_mut(loaded_id) {
-            loaded_table.raw_set(modname_val, LuaValue::boolean(false));
+            loaded_table.raw_set(&modname_val, LuaValue::boolean(false));
         }
     }
 
@@ -135,7 +135,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             if let Some(err_id) = error_msg.as_string_id() {
                 let vm = l.vm_mut();
                 if let Some(err_str) = vm.object_pool.get_string(err_id) {
-                    error_messages.push(err_str.as_str().to_string());
+                    error_messages.push(err_str.to_string());
                 }
             }
             l.set_top(func_idx);
@@ -167,7 +167,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             if let Some(msg_id) = first_result.as_string_id() {
                 let vm = l.vm_mut();
                 if let Some(msg_str) = vm.object_pool.get_string(msg_id) {
-                    error_messages.push(msg_str.as_str().to_string());
+                    error_messages.push(msg_str.to_string());
                 }
             }
             l.set_top(func_idx);
@@ -207,7 +207,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             let error_msg = if let Some(err_id) = error_val.as_string_id() {
                 let vm = l.vm_mut();
                 if let Some(err_str) = vm.object_pool.get_string(err_id) {
-                    err_str.as_str().to_string()
+                    err_str.to_string()
                 } else {
                     "error loading module".to_string()
                 }
@@ -238,7 +238,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         {
             let vm = l.vm_mut();
             if let Some(loaded_table) = vm.object_pool.get_table_mut(loaded_id) {
-                loaded_table.raw_set(modname_val, final_result);
+                loaded_table.raw_set(&modname_val, final_result);
             }
         }
 
@@ -253,7 +253,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     {
         let vm = l.vm_mut();
         if let Some(loaded_table) = vm.object_pool.get_table_mut(loaded_id) {
-            loaded_table.raw_set(modname_val, LuaValue::nil());
+            loaded_table.raw_set(&modname_val, LuaValue::nil());
         }
     }
 

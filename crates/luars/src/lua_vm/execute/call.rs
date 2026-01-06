@@ -8,6 +8,7 @@
 /// - TAILCALL: replace current frame, return FrameAction::TailCall (main loop loads new chunk)
 use crate::{
     LuaValue,
+    lua_value::LuaTableImpl,
     lua_vm::{CFunction, LuaError, LuaResult, LuaState},
 };
 
@@ -87,7 +88,7 @@ pub fn handle_call(
             .get_function(new_func_id)
             .ok_or(LuaError::RuntimeError)?;
 
-        if new_func.is_lua_function() {
+        if new_func.data.is_lua_function() {
             // Lua function call: push new frame
             let new_base = func_idx + 1; // Arguments start after function
 
@@ -96,7 +97,7 @@ pub fn handle_call(
 
             // Return FrameAction::Call - main loop will load new chunk and continue
             Ok(FrameAction::Call)
-        } else if new_func.is_c_function() {
+        } else if new_func.data.is_c_function() {
             // GC C function call: execute directly
             call_c_function(lua_state, func_idx, nargs, nresults)?;
 
@@ -113,37 +114,36 @@ pub fn handle_call(
             // Need to shift arguments and insert function as first arg
             // Stack layout before: [func, arg1, arg2, ...]
             // Stack layout after:  [__call, func, arg1, arg2, ...]
-            
+
             // First, shift arguments to make room for func as first arg
             let first_arg = func_idx + 1;
             for i in (0..nargs).rev() {
-                let val = lua_state.stack_get(first_arg + i).unwrap_or(LuaValue::nil());
+                let val = lua_state
+                    .stack_get(first_arg + i)
+                    .unwrap_or(LuaValue::nil());
                 lua_state.stack_set(first_arg + i + 1, val)?;
             }
-            
+
             // Set func as first arg of metamethod
             lua_state.stack_set(first_arg, func)?;
-            
+
             // Set metamethod as the function to call
             lua_state.stack_set(func_idx, mm)?;
-            
+
             // Update frame top to include the shifted argument
             let new_top = first_arg + nargs + 1;
             if let Some(frame) = lua_state.current_frame_mut() {
                 frame.top = new_top;
             }
             lua_state.set_top(new_top);
-            
+
             // Now call the metamethod with nargs+1 (including original func)
             // We need to adjust b: if b was 0 (varargs), keep it 0
             // otherwise increment it to account for the extra argument
             let new_b = if b == 0 { 0 } else { b + 1 };
             return handle_call(lua_state, base, a, new_b, c);
         } else {
-            Err(lua_state.error(format!(
-                "attempt to call a {} value",
-                func.type_name()
-            )))
+            Err(lua_state.error(format!("attempt to call a {} value", func.type_name())))
         }
     }
 }
@@ -157,14 +157,14 @@ fn get_call_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<Lua
             .object_pool
             .get_table(table_id)?
             .get_metatable()?;
-        
+
         let mt_table_id = mt_val.as_table_id()?;
         let vm = lua_state.vm_mut();
         let key = vm.create_string("__call");
         let mt = vm.object_pool.get_table(mt_table_id)?;
         return mt.raw_get(&key);
     }
-    
+
     None
 }
 
@@ -186,7 +186,7 @@ pub fn call_c_function(
     let c_func: CFunction = if func.is_cfunction() {
         // Light C function - extract directly from value
         unsafe {
-            let func_ptr = func.value_.f as usize;
+            let func_ptr = func.value.f as usize;
             std::mem::transmute(func_ptr)
         }
     } else if let Some(func_id) = func.as_function_id() {
@@ -198,6 +198,7 @@ pub fn call_c_function(
             .ok_or(LuaError::RuntimeError)?;
 
         gc_func
+            .data
             .c_function()
             .ok_or_else(|| lua_state.error("Not a C function".to_string()))?
     } else {
@@ -385,7 +386,7 @@ pub fn handle_tailcall(
             .get_function(new_func_id)
             .ok_or(LuaError::RuntimeError)?;
 
-        if new_func.is_lua_function() {
+        if new_func.data.is_lua_function() {
             // Move arguments to current frame base
             let mut args = Vec::with_capacity(nargs);
             for i in 0..nargs {
@@ -412,7 +413,7 @@ pub fn handle_tailcall(
 
             // Return FrameAction::TailCall - main loop will load new chunk and continue
             Ok(FrameAction::TailCall)
-        } else if new_func.is_c_function() {
+        } else if new_func.data.is_c_function() {
             // C function tail call: execute directly and continue
             // Lua \u4e5f\u662f\u8fd9\u6837\u505a\u7684\uff1aluaD_pretailcall \u8c03\u7528 precallC
             call_c_function(lua_state, func_idx, nargs, -1)?;
@@ -488,7 +489,7 @@ fn call_c_function_tailcall(
     // Get the C function pointer
     let c_func: CFunction = if func.is_cfunction() {
         unsafe {
-            let func_ptr = func.value_.f as usize;
+            let func_ptr = func.value.f as usize;
             std::mem::transmute(func_ptr)
         }
     } else if let Some(func_id) = func.as_function_id() {
@@ -498,6 +499,7 @@ fn call_c_function_tailcall(
             .get_function(func_id)
             .ok_or(LuaError::RuntimeError)?;
         gc_func
+            .data
             .c_function()
             .ok_or_else(|| lua_state.error("Not a C function".to_string()))?
     } else {

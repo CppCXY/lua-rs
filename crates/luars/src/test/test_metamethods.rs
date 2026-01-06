@@ -100,9 +100,11 @@ fn test_mod_metamethod() {
         local c = a % 5
         assert(c.val == 2)
     "#,
-    );    if let Err(e) = &result {
+    );
+    if let Err(e) = &result {
         eprintln!("test_index_metamethod_table error: {:?}", e);
-    }    assert!(result.is_ok());
+    }
+    assert!(result.is_ok());
 }
 
 #[test]

@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 use crate::{
     Chunk, UpvalueId,
-    lua_value::{LUA_VFALSE, LuaValue},
+    lua_value::{LUA_VFALSE, LuaTableImpl, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
         execute::helper::{
@@ -90,15 +90,15 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
             // Check if this is a Lua function
             // C functions should not reach here because they execute synchronously
             // in handle_call and return FrameAction::Return immediately
-            if !gc_function.is_lua_function() {
+            if !gc_function.data.is_lua_function() {
                 return Err(lua_state.error("Unexpected C function in main VM loop".to_string()));
             }
 
-            let Some(chunk_rc) = gc_function.chunk() else {
+            let Some(chunk_rc) = gc_function.data.chunk() else {
                 return Err(lua_state.error("Lua function has no chunk".to_string()));
             };
 
-            (chunk_rc.clone(), gc_function.upvalues.clone())
+            (chunk_rc.clone(), gc_function.data.upvalues().clone())
         };
 
         // Execute this frame until CALL/RETURN/TAILCALL
@@ -149,7 +149,7 @@ fn execute_frame(
     // Constants and code pointers (avoid repeated dereferencing)
     let constants = &chunk.constants;
     let code = &chunk.code;
-    
+
     // Macro-like helper to save PC before operations that may call functions
     // Matches Lua 5.5's savepc(ci) in Protect() macro
     macro_rules! save_pc {
@@ -157,7 +157,7 @@ fn execute_frame(
             lua_state.set_frame_pc(frame_idx, pc as u32);
         };
     }
-    
+
     // Macro-like helper to restore state after operations that may change frames
     // Matches Lua 5.5's updatebase(ci) and updatetrap(ci) in Protect() macro
     // NOTE: We do NOT restore PC! The PC has already been incremented in the main loop.
@@ -174,7 +174,11 @@ fn execute_frame(
                 base = lua_state.get_frame_base(frame_idx);
             } else {
                 // This should never happen - if it does, it's a bug in frame management
-                panic!("restore_state: frame_idx {} >= call_depth {}", frame_idx, lua_state.call_depth());
+                panic!(
+                    "restore_state: frame_idx {} >= call_depth {}",
+                    frame_idx,
+                    lua_state.call_depth()
+                );
             }
         };
     }
@@ -952,13 +956,13 @@ fn execute_frame(
                     .ok_or(LuaError::RuntimeError)?;
 
                 // Get value from upvalue
-                let value = if upvalue.is_open() {
+                let value = if upvalue.data.is_open() {
                     // Open: read from stack
-                    let stack_idx = upvalue.get_stack_index().unwrap();
+                    let stack_idx = upvalue.data.get_stack_index().unwrap();
                     lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
                 } else {
                     // Closed: read from upvalue storage
-                    upvalue.get_closed_value().unwrap()
+                    upvalue.data.get_closed_value().unwrap()
                 };
 
                 let stack = lua_state.stack_mut();
@@ -990,14 +994,14 @@ fn execute_frame(
                     .get_upvalue_mut(upval_id)
                     .ok_or(LuaError::RuntimeError)?;
 
-                if upvalue.is_open() {
+                if upvalue.data.is_open() {
                     // Open: write to stack
-                    let stack_idx = upvalue.get_stack_index().unwrap();
+                    let stack_idx = upvalue.data.get_stack_index().unwrap();
                     lua_state.stack_set(stack_idx, value)?;
                 } else {
                     // Closed: write to upvalue storage
                     unsafe {
-                        upvalue.set_closed_value_unchecked(value);
+                        upvalue.data.set_closed_value_unchecked(value);
                     }
                 }
 
@@ -1101,7 +1105,7 @@ fn execute_frame(
                             .ok_or(LuaError::RuntimeError)?;
                         table.raw_get(&rc)
                     };
-                    
+
                     if direct_result.is_some() {
                         direct_result
                     } else {
@@ -1138,7 +1142,7 @@ fn execute_frame(
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
                     let direct_result = table.get_int(c as i64);
-                    
+
                     if direct_result.is_some() {
                         direct_result
                     } else {
@@ -1200,7 +1204,7 @@ fn execute_frame(
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
                     let direct_result = table.raw_get(key);
-                    
+
                     if direct_result.is_some() {
                         direct_result
                     } else {
@@ -1261,7 +1265,7 @@ fn execute_frame(
                             .object_pool
                             .get_table_mut(table_id)
                             .ok_or(LuaError::RuntimeError)?;
-                        table.raw_set(key, value);
+                        table.raw_set(&key, value);
                     }
                     // GC write barrier: check GC after table modification
                     lua_state.vm_mut().check_gc();
@@ -1422,7 +1426,7 @@ fn execute_frame(
                 let rb = &stack[base + b];
 
                 // l_isfalse: nil or false
-                let is_false = rb.tt_ == LUA_VFALSE || rb.is_nil();
+                let is_false = rb.tt == LUA_VFALSE || rb.is_nil();
                 if is_false {
                     setbtvalue(&mut stack[base + a]);
                 } else {
@@ -1719,7 +1723,9 @@ fn execute_frame(
 
                 // Protect metamethod call
                 save_pc!();
-                metamethod::handle_mmbink(lua_state, base, a, b, c, k, pc, code, constants, frame_idx)?;
+                metamethod::handle_mmbink(
+                    lua_state, base, a, b, c, k, pc, code, constants, frame_idx,
+                )?;
                 restore_state!();
             }
 
@@ -1755,11 +1761,11 @@ fn execute_frame(
                     .ok_or(LuaError::RuntimeError)?;
 
                 // Get table value from upvalue
-                let table_value = if upvalue.is_open() {
-                    let stack_idx = upvalue.get_stack_index().unwrap();
+                let table_value = if upvalue.data.is_open() {
+                    let stack_idx = upvalue.data.get_stack_index().unwrap();
                     lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
                 } else {
-                    upvalue.get_closed_value().unwrap()
+                    upvalue.data.get_closed_value().unwrap()
                 };
 
                 // Get key from constants (K[C])
@@ -1777,7 +1783,7 @@ fn execute_frame(
                         .get_table(table_id)
                         .ok_or(LuaError::RuntimeError)?;
                     let direct_result = table.raw_get(key);
-                    
+
                     if direct_result.is_some() {
                         direct_result.unwrap()
                     } else {
@@ -1820,11 +1826,11 @@ fn execute_frame(
                     .ok_or(LuaError::RuntimeError)?;
 
                 // Get table value from upvalue
-                let table_value = if upvalue.is_open() {
-                    let stack_idx = upvalue.get_stack_index().unwrap();
+                let table_value = if upvalue.data.is_open() {
+                    let stack_idx = upvalue.data.get_stack_index().unwrap();
                     lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
                 } else {
-                    upvalue.get_closed_value().unwrap()
+                    upvalue.data.get_closed_value().unwrap()
                 };
 
                 // Get key from constants (K[B])
@@ -1853,7 +1859,7 @@ fn execute_frame(
                         .object_pool
                         .get_table_mut(table_id)
                         .ok_or(LuaError::RuntimeError)?;
-                    table.raw_set(key, value);
+                    table.raw_set(&key, value);
                 }
                 // else: should trigger metamethod, but we skip for now
             }
@@ -1873,7 +1879,7 @@ fn execute_frame(
                 if let Some(string_id) = rb.as_string_id() {
                     // String: get length from object pool
                     if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
-                        let len = s.as_str().len();
+                        let len = s.len();
                         setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
                     } else {
                         setivalue(&mut lua_state.stack_mut()[base + a], 0);
@@ -1897,7 +1903,8 @@ fn execute_frame(
                             lua_state.stack_mut()[base + a] = result;
                         } else {
                             // No metamethod, use primitive length
-                            if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
+                            if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id)
+                            {
                                 let len = table.len();
                                 setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
                             } else {
@@ -1951,17 +1958,19 @@ fn execute_frame(
                                 let stack = lua_state.stack_mut();
                                 (stack[base + a + n - 2], stack[base + a + n - 1])
                             };
-                            
+
                             // Try to get __concat metamethod
-                            if let Some(mm) = helper::get_binop_metamethod(lua_state, &v1, &v2, "__concat") {
+                            if let Some(mm) =
+                                helper::get_binop_metamethod(lua_state, &v1, &v2, "__concat")
+                            {
                                 save_pc!();
                                 let result = metamethod::call_metamethod(lua_state, mm, v1, v2)?;
                                 restore_state!();
-                                
+
                                 // Store result back and reduce count
                                 let stack = lua_state.stack_mut();
                                 stack[base + a + n - 2] = result;
-                                
+
                                 // If we still have more than 1 value left, continue concatenating
                                 // For simplicity, just store the result in R[A]
                                 if n == 2 {
@@ -1969,7 +1978,10 @@ fn execute_frame(
                                 } else {
                                     // Multiple concat with metamethod - simplified approach
                                     // Store the result of last two, will need to handle rest
-                                    return Err(lua_state.error("complex concat with metamethod not fully supported".to_string()));
+                                    return Err(lua_state.error(
+                                        "complex concat with metamethod not fully supported"
+                                            .to_string(),
+                                    ));
                                 }
                             } else {
                                 return Err(lua_state.error(format!(
@@ -1979,7 +1991,9 @@ fn execute_frame(
                                 )));
                             }
                         } else {
-                            return Err(lua_state.error("concat requires at least 2 values".to_string()));
+                            return Err(
+                                lua_state.error("concat requires at least 2 values".to_string())
+                            );
                         }
                     }
                 }
@@ -1999,12 +2013,12 @@ fn execute_frame(
                     let stack = lua_state.stack_mut();
                     (stack[base + a], stack[base + b])
                 };
-                
+
                 // Protect(exp): save PC → execute → restore state
                 save_pc!();
                 let cond = metamethod::equalobj(lua_state, ra, rb)?;
                 restore_state!();
-                
+
                 if cond != k {
                     pc += 1; // Condition failed - skip next instruction
                 }
@@ -2042,7 +2056,7 @@ fn execute_frame(
                         if let (Some(sa), Some(sb)) =
                             (pool.get_string(sid_a), pool.get_string(sid_b))
                         {
-                            sa.as_str() < sb.as_str()
+                            sa < sb
                         } else {
                             false
                         }
@@ -2050,12 +2064,14 @@ fn execute_frame(
                         // Try metamethod - use Protect pattern
                         let va = *ra;
                         let vb = *rb;
-                        
+
                         save_pc!();
                         let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
                             Some(result) => result,
                             None => {
-                                return Err(lua_state.error("attempt to compare non-comparable values".to_string()));
+                                return Err(lua_state.error(
+                                    "attempt to compare non-comparable values".to_string(),
+                                ));
                             }
                         };
                         restore_state!();
@@ -2099,7 +2115,7 @@ fn execute_frame(
                         if let (Some(sa), Some(sb)) =
                             (pool.get_string(sid_a), pool.get_string(sid_b))
                         {
-                            sa.as_str() <= sb.as_str()
+                            sa <= sb
                         } else {
                             false
                         }
@@ -2107,12 +2123,14 @@ fn execute_frame(
                         // Try metamethod - use Protect pattern
                         let va = *ra;
                         let vb = *rb;
-                        
+
                         save_pc!();
                         let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
                             Some(result) => result,
                             None => {
-                                return Err(lua_state.error("attempt to compare non-comparable values".to_string()));
+                                return Err(lua_state.error(
+                                    "attempt to compare non-comparable values".to_string(),
+                                ));
                             }
                         };
                         restore_state!();
@@ -2141,7 +2159,7 @@ fn execute_frame(
                 let kb = constants.get(b).unwrap();
 
                 // Raw equality (no metamethods for constants)
-                let cond = ra.raw_equal(kb, &lua_state.vm_mut().object_pool);
+                let cond = ra == *kb;
                 if cond != k {
                     pc += 1; // Condition failed - skip next instruction
                 }
@@ -2275,7 +2293,7 @@ fn execute_frame(
                 let ra = &stack[base + a];
 
                 // l_isfalse: nil or false
-                let is_false = ra.is_nil() || (ra.is_boolean() && ra.tt_ == LUA_VFALSE);
+                let is_false = ra.is_nil() || (ra.is_boolean() && ra.tt == LUA_VFALSE);
                 let cond = !is_false;
 
                 if cond != k {
@@ -2298,7 +2316,7 @@ fn execute_frame(
 
                 let stack = lua_state.stack_mut();
                 let rb = &stack[base + b];
-                let is_false = rb.is_nil() || (rb.is_boolean() && rb.tt_ == LUA_VFALSE);
+                let is_false = rb.is_nil() || (rb.is_boolean() && rb.tt == LUA_VFALSE);
 
                 if is_false == k {
                     pc += 1; // Condition failed - skip next instruction (JMP)
@@ -2527,7 +2545,7 @@ fn execute_frame(
                         .object_pool
                         .get_function(func_id)
                         .ok_or(LuaError::RuntimeError)?;
-                    let chunk = func_obj.chunk().ok_or(LuaError::RuntimeError)?;
+                    let chunk = func_obj.data.chunk().ok_or(LuaError::RuntimeError)?;
                     chunk.param_count
                 };
 
@@ -2541,7 +2559,7 @@ fn execute_frame(
                         .vm_mut()
                         .object_pool
                         .get_string(string_id)
-                        .map(|s| s.as_str() == "n")
+                        .map(|s| s == "n")
                         .unwrap_or(false);
                     if is_n {
                         // Return vararg count
@@ -2594,7 +2612,7 @@ fn execute_frame(
                                 .vm_mut()
                                 .object_pool
                                 .get_string(string_id)
-                                .map(|s| s.as_str().to_string())
+                                .map(|s| s.to_string())
                                 .unwrap_or_else(|| "?".to_string())
                         } else {
                             "?".to_string()

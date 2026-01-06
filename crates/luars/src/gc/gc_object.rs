@@ -239,7 +239,7 @@ impl FunctionBody {
 
     /// Get inline upvalue 1 for CClosureInline1
     #[inline(always)]
-    pub fn inline_upvalue(&self) -> &Vec<UpvalueId> {
+    pub fn upvalues(&self) -> &Vec<UpvalueId> {
         match &self {
             FunctionBody::CClosure(_, uv) => uv,
             FunctionBody::Lua(_, uv) => uv,
@@ -256,7 +256,6 @@ impl FunctionBody {
 /// Note: We cannot use raw pointers for open upvalues because
 /// register_stack may reallocate, invalidating the pointers.
 pub struct Upvalue {
-    pub header: GcHeader,
     /// The stack index when open (used for accessing stack value)
     pub stack_index: usize,
     /// Storage for closed value

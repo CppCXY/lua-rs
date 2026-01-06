@@ -4,7 +4,7 @@ use crate::compiler::expression::{ExpDesc, ExpKind};
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::compiler::{ExpUnion, IndVars};
-use crate::lua_value::LuaValueKind;
+use crate::lua_value::{LuaTableImpl, LuaValueKind};
 use crate::lua_vm::{Instruction, OpCode, TmKind};
 use crate::{LuaValue, StringId};
 
@@ -75,7 +75,7 @@ pub fn const_to_exp(value: LuaValue, e: &mut ExpDesc) {
         }
         LuaValueKind::String => {
             e.kind = ExpKind::VKSTR;
-            e.u = ExpUnion::Str(value.as_string_id().unwrap_or(StringId::short(0)));
+            e.u = ExpUnion::Str(value.as_string_id().unwrap_or(StringId(0)));
         }
         _ => {
             // Other types shouldn't appear as compile-time constants
@@ -968,7 +968,7 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
 
     // Verify the stored value matches (lcode.c:632)
     if let Some(existing) = fs.chunk.constants.get(idx) {
-        if val.raw_equal(existing, fs.pool) {
+        if val == *existing {
             return idx;
         }
     }
@@ -1058,7 +1058,7 @@ fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> 
         {
             // Must match value (lcode.c:570-571)
             // Note: For floats, collisions can happen; for non-floats, must be equal
-            if value.raw_equal(existing, fs.pool) {
+            if value == *existing {
                 return idx;
             }
         }
@@ -1070,7 +1070,7 @@ fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> 
 
     // Store key->index mapping in kcache table (lcode.c:575-576)
     if let Some(kcache_table) = fs.pool.get_table_mut(fs.kcache) {
-        kcache_table.raw_set(key, LuaValue::integer(idx as i64));
+        kcache_table.raw_set(&key, LuaValue::integer(idx as i64));
     }
 
     idx
@@ -2352,11 +2352,6 @@ fn is_kstr(fs: &FuncState, e: &ExpDesc) -> bool {
         return false;
     }
 
-    let const_val = &fs.chunk.constants[k_idx];
-    if let Some(string_id) = const_val.as_string_id() {
-        return fs.pool.is_short_string(string_id);
-    }
-
     false
 }
 
@@ -2394,7 +2389,7 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
         // Check if it's a short string
         let str_id = key.u.str();
         if let Some(lua_str) = fs.pool.get_string(str_id) {
-            lua_str.as_str().len() <= LUAI_MAXSHORTLEN
+            lua_str.len() <= LUAI_MAXSHORTLEN
         } else {
             false
         }

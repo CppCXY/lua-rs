@@ -2,6 +2,7 @@
 // Implements: char, charpattern, codes, codepoint, len, offset
 
 use crate::lib_registry::LibraryModule;
+use crate::lua_value::LuaTableImpl;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaState;
@@ -38,7 +39,7 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(s_id) else {
             return Err(l.error("bad argument #1 to 'len' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     let bytes = s_str.as_bytes();
@@ -150,8 +151,8 @@ fn utf8_codes(l: &mut LuaState) -> LuaResult<usize> {
     if let Some(table_id) = state_table.as_table_id() {
         let vm = l.vm_mut();
         if let Some(table) = vm.object_pool.get_table_mut(table_id) {
-            table.raw_set(string_key, s_value);
-            table.raw_set(position_key, LuaValue::integer(0));
+            table.raw_set(&string_key, s_value);
+            table.raw_set(&position_key, LuaValue::integer(0));
         }
     }
 
@@ -199,7 +200,7 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error("utf8.codes iterator: invalid string".to_string()));
         };
 
-        (lua_str.as_str().to_string(), pos)
+        (lua_str.to_string(), pos)
     };
 
     let bytes = s_str.as_bytes();
@@ -218,7 +219,7 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
         let vm = l.vm_mut();
         if let Some(table) = vm.object_pool.get_table_mut(table_id) {
             table.raw_set(
-                LuaValue::integer(position_key),
+                &LuaValue::integer(position_key),
                 LuaValue::integer((pos + char_len) as i64),
             );
         }
@@ -245,7 +246,7 @@ fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(s_id) else {
             return Err(l.error("bad argument #1 to 'codepoint' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
@@ -294,7 +295,7 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
         let Some(s) = vm.object_pool.get_string(s_id) else {
             return Err(l.error("bad argument #1 to 'offset' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     let n_value = l

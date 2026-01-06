@@ -3,7 +3,7 @@
 mod file;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaUserdata, LuaValue};
+use crate::lua_value::{LuaTableImpl, LuaUserdata, LuaValue};
 use crate::lua_vm::{LuaResult, LuaState};
 pub use file::{LuaFile, create_file_metatable};
 use std::fs::OpenOptions;
@@ -45,7 +45,7 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
         let Some(io_tbl) = vm.object_pool.get_table_mut(io_id) else {
             return Err(l.error("io table not found".to_string()));
         };
-        io_tbl.raw_set(stdin_key, stdin_val);
+        io_tbl.raw_set(&stdin_key, stdin_val);
     }
 
     // Create stdout
@@ -56,7 +56,7 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
         let Some(io_tbl) = vm.object_pool.get_table_mut(io_id) else {
             return Err(l.error("io table not found".to_string()));
         };
-        io_tbl.raw_set(stdout_key, stdout_val);
+        io_tbl.raw_set(&stdout_key, stdout_val);
     }
 
     // Create stderr
@@ -67,7 +67,7 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
         let Some(io_tbl) = vm.object_pool.get_table_mut(io_id) else {
             return Err(l.error("io table not found".to_string()));
         };
-        io_tbl.raw_set(stderr_key, stderr_val);
+        io_tbl.raw_set(&stderr_key, stderr_val);
     }
 
     Ok(())
@@ -122,7 +122,7 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
         };
 
         if let Some(s) = l.get_string(&arg) {
-            print!("{}", s.as_str());
+            print!("{}", s);
         } else if let Some(n) = arg.as_number() {
             print!("{}", n);
         } else {
@@ -143,7 +143,7 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
 
     // Default to "*l" (read line)
     let format_str = format
-        .and_then(|v| l.get_string(&v).map(|s| s.as_str().to_string()))
+        .and_then(|v| l.get_string(&v).map(|s| s.to_string()))
         .unwrap_or_else(|| "*l".to_string());
 
     let result = match format_str.as_str() {
@@ -228,13 +228,13 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'io.open' (string expected)".to_string()))?;
     let filename_str = match l.get_string(&filename_val) {
-        Some(s) => s.as_str().to_string(),
+        Some(s) => s.to_string(),
         None => return Err(l.error("bad argument #1 to 'io.open' (string expected)".to_string())),
     };
 
     let mode_str = l
         .get_arg(2)
-        .and_then(|v| l.get_string(&v).map(|s| s.as_str().to_string()))
+        .and_then(|v| l.get_string(&v).map(|s| s.to_string()))
         .unwrap_or_else(|| "r".to_string());
     let mode = mode_str.as_str();
 
@@ -281,7 +281,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
     if let Some(filename_val) = filename {
         // io.lines(filename) - open file and return iterator
         let filename_str = match l.get_string(&filename_val) {
-            Some(s) => s.as_str().to_string(),
+            Some(s) => s.to_string(),
             None => return Err(l.error("bad argument #1 to 'lines' (string expected)".to_string())),
         };
 

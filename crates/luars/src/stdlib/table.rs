@@ -2,7 +2,7 @@
 // Implements: concat, insert, move, pack, remove, sort, unpack
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaTableImpl, LuaValue};
 use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_table_lib() -> LibraryModule {
@@ -67,7 +67,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
             if let Some(string_id) = v.as_string_id() {
                 let vm = l.vm_mut();
                 if let Some(s) = vm.object_pool.get_string(string_id) {
-                    s.as_str().to_string()
+                    s.to_string()
                 } else {
                     return Err(
                         l.error("bad argument #2 to 'concat' (string expected)".to_string())
@@ -102,7 +102,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
             if let Some(value) = table_borrowed.get_int(idx) {
                 if let Some(string_id) = value.as_string_id() {
                     if let Some(s) = vm.object_pool.get_string(string_id) {
-                        parts.push(s.as_str().to_string());
+                        parts.push(s.to_string());
                     } else {
                         let msg =
                             format!("bad value at index {} in 'concat' (string expected)", idx);
@@ -320,7 +320,7 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
         table_ref.set_int(i as i64 + 1, arg.clone());
     }
 
-    table_ref.raw_set(n_key, LuaValue::integer(args.len() as i64));
+    table_ref.raw_set(&n_key, LuaValue::integer(args.len() as i64));
     l.push_value(table)?;
     Ok(1)
 }
@@ -381,19 +381,13 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'sort' (table expected)".to_string()))?;
     let comp = l.get_arg(2);
 
-    let Some(table_id) = table_val.as_table_id() else {
+    let Some(table_ref) = l.get_table_mut(&table_val) else {
         return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
     };
 
     // Get array length
-    let len = {
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
-            return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
-        };
-        table_ref.len()
-    };
-
+    let mut arr = table_ref.array.clone();
+    let len = arr.len();
     if len <= 1 {
         return Ok(0);
     }
@@ -406,33 +400,10 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         LuaValue::nil()
     };
 
-    // Extract values
-    let mut values = Vec::with_capacity(len);
-    let mut string_cache: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
-
-    {
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
-            return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
-        };
-        for i in 1..=len as i64 {
-            let val = table_ref.get_int(i).unwrap_or(LuaValue::nil());
-
-            // Cache string content if it's a string value
-            if let Some(string_id) = val.as_string_id() {
-                if let Some(s) = vm.object_pool.get_string(string_id) {
-                    string_cache.insert(string_id.index() as i64, s.as_str().to_string());
-                }
-            }
-
-            values.push(val);
-        }
-    }
-
     // Sort using Lua semantics comparison
     if has_comp {
         // Custom comparison function
-        values.sort_by(|a, b| {
+        arr.sort_by(|a, b| {
             // Call comp(a, b)
             l.push_value(comp_func).ok();
             l.push_value(*a).ok();
@@ -477,30 +448,21 @@ fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         });
     } else {
         // Default comparison
-        values.sort_by(|a, b| lua_compare_values(a, b, &string_cache));
+        arr.sort_by(|a, b| lua_compare_values(l, a, b));
     }
 
-    // Write sorted values back
-    {
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
-            return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
-        };
-        for (idx, val) in values.into_iter().enumerate() {
-            table_ref.set_int((idx + 1) as i64, val);
-        }
-    }
+    // Write back sorted array
+    let Some(table_ref) = l.get_table_mut(&table_val) else {
+        return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
+    };
 
+    table_ref.array = arr;
     Ok(0)
 }
 
 /// Compare two Lua values according to Lua semantics
 /// Returns Ordering for sorting purposes
-fn lua_compare_values(
-    a: &LuaValue,
-    b: &LuaValue,
-    string_cache: &std::collections::HashMap<i64, String>,
-) -> std::cmp::Ordering {
+fn lua_compare_values(l: &LuaState, a: &LuaValue, b: &LuaValue) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     // Both numbers - compare numerically
@@ -512,15 +474,15 @@ fn lua_compare_values(
     if a.is_string() && b.is_string() {
         if let (Some(id1), Some(id2)) = (a.as_string_id(), b.as_string_id()) {
             // Try to get from cache
-            let s1 = string_cache.get(&(id1.index() as i64));
-            let s2 = string_cache.get(&(id2.index() as i64));
+            let s1 = l.get_string(&LuaValue::string(id1));
+            let s2 = l.get_string(&LuaValue::string(id2));
 
             if let (Some(str1), Some(str2)) = (s1, s2) {
                 return str1.cmp(str2);
             }
 
             // Fallback: compare string IDs (maintains stability)
-            return id1.index().cmp(&id2.index());
+            return id1.0.cmp(&id2.0);
         }
     }
 

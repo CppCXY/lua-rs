@@ -444,7 +444,7 @@ fn math_tointeger(l: &mut LuaState) -> LuaResult<usize> {
         // Try to parse string as integer
         let vm = l.vm_mut();
         if let Some(s) = vm.object_pool.get_string(s_id) {
-            let s_str = s.as_str().trim();
+            let s_str = s.trim();
             if let Ok(i) = s_str.parse::<i64>() {
                 LuaValue::integer(i)
             } else if let Ok(f) = s_str.parse::<f64>() {

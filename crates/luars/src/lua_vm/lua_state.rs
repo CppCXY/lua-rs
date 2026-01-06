@@ -6,13 +6,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::gc::UpvalueId;
-use crate::lua_value::{LuaString, LuaUserdata, LuaValue};
+use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, LuaVM, ThreadId};
+use crate::{Chunk, LuaTable, LuaVM, ThreadId};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -134,7 +134,9 @@ impl LuaState {
                 .as_function_id()
                 .and_then(|id| {
                     let vm = unsafe { &*self.vm };
-                    vm.object_pool.get_function(id).and_then(|f| f.c_function())
+                    vm.object_pool
+                        .get_function(id)
+                        .and_then(|f| f.data.c_function())
                 })
                 .is_some()
         {
@@ -148,7 +150,7 @@ impl LuaState {
         let nextraargs = if let Some(func_id) = func.as_function_id() {
             let vm = unsafe { &*self.vm };
             if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                if let Some(chunk) = func_obj.chunk() {
+                if let Some(chunk) = func_obj.data.chunk() {
                     // For Lua functions with prototypes
                     let numparams = chunk.param_count;
                     if nparams > numparams {
@@ -310,7 +312,7 @@ impl LuaState {
                 if let Some(func_id) = ci.func.as_function_id() {
                     let vm = unsafe { &*self.vm };
                     if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                        if let Some(chunk) = func_obj.chunk() {
+                        if let Some(chunk) = func_obj.data.chunk() {
                             let source = chunk.source_name.as_deref().unwrap_or("[string]");
                             let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len()
                             {
@@ -366,7 +368,7 @@ impl LuaState {
                 // Lua function - get source and line info
                 if let Some(func_id) = ci.func.as_function_id() {
                     if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                        if let Some(chunk) = func_obj.chunk() {
+                        if let Some(chunk) = func_obj.data.chunk() {
                             let source = chunk.source_name.as_deref().unwrap_or("[string]");
 
                             // Get current line number from PC
@@ -432,11 +434,11 @@ impl LuaState {
         while i < self.open_upvalues_list.len() {
             let upval_id = self.open_upvalues_list[i];
             if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
-                if let Some(stack_idx) = upval.get_stack_index() {
+                if let Some(stack_idx) = upval.data.get_stack_index() {
                     if stack_idx >= level {
                         // Close this upvalue - copy stack value to closed storage
                         if let Some(value) = self.stack_get(stack_idx) {
-                            upval.close(value);
+                            upval.data.close(value);
                         }
                         // Remove from both map and list
                         self.open_upvalues_map.remove(&stack_idx);
@@ -478,7 +480,7 @@ impl LuaState {
                 .filter_map(|&id| {
                     vm.object_pool
                         .get_upvalue(id)
-                        .and_then(|upval| upval.get_stack_index())
+                        .and_then(|upval| upval.data.get_stack_index())
                 })
                 .collect()
         };
@@ -798,6 +800,10 @@ impl LuaState {
         self.vm_mut().table_set(table, key, value)
     }
 
+    pub fn get_table_mut(&mut self, table: &LuaValue) -> Option<&mut LuaTable> {
+        self.vm_mut().get_table_mut(table)
+    }
+
     /// Set value in table with metatable support
     pub fn table_set_with_meta(
         &mut self,
@@ -809,7 +815,7 @@ impl LuaState {
     }
 
     /// Get string from value
-    pub fn get_string(&self, value: &LuaValue) -> Option<&LuaString> {
+    pub fn get_string(&self, value: &LuaValue) -> Option<&str> {
         let vm = unsafe { &*self.vm };
         vm.get_string(value)
     }
@@ -837,7 +843,7 @@ impl LuaState {
             let vm = unsafe { &*self.vm };
             vm.object_pool
                 .get_function(func_id)
-                .map(|f| f.is_c_function())
+                .map(|f| f.data.is_c_function())
                 .unwrap_or(false)
         } else {
             false
@@ -858,7 +864,7 @@ impl LuaState {
                 let vm = unsafe { &*self.vm };
                 vm.object_pool
                     .get_function(func_id)
-                    .and_then(|f| f.c_function())
+                    .and_then(|f| f.data.c_function())
             } else {
                 None
             };
@@ -1011,7 +1017,7 @@ impl LuaState {
                     unsafe { &*self.vm }
                         .object_pool
                         .get_function(id)
-                        .and_then(|f| f.c_function())
+                        .and_then(|f| f.data.c_function())
                 })
                 .is_some()
         {

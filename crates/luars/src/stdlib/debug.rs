@@ -55,7 +55,7 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                 if let Some(func_id) = func.as_function_id() {
                     let vm = l.vm_mut();
                     if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                        if let Some(chunk) = func_obj.chunk() {
+                        if let Some(chunk) = func_obj.data.chunk() {
                             // Lua function
                             let source = chunk.source_name.as_deref().unwrap_or("?");
 
