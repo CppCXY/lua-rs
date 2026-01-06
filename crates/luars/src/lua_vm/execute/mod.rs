@@ -1285,18 +1285,43 @@ fn execute_frame(
                     stack[base + c]
                 };
 
-                // Try direct table set first
+                // FIXED: Check if table has __newindex metamethod
+                // Only call store_to_metatable if needed, otherwise use fast path
                 if let Some(table_id) = ra.as_table_id() {
-                    let table = lua_state
+                    let has_metatable = lua_state
                         .vm_mut()
                         .object_pool
-                        .get_table_mut(table_id)
-                        .ok_or(LuaError::RuntimeError)?;
-                    table.set_int(b as i64, value);
-                    // GC write barrier: check GC after table modification
-                    lua_state.vm_mut().check_gc();
+                        .get_table(table_id)
+                        .and_then(|t| t.get_metatable())
+                        .is_some();
+
+                    // DEBUG
+                    use std::sync::atomic::{AtomicUsize, Ordering};
+                    static SETI_COUNT: AtomicUsize = AtomicUsize::new(0);
+                    let count = SETI_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if count <= 20 || count % 1000 == 0 {
+                        eprintln!("[SetI #{}] table_id={:?}, has_mt={}, key={}", 
+                            count, table_id, has_metatable, b);
+                    }
+
+                    if has_metatable {
+                        // Has metatable, might have __newindex
+                        let key = LuaValue::integer(b as i64);
+                        save_pc!();
+                        helper::store_to_metatable(lua_state, &ra, &key, value)?;
+                        restore_state!();
+                    } else {
+                        // No metatable, use fast path
+                        let table = lua_state
+                            .vm_mut()
+                            .object_pool
+                            .get_table_mut(table_id)
+                            .ok_or(LuaError::RuntimeError)?;
+                        table.set_int(b as i64, value);
+                        lua_state.vm_mut().check_gc();
+                    }
                 } else {
-                    // Not a table, use __newindex metamethod with Protect pattern
+                    // Not a table, use __newindex metamethod
                     let key = LuaValue::integer(b as i64);
                     save_pc!();
                     helper::store_to_metatable(lua_state, &ra, &key, value)?;
