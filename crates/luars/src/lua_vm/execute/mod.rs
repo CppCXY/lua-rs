@@ -25,11 +25,8 @@ mod return_handler;
 
 use call::FrameAction;
 
-use std::rc::Rc;
-
 use crate::{
-    Chunk, UpvalueId,
-    gc::CachedUpvalue,
+    UpvalueId,
     lua_value::{LUA_VFALSE, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
@@ -61,140 +58,92 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
 /// without affecting caller frames
+///
+/// ARCHITECTURE: Single-loop execution like Lua C's luaV_execute
+/// - Uses labeled loops instead of goto for context switching
+/// - Function calls/returns just update pointers and continue
+/// - Zero Rust function call overhead
 pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
-    // Main execution loop - continues until frames are popped to target depth
-    'vm_loop: loop {
+    
+    // STARTFUNC: Function context switching point (like Lua C's startfunc label)
+    'startfunc: loop {
         // Check if we've reached target depth
         let current_depth = lua_state.call_depth();
         if current_depth <= target_depth {
-            return Ok(()); // Reached target depth, stop execution
+            return Ok(());
         }
 
-        // Get current call frame index
         let frame_idx = current_depth - 1;
+        
+        // ===== LOAD FRAME CONTEXT =====
+        let func_value = lua_state
+            .get_frame_func(frame_idx)
+            .ok_or(LuaError::RuntimeError)?;
 
-        // Load current function's chunk and cached upvalues
-        let (chunk, cached_upvalues) = {
-            let func_value = lua_state
-                .get_frame_func(frame_idx)
-                .ok_or(LuaError::RuntimeError)?;
-
-            // OPTIMIZATION: Use direct pointer access to FunctionBody
-            let Some(func_body) = func_value.as_lua_function() else {
-                return Err(lua_state.error("Current frame is not a function".to_string()));
-            };
-
-            // Check if this is a Lua function
-            if !func_body.is_lua_function() {
-                return Err(lua_state.error("Unexpected C function in main VM loop".to_string()));
-            }
-
-            let Some(chunk_rc) = func_body.chunk() else {
-                return Err(lua_state.error("Lua function has no chunk".to_string()));
-            };
-
-            // CRITICAL: Get cached upvalues (already contains direct pointers!)
-            (chunk_rc.clone(), func_body.cached_upvalues().clone())
+        let Some(func_body) = func_value.as_lua_function() else {
+            return Err(lua_state.error("Current frame is not a function".to_string()));
         };
 
-        // Execute this frame until CALL/RETURN/TAILCALL
-        match execute_frame(lua_state, frame_idx, chunk, cached_upvalues)? {
-            FrameAction::Return => {
-                // Frame was already popped by handle_return, just continue with caller
-                // Loop continues with caller's frame (or exits if no caller)
-            }
-            FrameAction::Call => {
-                // New frame was pushed, loop continues with callee's frame
-                // Note: C functions don't push frames, they execute and return Continue
-                continue 'vm_loop;
-            }
-            FrameAction::TailCall => {
-                // Current frame was replaced, loop continues with new function
-                continue 'vm_loop;
-            }
-            FrameAction::Continue => {
-                // C function executed in current frame, continue with same frame
-                // Just loop back to execute_frame with the same frame
-                continue 'vm_loop;
-            }
+        if !func_body.is_lua_function() {
+            return Err(lua_state.error("Unexpected C function in main VM loop".to_string()));
+        };
+
+        let Some(chunk_rc) = func_body.chunk() else {
+            return Err(lua_state.error("Lua function has no chunk".to_string()));
+        };
+
+        let cached_upvalues = func_body.cached_upvalues().clone();
+        let chunk = chunk_rc.clone();
+        
+        // Load frame state
+        let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
+        let mut base = lua_state.get_frame_base(frame_idx);
+        
+        // Sync stack top
+        let frame_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top(frame_top);
+        
+        // Pre-grow stack
+        let needed_size = base + chunk.max_stack_size;
+        lua_state.grow_stack(needed_size)?;
+        
+        // Cache pointers
+        let constants = &chunk.constants;
+        let code = &chunk.code;
+        let upvalue_ptrs = &cached_upvalues;
+        
+        // Macro to save PC before operations that may call functions
+        macro_rules! save_pc {
+            () => {
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+            };
         }
-    }
-}
-
-/// Execute a single frame until it calls another function or returns
-fn execute_frame(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    chunk: Rc<Chunk>,
-    cached_upvalues: Vec<CachedUpvalue>,
-) -> LuaResult<FrameAction> {
-    // Cache values in locals (will be in CPU registers)
-    let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
-    let mut base = lua_state.get_frame_base(frame_idx);
-
-    // CRITICAL: Sync stack_top with current frame's top before execution
-    // This ensures metamethod calls use correct stack positions
-    let frame_top = lua_state.get_call_info(frame_idx).top;
-    lua_state.set_top(frame_top);
-
-    // PRE-GROW STACK: Ensure enough space for this frame
-    // This prevents reallocation during normal instruction execution
-    let needed_size = base + chunk.max_stack_size;
-    lua_state.grow_stack(needed_size)?;
-
-    // Constants and code pointers (avoid repeated dereferencing)
-    let constants = &chunk.constants;
-    let code = &chunk.code;
-
-    // ZERO-COST UPVALUE ACCESS: Use cached pointers directly (like Lua C's cl->upvals[i])
-    // No ObjectPool lookups, no allocations - just direct pointer dereference!
-    // This matches official Lua's performance: cl->upvals[B]->v.p
-    let upvalue_ptrs = &cached_upvalues;
-
-    // Macro-like helper to save PC before operations that may call functions
-    // Matches Lua 5.5's savepc(ci) in Protect() macro
-    macro_rules! save_pc {
-        () => {
-            lua_state.set_frame_pc(frame_idx, pc as u32);
-        };
-    }
-
-    // Macro-like helper to restore state after operations that may change frames
-    // Matches Lua 5.5's updatebase(ci) and updatetrap(ci) in Protect() macro
-    // NOTE: We do NOT restore PC! The PC has already been incremented in the main loop.
-    // Restoring PC would cause us to execute the wrong instruction or re-execute the current one.
-    // Lua 5.5's updatebase() only updates the base pointer, not the PC.
-    macro_rules! restore_state {
-        () => {
-            // SAFETY: After metamethod calls, we must ensure the frame still exists
-            // The frame_idx parameter refers to THIS frame, which should not have been popped
-            // (only called frames are popped, not the caller frame)
-            if frame_idx < lua_state.call_depth() {
-                // Reload base from frame (may have changed due to stack reallocations)
-                // DO NOT reload PC - it's already been updated by the main loop
-                base = lua_state.get_frame_base(frame_idx);
-            } else {
-                // This should never happen - if it does, it's a bug in frame management
-                panic!(
-                    "restore_state: frame_idx {} >= call_depth {}",
-                    frame_idx,
-                    lua_state.call_depth()
-                );
-            }
-        };
-    }
-
-    // Main interpreter loop
-    loop {
-        // Fetch instruction and advance PC
-        // NOTE: No bounds check - compiler guarantees valid bytecode
-        let instr = unsafe { *code.get_unchecked(pc) };
-        pc += 1;
-
-        // Dispatch instruction
-        // The match compiles to a jump table in release mode
-        match instr.get_opcode() {
-            OpCode::Move => {
+        
+        // Macro to restore state after operations that may change frames
+        macro_rules! restore_state {
+            () => {
+                if frame_idx < lua_state.call_depth() {
+                    base = lua_state.get_frame_base(frame_idx);
+                } else {
+                    panic!(
+                        "restore_state: frame_idx {} >= call_depth {}",
+                        frame_idx,
+                        lua_state.call_depth()
+                    );
+                }
+            };
+        }
+        
+        // MAINLOOP: Main instruction dispatch loop
+        loop {
+            // Fetch instruction and advance PC
+            let instr = unsafe { *code.get_unchecked(pc) };
+            pc += 1;
+            
+            // Dispatch instruction (continues in next replacement...)
+            // Dispatch instruction (continues in next replacement...)
+            match instr.get_opcode() {
+                OpCode::Move => {
                 // R[A] := R[B]
                 // setobjs2s(L, ra, RB(i))
                 // OPTIMIZATION: Use raw pointer for direct access like Lua C
@@ -944,20 +893,30 @@ fn execute_frame(
                 let k = instr.get_k();
 
                 // Update PC before returning
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
 
-                return return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k);
+                // Handle return
+                return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
+                
+                // Return pops frame, continue to 'startfunc to load caller's context
+                continue 'startfunc;
             }
             OpCode::Return0 => {
                 // return (no values)
-                lua_state.set_frame_pc(frame_idx, pc as u32);
-                return return_handler::handle_return0(lua_state, frame_idx);
+                save_pc!();
+                return_handler::handle_return0(lua_state, frame_idx)?;
+                
+                // Return pops frame, continue to 'startfunc
+                continue 'startfunc;
             }
             OpCode::Return1 => {
                 // return R[A]
                 let a = instr.get_a() as usize;
-                lua_state.set_frame_pc(frame_idx, pc as u32);
-                return return_handler::handle_return1(lua_state, base, frame_idx, a);
+                save_pc!();
+                return_handler::handle_return1(lua_state, base, frame_idx, a)?;
+                
+                // Return pops frame, continue to 'startfunc
+                continue 'startfunc;
             }
             OpCode::GetUpval => {
                 // R[A] := UpValue[B]
@@ -1418,14 +1377,28 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
 
                 // Save PC before call
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
 
-                // Delegate to call handler - returns FrameAction
+                // Delegate to call handler
                 match call::handle_call(lua_state, base, a, b, c) {
                     Ok(FrameAction::Continue) => {
-                        // Continue execution
+                        // C function executed, continue in current frame
+                        restore_state!();
                     }
-                    other => return other,
+                    Ok(FrameAction::Call) => {
+                        // Lua function pushed new frame
+                        // Continue to 'startfunc to load new function context
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::TailCall) => {
+                        // Tail call replaced current frame
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::Return) => {
+                        // Shouldn't happen from handle_call
+                        continue 'startfunc;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             OpCode::TailCall => {
@@ -1434,14 +1407,23 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
 
                 // Save PC before call
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
 
-                // Delegate to tailcall handler (returns FrameAction)
+                // Delegate to tailcall handler
                 match call::handle_tailcall(lua_state, base, a, b) {
                     Ok(FrameAction::Continue) => {
                         // Continue execution
+                        restore_state!();
                     }
-                    other => return other,
+                    Ok(FrameAction::TailCall) => {
+                        // Tail call replaced frame
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::Call) | Ok(FrameAction::Return) => {
+                        // Shouldn't happen from handle_tailcall
+                        continue 'startfunc;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             OpCode::Not => {
@@ -1689,8 +1671,16 @@ fn execute_frame(
                     Ok(FrameAction::Continue) => {
                         // C function completed, results already in place
                         // Fall through to next instruction (TFORLOOP)
+                        restore_state!();
                     }
-                    other => return other,
+                    Ok(FrameAction::Call) => {
+                        // Lua function pushed new frame
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::TailCall) | Ok(FrameAction::Return) => {
+                        continue 'startfunc;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             OpCode::TForLoop => {
@@ -2683,9 +2673,10 @@ fn execute_frame(
                 // This instruction should never be executed directly
                 // It's always consumed by the previous instruction (NEWTABLE, SETLIST, etc.)
                 // If we reach here, it's a compiler error
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
                 return Err(lua_state.error("unexpected EXTRAARG instruction".to_string()));
             }
-        }
-    }
+        } // end match
+    } // end 'mainloop
+    } // end 'startfunc
 }
