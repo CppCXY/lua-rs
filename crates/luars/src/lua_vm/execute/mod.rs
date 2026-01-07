@@ -84,16 +84,11 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
             return Err(lua_state.error("Current frame is not a function".to_string()));
         };
 
-        if !func_body.is_lua_function() {
-            return Err(lua_state.error("Unexpected C function in main VM loop".to_string()));
-        };
-
-        let Some(chunk_rc) = func_body.chunk() else {
+        let Some(chunk) = func_body.chunk() else {
             return Err(lua_state.error("Lua function has no chunk".to_string()));
         };
 
-        let cached_upvalues = func_body.cached_upvalues().clone();
-        let chunk = chunk_rc.clone();
+        let upvalue_ptrs = func_body.cached_upvalues();
         
         // Load frame state
         let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
@@ -110,7 +105,6 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
         // Cache pointers
         let constants = &chunk.constants;
         let code = &chunk.code;
-        let upvalue_ptrs = &cached_upvalues;
         
         // Macro to save PC before operations that may call functions
         macro_rules! save_pc {
@@ -144,32 +138,21 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
             // Dispatch instruction (continues in next replacement...)
             match instr.get_opcode() {
                 OpCode::Move => {
-                // R[A] := R[B]
-                // setobjs2s(L, ra, RB(i))
-                // OPTIMIZATION: Use raw pointer for direct access like Lua C
+                // R[A] := R[B] - OPTIMIZED with raw pointers
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
-
-                let stack = lua_state.stack_mut();
                 unsafe {
-                    let val = *stack.get_unchecked(base + b);
-                    *stack.get_unchecked_mut(base + a) = val;
-                }
-
-                // Update frame.top if we're writing beyond current top
-                let write_pos = base + a;
-                let call_info = lua_state.get_call_info_mut(frame_idx);
-                if write_pos >= call_info.top {
-                    call_info.top = write_pos + 1;
+                    let stack_ptr = lua_state.stack_mut().as_mut_ptr();
+                    *stack_ptr.add(base + a) = *stack_ptr.add(base + b);
                 }
             }
             OpCode::LoadI => {
-                // R[A] := sBx (signed integer immediate)
+                // R[A] := sBx - OPTIMIZED with raw pointers
                 let a = instr.get_a() as usize;
                 let sbx = instr.get_sbx();
-
-                let stack = lua_state.stack_mut();
-                setivalue(&mut stack[base + a], sbx as i64);
+                unsafe {
+                    setivalue(&mut *lua_state.stack_mut().as_mut_ptr().add(base + a), sbx as i64);
+                }
             }
             OpCode::LoadF => {
                 // R[A] := (float)sBx
@@ -180,18 +163,13 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                 setfltvalue(&mut stack[base + a], sbx as f64);
             }
             OpCode::LoadK => {
-                // R[A] := K[Bx]
+                // R[A] := K[Bx] - OPTIMIZED with raw pointers
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
-
-                if bx >= constants.len() {
-                    lua_state.set_frame_pc(frame_idx, pc as u32);
-                    return Err(lua_state.error(format!("LOADK: invalid constant index {}", bx)));
+                unsafe {
+                    let constant = *constants.get_unchecked(bx);
+                    *lua_state.stack_mut().as_mut_ptr().add(base + a) = constant;
                 }
-
-                let value = constants[bx];
-                let stack = lua_state.stack_mut();
-                stack[base + a] = value; // setobj2s
             }
             OpCode::LoadKX => {
                 // R[A] := K[extra_arg]; pc++
