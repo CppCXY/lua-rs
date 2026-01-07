@@ -1242,24 +1242,35 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                let stack = lua_state.stack_mut();
-                let ra = &stack[base + a];
-                let rb = &stack[base + b];
+                // CRITICAL: Update frame.top to protect all registers before calling metamethod
+                // This prevents push_value from overwriting registers during metamethod call
+                let max_reg = a.max(b).max(c) + 1;
+                let required_top = base + max_reg;
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                if required_top > call_info.top {
+                    call_info.top = required_top;
+                    lua_state.set_top(required_top);
+                }
 
-                // Get value (RK: register or constant)
-                let value = if k {
-                    if c >= constants.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error("SETTABLE: invalid constant".to_string()));
-                    }
-                    constants[c]
-                } else {
-                    stack[base + c]
+                // CRITICAL: Copy all values BEFORE any metamethod calls
+                // Metamethod calls may reallocate the stack, invalidating references
+                let (ra_value, key, value) = {
+                    let stack = lua_state.stack();
+                    let ra = stack[base + a];
+                    let rb = stack[base + b];
+                    let val = if k {
+                        if c >= constants.len() {
+                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            return Err(lua_state.error("SETTABLE: invalid constant".to_string()));
+                        }
+                        constants[c]
+                    } else {
+                        stack[base + c]
+                    };
+                    (ra, rb, val)
                 };
 
                 // Always use store_to_metatable which handles __newindex metamethod
-                let ra_value = *ra;
-                let key = *rb;
                 save_pc!();
                 helper::store_to_metatable(lua_state, &ra_value, &key, value)?;
                 restore_state!();
@@ -1271,7 +1282,16 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                let stack = lua_state.stack_mut();
+                // CRITICAL: Update frame.top to protect all registers before calling metamethod
+                let max_reg = a.max(c) + 1;
+                let required_top = base + max_reg;
+                let call_info = lua_state.get_call_info_mut(frame_idx);
+                if required_top > call_info.top {
+                    call_info.top = required_top;
+                    lua_state.set_top(required_top);
+                }
+
+                let stack = lua_state.stack();
                 let ra = stack[base + a];
 
                 // Get value (RK: register or constant)

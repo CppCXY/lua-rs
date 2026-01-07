@@ -422,8 +422,9 @@ pub fn store_to_metatable(
                         let func_pos = lua_state.get_top();
 
                         // Push function and arguments using push_value to ensure stack grows
+                        // CRITICAL: Push the ORIGINAL table (*obj), not the loop variable t
                         lua_state.push_value(tm)?;
-                        lua_state.push_value(t)?;
+                        lua_state.push_value(*obj)?;
                         lua_state.push_value(*key)?;
                         lua_state.push_value(value)?;
 
