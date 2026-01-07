@@ -158,29 +158,28 @@ impl fmt::Debug for LuaUpvalue {
 }
 
 /// Userdata - arbitrary Rust data with optional metatable
-#[derive(Clone)]
 pub struct LuaUserdata {
-    data: Rc<RefCell<Box<dyn Any>>>,
+    data: Box<dyn Any>,
     metatable: LuaValue,
 }
 
 impl LuaUserdata {
     pub fn new<T: Any>(data: T) -> Self {
         LuaUserdata {
-            data: Rc::new(RefCell::new(Box::new(data))),
+            data: Box::new(data),
             metatable: LuaValue::nil(),
         }
     }
 
     pub fn with_metatable<T: Any>(data: T, metatable: LuaValue) -> Self {
         LuaUserdata {
-            data: Rc::new(RefCell::new(Box::new(data))),
+            data: Box::new(data),
             metatable,
         }
     }
 
-    pub fn get_data(&self) -> Rc<RefCell<Box<dyn Any>>> {
-        self.data.clone()
+    pub fn get_data(&self) -> &Box<dyn Any> {
+        &self.data
     }
 
     pub fn get_metatable(&self) -> LuaValue {
@@ -194,7 +193,7 @@ impl LuaUserdata {
 
 impl fmt::Debug for LuaUserdata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Userdata({:p})", self.data.as_ptr())
+        write!(f, "Userdata({:p})", self.data.as_ref() as *const dyn Any)
     }
 }
 

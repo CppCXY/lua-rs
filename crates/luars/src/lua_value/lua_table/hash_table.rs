@@ -25,7 +25,7 @@ impl LuaHashTable {
             LUA_TNIL => 0,
             LUA_TBOOLEAN => unsafe { key.value.i as u64 }, // boolean stored in i field
             LUA_TNUMBER => unsafe {
-                if key.tt & 1 == 0 {
+                if key.tt() & 1 == 0 {
                     // Float: use bit pattern
                     key.value.n.to_bits()
                 } else {
@@ -33,11 +33,11 @@ impl LuaHashTable {
                     key.value.i as u64
                 }
             },
-            _ => unsafe {
+            _ => {
                 // GC类型：使用ID with fibonacci hash for better distribution
-                let id = key.value.gc_id as u64;
+                let id = key.gcid() as u64;
                 id.wrapping_mul(0x9e3779b97f4a7c15)
-            },
+            }
         }
     }
 }

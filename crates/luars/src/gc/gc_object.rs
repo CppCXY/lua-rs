@@ -1,10 +1,9 @@
 // ============ GC Header ============
 
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 use crate::{
-    Chunk, LuaTable, LuaValue, UpvalueId,
-    lua_vm::{CFunction, LuaState},
+    lua_value::LuaUserdata, lua_vm::{CFunction, LuaState}, Chunk, LuaTable, LuaValue, UpvalueId
 };
 
 // Object ages for generational GC (like Lua 5.4)
@@ -179,7 +178,7 @@ impl GcHeader {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gc<T> {
     pub header: GcHeader,
-    pub data: T,
+    pub data: Box<T>, // Use Box to ensure stable pointer even when Pool array grows
 }
 
 impl<T> Gc<T> {
@@ -187,8 +186,20 @@ impl<T> Gc<T> {
     pub fn new(data: T) -> Self {
         Gc {
             header: GcHeader::default(),
-            data,
+            data: Box::new(data),
         }
+    }
+
+    /// Get raw pointer to data (stable across Pool reallocations)
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *const T {
+        self.data.as_ref() as *const T
+    }
+
+    /// Get mutable raw pointer to data
+    #[inline(always)]
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.data.as_mut() as *mut T
     }
 }
 
@@ -332,4 +343,7 @@ impl Upvalue {
 pub type GcString = Gc<String>;
 
 /// Thread (coroutine) with embedded GC header
-pub type GcThread = Gc<Rc<RefCell<LuaState>>>;
+/// TODO: Remove Rc<RefCell> once we have proper pointer-based design
+pub type GcThread = Gc<LuaState>;
+
+pub type GcUserdata = Gc<LuaUserdata>;

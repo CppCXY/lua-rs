@@ -489,6 +489,15 @@ impl GC {
         }
     }
 
+    fn mark_table_id(&mut self, table_id: TableId, pool: &mut ObjectPool) {
+        if let Some(t) = pool.tables.get_mut(table_id.0) {
+            if t.header.is_white() {
+                t.header.make_gray();
+                self.gray.push(GcId::TableId(table_id));
+            }
+        }
+    }
+
     /// Propagate mark for one gray object (like propagatemark in Lua 5.5)
     fn propagate_mark(&mut self, pool: &mut ObjectPool) -> isize {
         if let Some(gc_id) = self.gray.pop() {
@@ -520,7 +529,7 @@ impl GC {
                     self.mark_value(v, pool);
                 }
                 if let Some(mt) = &metatable {
-                    self.mark_value(mt, pool);
+                    self.mark_table_id(*mt, pool);
                 }
                 return 1 + entries.len() as isize;
             }

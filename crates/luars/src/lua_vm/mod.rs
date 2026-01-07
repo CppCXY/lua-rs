@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{ObjectPool, lib_registry};
+use crate::{lib_registry, LuaFunction, ObjectPool};
 pub use execute::TmKind;
 pub use opcode::{Instruction, OpCode};
 use std::ptr::null_mut;
@@ -34,10 +34,10 @@ pub const MAX_CALL_DEPTH: usize = 200;
 /// Manages global resources shared by all execution threads/coroutines
 pub struct LuaVM {
     /// Global environment table (_G and _ENV point to this)
-    pub(crate) global: TableId,
+    pub(crate) global: LuaValue,
 
     /// Registry table (like Lua's LUA_REGISTRYINDEX)
-    pub(crate) registry: TableId,
+    pub(crate) registry: LuaValue,
 
     /// Object pool for unified object management
     pub(crate) object_pool: ObjectPool,
@@ -58,8 +58,8 @@ pub struct LuaVM {
 impl LuaVM {
     pub fn new(option: SafeOption) -> Box<Self> {
         let mut vm = Box::new(LuaVM {
-            global: TableId(0),
-            registry: TableId(1),
+            global: LuaValue::nil(),
+            registry: LuaValue::nil(),
             object_pool: ObjectPool::new(),
             gc: GC::new(),
             main_state: LuaState::new(6, null_mut(), option.clone()),
@@ -74,18 +74,18 @@ impl LuaVM {
         // Initialize registry (like Lua's init_registry)
         // Registry is a GC root and protects all values stored in it
         let registry = vm.create_table(2, 8);
+        vm.registry = registry;
         if let Some(registry_id) = registry.as_table_id() {
             // Fix the registry table so it's never collected
             vm.object_pool.fix_table(registry_id);
-            vm.registry = registry_id;
         }
 
         // Set _G to point to the global table itself
         let globals_value = vm.create_table(0, 20);
+        vm.global = globals_value;
         if let Some(globals_id) = globals_value.as_table_id() {
             // Fix the global table so it's never collected
             vm.object_pool.fix_table(globals_id);
-            vm.global = globals_id;
         }
 
         vm.set_global("_G", globals_value);
@@ -103,14 +103,14 @@ impl LuaVM {
 
     /// Set a value in the registry by integer key
     pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
-        if let Some(reg_table) = self.object_pool.get_table_mut(self.registry) {
+        if let Some(reg_table) = self.registry.as_table_mut() {
             reg_table.set_int(key, value);
         }
     }
 
     /// Get a value from the registry by integer key
     pub fn registry_get_integer(&self, key: i64) -> Option<LuaValue> {
-        if let Some(reg_table) = self.object_pool.get_table(self.registry) {
+        if let Some(reg_table) = self.registry.as_table_mut() {
             return reg_table.get_int(key);
         }
 
@@ -121,7 +121,7 @@ impl LuaVM {
     pub fn registry_set(&mut self, key: &str, value: LuaValue) {
         let key_value = self.create_string(key);
 
-        if let Some(reg_table) = self.object_pool.get_table_mut(self.registry) {
+        if let Some(reg_table) = self.registry.as_table_mut() {
             reg_table.raw_set(&key_value, value);
         }
     }
@@ -129,7 +129,7 @@ impl LuaVM {
     /// Get a value from the registry by string key
     pub fn registry_get(&mut self, key: &str) -> Option<LuaValue> {
         let key = self.create_string(key);
-        if let Some(reg_table) = self.object_pool.get_table(self.registry) {
+        if let Some(reg_table) = self.registry.as_table_mut() {
             return reg_table.raw_get(&key);
         }
 
@@ -150,7 +150,7 @@ impl LuaVM {
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
         // Main chunk needs _ENV upvalue pointing to global table
         // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
-        let env_upvalue_id = self.create_upvalue_closed(LuaValue::table(self.global));
+        let env_upvalue_id = self.create_upvalue_closed(self.global);
         let func = self.create_function(chunk, vec![env_upvalue_id]);
         self.execute_function(func, vec![])
     }
@@ -235,14 +235,16 @@ impl LuaVM {
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
         let key = self.create_string(name);
 
-        let global = self.object_pool.get_table(self.global)?;
-        global.raw_get(&key)
+        if let Some(global) = self.global.as_table_mut() {
+            return global.raw_get(&key);
+        }
+        None
     }
 
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
         let key = self.create_string(name);
 
-        if let Some(global) = self.object_pool.get_table_mut(self.global) {
+        if let Some(global) = self.global.as_table_mut() {
             global.raw_set(&key, value);
         }
     }
@@ -251,12 +253,11 @@ impl LuaVM {
     /// This allows string methods to be called with : syntax (e.g., str:upper())
     pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) {
         // Create a metatable with __index pointing to the string library
-        let mt_id = self.object_pool.create_table(0, 1);
-        let mt_value = LuaValue::table(mt_id);
+        let mt_value = self.object_pool.create_table(0, 1);
 
         // Set __index to point to the string library
         let index_key = self.create_string("__index");
-        if let Some(mt) = self.object_pool.get_table_mut(mt_id) {
+        if let Some(mt) = mt_value.as_table_mut() {
             mt.raw_set(&index_key, string_lib_table);
         }
 
@@ -279,8 +280,7 @@ impl LuaVM {
             .expect("Failed to push function onto coroutine stack");
 
         // Create thread in ObjectPool and return LuaValue
-        let thread_id = self.object_pool.create_thread(thread);
-        LuaValue::thread(thread_id)
+        self.object_pool.create_thread(thread)
     }
 
     /// Resume a coroutine - DEPRECATED: Use thread_state.resume() instead
@@ -300,12 +300,12 @@ impl LuaVM {
         }
 
         // Get thread's Rc<RefCell<LuaState>>
-        let Some(thread_rc) = self.object_pool.get_thread(thread_id) else {
+        let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
             return Err(self.error("thread not found".to_string()));
         };
-
+        //
         // Borrow mutably and delegate to LuaState::resume
-        thread_rc.borrow_mut().resume(args)
+        thread.resume(args)
     }
 
     /// Fast table get - NO metatable support!
@@ -341,32 +341,26 @@ impl LuaVM {
         table_value: &LuaValue,
         key: &LuaValue,
     ) -> Option<LuaValue> {
-        // First try raw get
-        let table_id = table_value.as_table_id()?;
+        if let Some(table) = table_value.as_table_mut() {
+            if let Some(val) = table.raw_get(key) {
+                return Some(val);
+            }
 
-        // Try to get value directly from table
-        if let Some(value) = self.table_get_raw(table_value, key) {
-            return Some(value);
-        }
-
-        // Value not found, check for __index metamethod
-        let metatable = {
-            let table = self.object_pool.get_table(table_id)?;
-            table.get_metatable()
-        };
-
-        if let Some(mt) = metatable {
-            // Try to get __index metamethod
-            let index_key = self.create_string("__index");
-            if let Some(index_mm) = self.table_get_raw(&mt, &index_key) {
-                if index_mm.is_table() {
-                    // __index is a table, do lookup in it
-                    return self.table_get_with_meta(&index_mm, key);
-                } else if index_mm.is_function() || index_mm.is_cfunction() {
-                    // __index is a function, call it
-                    // For now, we'll skip function call to avoid complexity
-                    // TODO: Implement function call for __index
-                    return None;
+            if let Some(meta_id) = table.get_metatable() {
+                if let Some(meta_table) = self.object_pool.get_table(meta_id) {
+                    // Try to get __index metamethod
+                    let index_key = self.object_pool.tm_index;
+                    if let Some(index_mm) = meta_table.raw_get(&index_key) {
+                        if index_mm.is_table() {
+                            // __index is a table, do lookup in it
+                            return self.table_get_with_meta(&index_mm, key);
+                        } else if index_mm.is_function() || index_mm.is_cfunction() {
+                            // __index is a function, call it
+                            // For now, we'll skip function call to avoid complexity
+                            // TODO: Implement function call for __index
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -407,7 +401,6 @@ impl LuaVM {
         } else {
             return Err(self.error("invalid table".to_string()));
         };
-
         if let Some(mt) = metatable {
             let newindex_key = self.create_string("__newindex");
             if let Some(newindex_mm) = self.table_get_raw(&mt, &newindex_key) {
@@ -446,7 +439,7 @@ impl LuaVM {
 
     /// Create a new table and register it with GC
     /// Create a string and register it with GC
-    /// For short strings (�?4 bytes), use interning (global deduplication)
+    /// For short strings (4 bytes), use interning (global deduplication)
     /// Create a string value with automatic interning for short strings
     /// Returns LuaValue directly with ZERO allocation overhead for interned strings
     ///
@@ -455,24 +448,26 @@ impl LuaVM {
     /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
-        let (id, is_new) = self.object_pool.create_string(s);
+        let (value, is_new) = self.object_pool.create_string(s);
         if is_new {
             let size = 32 + s.len();
-            self.gc.track_object(GcId::StringId(id), size);
+            let s_id = value.as_string_id().unwrap();
+            self.gc.track_object(GcId::StringId(s_id), size);
         }
-        LuaValue::string(id)
+        value
     }
 
     /// Create string from owned String (avoids clone for non-interned strings)
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let len = s.len();
-        let (id, is_new) = self.object_pool.create_string_owned(s);
+        let (value, is_new) = self.object_pool.create_string_owned(s);
         if is_new {
             let size = 32 + len;
-            self.gc.track_object(GcId::StringId(id), size);
+            let s_id = value.as_string_id().unwrap();
+            self.gc.track_object(GcId::StringId(s_id), size);
         }
-        LuaValue::string(id)
+        value
     }
 
     /// Get string by LuaValue (resolves ID from object pool)
@@ -551,10 +546,11 @@ impl LuaVM {
     /// Create a new table in object pool
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let id = self.object_pool.create_table(array_size, hash_size);
+        let value = self.object_pool.create_table(array_size, hash_size);
         // Track object for GC - adds to young_list in generational mode and updates gc_debt
+        let id = value.as_table_id().unwrap();
         self.gc.track_object(GcId::TableId(id), 256);
-        LuaValue::table(id)
+        value
     }
 
     /// Get table by LuaValue (resolves ID from object pool)
@@ -597,35 +593,21 @@ impl LuaVM {
 
     /// Create new userdata in object pool
     pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
-        let id = self.object_pool.create_userdata(data);
-        LuaValue::userdata(id)
+        let value = self.object_pool.create_userdata(data);
+        let id = value.as_userdata_id().unwrap();
+        self.gc.track_object(GcId::UserdataId(id), std::mem::size_of::<LuaUserdata>());
+        value
     }
 
-    /// Get userdata by LuaValue (resolves ID from object pool)
-    pub fn get_userdata(&self, value: &LuaValue) -> Option<&LuaUserdata> {
-        if let Some(id) = value.as_userdata_id() {
-            self.object_pool.get_userdata(id)
-        } else {
-            None
-        }
-    }
-
-    /// Get mutable userdata by LuaValue
-    pub fn get_userdata_mut(&mut self, value: &LuaValue) -> Option<&mut LuaUserdata> {
-        if let Some(id) = value.as_userdata_id() {
-            self.object_pool.get_userdata_mut(id)
-        } else {
-            None
-        }
-    }
 
     /// Create a function in object pool
     /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
-        let id = self.object_pool.create_function(chunk, upvalue_ids);
-        self.gc.track_object(GcId::FunctionId(id), 128);
-        LuaValue::function(id)
+        let value = self.object_pool.create_function(chunk, upvalue_ids);
+        let id = value.as_function_id().unwrap();
+        self.gc.track_object(GcId::FunctionId(id), std::mem::size_of::<LuaFunction>());
+        value
     }
 
     /// Create a C closure (native function with upvalues stored as closed upvalues)
@@ -638,16 +620,16 @@ impl LuaVM {
             .map(|v| self.create_upvalue_closed(v))
             .collect();
 
-        let id = self.object_pool.create_c_closure(func, upvalue_ids);
-        self.gc.track_object(GcId::FunctionId(id), 128);
-        LuaValue::function(id)
+        let value = self.object_pool.create_c_closure(func, upvalue_ids);
+        let id = value.as_function_id().unwrap();
+        self.gc.track_object(GcId::FunctionId(id), std::mem::size_of::<GcFunction>());
+        value
     }
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let id = self.object_pool.create_upvalue_open(stack_index);
-        self.check_gc();
         self.gc.track_object(GcId::UpvalueId(id), 64);
         id
     }
@@ -655,28 +637,9 @@ impl LuaVM {
     /// Create a closed upvalue with a value
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
-        self.check_gc();
         let id = self.object_pool.create_upvalue_closed(value);
         self.gc.track_object(GcId::UpvalueId(id), 64);
         id
-    }
-
-    /// Get function by LuaValue (resolves ID from object pool)
-    pub fn get_function(&self, value: &LuaValue) -> Option<&GcFunction> {
-        if let Some(id) = value.as_function_id() {
-            self.object_pool.get_function(id)
-        } else {
-            None
-        }
-    }
-
-    /// Get mutable function by LuaValue
-    pub fn get_function_mut(&mut self, value: &LuaValue) -> Option<&mut GcFunction> {
-        if let Some(id) = value.as_function_id() {
-            self.object_pool.get_function_mut(id)
-        } else {
-            None
-        }
     }
 
     //==========================================================================
@@ -768,14 +731,6 @@ impl LuaVM {
         self.check_gc_slow();
     }
 
-    /// Slow path for GC - separate function to keep hot path small
-    /// Public version for direct inline checks
-    #[cold]
-    #[inline(never)]
-    pub fn check_gc_slow_pub(&mut self) {
-        self.check_gc_slow();
-    }
-
     #[cold]
     #[inline(never)]
     fn check_gc_slow(&mut self) {
@@ -855,10 +810,10 @@ impl LuaVM {
         let mut roots = Vec::with_capacity(128);
 
         // 1. Global table
-        roots.push(LuaValue::table(self.global));
+        roots.push(self.global);
 
         // 2. Registry table (persistent objects storage)
-        roots.push(LuaValue::table(self.registry));
+        roots.push(self.registry);
 
         // 3. String metatable
         if let Some(mt) = &self.string_mt {

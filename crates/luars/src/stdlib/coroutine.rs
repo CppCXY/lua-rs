@@ -123,8 +123,7 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 
     // Check if thread exists and get status
     let vm = l.vm_mut();
-    let status_str = if let Some(thread_rc) = vm.object_pool.get_thread(thread_id) {
-        let thread = thread_rc.borrow();
+    let status_str = if let Some(thread) = vm.object_pool.get_thread(thread_id) {
         // Thread is suspended if it has frames or stack content
         if thread.call_depth() > 0 {
             "suspended"
@@ -263,8 +262,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Clear the thread's stack and frames to mark it as closed
-    if let Some(thread_rc) = vm.object_pool.get_thread(thread_id) {
-        let mut thread = thread_rc.borrow_mut();
+    if let Some(thread) = vm.object_pool.get_thread_mut(thread_id) {
         thread.stack_truncate(0);
         while thread.call_depth() > 0 {
             thread.pop_frame();
