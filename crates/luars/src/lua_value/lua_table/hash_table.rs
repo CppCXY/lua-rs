@@ -54,8 +54,7 @@ impl LuaHashTable {
         }
     }
 
-    /// 快速哈希函数 - 针对LuaValue优化
-    /// 整数和GC对象都用Fibonacci，简单且性能稳定
+    /// 哈希函数 - 简化版，依赖奇数容量提供更好的分布
     #[inline(always)]
     fn hash_key(key: &LuaValue) -> u64 {
         use crate::lua_value::lua_value::*;
@@ -68,7 +67,7 @@ impl LuaHashTable {
                 LUA_TBOOLEAN => (key.value.i as u64).wrapping_mul(K),
                 LUA_TNUMBER => {
                     if key.tt() & 1 == 0 {
-                        // Float: 直接用bit pattern哈希
+                        // Float: bit pattern哈希
                         key.value.n.to_bits().wrapping_mul(K)
                     } else {
                         // Integer: Fibonacci hashing
