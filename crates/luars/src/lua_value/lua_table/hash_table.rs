@@ -54,30 +54,32 @@ impl LuaHashTable {
         }
     }
 
-    /// 快速哈希函数 - 针对LuaValue优化，匹配Lua 5.5的简单性
+    /// 快速哈希函数 - 针对LuaValue优化
+    /// 整数和GC对象都用Fibonacci，简单且性能稳定
     #[inline(always)]
     fn hash_key(key: &LuaValue) -> u64 {
         use crate::lua_value::lua_value::*;
+        
+        const K: u64 = 0x9e3779b97f4a7c15; // Fibonacci golden ratio
 
         unsafe {
             match key.ttype() {
                 LUA_TNIL => 0,
-                LUA_TBOOLEAN => key.value.i as u64,
+                LUA_TBOOLEAN => (key.value.i as u64).wrapping_mul(K),
                 LUA_TNUMBER => {
                     if key.tt() & 1 == 0 {
-                        // Float: 直接使用bit pattern
-                        key.value.n.to_bits()
+                        // Float: 直接用bit pattern哈希
+                        key.value.n.to_bits().wrapping_mul(K)
                     } else {
-                        // Integer: 使用fibonacci hashing避免连续整数聚集
-                        (key.value.i as u64).wrapping_mul(0x9e3779b97f4a7c15)
+                        // Integer: Fibonacci hashing
+                        (key.value.i as u64).wrapping_mul(K)
                     }
                 }
                 _ => {
-                    // GC类型：gcid + type tag混合，避免与整数冲突
-                    // 不同类型的对象即使gcid相同也有不同哈希
+                    // GC类型：gcid + type tag
                     let id = key.gcid() as u64;
-                    let type_tag = (key.tt() as u64) << 56; // 类型标签放在高位
-                    id.wrapping_mul(0x9e3779b97f4a7c15) ^ type_tag
+                    let tt = (key.tt() as u64) << 56;
+                    id.wrapping_mul(K) ^ tt
                 }
             }
         }
