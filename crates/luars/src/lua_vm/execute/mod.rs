@@ -39,8 +39,8 @@ use crate::{
         },
     },
 };
-pub use metamethod::TmKind;
 pub use helper::{get_metamethod_event, get_metatable};
+pub use metamethod::TmKind;
 
 /// Main VM execution entry point
 ///
@@ -162,7 +162,7 @@ fn execute_frame(
             .object_pool
             .get_upvalue(*upval_id)
             .ok_or(LuaError::RuntimeError)?;
-        
+
         let value = if upvalue.data.is_open() {
             let stack_idx = upvalue.data.get_stack_index().unwrap();
             lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
@@ -224,10 +224,8 @@ fn execute_frame(
 
                 let stack = lua_state.stack_mut();
                 unsafe {
-                    let stack_ptr = stack.as_mut_ptr();
-                    let rb = &*stack_ptr.add(base + b);
-                    let ra = &mut *stack_ptr.add(base + a);
-                    *ra = *rb;
+                    let val = *stack.get_unchecked(base + b);
+                    *stack.get_unchecked_mut(base + a) = val;
                 }
 
                 // Update frame.top if we're writing beyond current top
@@ -339,15 +337,14 @@ fn execute_frame(
                 // OPTIMIZATION: Use raw slice access to reduce bounds checking
                 let stack = lua_state.stack_mut();
                 unsafe {
-                    let stack_ptr = stack.as_mut_ptr();
-                    let v1 = &*stack_ptr.add(base + b);
-                    let v2 = &*stack_ptr.add(base + c);
-                    let ra = &mut *stack_ptr.add(base + a);
+                    let v1 = stack.get_unchecked(base + b);
+                    let v2 = stack.get_unchecked(base + c);
 
                     // Fast path: both integers (most common case)
                     if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
                         let i2 = ivalue(v2);
+                        let ra = stack.get_unchecked_mut(base + a);
                         setivalue(ra, i1.wrapping_add(i2));
                         pc += 1; // Skip metamethod on success
                     }
@@ -356,6 +353,7 @@ fn execute_frame(
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            let ra = stack.get_unchecked_mut(base + a);
                             setfltvalue(ra, n1 + n2);
                             pc += 1; // Skip metamethod on success
                         }
@@ -370,22 +368,22 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let sc = instr.get_sc();
 
-                // OPTIMIZATION: Use raw pointer access like Lua C
+                // OPTIMIZATION: Use get_unchecked to avoid bounds checking
                 let stack = lua_state.stack_mut();
                 unsafe {
-                    let stack_ptr = stack.as_mut_ptr();
-                    let v1 = &*stack_ptr.add(base + b);
-                    let ra = &mut *stack_ptr.add(base + a);
+                    let v1 = stack.get_unchecked(base + b);
 
                     // Fast path: integer (most common)
                     if ttisinteger(v1) {
                         let iv1 = ivalue(v1);
+                        let ra = stack.get_unchecked_mut(base + a);
                         setivalue(ra, iv1.wrapping_add(sc as i64));
                         pc += 1; // Skip metamethod on success
                     }
                     // Slow path: float
                     else if ttisfloat(v1) {
                         let nb = fltvalue(v1);
+                        let ra = stack.get_unchecked_mut(base + a);
                         setfltvalue(ra, nb + (sc as f64));
                         pc += 1; // Skip metamethod on success
                     }
@@ -400,20 +398,20 @@ fn execute_frame(
 
                 let stack = lua_state.stack_mut();
                 unsafe {
-                    let stack_ptr = stack.as_mut_ptr();
-                    let v1 = &*stack_ptr.add(base + b);
-                    let v2 = &*stack_ptr.add(base + c);
-                    let ra = &mut *stack_ptr.add(base + a);
+                    let v1 = stack.get_unchecked(base + b);
+                    let v2 = stack.get_unchecked(base + c);
 
                     if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
                         let i2 = ivalue(v2);
+                        let ra = stack.get_unchecked_mut(base + a);
                         setivalue(ra, i1.wrapping_sub(i2));
                         pc += 1;
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            let ra = stack.get_unchecked_mut(base + a);
                             setfltvalue(ra, n1 - n2);
                             pc += 1;
                         }
@@ -428,20 +426,20 @@ fn execute_frame(
 
                 let stack = lua_state.stack_mut();
                 unsafe {
-                    let stack_ptr = stack.as_mut_ptr();
-                    let v1 = &*stack_ptr.add(base + b);
-                    let v2 = &*stack_ptr.add(base + c);
-                    let ra = &mut *stack_ptr.add(base + a);
+                    let v1 = stack.get_unchecked(base + b);
+                    let v2 = stack.get_unchecked(base + c);
 
                     if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
                         let i2 = ivalue(v2);
+                        let ra = stack.get_unchecked_mut(base + a);
                         setivalue(ra, i1.wrapping_mul(i2));
                         pc += 1;
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            let ra = stack.get_unchecked_mut(base + a);
                             setfltvalue(ra, n1 * n2);
                             pc += 1;
                         }
@@ -1025,7 +1023,7 @@ fn execute_frame(
                     // Open: write to stack
                     let stack_idx = upvalue.data.get_stack_index().unwrap();
                     lua_state.stack_set(stack_idx, value)?;
-                    
+
                     // CRITICAL: Update cache to reflect the change
                     // This ensures subsequent GetUpval reads the new value
                     upvalue_cache[b] = value;
@@ -1034,7 +1032,7 @@ fn execute_frame(
                     unsafe {
                         upvalue.data.set_closed_value_unchecked(value);
                     }
-                    
+
                     // CRITICAL: Update cache for closed upvalue too
                     upvalue_cache[b] = value;
                 }
@@ -1494,27 +1492,25 @@ fn execute_frame(
 
                 let stack = lua_state.stack_mut();
                 unsafe {
-                    let stack_ptr = stack.as_mut_ptr();
                     let ra = base + a;
-                    let ra_ptr = stack_ptr.add(ra);
 
                     // Check if integer loop
-                    if ttisinteger(&*ra_ptr.add(1)) {
+                    if ttisinteger(stack.get_unchecked(ra + 1)) {
                         // Integer loop (most common for numeric loops)
                         // ra: counter (count of iterations left)
                         // ra+1: step
                         // ra+2: control variable (idx)
-                        let count = ivalue(&*ra_ptr) as u64; // unsigned count
+                        let count = ivalue(stack.get_unchecked(ra)) as u64; // unsigned count
                         if count > 0 {
                             // More iterations
-                            let step = ivalue(&*ra_ptr.add(1));
-                            let idx = ivalue(&*ra_ptr.add(2));
+                            let step = ivalue(stack.get_unchecked(ra + 1));
+                            let idx = ivalue(stack.get_unchecked(ra + 2));
 
                             // Update counter (decrement)
-                            setivalue(&mut *ra_ptr, (count - 1) as i64);
+                            setivalue(stack.get_unchecked_mut(ra), (count - 1) as i64);
 
                             // Update control variable: idx += step
-                            setivalue(&mut *ra_ptr.add(2), idx.wrapping_add(step));
+                            setivalue(stack.get_unchecked_mut(ra + 2), idx.wrapping_add(step));
 
                             // Jump back (no error check - validated at compile time)
                             pc -= bx;
@@ -1525,9 +1521,9 @@ fn execute_frame(
                         // ra: limit
                         // ra+1: step
                         // ra+2: idx (control variable)
-                        let step = fltvalue(&*ra_ptr.add(1));
-                        let limit = fltvalue(&*ra_ptr);
-                        let idx = fltvalue(&*ra_ptr.add(2));
+                        let step = fltvalue(stack.get_unchecked(ra + 1));
+                        let limit = fltvalue(stack.get_unchecked(ra));
+                        let idx = fltvalue(stack.get_unchecked(ra + 2));
 
                         // idx += step
                         let new_idx = idx + step;
@@ -1541,7 +1537,7 @@ fn execute_frame(
 
                         if should_continue {
                             // Update control variable
-                            setfltvalue(&mut *ra_ptr.add(2), new_idx);
+                            setfltvalue(stack.get_unchecked_mut(ra + 2), new_idx);
 
                             // Jump back
                             if bx > pc {
