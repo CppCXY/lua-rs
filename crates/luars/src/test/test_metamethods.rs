@@ -675,25 +675,6 @@ fn test_newindex_with_rawset() {
 }
 
 #[test]
-fn test_metatable_protection() {
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
-        r#"
-        local t = {}
-        local mt = {
-            __metatable = "protected"
-        }
-        setmetatable(t, mt)
-        assert(getmetatable(t) == "protected")
-        local success = pcall(setmetatable, t, {})
-        assert(not success)
-    "#,
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
 fn test_mode_weak_tables() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();

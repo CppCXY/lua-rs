@@ -10,9 +10,10 @@
 
 use crate::gc::gc_object::FunctionBody;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
-use crate::lua_vm::{CFunction, LuaState};
+use crate::lua_vm::{CFunction, LuaState, TmKind};
 use crate::{
-    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable, LuaValue, StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId
+    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable,
+    LuaValue, StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -484,33 +485,33 @@ impl ObjectPool {
     /// TM_IDIV=12, TM_BAND=13, TM_BOR=14, TM_BXOR=15, TM_SHL=16, TM_SHR=17,
     /// TM_UNM=18, TM_BNOT=19, TM_LT=20, TM_LE=21, TM_CONCAT=22, TM_CALL=23
     #[inline]
-    pub fn get_tm_value(&self, tm: u8) -> LuaValue {
+    pub fn get_tm_value(&self, tm: TmKind) -> LuaValue {
         match tm {
-            0 => self.tm_index,
-            1 => self.tm_newindex,
-            2 => self.tm_gc,
-            3 => self.tm_mode,
-            4 => self.tm_len,
-            5 => self.tm_eq,
-            6 => self.tm_add,
-            7 => self.tm_sub,
-            8 => self.tm_mul,
-            9 => self.tm_mod,
-            10 => self.tm_pow,
-            11 => self.tm_div,
-            12 => self.tm_idiv,
-            13 => self.tm_band,
-            14 => self.tm_bor,
-            15 => self.tm_bxor,
-            16 => self.tm_shl,
-            17 => self.tm_shr,
-            18 => self.tm_unm,
-            19 => self.tm_bnot,
-            20 => self.tm_lt,
-            21 => self.tm_le,
-            22 => self.tm_concat,
-            23 => self.tm_call,
-            24 => self.tm_close,
+            TmKind::Index => self.tm_index,
+            TmKind::NewIndex => self.tm_newindex,
+            TmKind::Gc => self.tm_gc,
+            TmKind::Mode => self.tm_mode,
+            TmKind::Len => self.tm_len,
+            TmKind::Eq => self.tm_eq,
+            TmKind::Add => self.tm_add,
+            TmKind::Sub => self.tm_sub,
+            TmKind::Mul => self.tm_mul,
+            TmKind::Mod => self.tm_mod,
+            TmKind::Pow => self.tm_pow,
+            TmKind::Div => self.tm_div,
+            TmKind::IDiv => self.tm_idiv,
+            TmKind::Band => self.tm_band,
+            TmKind::Bor => self.tm_bor,
+            TmKind::Bxor => self.tm_bxor,
+            TmKind::Shl => self.tm_shl,
+            TmKind::Shr => self.tm_shr,
+            TmKind::Unm => self.tm_unm,
+            TmKind::Bnot => self.tm_bnot,
+            TmKind::Lt => self.tm_lt,
+            TmKind::Le => self.tm_le,
+            TmKind::Concat => self.tm_concat,
+            TmKind::Call => self.tm_call,
+            TmKind::Close => self.tm_close,
             _ => self.tm_index, // Fallback to __index
         }
     }
@@ -543,6 +544,7 @@ impl ObjectPool {
             "__concat" => self.tm_concat,
             "__call" => self.tm_call,
             "__close" => self.tm_close,
+            "__tostring" => self.tm_tostring,
             _ => self.tm_index, // Fallback to __index
         }
     }

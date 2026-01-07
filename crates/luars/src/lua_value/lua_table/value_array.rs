@@ -73,7 +73,7 @@ impl LuaTableImpl for LuaValueArray {
 
     fn insert_at(&mut self, index: usize, value: LuaValue) -> LuaInsertResult {
         if index < self.array.len() {
-            self.array[index] = value;
+            self.array.insert(index, value);
         } else if index == self.array.len() {
             self.array.push(value);
         } else {
