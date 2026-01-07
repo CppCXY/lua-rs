@@ -183,6 +183,30 @@ impl ValueMeta {
     pub fn gcid(&self) -> u32 {
         self.gcid
     }
+
+    #[inline(always)]
+    pub fn set_to_int(&mut self) {
+        self.tt = LUA_VNUMINT;
+        self.gcid = 0;
+    }
+
+    #[inline(always)]
+    pub fn set_to_float(&mut self) {
+        self.tt = LUA_VNUMFLT;
+        self.gcid = 0;
+    }
+
+    #[inline(always)]
+    pub fn set_boolean(&mut self, b: bool) {
+        self.tt = if b { LUA_VTRUE } else { LUA_VFALSE };
+        self.gcid = 0;
+    }
+
+    #[inline(always)]
+    pub fn set_nil(&mut self) {
+        self.tt = LUA_VNIL;
+        self.gcid = 0;
+    }
 }
 
 // ============ TValue ============
@@ -191,8 +215,8 @@ impl ValueMeta {
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct LuaValue {
-    pub value: Value, // 8 bytes: value or pointer
-    meta: ValueMeta,  // 8 bytes: type tag + GC ID
+    pub(crate) value: Value,    // 8 bytes: value or pointer
+    pub(crate) meta: ValueMeta, // 8 bytes: type tag + GC ID
 }
 
 impl LuaValue {

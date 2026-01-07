@@ -209,7 +209,7 @@ fn execute_frame(
     loop {
         // Fetch instruction and advance PC
         // NOTE: No bounds check - compiler guarantees valid bytecode
-        let instr = code[pc]; // unsafe { *code.get_unchecked(pc) };
+        let instr = unsafe { *code.get_unchecked(pc) };
         pc += 1;
 
         // Dispatch instruction
@@ -218,11 +218,17 @@ fn execute_frame(
             OpCode::Move => {
                 // R[A] := R[B]
                 // setobjs2s(L, ra, RB(i))
+                // OPTIMIZATION: Use raw pointer for direct access like Lua C
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
                 let stack = lua_state.stack_mut();
-                stack[base + a] = stack[base + b];
+                unsafe {
+                    let stack_ptr = stack.as_mut_ptr();
+                    let rb = &*stack_ptr.add(base + b);
+                    let ra = &mut *stack_ptr.add(base + a);
+                    *ra = *rb;
+                }
 
                 // Update frame.top if we're writing beyond current top
                 let write_pos = base + a;
@@ -330,26 +336,31 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let c = instr.get_c() as usize;
 
+                // OPTIMIZATION: Use raw slice access to reduce bounds checking
                 let stack = lua_state.stack_mut();
-                let v1 = &stack[base + b];
-                let v2 = &stack[base + c];
+                unsafe {
+                    let stack_ptr = stack.as_mut_ptr();
+                    let v1 = &*stack_ptr.add(base + b);
+                    let v2 = &*stack_ptr.add(base + c);
+                    let ra = &mut *stack_ptr.add(base + a);
 
-                // Fast path: both integers
-                if ttisinteger(v1) && ttisinteger(v2) {
-                    let i1 = ivalue(v1);
-                    let i2 = ivalue(v2);
-                    pc += 1; // Skip metamethod on success
-                    setivalue(&mut stack[base + a], i1.wrapping_add(i2));
-                }
-                // Slow path: try float conversion
-                else {
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                    // Fast path: both integers (most common case)
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        setivalue(ra, i1.wrapping_add(i2));
                         pc += 1; // Skip metamethod on success
-                        setfltvalue(&mut stack[base + a], n1 + n2);
                     }
-                    // else: fall through to MMBIN (next instruction)
+                    // Slow path: try float conversion
+                    else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            setfltvalue(ra, n1 + n2);
+                            pc += 1; // Skip metamethod on success
+                        }
+                        // else: fall through to MMBIN (next instruction)
+                    }
                 }
             }
             OpCode::AddI => {
@@ -359,23 +370,27 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
                 let sc = instr.get_sc();
 
+                // OPTIMIZATION: Use raw pointer access like Lua C
                 let stack = lua_state.stack_mut();
-                let v1 = &stack[base + b];
+                unsafe {
+                    let stack_ptr = stack.as_mut_ptr();
+                    let v1 = &*stack_ptr.add(base + b);
+                    let ra = &mut *stack_ptr.add(base + a);
 
-                // Fast path: integer
-                if ttisinteger(v1) {
-                    let iv1 = ivalue(v1);
-                    pc += 1; // Skip metamethod on success
-                    setivalue(&mut stack[base + a], iv1.wrapping_add(sc as i64));
+                    // Fast path: integer (most common)
+                    if ttisinteger(v1) {
+                        let iv1 = ivalue(v1);
+                        setivalue(ra, iv1.wrapping_add(sc as i64));
+                        pc += 1; // Skip metamethod on success
+                    }
+                    // Slow path: float
+                    else if ttisfloat(v1) {
+                        let nb = fltvalue(v1);
+                        setfltvalue(ra, nb + (sc as f64));
+                        pc += 1; // Skip metamethod on success
+                    }
+                    // else: fall through to MMBINI (next instruction)
                 }
-                // Slow path: float
-                else if ttisfloat(v1) {
-                    let nb = fltvalue(v1);
-                    let fimm = sc as f64;
-                    pc += 1; // Skip metamethod on success
-                    setfltvalue(&mut stack[base + a], nb + fimm);
-                }
-                // else: fall through to MMBINI (next instruction)
             }
             OpCode::Sub => {
                 // op_arith(L, l_subi, luai_numsub)
@@ -384,20 +399,24 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
 
                 let stack = lua_state.stack_mut();
-                let v1 = &stack[base + b];
-                let v2 = &stack[base + c];
+                unsafe {
+                    let stack_ptr = stack.as_mut_ptr();
+                    let v1 = &*stack_ptr.add(base + b);
+                    let v2 = &*stack_ptr.add(base + c);
+                    let ra = &mut *stack_ptr.add(base + a);
 
-                if ttisinteger(v1) && ttisinteger(v2) {
-                    let i1 = ivalue(v1);
-                    let i2 = ivalue(v2);
-                    pc += 1;
-                    setivalue(&mut stack[base + a], i1.wrapping_sub(i2));
-                } else {
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        setivalue(ra, i1.wrapping_sub(i2));
                         pc += 1;
-                        setfltvalue(&mut stack[base + a], n1 - n2);
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            setfltvalue(ra, n1 - n2);
+                            pc += 1;
+                        }
                     }
                 }
             }
@@ -408,20 +427,24 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
 
                 let stack = lua_state.stack_mut();
-                let v1 = &stack[base + b];
-                let v2 = &stack[base + c];
+                unsafe {
+                    let stack_ptr = stack.as_mut_ptr();
+                    let v1 = &*stack_ptr.add(base + b);
+                    let v2 = &*stack_ptr.add(base + c);
+                    let ra = &mut *stack_ptr.add(base + a);
 
-                if ttisinteger(v1) && ttisinteger(v2) {
-                    let i1 = ivalue(v1);
-                    let i2 = ivalue(v2);
-                    pc += 1;
-                    setivalue(&mut stack[base + a], i1.wrapping_mul(i2));
-                } else {
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                    if ttisinteger(v1) && ttisinteger(v2) {
+                        let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
+                        setivalue(ra, i1.wrapping_mul(i2));
                         pc += 1;
-                        setfltvalue(&mut stack[base + a], n1 * n2);
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            setfltvalue(ra, n1 * n2);
+                            pc += 1;
+                        }
                     }
                 }
             }
@@ -1470,66 +1493,65 @@ fn execute_frame(
                 let bx = instr.get_bx() as usize;
 
                 let stack = lua_state.stack_mut();
-                let ra = base + a;
+                unsafe {
+                    let stack_ptr = stack.as_mut_ptr();
+                    let ra = base + a;
+                    let ra_ptr = stack_ptr.add(ra);
 
-                // Check if integer loop
-                if ttisinteger(&stack[ra + 1]) {
-                    // Integer loop
-                    // ra: counter (count of iterations left)
-                    // ra+1: step
-                    // ra+2: control variable (idx)
-                    let count = ivalue(&stack[ra]) as u64; // unsigned count
-                    if count > 0 {
-                        // More iterations
-                        let step = ivalue(&stack[ra + 1]);
-                        let idx = ivalue(&stack[ra + 2]);
+                    // Check if integer loop
+                    if ttisinteger(&*ra_ptr.add(1)) {
+                        // Integer loop (most common for numeric loops)
+                        // ra: counter (count of iterations left)
+                        // ra+1: step
+                        // ra+2: control variable (idx)
+                        let count = ivalue(&*ra_ptr) as u64; // unsigned count
+                        if count > 0 {
+                            // More iterations
+                            let step = ivalue(&*ra_ptr.add(1));
+                            let idx = ivalue(&*ra_ptr.add(2));
 
-                        // Update counter (decrement)
-                        setivalue(&mut stack[ra], (count - 1) as i64);
+                            // Update counter (decrement)
+                            setivalue(&mut *ra_ptr, (count - 1) as i64);
 
-                        // Update control variable: idx += step
-                        let new_idx = idx.wrapping_add(step);
-                        setivalue(&mut stack[ra + 2], new_idx);
+                            // Update control variable: idx += step
+                            setivalue(&mut *ra_ptr.add(2), idx.wrapping_add(step));
 
-                        // Jump back
-                        if bx > pc {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
+                            // Jump back (no error check - validated at compile time)
+                            pc -= bx;
                         }
-                        pc -= bx;
-                    }
-                    // else: counter expired, exit loop
-                } else {
-                    // Float loop
-                    // ra: limit
-                    // ra+1: step
-                    // ra+2: idx (control variable)
-                    let step = fltvalue(&stack[ra + 1]);
-                    let limit = fltvalue(&stack[ra]);
-                    let idx = fltvalue(&stack[ra + 2]);
-
-                    // idx += step
-                    let new_idx = idx + step;
-
-                    // Check if should continue
-                    let should_continue = if step > 0.0 {
-                        new_idx <= limit
+                        // else: counter expired, exit loop
                     } else {
-                        new_idx >= limit
-                    };
+                        // Float loop
+                        // ra: limit
+                        // ra+1: step
+                        // ra+2: idx (control variable)
+                        let step = fltvalue(&*ra_ptr.add(1));
+                        let limit = fltvalue(&*ra_ptr);
+                        let idx = fltvalue(&*ra_ptr.add(2));
 
-                    if should_continue {
-                        // Update control variable
-                        setfltvalue(&mut stack[ra + 2], new_idx);
+                        // idx += step
+                        let new_idx = idx + step;
 
-                        // Jump back
-                        if bx > pc {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
+                        // Check if should continue
+                        let should_continue = if step > 0.0 {
+                            new_idx <= limit
+                        } else {
+                            new_idx >= limit
+                        };
+
+                        if should_continue {
+                            // Update control variable
+                            setfltvalue(&mut *ra_ptr.add(2), new_idx);
+
+                            // Jump back
+                            if bx > pc {
+                                lua_state.set_frame_pc(frame_idx, pc as u32);
+                                return Err(lua_state.error("FORLOOP: invalid jump".to_string()));
+                            }
+                            pc -= bx;
                         }
-                        pc -= bx;
+                        // else: exit loop
                     }
-                    // else: exit loop
                 }
             }
             OpCode::ForPrep => {

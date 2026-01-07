@@ -105,33 +105,40 @@ pub fn fltvalue(v: &LuaValue) -> f64 {
 }
 
 /// setivalue - 设置整数值
+/// OPTIMIZATION: Use constructor but inline it
 #[inline(always)]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
-    *v = LuaValue::integer(i);
+    v.meta.set_to_int();
+    v.value.i = i;
 }
 
-/// setfltvalue - 设置浮点值
+/// setfltvalue - 设置浮点值  
+/// OPTIMIZATION: Use constructor but inline it
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
-    *v = LuaValue::float(n);
+    v.meta.set_to_float();
+    v.value.n = n;
 }
 
 /// setbfvalue - 设置false
 #[inline(always)]
 pub fn setbfvalue(v: &mut LuaValue) {
-    (*v) = LuaValue::boolean(false);
+    v.meta.set_boolean(false);
+    v.value.i = 0;
 }
 
 /// setbtvalue - 设置true
 #[inline(always)]
 pub fn setbtvalue(v: &mut LuaValue) {
-    (*v) = LuaValue::boolean(true);
+    v.meta.set_boolean(true);
+    v.value.i = 1;
 }
 
 /// setnilvalue - 设置nil
 #[inline(always)]
 pub fn setnilvalue(v: &mut LuaValue) {
-    *v = LuaValue::nil();
+    v.meta.set_nil();
+    v.value.i = 0;
 }
 
 // ============ 类型转换辅助函数 ============
