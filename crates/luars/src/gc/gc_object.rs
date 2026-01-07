@@ -8,6 +8,42 @@ use crate::{
     lua_vm::{CFunction, LuaState},
 };
 
+/// Cached upvalue - stores both ID and direct pointer for fast access
+/// Mimics Lua C's cl->upvals[i] which is a direct pointer to UpValue
+#[derive(Clone, Copy, Debug)]
+pub struct CachedUpvalue {
+    pub id: UpvalueId,
+    /// Direct pointer to the Upvalue object for fast access
+    /// SAFETY: This pointer is valid as long as the Upvalue exists in ObjectPool
+    /// The Upvalue is kept alive by the GC as long as this function exists
+    pub ptr: *const Upvalue,
+}
+
+unsafe impl Send for CachedUpvalue {}
+unsafe impl Sync for CachedUpvalue {}
+
+impl CachedUpvalue {
+    #[inline(always)]
+    pub fn new(id: UpvalueId, ptr: *const Upvalue) -> Self {
+        Self { id, ptr }
+    }
+    
+    /// Get the upvalue value directly through the cached pointer
+    /// SAFETY: Caller must ensure the pointer is still valid
+    #[inline(always)]
+    pub unsafe fn get_value_unchecked(&self, stack: &[LuaValue]) -> LuaValue {
+        unsafe {
+            let upval = &*self.ptr;
+            if upval.is_open() {
+                let stack_idx = upval.stack_index;
+                *stack.get_unchecked(stack_idx)
+            } else {
+                upval.closed_value
+            }
+        }
+    }
+}
+
 // Object ages for generational GC (like Lua 5.4)
 // Uses 3 bits (0-7)
 pub const G_NEW: u8 = 0; // Created in current cycle
@@ -212,9 +248,10 @@ pub type GcTable = Gc<LuaTable>;
 /// Function body - either Lua bytecode or C function
 pub enum FunctionBody {
     /// Lua function with bytecode chunk
-    Lua(Rc<Chunk>, Vec<UpvalueId>),
-    /// C function (native Rust function) - no upvalues
-    CClosure(CFunction, Vec<UpvalueId>),
+    /// Now includes cached upvalue pointers for direct access (zero-overhead like Lua C)
+    Lua(Rc<Chunk>, Vec<CachedUpvalue>),
+    /// C function (native Rust function) with cached upvalues
+    CClosure(CFunction, Vec<CachedUpvalue>),
 }
 
 pub type GcFunction = Gc<FunctionBody>;
@@ -250,10 +287,25 @@ impl FunctionBody {
         }
     }
 
-    /// Get inline upvalue 1 for CClosureInline1
+    /// Get cached upvalues (direct pointers for fast access)
     #[inline(always)]
-    pub fn upvalues(&self) -> &Vec<UpvalueId> {
+    pub fn cached_upvalues(&self) -> &Vec<CachedUpvalue> {
         match &self {
+            FunctionBody::CClosure(_, uv) => uv,
+            FunctionBody::Lua(_, uv) => uv,
+        }
+    }
+    
+    /// Get upvalue IDs (for compatibility)
+    #[inline(always)]
+    pub fn upvalues(&self) -> Vec<UpvalueId> {
+        self.cached_upvalues().iter().map(|cu| cu.id).collect()
+    }
+    
+    /// Get mutable access to cached upvalues for updating pointers
+    #[inline(always)]
+    pub fn cached_upvalues_mut(&mut self) -> &mut Vec<CachedUpvalue> {
+        match self {
             FunctionBody::CClosure(_, uv) => uv,
             FunctionBody::Lua(_, uv) => uv,
         }

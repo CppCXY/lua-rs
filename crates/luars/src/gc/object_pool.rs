@@ -8,7 +8,7 @@
 // 5. Free list for slot reuse
 // 6. GC headers embedded in objects for mark-sweep
 
-use crate::gc::gc_object::FunctionBody;
+use crate::gc::gc_object::{CachedUpvalue, FunctionBody};
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, TmKind};
 use crate::{
@@ -699,11 +699,23 @@ impl ObjectPool {
     // ==================== Function Operations ====================
 
     /// Create a Lua function (closure with bytecode chunk)
+    /// Now caches upvalue pointers for direct access
     #[inline]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
+        // Build cached upvalues with direct pointers
+        let cached_upvalues: Vec<CachedUpvalue> = upvalue_ids
+            .into_iter()
+            .map(|id| {
+                let ptr = self.upvalues.get(id.0)
+                    .map(|uv| uv.data.as_ref() as *const Upvalue)
+                    .unwrap_or(std::ptr::null());
+                CachedUpvalue::new(id, ptr)
+            })
+            .collect();
+        
         let gc_func = GcFunction {
             header: GcHeader::default(),
-            data: Box::new(FunctionBody::Lua(chunk, upvalue_ids)),
+            data: Box::new(FunctionBody::Lua(chunk, cached_upvalues)),
         };
         let ptr = gc_func.data.as_ref() as *const FunctionBody;
         let id = FunctionId(self.functions.alloc(gc_func));
@@ -711,11 +723,23 @@ impl ObjectPool {
     }
 
     /// Create a C closure (native function with upvalues)
+    /// Now caches upvalue pointers for direct access
     #[inline]
     pub fn create_c_closure(&mut self, func: CFunction, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
+        // Build cached upvalues with direct pointers
+        let cached_upvalues: Vec<CachedUpvalue> = upvalue_ids
+            .into_iter()
+            .map(|id| {
+                let ptr = self.upvalues.get(id.0)
+                    .map(|uv| uv.data.as_ref() as *const Upvalue)
+                    .unwrap_or(std::ptr::null());
+                CachedUpvalue::new(id, ptr)
+            })
+            .collect();
+        
         let gc_func = GcFunction {
             header: GcHeader::default(),
-            data: Box::new(FunctionBody::CClosure(func, upvalue_ids)),
+            data: Box::new(FunctionBody::CClosure(func, cached_upvalues)),
         };
         let ptr = gc_func.data.as_ref() as *const FunctionBody;
         let id = FunctionId(self.functions.alloc(gc_func));
