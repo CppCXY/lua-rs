@@ -399,12 +399,17 @@ pub fn call_metamethod(
     // 3. Call with luaD_call(L, func, 1) - nresults=1
     // 4. Move result from top-1 to result position
 
-    // **Critical**: We need to push at top and let the call mechanism
-    // handle everything. After call, result will be at the function position.
+    // **CRITICAL**: Like Lua 5.5's Protect macro does `L->top.p = ci->top.p`
+    // We must set stack_top to the caller frame's top limit BEFORE pushing arguments.
+    // This ensures push_value won't overwrite active registers in the caller frame.
+    // Caller's registers are in [base, top), so pushing from top is safe.
+    let caller_frame_idx = lua_state.call_depth() - 1;
+    let caller_frame_top = lua_state.get_call_info(caller_frame_idx).top;
+    lua_state.set_top(caller_frame_top);
 
     let func_pos = lua_state.get_top();
 
-    // Push function and arguments
+    // Push function and arguments (now safe - won't overwrite caller's registers)
     lua_state.push_value(metamethod)?;
     lua_state.push_value(arg1)?;
     lua_state.push_value(arg2)?;

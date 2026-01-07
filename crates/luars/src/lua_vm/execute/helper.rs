@@ -418,6 +418,12 @@ pub fn store_to_metatable(
                 if let Some(tm) = get_metamethod_from_metatable(lua_state, mt, "__newindex") {
                     // Has __newindex metamethod
                     if tm.is_function() {
+                        // **CRITICAL**: Like Lua 5.5's Protect macro, set stack_top to caller frame's top
+                        // before pushing arguments. This prevents overwriting active registers.
+                        let caller_frame_idx = lua_state.call_depth() - 1;
+                        let caller_frame_top = lua_state.get_call_info(caller_frame_idx).top;
+                        lua_state.set_top(caller_frame_top);
+
                         // Call metamethod: tm(t, key, value)
                         let func_pos = lua_state.get_top();
 
