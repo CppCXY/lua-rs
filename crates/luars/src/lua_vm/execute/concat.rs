@@ -16,9 +16,6 @@ use crate::{
     lua_vm::{LuaResult, LuaState},
 };
 
-/// Maximum short string length (can use stack buffer)
-const MAX_SHORT_LEN: usize = 256;
-
 /// Convert value to string representation
 /// Returns (string content, was_already_string)
 #[inline]
@@ -68,8 +65,8 @@ pub fn concat_strings(
 ) -> LuaResult<LuaValue> {
     if n == 0 {
         // Empty concat - return empty string
-        let (string_id, _) = lua_state.vm_mut().object_pool.create_string("");
-        return Ok(LuaValue::string(string_id));
+        let v = lua_state.create_string("");
+        return Ok(v);
     }
 
     if n == 1 {
@@ -80,140 +77,47 @@ pub fn concat_strings(
             return Ok(val); // Already a string
         }
         let (s, _) = value_to_string_content(lua_state, &val)?;
-        let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&s);
-        return Ok(LuaValue::string(string_id));
+        let v = lua_state.create_string(&s);
+        return Ok(v);
     }
 
     // Multiple values - optimize concat
     // Phase 1: Check for empty string optimization and collect lengths
     let mut total_len = 0usize;
     let mut all_strings = true;
-    let mut has_empty = false;
-
     // Collect string_ids first (no borrow conflict)
     let stack = lua_state.stack_mut();
-    let mut string_ids = Vec::with_capacity(n);
+    let mut strings = Vec::with_capacity(n);
     for i in 0..n {
-        let val = stack[base + a + i];
-        if let Some(string_id) = val.as_string_id() {
-            string_ids.push(Some(string_id));
+        let val = &stack[base + a + i];
+        if let Some(str) = val.as_string_str() {
+            total_len += str.len();
+            strings.push(str);
         } else {
-            string_ids.push(None);
             all_strings = false;
+            break;
         }
     }
 
-    // Now check lengths (can mutably borrow vm)
-    for id_opt in &string_ids {
-        if let Some(string_id) = id_opt {
-            if let Some(s) = lua_state.vm_mut().object_pool.get_string(*string_id) {
-                let len = s.len();
-                if len == 0 {
-                    has_empty = true;
-                }
-                total_len += len;
-            } else {
-                all_strings = false;
-            }
-        }
-    }
-
+    let mut result = String::with_capacity(total_len);
     // Fast path: all strings already, check for optimizations
     if all_strings {
-        // Optimization: if first or last is empty, can skip it
-        if n == 2 && has_empty {
-            let stack = lua_state.stack_mut();
-            let first = stack[base + a];
-            let second = stack[base + a + 1];
-
-            if let (Some(id1), Some(id2)) = (first.as_string_id(), second.as_string_id()) {
-                let (len1, len2) = {
-                    let pool = &lua_state.vm_mut().object_pool;
-                    let l1 = pool.get_string(id1).map(|s| s.len()).unwrap_or(0);
-                    let l2 = pool.get_string(id2).map(|s| s.len()).unwrap_or(0);
-                    (l1, l2)
-                };
-
-                if len1 == 0 {
-                    return Ok(second); // First is empty, return second
-                }
-                if len2 == 0 {
-                    return Ok(first); // Second is empty, return first
-                }
-            }
+        for s in strings {
+            result.push_str(s);
         }
 
-        // All strings, no empties or can't optimize - concat them
-        if total_len <= MAX_SHORT_LEN {
-            // Short string - use Vec (will be on stack in optimized version)
-            let mut buffer = Vec::with_capacity(total_len);
-
-            for id_opt in &string_ids {
-                if let Some(string_id) = id_opt {
-                    if let Some(s) = lua_state.vm_mut().object_pool.get_string(*string_id) {
-                        buffer.extend_from_slice(s.as_bytes());
-                    }
-                }
-            }
-
-            let result = String::from_utf8(buffer).unwrap_or_default();
-            let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&result);
-            return Ok(LuaValue::string(string_id));
-        } else {
-            // Long string - build directly
-            let mut result = String::with_capacity(total_len);
-
-            for id_opt in &string_ids {
-                if let Some(string_id) = id_opt {
-                    if let Some(s) = lua_state.vm_mut().object_pool.get_string(*string_id) {
-                        result.push_str(s);
-                    }
-                }
-            }
-
-            let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&result);
-            return Ok(LuaValue::string(string_id));
-        }
+        let v = lua_state.create_string(&result);
+        return Ok(v);
     }
-
-    // Slow path: need to convert some values to strings
-    // Collect all parts first, then concatenate
-    let mut parts: Vec<String> = Vec::with_capacity(n);
-    let mut total_len = 0;
-
     // Collect values first
-    let stack = lua_state.stack_mut();
-    let mut values = Vec::with_capacity(n);
     for i in 0..n {
-        values.push(stack[base + a + i]);
+        let value = lua_state.stack_mut()[base + a + i];
+        let (s, _was_string) = value_to_string_content(lua_state, &value)?;
+        result.push_str(&s);
     }
 
-    // Convert to strings (can mutably borrow lua_state)
-    for val in &values {
-        let (s, _was_string) = value_to_string_content(lua_state, val)?;
-        total_len += s.len();
-        parts.push(s);
-    }
-
-    // Build final result
-    if total_len <= MAX_SHORT_LEN {
-        // Short string
-        let mut buffer = Vec::with_capacity(total_len);
-        for part in &parts {
-            buffer.extend_from_slice(part.as_bytes());
-        }
-        let result = String::from_utf8(buffer).unwrap_or_default();
-        let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&result);
-        Ok(LuaValue::string(string_id))
-    } else {
-        // Long string
-        let mut result = String::with_capacity(total_len);
-        for part in parts {
-            result.push_str(&part);
-        }
-        let (string_id, _) = lua_state.vm_mut().object_pool.create_string(&result);
-        Ok(LuaValue::string(string_id))
-    }
+    let s = lua_state.create_string_owned(result);
+    Ok(s)
 }
 
 #[cfg(test)]

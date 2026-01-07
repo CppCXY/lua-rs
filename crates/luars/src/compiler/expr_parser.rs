@@ -133,9 +133,9 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             match string_content {
                 Ok(s) => {
                     // Intern string to ObjectPool and get StringId
-                    let (string_id, _) = fs.pool.create_string(&s);
+                    let (string, _) = fs.pool.create_string(&s);
                     // Create VKSTR expression (not VK!) - will convert to VK when needed
-                    *v = ExpDesc::new_vkstr(string_id);
+                    *v = ExpDesc::new_vkstr(string.as_string_id().unwrap());
                 }
                 Err(e) => {
                     return Err(fs.syntax_error(&format!("invalid string literal: {}", e)));
@@ -242,8 +242,8 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                 // This matches official Lua's codestring (lparser.c:160-164)
                 // which creates VKSTR without calling stringK immediately.
                 // The stringK call happens later in luaK_self via luaK_exp2K (lcode.c:1333)
-                let (string_id, _) = fs.pool.create_string(&method_name);
-                let mut key = ExpDesc::new_vkstr(string_id);
+                let (string, _) = fs.pool.create_string(&method_name);
+                let mut key = ExpDesc::new_vkstr(string.as_string_id().unwrap());
                 code::self_op(fs, v, &mut key);
 
                 funcargs(fs, v)?;
@@ -407,10 +407,10 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
     //   e->u.strval = s;
     // }
     // Create key as VKSTR (not VK) so indexed can track it correctly
-    let (str_id, _) = fs.pool.create_string(&varname);
+    let (string, _) = fs.pool.create_string(&varname);
     let mut key = ExpDesc::new_void();
     key.kind = ExpKind::VKSTR;
-    key.u = ExpUnion::Str(str_id);
+    key.u = ExpUnion::Str(string.as_string_id().unwrap());
     key.t = -1;
     key.f = -1;
 

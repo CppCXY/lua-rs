@@ -1,4 +1,4 @@
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::opcode::Instruction;
@@ -345,10 +345,10 @@ fn get_binop_metamethod(
     // Look up the metamethod in the metatable
     // CRITICAL: Use raw access to avoid triggering __index metamethod
     // This matches Lua 5.5's luaH_Hgetshortstr which is a raw access
-    if let Some(_table_id) = metatable.as_table_id() {
+    if let Some(table) = metatable.as_table_mut() {
         let vm = lua_state.vm_mut();
-        let key = vm.create_string(tm_name);
-        vm.table_get_raw(&metatable, &key) // Use RAW access!
+        let key = vm.object_pool.get_tm_value_by_str(tm_name);
+        table.raw_get(&key)
     } else {
         None
     }
@@ -359,25 +359,16 @@ fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue>
     let vm = lua_state.vm_mut();
 
     match value.kind() {
-        crate::lua_value::LuaValueKind::Table => {
-            if let Some(table_id) = value.as_table_id() {
-                vm.object_pool
-                    .get_table(table_id)
-                    .and_then(|t| t.get_metatable())
+        LuaValueKind::Table => {
+            let meta = value.as_table_mut()?.get_metatable();
+            if let Some(mt_id) = meta {
+                vm.object_pool.get_table_value(mt_id)
             } else {
                 None
             }
         }
-        crate::lua_value::LuaValueKind::Userdata => {
-            if let Some(ud_id) = value.as_userdata_id() {
-                vm.object_pool
-                    .get_userdata(ud_id)
-                    .map(|ud| ud.get_metatable())
-            } else {
-                None
-            }
-        }
-        crate::lua_value::LuaValueKind::String => {
+        LuaValueKind::Userdata => Some(value.as_userdata_mut()?.get_metatable()),
+        LuaValueKind::String => {
             // Strings share a global metatable
             vm.string_mt
         }
@@ -501,78 +492,11 @@ pub fn try_comp_tm(
 /// Handles metamethods for tables and userdata
 pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResult<bool> {
     // Direct port of lvm.c:582 luaV_equalobj
-
-    // Step 1: Check if types are different
-    if t1.ttype() != t2.ttype() {
-        return Ok(false);
-    }
-
-    // Step 2: Check if type tags are different (for number/string variants)
-    if t1.tt != t2.tt {
-        // Handle integer/float comparison
-        if t1.ttisinteger() && t2.ttisfloat() {
-            let i1 = t1.ivalue();
-            let f2 = t2.fltvalue();
-            return Ok(f2.floor() == f2 && i1 == f2 as i64);
-        } else if t1.ttisfloat() && t2.ttisinteger() {
-            let f1 = t1.fltvalue();
-            let i2 = t2.ivalue();
-            return Ok(f1.floor() == f1 && f1 as i64 == i2);
-        }
-        // String variants (short/long) - compare content
-        else if t1.ttisstring() && t2.ttisstring() {
-            let pool = &lua_state.vm_mut().object_pool;
-            let s1_id = t1.tsvalue();
-            let s2_id = t2.tsvalue();
-            let s1 = pool.get_string(s1_id);
-            let s2 = pool.get_string(s2_id);
-            if let (Some(str1), Some(str2)) = (s1, s2) {
-                return Ok(str1 == str2);
-            }
-            return Ok(false);
-        }
-        // Other types with different tags cannot be equal
-        return Ok(false);
-    }
-
-    // Step 3: Same type and tag - compare by type
-    // Use if-else chain instead of match to avoid pattern matching issues
-
-    if t1.ttisnil() || t1.ttisfalse() || t1.ttistrue() {
-        // nil, false, true: if same type/tag, they're equal
+    if t1 == t2 {
         return Ok(true);
     }
 
-    if t1.ttisinteger() {
-        return Ok(t1.ivalue() == t2.ivalue());
-    }
-
-    if t1.ttisfloat() {
-        return Ok(t1.fltvalue() == t2.fltvalue());
-    }
-
-    if t1.ttislightuserdata() {
-        return Ok(unsafe { t1.value.p == t2.value.p });
-    }
-
-    if t1.ttisstring() {
-        // Strings: for short strings, compare IDs (interned)
-        // For long strings, compare content
-        let s1_id = t1.tsvalue();
-        let s2_id = t2.tsvalue();
-
-        // Short strings are interned, so ID comparison is enough
-        if s1_id == s2_id {
-            return Ok(true);
-        }
-
-        // Different IDs: compare content
-        let pool = &lua_state.vm_mut().object_pool;
-        let s1 = pool.get_string(s1_id);
-        let s2 = pool.get_string(s2_id);
-        if let (Some(str1), Some(str2)) = (s1, s2) {
-            return Ok(str1 == str2);
-        }
+    if t1.tt() != t2.tt() {
         return Ok(false);
     }
 

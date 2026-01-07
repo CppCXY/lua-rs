@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{lib_registry, LuaFunction, ObjectPool};
+use crate::{LuaFunction, ObjectPool, lib_registry};
 pub use execute::TmKind;
 pub use opcode::{Instruction, OpCode};
 use std::ptr::null_mut;
@@ -377,41 +377,35 @@ impl LuaVM {
         key: LuaValue,
         value: LuaValue,
     ) -> LuaResult<()> {
-        // Use ObjectPool lookup
-        let Some(table_id) = lua_table_val.as_table_id() else {
-            return Err(self.error("table_set: not a table".to_string()));
-        };
+        let mut meta_id = None;
+        if let Some(table) = lua_table_val.as_table_mut() {
+            if let Some(r) = table.raw_get(&key) {
+                if !r.is_nil() {
+                    // Key exists, just set it directly
+                    table.raw_set(&key, value);
+                    return Ok(());
+                }
+            }
 
-        // Check if key already exists in table
-        let key_exists = if let Some(table) = self.object_pool.get_table(table_id) {
-            table.raw_get(&key).is_some()
-        } else {
-            return Err(self.error("invalid table".to_string()));
-        };
-
-        if key_exists {
-            // Key exists, just set it directly
-            self.table_set_raw(&lua_table_val, key, value);
-            return Ok(());
+            if let Some(id) = table.get_metatable() {
+                meta_id = Some(id);
+            }
         }
 
         // Key doesn't exist, check for __newindex metamethod
-        let metatable = if let Some(table) = self.object_pool.get_table(table_id) {
-            table.get_metatable()
-        } else {
-            return Err(self.error("invalid table".to_string()));
-        };
-        if let Some(mt) = metatable {
-            let newindex_key = self.create_string("__newindex");
-            if let Some(newindex_mm) = self.table_get_raw(&mt, &newindex_key) {
-                if newindex_mm.is_table() {
-                    // __newindex is a table, set in that table
-                    return self.table_set_with_meta(newindex_mm, key, value);
-                } else if newindex_mm.is_function() || newindex_mm.is_cfunction() {
-                    // __newindex is a function, call it
-                    // For now, we'll skip function call to avoid complexity
-                    // TODO: Implement function call for __newindex
-                    return Ok(());
+        if let Some(mt) = meta_id {
+            let newindex_key = self.object_pool.tm_newindex;
+            if let Some(table) = self.object_pool.get_table(mt) {
+                if let Some(newindex_mm) = table.raw_get(&newindex_key) {
+                    if newindex_mm.is_table() {
+                        // __newindex is a table, set in that table
+                        return self.table_set_with_meta(newindex_mm, key, value);
+                    } else if newindex_mm.is_function() || newindex_mm.is_cfunction() {
+                        // __newindex is a function, call it
+                        // For now, we'll skip function call to avoid complexity
+                        // TODO: Implement function call for __newindex
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -423,16 +417,23 @@ impl LuaVM {
 
     /// Get value from userdata with metatable support
     /// Handles __index metamethod
-    pub fn userdata_get(&mut self, userdata_value: &LuaValue, _key: &LuaValue) -> Option<LuaValue> {
-        let Some(userdata_id) = userdata_value.as_userdata_id() else {
-            return None;
-        };
-
-        // Get metatable from userdata
-        let _metatable = {
-            let userdata = self.object_pool.get_userdata(userdata_id)?;
-            userdata.get_metatable()
-        };
+    pub fn userdata_get(&mut self, userdata_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        if let Some(userdata) = userdata_value.as_userdata_mut() {
+            let metatable = userdata.get_metatable();
+            if let Some(table) = metatable.as_table_mut() {
+                // Try to get __index metamethod
+                let index_key = self.object_pool.tm_index;
+                if let Some(index_mm) = table.raw_get(&index_key) {
+                    if index_mm.is_table() {
+                        // __index is a table, do lookup in it
+                        return self.table_get_with_meta(&index_mm, key);
+                    } else if index_mm.is_function() || index_mm.is_cfunction() {
+                        // __index is a function, call it
+                        // For now, we'll skip function call to avoid complexity
+                    }
+                }
+            }
+        }
 
         None
     }
@@ -595,10 +596,10 @@ impl LuaVM {
     pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
         let value = self.object_pool.create_userdata(data);
         let id = value.as_userdata_id().unwrap();
-        self.gc.track_object(GcId::UserdataId(id), std::mem::size_of::<LuaUserdata>());
+        self.gc
+            .track_object(GcId::UserdataId(id), std::mem::size_of::<LuaUserdata>());
         value
     }
-
 
     /// Create a function in object pool
     /// Tracks the object in GC's allgc list for efficient sweep
@@ -606,7 +607,8 @@ impl LuaVM {
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         let value = self.object_pool.create_function(chunk, upvalue_ids);
         let id = value.as_function_id().unwrap();
-        self.gc.track_object(GcId::FunctionId(id), std::mem::size_of::<LuaFunction>());
+        self.gc
+            .track_object(GcId::FunctionId(id), std::mem::size_of::<LuaFunction>());
         value
     }
 
@@ -622,7 +624,8 @@ impl LuaVM {
 
         let value = self.object_pool.create_c_closure(func, upvalue_ids);
         let id = value.as_function_id().unwrap();
-        self.gc.track_object(GcId::FunctionId(id), std::mem::size_of::<GcFunction>());
+        self.gc
+            .track_object(GcId::FunctionId(id), std::mem::size_of::<GcFunction>());
         value
     }
 

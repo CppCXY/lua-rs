@@ -69,13 +69,12 @@ pub fn handle_closure(
     }
 
     // Create the function with the proto and upvalues
-    let func_id = lua_state
+    let closure_value = lua_state
         .vm_mut()
         .object_pool
         .create_function(proto, new_upvalues);
 
     // Store in R[A]
-    let closure_value = LuaValue::function(func_id);
     lua_state.stack_mut()[base + a] = closure_value;
 
     Ok(())

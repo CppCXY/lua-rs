@@ -1,7 +1,7 @@
 use crate::{
     Chunk, LuaResult, LuaValue,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
-    lua_vm::LuaState,
+    lua_vm::{LuaState, execute},
 };
 
 /// Build hidden arguments for vararg functions
@@ -75,13 +75,13 @@ pub fn buildhiddenargs(
 /// ttisinteger - 检查是否是整数 (最快的类型检查)
 #[inline(always)]
 pub fn ttisinteger(v: &LuaValue) -> bool {
-    (*v).tt == LUA_VNUMINT
+    v.ttisinteger()
 }
 
 /// ttisfloat - 检查是否是浮点数
 #[inline(always)]
 pub fn ttisfloat(v: &LuaValue) -> bool {
-    (*v).tt == LUA_VNUMFLT
+    v.ttisfloat()
 }
 
 /// ttisstring - 检查是否是字符串
@@ -95,27 +95,25 @@ pub fn ttisstring(v: &LuaValue) -> bool {
 /// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)
 #[inline(always)]
 pub fn ivalue(v: &LuaValue) -> i64 {
-    unsafe { (*v).value.i }
+    v.ivalue()
 }
 
 /// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
 #[inline(always)]
 pub fn fltvalue(v: &LuaValue) -> f64 {
-    unsafe { (*v).value.n }
+    v.fltvalue()
 }
 
 /// setivalue - 设置整数值
 #[inline(always)]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
-    (*v).value.i = i;
-    (*v).tt = LUA_VNUMINT;
+    *v = LuaValue::integer(i);
 }
 
 /// setfltvalue - 设置浮点值
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
-    (*v).value.n = n;
-    (*v).tt = LUA_VNUMFLT;
+    *v = LuaValue::float(n);
 }
 
 /// setbfvalue - 设置false
@@ -167,12 +165,12 @@ pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
 /// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
 #[inline(always)]
 pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
-    if v.tt == LUA_VNUMFLT {
+    if v.tt() == LUA_VNUMFLT {
         unsafe {
             *out = v.value.n;
         }
         true
-    } else if v.tt == LUA_VNUMINT {
+    } else if v.tt() == LUA_VNUMINT {
         unsafe {
             *out = v.value.i as f64;
         }
@@ -185,7 +183,7 @@ pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
 /// tointeger - 从LuaValue引用获取整数 (用于常量)
 #[inline(always)]
 pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
-    if v.tt == LUA_VNUMINT {
+    if v.tt() == LUA_VNUMINT {
         unsafe {
             *out = v.value.i;
         }
@@ -297,24 +295,15 @@ pub fn get_len_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<Lu
         let mt_val = lua_state.vm_mut().string_mt?;
         return get_metamethod_from_metatable(lua_state, mt_val, "__len");
     }
-
     // For userdata: use userdata's metatable
-    if let Some(ud_id) = obj.as_userdata_id() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_userdata(ud_id)?
-            .get_metatable();
+    else if let Some(ud) = obj.as_userdata_mut() {
+        let mt_val = ud.get_metatable();
         return get_metamethod_from_metatable(lua_state, mt_val, "__len");
     }
-
     // For table: check if it has metatable
-    if let Some(table_id) = obj.as_table_id() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_table(table_id)?
-            .get_metatable()?;
+    else if let Some(table) = obj.as_table_mut() {
+        let mt_id = table.get_metatable()?;
+        let mt_val = lua_state.vm_mut().object_pool.get_table_value(mt_id)?;
         return get_metamethod_from_metatable(lua_state, mt_val, "__len");
     }
 
@@ -328,24 +317,17 @@ fn get_index_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<LuaV
         let mt_val = lua_state.vm_mut().string_mt?;
         return get_metamethod_from_metatable(lua_state, mt_val, "__index");
     }
-
     // For userdata: use userdata's metatable
-    if let Some(ud_id) = obj.as_userdata_id() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_userdata(ud_id)?
-            .get_metatable();
+    else if let Some(ud) = obj.as_userdata_mut() {
+        let mt_val = ud.get_metatable();
         return get_metamethod_from_metatable(lua_state, mt_val, "__index");
     }
-
     // For table: check if it has metatable
-    if let Some(table_id) = obj.as_table_id() {
+    else if let Some(table) = obj.as_table_mut() {
         let mt_val = lua_state
             .vm_mut()
             .object_pool
-            .get_table(table_id)?
-            .get_metatable()?;
+            .get_table_value(table.get_metatable()?)?;
         return get_metamethod_from_metatable(lua_state, mt_val, "__index");
     }
 
@@ -360,7 +342,7 @@ fn get_metamethod_from_metatable(
 ) -> Option<LuaValue> {
     let mt_table_id = mt_val.as_table_id()?;
     let vm = lua_state.vm_mut();
-    let event_key = vm.create_string(event);
+    let event_key = vm.object_pool.get_tm_value_by_str(event);
     let mt = vm.object_pool.get_table(mt_table_id)?;
     mt.raw_get(&event_key)
 }
@@ -387,7 +369,12 @@ pub fn store_to_metatable(
 
                 if let Some(tbl) = table_opt {
                     let ke = tbl.raw_get(key).is_some();
-                    let mt = tbl.get_metatable();
+                    let mt_id = tbl.get_metatable();
+                    let mt = if let Some(mid) = mt_id {
+                        vm.object_pool.get_table_value(mid)
+                    } else {
+                        None
+                    };
                     (ke, mt)
                 } else {
                     return Err(lua_state.error(format!(
@@ -438,7 +425,7 @@ pub fn store_to_metatable(
                         let new_base = func_pos + 1;
                         // Call metamethod (0 results expected)
                         lua_state.push_frame(tm, new_base, 3, 0)?;
-                        crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
+                        execute::lua_execute_until(lua_state, caller_depth)?;
 
                         lua_state.set_top(func_pos); // Clean up stack
                         return Ok(true);
@@ -514,29 +501,31 @@ fn get_newindex_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<L
         let mt_val = lua_state.vm_mut().string_mt?;
         return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
     }
-
     // For userdata: use userdata's metatable
-    if let Some(ud_id) = obj.as_userdata_id() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_userdata(ud_id)?
-            .get_metatable();
+    else if let Some(ud) = obj.as_userdata_mut() {
+        let mt_val = ud.get_metatable();
         return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
     }
-
     // For table: check if it has metatable
-    if let Some(table_id) = obj.as_table_id() {
+    else if let Some(table) = obj.as_table_mut() {
         let mt_val = lua_state
             .vm_mut()
             .object_pool
-            .get_table(table_id)?
-            .get_metatable()?;
+            .get_table_value(table.get_metatable()?)?;
         return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
     }
 
     None
 }
+
+/// Get __call metamethod for a value
+pub fn get_call_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+    // For table: check metatable
+    let mt = get_value_metatable(lua_state, value)?;
+    
+    get_metamethod_from_metatable(lua_state, mt, "__call")
+}
+
 
 /// Get binary operation metamethod from either of two values
 /// Checks v1's metatable first, then v2's if not found
@@ -564,26 +553,14 @@ pub fn get_binop_metamethod(
 }
 
 /// Get metatable for any value type
-fn get_value_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+pub fn get_value_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
     if value.is_string() {
         return lua_state.vm_mut().string_mt;
-    }
-
-    if let Some(table_id) = value.as_table_id() {
-        return lua_state
-            .vm_mut()
-            .object_pool
-            .get_table(table_id)
-            .and_then(|t| t.get_metatable());
-    }
-
-    if let Some(ud_id) = value.as_userdata_id() {
-        if let Some(ud) = lua_state.vm_mut().object_pool.get_userdata(ud_id) {
-            let mt = ud.get_metatable();
-            if !mt.is_nil() {
-                return Some(mt);
-            }
-        }
+    } else if let Some(table) = value.as_table_mut() {
+        let mt_id = table.get_metatable();
+        return lua_state.vm_mut().object_pool.get_table_value(mt_id?);
+    } else if let Some(ud) = value.as_userdata_mut() {
+        return Some(ud.get_metatable());
     }
 
     None

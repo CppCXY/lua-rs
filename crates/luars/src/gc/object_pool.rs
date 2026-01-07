@@ -484,7 +484,7 @@ impl ObjectPool {
     /// TM_IDIV=12, TM_BAND=13, TM_BOR=14, TM_BXOR=15, TM_SHL=16, TM_SHR=17,
     /// TM_UNM=18, TM_BNOT=19, TM_LT=20, TM_LE=21, TM_CONCAT=22, TM_CALL=23
     #[inline]
-    pub fn get_binop_tm(&self, tm: u8) -> LuaValue {
+    pub fn get_tm_value(&self, tm: u8) -> LuaValue {
         match tm {
             0 => self.tm_index,
             1 => self.tm_newindex,
@@ -515,6 +515,38 @@ impl ObjectPool {
         }
     }
 
+    #[inline]
+    pub fn get_tm_value_by_str(&self, tm_str: &str) -> LuaValue {
+        match tm_str {
+            "__index" => self.tm_index,
+            "__newindex" => self.tm_newindex,
+            "__gc" => self.tm_gc,
+            "__mode" => self.tm_mode,
+            "__len" => self.tm_len,
+            "__eq" => self.tm_eq,
+            "__add" => self.tm_add,
+            "__sub" => self.tm_sub,
+            "__mul" => self.tm_mul,
+            "__mod" => self.tm_mod,
+            "__pow" => self.tm_pow,
+            "__div" => self.tm_div,
+            "__idiv" => self.tm_idiv,
+            "__band" => self.tm_band,
+            "__bor" => self.tm_bor,
+            "__bxor" => self.tm_bxor,
+            "__shl" => self.tm_shl,
+            "__shr" => self.tm_shr,
+            "__unm" => self.tm_unm,
+            "__bnot" => self.tm_bnot,
+            "__lt" => self.tm_lt,
+            "__le" => self.tm_le,
+            "__concat" => self.tm_concat,
+            "__call" => self.tm_call,
+            "__close" => self.tm_close,
+            _ => self.tm_index, // Fallback to __index
+        }
+    }
+
     // ==================== String Operations ====================
 
     /// Create or intern a string (Lua-style with proper hash collision handling)
@@ -535,6 +567,13 @@ impl ObjectPool {
     #[inline(always)]
     pub fn get_string(&self, id: StringId) -> Option<&str> {
         self.strings.get(id).map(|gs| gs.data.as_ref().as_str())
+    }
+
+    #[inline(always)]
+    pub fn get_string_value(&self, id: StringId) -> Option<LuaValue> {
+        let gs = self.strings.get(id)?;
+        let ptr = gs.data.as_ptr();
+        Some(LuaValue::string(id, ptr))
     }
 
     #[inline(always)]
@@ -635,6 +674,13 @@ impl ObjectPool {
     #[inline(always)]
     pub fn get_table(&self, id: TableId) -> Option<&LuaTable> {
         self.tables.get(id.0).map(|gt| gt.data.as_ref())
+    }
+
+    #[inline(always)]
+    pub fn get_table_value(&self, id: TableId) -> Option<LuaValue> {
+        let table = self.tables.get(id.0)?;
+        let ptr = table.data.as_ref() as *const LuaTable;
+        Some(LuaValue::table(id, ptr))
     }
 
     #[inline(always)]

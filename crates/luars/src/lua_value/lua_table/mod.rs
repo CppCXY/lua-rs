@@ -6,12 +6,7 @@ mod value_array;
 use super::lua_value::LuaValue;
 use crate::{
     LuaResult, TableId,
-    lua_value::{
-        lua_table::{
-            hash_table::LuaHashTable, type_array::LuaTypedArray, value_array::LuaValueArray,
-        },
-        lua_value::Value,
-    },
+    lua_value::lua_table::{hash_table::LuaHashTable, value_array::LuaValueArray},
     lua_vm::LuaError,
 };
 
@@ -85,7 +80,7 @@ impl LuaTable {
 
     pub fn len(&self) -> usize {
         match &self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.len(),
+            // LuaTableDetail::TypedArray(arr) => arr.len(),
             LuaTableDetail::ValueArray(arr) => arr.len(),
             LuaTableDetail::HashTable(map) => map.len(),
         }
@@ -93,12 +88,13 @@ impl LuaTable {
 
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
         match &self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.get_int(key),
+            // LuaTableDetail::TypedArray(arr) => arr.get_int(key),
             LuaTableDetail::ValueArray(arr) => arr.get_int(key),
             LuaTableDetail::HashTable(map) => map.get_int(key),
         }
     }
 
+    #[allow(unused)]
     fn migrate_to_value_array(&mut self) {
         let len = self.len();
         let old_impl = std::mem::replace(
@@ -106,27 +102,27 @@ impl LuaTable {
             LuaTableDetail::ValueArray(LuaValueArray::new(len)),
         );
 
-        if let LuaTableDetail::ValueArray(new_arr) = &mut self.impl_table {
-            match old_impl {
-                LuaTableDetail::TypedArray(old_arr) => {
-                    let tt = old_arr.tt;
-                    new_arr.array.resize(
-                        len,
-                        LuaValue {
-                            tt,
-                            value: Value::nil(),
-                        },
-                    );
+        // if let LuaTableDetail::ValueArray(new_arr) = &mut self.impl_table {
+        //     match old_impl {
+        //         LuaTableDetail::TypedArray(old_arr) => {
+        //             let tt = old_arr.tt;
+        //             new_arr.array.resize(
+        //                 len,
+        //                 LuaValue {
+        //                     tt,
+        //                     value: Value::nil(),
+        //                 },
+        //             );
 
-                    for i in 0..len {
-                        if let Some(v) = old_arr.get_int((i + 1) as i64) {
-                            new_arr.array[i] = v;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        //             for i in 0..len {
+        //                 if let Some(v) = old_arr.get_int((i + 1) as i64) {
+        //                     new_arr.array[i] = v;
+        //                 }
+        //             }
+        //         }
+        //         _ => {}
+        //     }
+        // }
     }
 
     fn migrate_to_hash_table(&mut self) {
@@ -138,13 +134,13 @@ impl LuaTable {
 
         if let LuaTableDetail::HashTable(new_map) = &mut self.impl_table {
             match old_impl {
-                LuaTableDetail::TypedArray(old_arr) => {
-                    for i in 0..len {
-                        if let Some(v) = old_arr.get_int((i + 1) as i64) {
-                            new_map.set_int((i + 1) as i64, v);
-                        }
-                    }
-                }
+                // LuaTableDetail::TypedArray(old_arr) => {
+                //     for i in 0..len {
+                //         if let Some(v) = old_arr.get_int((i + 1) as i64) {
+                //             new_map.set_int((i + 1) as i64, v);
+                //         }
+                //     }
+                // }
                 LuaTableDetail::ValueArray(old_arr) => {
                     for i in 0..len {
                         if let Some(v) = old_arr.get_int((i + 1) as i64) {
@@ -159,7 +155,7 @@ impl LuaTable {
 
     pub fn set_int(&mut self, key: i64, value: LuaValue) {
         let r = match &mut self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.set_int(key, value),
+            // LuaTableDetail::TypedArray(arr) => arr.set_int(key, value),
             LuaTableDetail::ValueArray(arr) => arr.set_int(key, value),
             LuaTableDetail::HashTable(map) => map.set_int(key, value),
         };
@@ -183,7 +179,7 @@ impl LuaTable {
 
     pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         match &self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.raw_get(key),
+            // LuaTableDetail::TypedArray(arr) => arr.raw_get(key),
             LuaTableDetail::ValueArray(arr) => arr.raw_get(key),
             LuaTableDetail::HashTable(map) => map.raw_get(key),
         }
@@ -191,7 +187,7 @@ impl LuaTable {
 
     pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) {
         let r = match &mut self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.raw_set(key, value),
+            // LuaTableDetail::TypedArray(arr) => arr.raw_set(key, value),
             LuaTableDetail::ValueArray(arr) => arr.raw_set(key, value),
             LuaTableDetail::HashTable(map) => map.raw_set(key, value),
         };
@@ -215,7 +211,7 @@ impl LuaTable {
 
     pub fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
         match &self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.next(input_key),
+            // LuaTableDetail::TypedArray(arr) => arr.next(input_key),
             LuaTableDetail::ValueArray(arr) => arr.next(input_key),
             LuaTableDetail::HashTable(map) => map.next(input_key),
         }
@@ -224,7 +220,7 @@ impl LuaTable {
     pub fn insert_array_at(&mut self, i: i64, value: LuaValue) -> LuaResult<()> {
         let index = (i - 1) as usize;
         let r = match &mut self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.insert_at(index, value),
+            // LuaTableDetail::TypedArray(arr) => arr.insert_at(index, value),
             LuaTableDetail::ValueArray(arr) => arr.insert_at(index, value),
             LuaTableDetail::HashTable(map) => map.insert_at(index, value),
         };
@@ -251,7 +247,7 @@ impl LuaTable {
     pub fn remove_array_at(&mut self, i: i64) -> LuaResult<LuaValue> {
         let index = (i - 1) as usize;
         match &mut self.impl_table {
-            LuaTableDetail::TypedArray(arr) => arr.remove_at(index),
+            // LuaTableDetail::TypedArray(arr) => arr.remove_at(index),
             LuaTableDetail::ValueArray(arr) => arr.remove_at(index),
             LuaTableDetail::HashTable(map) => map.remove_at(index),
         }
@@ -260,17 +256,17 @@ impl LuaTable {
     pub fn iter_all(&self) -> Vec<(LuaValue, LuaValue)> {
         let mut result = Vec::new();
         match &self.impl_table {
-            LuaTableDetail::TypedArray(ar) => {
-                let tt = ar.tt;
-                for i in 0..ar.array.len() {
-                    let value = LuaValue {
-                        value: ar.array[i],
-                        tt,
-                    };
-                    let key = LuaValue::integer((i + 1) as i64);
-                    result.push((key, value));
-                }
-            }
+            // LuaTableDetail::TypedArray(ar) => {
+            //     let tt = ar.tt;
+            //     for i in 0..ar.array.len() {
+            //         let value = LuaValue {
+            //             value: ar.array[i],
+            //             tt,
+            //         };
+            //         let key = LuaValue::integer((i + 1) as i64);
+            //         result.push((key, value));
+            //     }
+            // }
             LuaTableDetail::ValueArray(ar) => {
                 for i in 0..ar.array.len() {
                     let value = ar.array[i];
@@ -308,7 +304,7 @@ pub trait LuaTableImpl {
 }
 
 pub enum LuaTableDetail {
-    TypedArray(LuaTypedArray),
+    // TypedArray(LuaTypedArray),
     ValueArray(LuaValueArray),
     HashTable(LuaHashTable),
 }
@@ -322,8 +318,6 @@ pub enum LuaInsertResult {
 
 #[cfg(test)]
 mod test {
-    use super::LuaTable;
-    use crate::{ObjectPool, lua_value::LuaValue};
 
     #[test]
     fn test_table_set_get() {

@@ -1454,7 +1454,7 @@ fn execute_frame(
                 let rb = &stack[base + b];
 
                 // l_isfalse: nil or false
-                let is_false = rb.tt == LUA_VFALSE || rb.is_nil();
+                let is_false = rb.tt() == LUA_VFALSE || rb.is_nil();
                 if is_false {
                     setbtvalue(&mut stack[base + a]);
                 } else {
@@ -2295,7 +2295,7 @@ fn execute_frame(
                 let ra = &stack[base + a];
 
                 // l_isfalse: nil or false
-                let is_false = ra.is_nil() || (ra.is_boolean() && ra.tt == LUA_VFALSE);
+                let is_false = ra.is_nil() || (ra.is_boolean() && ra.tt() == LUA_VFALSE);
                 let cond = !is_false;
 
                 if cond != k {
@@ -2318,7 +2318,7 @@ fn execute_frame(
 
                 let stack = lua_state.stack_mut();
                 let rb = &stack[base + b];
-                let is_false = rb.is_nil() || (rb.is_boolean() && rb.tt == LUA_VFALSE);
+                let is_false = rb.is_nil() || (rb.is_boolean() && rb.tt() == LUA_VFALSE);
 
                 if is_false == k {
                     pc += 1; // Condition failed - skip next instruction (JMP)

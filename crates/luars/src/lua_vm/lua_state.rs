@@ -765,17 +765,6 @@ impl LuaState {
         self.vm_mut().create_userdata(data)
     }
 
-    /// Get userdata reference
-    pub fn get_userdata(&self, value: &LuaValue) -> Option<&LuaUserdata> {
-        let vm = unsafe { &*self.vm };
-        vm.get_userdata(value)
-    }
-
-    /// Get mutable userdata reference
-    pub fn get_userdata_mut(&mut self, value: &LuaValue) -> Option<&mut LuaUserdata> {
-        self.vm_mut().get_userdata_mut(value)
-    }
-
     // ===== Global Access =====
 
     /// Get global variable

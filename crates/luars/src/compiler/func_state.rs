@@ -1,7 +1,7 @@
 use crate::Chunk;
 use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
 // Port of FuncState and related structures from lparser.h
-use crate::gc::{ObjectPool, TableId};
+use crate::gc::ObjectPool;
 use crate::{LuaValue, compiler::parser::LuaLexer};
 
 // Upvalue descriptor
@@ -36,7 +36,7 @@ pub struct FuncState<'a> {
     pub numparams: u8,                 // number of fixed parameters (excluding vararg parameter)
     pub first_local: usize,            // index of first local variable in prev
     pub source_name: String,           // source file name for error messages
-    pub kcache: TableId, // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
+    pub kcache: LuaValue, // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
 }
 
 pub struct CompilerState {

@@ -8,7 +8,7 @@
 /// - TAILCALL: replace current frame, return FrameAction::TailCall (main loop loads new chunk)
 use crate::{
     LuaValue,
-    lua_vm::{CFunction, LuaError, LuaResult, LuaState},
+    lua_vm::{CFunction, LuaError, LuaResult, LuaState, execute::helper::get_call_metamethod},
 };
 
 pub enum FrameAction {
@@ -145,26 +145,6 @@ pub fn handle_call(
             Err(lua_state.error(format!("attempt to call a {} value", func.type_name())))
         }
     }
-}
-
-/// Get __call metamethod for a value
-fn get_call_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
-    // For table: check metatable
-    if let Some(table_id) = value.as_table_id() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_table(table_id)?
-            .get_metatable()?;
-
-        let mt_table_id = mt_val.as_table_id()?;
-        let vm = lua_state.vm_mut();
-        let key = vm.create_string("__call");
-        let mt = vm.object_pool.get_table(mt_table_id)?;
-        return mt.raw_get(&key);
-    }
-
-    None
 }
 
 /// Call a C function and handle results  

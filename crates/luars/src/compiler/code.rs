@@ -914,7 +914,7 @@ fn nil_k(fs: &mut FuncState) -> usize {
     //   sethvalue(fs->ls->L, &k, fs->kcache);
     //   return k2proto(fs, &k, &v);
     // }
-    let key = LuaValue::table(fs.kcache);
+    let key = fs.kcache;
     let val = LuaValue::nil();
     add_constant_with_key(fs, key, val)
 }
@@ -990,12 +990,11 @@ fn integer_k(fs: &mut FuncState, i: i64) -> usize {
 // static int stringK (FuncState *fs, TString *s)
 pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     // Intern string to ObjectPool and get StringId
-    let (string_id, _) = fs.pool.create_string(&s);
+    let (string, _) = fs.pool.create_string(&s);
 
     // Add LuaValue with StringId to constants (check for duplicates)
     // For strings, key == value (strings are deduplicated globally)
-    let value = LuaValue::string(string_id);
-    add_constant(fs, value)
+    add_constant(fs, string)
 }
 
 // Port of str2K from lcode.c:738-742
@@ -1019,7 +1018,7 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) -> usize {
     debug_assert!(e.kind == ExpKind::VKSTR);
     e.kind = ExpKind::VK;
     let str_id = e.u.str();
-    let value = LuaValue::string(str_id);
+    let value = fs.pool.get_string_value(str_id).unwrap();
     let k = add_constant(fs, value);
     e.u = ExpUnion::Info(k as i32);
     k
@@ -1039,7 +1038,7 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) -> usize {
 fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> usize {
     // Query kcache table with key (lcode.c:567)
     let found_idx: Option<usize> = {
-        if let Some(kcache_table) = fs.pool.get_table(fs.kcache) {
+        if let Some(kcache_table) = fs.kcache.as_table_mut() {
             // luaH_get returns the value if found (stored as integer index)
             if let Some(idx_value) = kcache_table.raw_get(&key) {
                 idx_value.as_integer().map(|i| i as usize)
@@ -1069,7 +1068,7 @@ fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> 
     fs.chunk.constants.push(value.clone());
 
     // Store key->index mapping in kcache table (lcode.c:575-576)
-    if let Some(kcache_table) = fs.pool.get_table_mut(fs.kcache) {
+    if let Some(kcache_table) = fs.kcache.as_table_mut() {
         kcache_table.raw_set(&key, LuaValue::integer(idx as i64));
     }
 
@@ -2459,7 +2458,8 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
         ExpKind::VKSTR => {
             // String constant - already in constants
             let id = e.u.str();
-            Some(LuaValue::string(id))
+            let str_value = fs.pool.get_string_value(id)?;
+            Some(str_value)
         }
         ExpKind::VK => {
             // Constant in K
