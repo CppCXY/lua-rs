@@ -134,11 +134,6 @@ impl Value {
     }
 
     #[inline(always)]
-    pub fn ptr(p: *const u8) -> Self {
-        Value { ptr: p }
-    }
-
-    #[inline(always)]
     pub fn lightuserdata(p: *mut std::ffi::c_void) -> Self {
         Value { p }
     }
@@ -287,6 +282,26 @@ impl LuaValue {
     #[inline(always)]
     pub fn number(n: f64) -> Self {
         Self::float(n)
+    }
+
+    // ============ In-place mutators (for VM performance) ============
+
+    /// Set this value to an integer (mutates in place)
+    /// PERFORMANCE: Avoids creating new LuaValue, directly modifies memory
+    /// Port of Lua 5.5's setivalue macro: v->value_.i = x; settt_(v, LUA_VNUMINT)
+    #[inline(always)]
+    pub fn set_integer(&mut self, i: i64) {
+        self.value.i = i;
+        self.meta.set_to_int();
+    }
+
+    /// Set this value to a float (mutates in place)
+    /// PERFORMANCE: Avoids creating new LuaValue, directly modifies memory
+    /// Port of Lua 5.5's setfltvalue macro: v->value_.n = x; settt_(v, LUA_VNUMFLT)
+    #[inline(always)]
+    pub fn set_float(&mut self, n: f64) {
+        self.value.n = n;
+        self.meta.set_to_float();
     }
 
     /// Create a string value from StringId

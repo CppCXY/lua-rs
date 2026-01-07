@@ -105,7 +105,7 @@ pub fn fltvalue(v: &LuaValue) -> f64 {
 }
 
 /// setivalue - 设置整数值
-/// OPTIMIZATION: Use constructor but inline it
+/// OPTIMIZATION: Direct field access matching Lua 5.5's setivalue macro
 #[inline(always)]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
     v.meta.set_to_int();
@@ -113,7 +113,7 @@ pub fn setivalue(v: &mut LuaValue, i: i64) {
 }
 
 /// setfltvalue - 设置浮点值  
-/// OPTIMIZATION: Use constructor but inline it
+/// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
     v.meta.set_to_float();
