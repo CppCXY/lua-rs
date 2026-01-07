@@ -40,6 +40,7 @@ use crate::{
     },
 };
 pub use metamethod::TmKind;
+pub use helper::{get_metamethod_event, get_metatable};
 
 /// Main VM execution entry point
 ///

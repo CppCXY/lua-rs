@@ -841,6 +841,13 @@ impl ObjectPool {
     }
 
     #[inline(always)]
+    pub fn get_thread_value(&self, id: ThreadId) -> Option<LuaValue> {
+        let thread = self.threads.get(id.0)?;
+        let ptr = thread.data.as_ref() as *const LuaState;
+        Some(LuaValue::thread(id, ptr))
+    }
+
+    #[inline(always)]
     pub fn get_thread_mut(&mut self, id: ThreadId) -> Option<&mut LuaState> {
         self.threads.get_mut(id.0).map(|gt| gt.data.as_mut())
     }

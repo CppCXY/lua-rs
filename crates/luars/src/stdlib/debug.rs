@@ -3,7 +3,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaResult, LuaState};
+use crate::lua_vm::{get_metatable, LuaResult, LuaState};
 
 pub fn create_debug_lib() -> LibraryModule {
     crate::lib_module!("debug", {
@@ -121,18 +121,9 @@ fn debug_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("getmetatable() requires argument 1".to_string()))?;
 
     // For tables, get metatable directly
-    if let Some(table_id) = value.as_table_id() {
-        let vm = l.vm_mut();
-        if let Some(table) = vm.object_pool.get_table(table_id) {
-            if let Some(mt) = table.get_metatable() {
-                l.push_value(mt)?;
-                return Ok(1);
-            }
-        }
-    }
-
+    let v = get_metatable(l, &value).unwrap_or(LuaValue::nil());
     // For other types, return nil (simplified)
-    l.push_value(LuaValue::nil())?;
+    l.push_value(v)?;
     Ok(1)
 }
 

@@ -312,26 +312,7 @@ pub fn get_len_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<Lu
 
 /// Get __index metamethod for a value
 fn get_index_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<LuaValue> {
-    // For string: use string_mt
-    if obj.is_string() {
-        let mt_val = lua_state.vm_mut().string_mt?;
-        return get_metamethod_from_metatable(lua_state, mt_val, "__index");
-    }
-    // For userdata: use userdata's metatable
-    else if let Some(ud) = obj.as_userdata_mut() {
-        let mt_val = ud.get_metatable();
-        return get_metamethod_from_metatable(lua_state, mt_val, "__index");
-    }
-    // For table: check if it has metatable
-    else if let Some(table) = obj.as_table_mut() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_table_value(table.get_metatable()?)?;
-        return get_metamethod_from_metatable(lua_state, mt_val, "__index");
-    }
-
-    None
+    get_metamethod_event(lua_state, obj, "__index")
 }
 
 /// Get a metamethod from a metatable value
@@ -496,36 +477,22 @@ pub fn store_to_metatable(
 
 /// Get __newindex metamethod for a value
 fn get_newindex_metamethod(lua_state: &mut LuaState, obj: &LuaValue) -> Option<LuaValue> {
-    // For string: use string_mt
-    if obj.is_string() {
-        let mt_val = lua_state.vm_mut().string_mt?;
-        return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
-    }
-    // For userdata: use userdata's metatable
-    else if let Some(ud) = obj.as_userdata_mut() {
-        let mt_val = ud.get_metatable();
-        return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
-    }
-    // For table: check if it has metatable
-    else if let Some(table) = obj.as_table_mut() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_table_value(table.get_metatable()?)?;
-        return get_metamethod_from_metatable(lua_state, mt_val, "__newindex");
-    }
-
-    None
+    get_metamethod_event(lua_state, obj, "__newindex")
 }
 
 /// Get __call metamethod for a value
 pub fn get_call_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
-    // For table: check metatable
-    let mt = get_value_metatable(lua_state, value)?;
-    
-    get_metamethod_from_metatable(lua_state, mt, "__call")
+    get_metamethod_event(lua_state, value, "__call")
 }
 
+pub fn get_metamethod_event(
+    lua_state: &mut LuaState,
+    value: &LuaValue,
+    event: &str,
+) -> Option<LuaValue> {
+    let mt = get_metatable(lua_state, value)?;
+    get_metamethod_from_metatable(lua_state, mt, event)
+}
 
 /// Get binary operation metamethod from either of two values
 /// Checks v1's metatable first, then v2's if not found
@@ -536,14 +503,14 @@ pub fn get_binop_metamethod(
     event: &str,
 ) -> Option<LuaValue> {
     // Try v1's metatable first
-    if let Some(mt) = get_value_metatable(lua_state, v1) {
+    if let Some(mt) = get_metatable(lua_state, v1) {
         if let Some(mm) = get_metamethod_from_metatable(lua_state, mt, event) {
             return Some(mm);
         }
     }
 
     // Try v2's metatable
-    if let Some(mt) = get_value_metatable(lua_state, v2) {
+    if let Some(mt) = get_metatable(lua_state, v2) {
         if let Some(mm) = get_metamethod_from_metatable(lua_state, mt, event) {
             return Some(mm);
         }
@@ -553,7 +520,7 @@ pub fn get_binop_metamethod(
 }
 
 /// Get metatable for any value type
-pub fn get_value_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
     if value.is_string() {
         return lua_state.vm_mut().string_mt;
     } else if let Some(table) = value.as_table_mut() {

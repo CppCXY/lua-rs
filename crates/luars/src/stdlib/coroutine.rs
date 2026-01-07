@@ -115,15 +115,8 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("coroutine.status requires a thread argument".to_string()));
     }
 
-    let Some(thread_id) = thread_val.as_thread_id() else {
-        let status_str = l.create_string("dead");
-        l.push_value(status_str)?;
-        return Ok(1);
-    };
-
     // Check if thread exists and get status
-    let vm = l.vm_mut();
-    let status_str = if let Some(thread) = vm.object_pool.get_thread(thread_id) {
+    let status_str = if let Some(thread) = thread_val.as_thread_mut() {
         // Thread is suspended if it has frames or stack content
         if thread.call_depth() > 0 {
             "suspended"
@@ -146,8 +139,8 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 fn coroutine_running(l: &mut LuaState) -> LuaResult<usize> {
     // In the main thread, return nil and true
     let thread_id = l.get_thread_id();
-
-    l.push_value(LuaValue::thread(thread_id))?;
+    let thread_value = l.vm_mut().object_pool.get_thread_value(thread_id).unwrap();
+    l.push_value(thread_value)?;
     l.push_value(LuaValue::boolean(thread_id.is_main()))?;
     Ok(2)
 }
@@ -255,14 +248,12 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("invalid thread".to_string()));
     };
 
-    // Check if thread exists and close it
-    let vm = l.vm_mut();
-    if vm.object_pool.get_thread(thread_id).is_none() {
-        return Err(l.error("cannot close dead coroutine".to_string()));
+    if thread_id.is_main() {
+        return Err(l.error("cannot close the main thread".to_string()));
     }
 
     // Clear the thread's stack and frames to mark it as closed
-    if let Some(thread) = vm.object_pool.get_thread_mut(thread_id) {
+    if let Some(thread) = thread_val.as_thread_mut() {
         thread.stack_truncate(0);
         while thread.call_depth() > 0 {
             thread.pop_frame();

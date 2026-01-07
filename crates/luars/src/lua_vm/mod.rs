@@ -21,6 +21,7 @@ pub use execute::TmKind;
 pub use opcode::{Instruction, OpCode};
 use std::ptr::null_mut;
 use std::rc::Rc;
+pub use execute::{get_metamethod_event, get_metatable};
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua

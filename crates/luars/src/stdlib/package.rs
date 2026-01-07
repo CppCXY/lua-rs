@@ -246,7 +246,7 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     let chunk = vm.compile_with_name(&source, &chunkname)?;
 
     // Create a function from the chunk with _ENV upvalue
-    let env_upvalue_id = vm.create_upvalue_closed(LuaValue::table(vm.global));
+    let env_upvalue_id = vm.create_upvalue_closed(vm.global);
     let func = vm.create_function(Rc::new(chunk), vec![env_upvalue_id]);
 
     // Push the function to be called by require

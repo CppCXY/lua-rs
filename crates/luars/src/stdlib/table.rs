@@ -46,13 +46,9 @@ fn table_create(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Create table with pre-allocated sizes
-    let table_val = {
-        let vm = l.vm_mut();
-        let table = vm.object_pool.create_table(narray as usize, nhash as usize);
-        LuaValue::table(table)
-    };
+    let table = l.create_table(narray as usize, nhash as usize);
 
-    l.push_value(table_val)?;
+    l.push_value(table)?;
     Ok(1)
 }
 

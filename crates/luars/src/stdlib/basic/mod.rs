@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::lua_vm::{LuaError, LuaResult, LuaState};
+use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event, get_metatable};
 use require::lua_require;
 
 pub fn create_basic_lib() -> LibraryModule {
@@ -271,35 +271,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
 
 /// Get __tostring metamethod for a value
 fn get_tostring_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
-    // For table: check metatable
-    if let Some(table_id) = value.as_table_id() {
-        let mt_val = lua_state
-            .vm_mut()
-            .object_pool
-            .get_table(table_id)?
-            .get_metatable()?;
-
-        let mt_table_id = mt_val.as_table_id()?;
-        let vm = lua_state.vm_mut();
-        let key = vm.create_string("__tostring");
-        let mt = vm.object_pool.get_table(mt_table_id)?;
-        return mt.raw_get(&key);
-    }
-
-    // For userdata: check metatable
-    if let Some(ud_id) = value.as_userdata_id() {
-        let ud = lua_state.vm_mut().object_pool.get_userdata(ud_id)?;
-        let mt_val = ud.get_metatable();
-        if !mt_val.is_nil() {
-            let mt_table_id = mt_val.as_table_id()?;
-            let vm = lua_state.vm_mut();
-            let key = vm.create_string("__tostring");
-            let mt = vm.object_pool.get_table(mt_table_id)?;
-            return mt.raw_get(&key);
-        }
-    }
-
-    None
+    get_metamethod_event(lua_state, value, "__tostring")
 }
 
 /// select(index, ...) - Return subset of arguments
@@ -577,79 +549,9 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'getmetatable' (value expected)".to_string()))?;
 
-    match value.kind() {
-        LuaValueKind::Table => {
-            let vm = l.vm_mut();
-            let Some(table_id) = value.as_table_id() else {
-                return Err(l.error("Invalid table".to_string()));
-            };
-
-            // Get metatable
-            let mt = {
-                let Some(table_ref) = vm.object_pool.get_table(table_id) else {
-                    return Err(l.error("Invalid table".to_string()));
-                };
-                table_ref.get_metatable()
-            };
-
-            if let Some(mt) = mt {
-                // Check for __metatable field
-                let metatable_key = vm.create_string("__metatable");
-                if let Some(mt_id) = mt.as_table_id() {
-                    if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
-                        if let Some(protected) = mt_table.raw_get(&metatable_key) {
-                            if !protected.is_nil() {
-                                l.push_value(protected)?;
-                                return Ok(1);
-                            }
-                        }
-                    }
-                }
-                l.push_value(mt)?;
-                Ok(1)
-            } else {
-                l.push_value(LuaValue::nil())?;
-                Ok(1)
-            }
-        }
-        LuaValueKind::String => {
-            let mt = l.vm_mut().string_mt.unwrap_or(LuaValue::nil());
-            l.push_value(mt)?;
-            Ok(1)
-        }
-        LuaValueKind::Userdata => {
-            let vm = l.vm_mut();
-            // Return userdata metatable
-            if let Some(ud_id) = value.as_userdata_id() {
-                if let Some(ud) = vm.object_pool.get_userdata(ud_id) {
-                    let mt = ud.get_metatable();
-                    if !mt.is_nil() {
-                        // Check for __metatable field
-                        let metatable_key = vm.create_string("__metatable");
-                        if let Some(mt_id) = mt.as_table_id() {
-                            if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
-                                if let Some(protected) = mt_table.raw_get(&metatable_key) {
-                                    if !protected.is_nil() {
-                                        l.push_value(protected)?;
-                                        return Ok(1);
-                                    }
-                                }
-                            }
-                        }
-                        l.push_value(mt)?;
-                        return Ok(1);
-                    }
-                }
-            }
-            l.push_value(LuaValue::nil())?;
-            Ok(1)
-        }
-        // TODO: Support metatables for other types (numbers, etc.)
-        _ => {
-            l.push_value(LuaValue::nil())?;
-            Ok(1)
-        }
-    }
+    let v = get_metatable(l, &value).unwrap_or(LuaValue::nil());
+    l.push_value(v)?;
+    Ok(1)
 }
 
 /// setmetatable(table, metatable) - Set metatable
@@ -661,61 +563,24 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'setmetatable' (value expected)".to_string()))?;
 
-    let vm = l.vm_mut();
-
-    // Set the new metatable using ObjectPool
-    let Some(table_id) = table.as_table_id() else {
-        return Err(l.error("bad argument #1 to 'setmetatable' (table expected)".to_string()));
-    };
-
-    // Create the key first to avoid borrow issues
-    let metatable_field = vm.create_string("__metatable");
-
-    // Check if current metatable has __metatable field (protection)
-    let is_protected = {
-        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
-            return Err(l.error("Invalid table".to_string()));
-        };
-        if let Some(current_mt) = table_ref.get_metatable() {
-            if let Some(mt_id) = current_mt.as_table_id() {
-                if let Some(mt_table) = vm.object_pool.get_table(mt_id) {
-                    mt_table.raw_get(&metatable_field).is_some()
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    };
-
-    if is_protected {
-        return Err(l.error("cannot change a protected metatable".to_string()));
-    }
-
     // Now modify the table
-    let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
-        return Err(l.error("Invalid table".to_string()));
-    };
-
-    match metatable.kind() {
-        LuaValueKind::Nil => {
-            table_ref.set_metatable(None);
-        }
-        LuaValueKind::Table => {
-            table_ref.set_metatable(Some(metatable.clone()));
-        }
-        _ => {
-            return Err(
-                l.error("setmetatable() second argument must be a table or nil".to_string())
-            );
+    if let Some(table_ref) = table.as_table_mut() {
+        match metatable.kind() {
+            LuaValueKind::Nil => {
+                table_ref.set_metatable(None);
+            }
+            LuaValueKind::Table => {
+                table_ref.set_metatable(Some(metatable.clone()));
+            }
+            _ => {
+                return Err(
+                    l.error("setmetatable() second argument must be a table or nil".to_string())
+                );
+            }
         }
     }
-
     // Return the original table
-    l.push_value(table.clone())?;
+    l.push_value(table)?;
     Ok(1)
 }
 
@@ -914,7 +779,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             let env_upvalue_id = if let Some(env) = env {
                 vm.create_upvalue_closed(env)
             } else {
-                vm.create_upvalue_closed(LuaValue::table(vm.global))
+                vm.create_upvalue_closed(vm.global)
             };
             let upvalues = vec![env_upvalue_id];
 
@@ -965,7 +830,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.create_upvalue_closed(LuaValue::table(vm.global));
+            let env_upvalue_id = vm.create_upvalue_closed(vm.global);
             let upvalues = vec![env_upvalue_id];
             let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
             l.push_value(func)?;
