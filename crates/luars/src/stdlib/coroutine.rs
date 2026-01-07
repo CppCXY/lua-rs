@@ -4,6 +4,7 @@
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
+use crate::ThreadId;
 
 pub fn create_coroutine_lib() -> LibraryModule {
     crate::lib_module!("coroutine", {
@@ -76,8 +77,11 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
         Err(e) => {
             // Error occurred during resume - get detailed error message
             let error_msg = {
-                let vm = l.vm_mut();
-                vm.get_error_message().to_string()
+                if let Some(thread) = thread_val.as_thread_mut() {
+                    thread.error_msg().to_string()
+                } else {
+                    String::new()
+                }
             };
             let error_str = if error_msg.is_empty() {
                 l.create_string(&format!("{:?}", e))
@@ -115,6 +119,15 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("coroutine.status requires a thread argument".to_string()));
     }
 
+    if let Some(thread_id) = thread_val.as_thread_id() {
+        if thread_id.is_main() {
+            // Main thread is always running
+            let status_val = l.create_string("running");
+            l.push_value(status_val)?;
+            return Ok(1);
+        }
+    }
+
     // Check if thread exists and get status
     let status_str = if let Some(thread) = thread_val.as_thread_mut() {
         // Thread is suspended if it has frames or stack content
@@ -139,9 +152,16 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 fn coroutine_running(l: &mut LuaState) -> LuaResult<usize> {
     // In the main thread, return nil and true
     let thread_id = l.get_thread_id();
+    if thread_id.is_main() {
+        let main_ptr = l as *mut LuaState;
+        l.push_value(LuaValue::thread(ThreadId::main_id(), main_ptr))?;
+        l.push_value(LuaValue::boolean(true))?;
+        return Ok(2);
+    }
+
     let thread_value = l.vm_mut().object_pool.get_thread_value(thread_id).unwrap();
     l.push_value(thread_value)?;
-    l.push_value(LuaValue::boolean(thread_id.is_main()))?;
+    l.push_value(LuaValue::boolean(false))?;
     Ok(2)
 }
 
@@ -224,10 +244,8 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
 
 /// coroutine.isyieldable() - Check if current position can yield
 fn coroutine_isyieldable(l: &mut LuaState) -> LuaResult<usize> {
-    // For now, we can't easily determine if we're in a yieldable context
-    // Return false from main thread
-    // TODO: Track execution context properly
-    l.push_value(LuaValue::boolean(false))?;
+    let id = l.get_thread_id();
+    l.push_value(LuaValue::boolean(!id.is_main()))?;
     Ok(1)
 }
 

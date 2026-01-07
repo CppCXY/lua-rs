@@ -79,7 +79,7 @@ fn create_stdin(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file_mt = create_file_metatable(l)?;
     let userdata = l.create_userdata(LuaUserdata::new(file));
 
-    if let Some(ud) = l.get_userdata_mut(&userdata) {
+    if let Some(ud) = userdata.as_userdata_mut() {
         ud.set_metatable(file_mt);
     }
 
@@ -92,7 +92,7 @@ fn create_stdout(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file_mt = create_file_metatable(l)?;
     let userdata = l.create_userdata(LuaUserdata::new(file));
 
-    if let Some(ud) = l.get_userdata_mut(&userdata) {
+    if let Some(ud) = userdata.as_userdata_mut() {
         ud.set_metatable(file_mt);
     }
 
@@ -105,7 +105,7 @@ fn create_stderr(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file_mt = create_file_metatable(l)?;
     let userdata = l.create_userdata(LuaUserdata::new(file));
 
-    if let Some(ud) = l.get_userdata_mut(&userdata) {
+    if let Some(ud) = userdata.as_userdata_mut() {
         ud.set_metatable(file_mt);
     }
 
@@ -255,10 +255,8 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
             let userdata = l.create_userdata(LuaUserdata::new(file));
 
             // Set metatable
-            if let Some(_ud_id) = userdata.as_userdata_id() {
-                if let Some(ud) = l.get_userdata_mut(&userdata) {
-                    ud.set_metatable(file_mt);
-                }
+            if let Some(ud) = userdata.as_userdata_mut() {
+                ud.set_metatable(file_mt);
             }
 
             l.push_value(userdata)?;
@@ -295,10 +293,8 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                 let userdata = l.create_userdata(LuaUserdata::new(file));
 
                 // Set metatable
-                if let Some(_ud_id) = userdata.as_userdata_id() {
-                    if let Some(ud) = l.get_userdata_mut(&userdata) {
-                        ud.set_metatable(file_mt);
-                    }
+                if let Some(ud) = userdata.as_userdata_mut() {
+                    ud.set_metatable(file_mt);
                 }
 
                 // Create state table with file handle
@@ -330,10 +326,9 @@ fn io_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
 
     // Read next line
-    if let Some(ud) = l.get_userdata(&file_val) {
-        let data = ud.get_data();
-        let mut data_ref = data.borrow_mut();
-        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+    if let Some(ud) = file_val.as_userdata_mut() {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             let res = lua_file.read_line();
             match res {
                 Ok(Some(line)) => {
@@ -370,23 +365,17 @@ fn io_type(l: &mut LuaState) -> LuaResult<usize> {
     let obj = l.get_arg(1);
 
     if let Some(val) = obj {
-        if let Some(ud) = l.get_userdata(&val) {
-            let data = ud.get_data();
-            let data_ref = data.borrow();
-            if data_ref.downcast_ref::<LuaFile>().is_some() {
-                // Check if file is closed
-                drop(data_ref);
-                let data_ref = data.borrow();
-                if let Some(lua_file) = data_ref.downcast_ref::<LuaFile>() {
-                    if lua_file.is_closed() {
-                        let result = l.create_string("closed file");
-                        l.push_value(result)?;
-                        return Ok(1);
-                    } else {
-                        let result = l.create_string("file");
-                        l.push_value(result)?;
-                        return Ok(1);
-                    }
+        if let Some(ud) = val.as_userdata_mut() {
+            let data = ud.get_data_mut();
+            if let Some(lua_file) = data.downcast_ref::<LuaFile>() {
+                if lua_file.is_closed() {
+                    let result = l.create_string("closed file");
+                    l.push_value(result)?;
+                    return Ok(1);
+                } else {
+                    let result = l.create_string("file");
+                    l.push_value(result)?;
+                    return Ok(1);
                 }
             }
         }
@@ -436,10 +425,8 @@ fn io_tmpfile(l: &mut LuaState) -> LuaResult<usize> {
             let userdata = l.create_userdata(LuaUserdata::new(lua_file));
 
             // Set metatable
-            if let Some(_ud_id) = userdata.as_userdata_id() {
-                if let Some(ud) = l.get_userdata_mut(&userdata) {
-                    ud.set_metatable(file_mt);
-                }
+            if let Some(ud) = userdata.as_userdata_mut() {
+                ud.set_metatable(file_mt);
             }
 
             l.push_value(userdata)?;
@@ -459,10 +446,9 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
     let file_arg = l.get_arg(1);
 
     if let Some(file_val) = file_arg {
-        if let Some(ud) = l.get_userdata(&file_val) {
-            let data = ud.get_data();
-            let mut data_ref = data.borrow_mut();
-            if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+        if let Some(ud) = file_val.as_userdata_mut() {
+            let data = ud.get_data_mut();
+            if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
                 // Don't actually close standard streams
                 if lua_file.is_std_stream() {
                     l.push_value(LuaValue::boolean(true))?;

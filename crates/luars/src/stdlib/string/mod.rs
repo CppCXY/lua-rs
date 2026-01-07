@@ -32,28 +32,22 @@ pub fn create_string_lib() -> LibraryModule {
 }
 
 /// string.byte(s [, i [, j]]) - Return byte values
-/// OPTIMIZED: Fast path for single byte return (common case)
+/// ULTRA-OPTIMIZED: Direct pointer access, no allocation!
 fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.byte' (string expected)".to_string()))?;
-    let Some(string_id) = s_value.as_string_id() else {
+    
+    // 直接获取字符串引用 - 无需 to_vec()！
+    let Some(s) = s_value.as_string_str() else {
         return Err(l.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
     };
 
-    // Get parameters first before borrowing vm_mut
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
     let j = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(i);
 
-    // Copy byte data to avoid holding vm borrow
-    let bytes_vec = {
-        let Some(s) = l.vm_mut().object_pool.get_string(string_id) else {
-            return Err(l.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
-        };
-        s.as_bytes().to_vec()
-    };
-
-    let len = bytes_vec.len() as i64;
+    let bytes = s.as_bytes(); // 直接获取字节切片，零拷贝！
+    let len = bytes.len() as i64;
 
     // Convert negative indices
     let start = if i < 0 { len + i + 1 } else { i };
@@ -67,15 +61,15 @@ fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
 
     // FAST PATH: Single byte return (most common case)
     if start == end && start >= 1 && start <= len {
-        let byte = bytes_vec[(start - 1) as usize];
+        let byte = bytes[(start - 1) as usize];
         l.push_value(LuaValue::integer(byte as i64))?;
         return Ok(1);
     }
 
     // FAST PATH: Two byte return
     if end == start + 1 && start >= 1 && end <= len {
-        let b1 = bytes_vec[(start - 1) as usize] as i64;
-        let b2 = bytes_vec[(end - 1) as usize] as i64;
+        let b1 = bytes[(start - 1) as usize] as i64;
+        let b2 = bytes[(end - 1) as usize] as i64;
         l.push_value(LuaValue::integer(b1))?;
         l.push_value(LuaValue::integer(b2))?;
         return Ok(2);
@@ -85,7 +79,7 @@ fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
     let mut count = 0;
     for idx in start..=end {
         if idx >= 1 && idx <= len {
-            let byte = bytes_vec[(idx - 1) as usize];
+            let byte = bytes[(idx - 1) as usize];
             l.push_value(LuaValue::integer(byte as i64))?;
             count += 1;
         }
@@ -386,10 +380,10 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Use optimized create_substring
-    let result_id = vm
+    let result_value = vm
         .object_pool
-        .create_substring(string_id, start_byte, end_byte);
-    l.push_value(LuaValue::string(result_id))?;
+        .create_substring(s_value, start_byte, end_byte);
+    l.push_value(result_value)?;
     Ok(1)
 }
 

@@ -28,14 +28,14 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
     let impl_table = &mut table_ref.impl_table;
     let mut sort_arr = match impl_table {
         LuaTableDetail::ValueArray(arr) => arr.array.clone(),
-        LuaTableDetail::TypedArray(arr) => arr
-            .array
-            .iter()
-            .map(|v| LuaValue {
-                tt: arr.tt,
-                value: v.clone(),
-            })
-            .collect(),
+        // LuaTableDetail::TypedArray(arr) => arr
+        //     .array
+        //     .iter()
+        //     .map(|v| LuaValue {
+        //         tt: arr.tt,
+        //         value: v.clone(),
+        //     })
+        //     .collect(),
         LuaTableDetail::HashTable(_) => {
             // Sort HashTable
             return Err(l.error("bad argument #1 to 'sort' (array expected)".to_string()));
@@ -90,7 +90,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         });
     } else {
         // Default comparison
-        sort_arr.sort_by(|a, b| lua_compare_values(l, a, b));
+        sort_arr.sort_by(|a, b| lua_compare_values(a, b));
     }
 
     // Write back sorted array
@@ -102,9 +102,9 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         LuaTableDetail::ValueArray(arr) => {
             arr.array = sort_arr;
         }
-        LuaTableDetail::TypedArray(arr) => {
-            arr.array = sort_arr.into_iter().map(|v| v.value).collect();
-        }
+        // LuaTableDetail::TypedArray(arr) => {
+        //     arr.array = sort_arr.into_iter().map(|v| v.value).collect();
+        // }
         LuaTableDetail::HashTable(_) => {
             // Sort HashTable
             return Err(l.error("bad argument #1 to 'sort' (array expected)".to_string()));
@@ -117,7 +117,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
 
 /// Compare two Lua values according to Lua semantics
 /// Returns Ordering for sorting purposes
-fn lua_compare_values(l: &LuaState, a: &LuaValue, b: &LuaValue) -> std::cmp::Ordering {
+fn lua_compare_values(a: &LuaValue, b: &LuaValue) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     // Both numbers - compare numerically
@@ -127,16 +127,11 @@ fn lua_compare_values(l: &LuaState, a: &LuaValue, b: &LuaValue) -> std::cmp::Ord
 
     // Both strings - compare lexicographically
     if a.is_string() && b.is_string() {
+        if let (Some(str1), Some(str2)) = (a.as_string_str(), b.as_string_str()) {
+            return str1.cmp(str2);
+        }
+        // Fallback: compare string IDs (maintains stability)
         if let (Some(id1), Some(id2)) = (a.as_string_id(), b.as_string_id()) {
-            // Try to get from cache
-            let s1 = l.get_string(&LuaValue::string(id1));
-            let s2 = l.get_string(&LuaValue::string(id2));
-
-            if let (Some(str1), Some(str2)) = (s1, s2) {
-                return str1.cmp(str2);
-            }
-
-            // Fallback: compare string IDs (maintains stability)
             return id1.0.cmp(&id2.0);
         }
     }

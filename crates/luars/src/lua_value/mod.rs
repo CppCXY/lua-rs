@@ -182,6 +182,10 @@ impl LuaUserdata {
         &self.data
     }
 
+    pub fn get_data_mut(&mut self) -> &mut Box<dyn Any> {
+        &mut self.data
+    }
+
     pub fn get_metatable(&self) -> LuaValue {
         self.metatable
     }

@@ -296,11 +296,10 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("file:read requires file handle".to_string()))?;
 
-    // Extract LuaFile from userdata
-    if let Some(ud) = l.get_userdata(&file_val) {
-        let data = ud.get_data();
-        let mut data_ref = data.borrow_mut();
-        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+    // Extract LuaFile from userdata using direct pointer access
+    if let Some(ud) = file_val.as_userdata_mut() {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             // Get format (default "*l")
             let format_arg = l.get_arg(2);
 
@@ -402,11 +401,10 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("file:write requires file handle".to_string()))?;
 
-    // Extract LuaFile from userdata
-    if let Some(ud) = l.get_userdata(&file_val) {
-        let data = ud.get_data();
-        let mut data_ref = data.borrow_mut();
-        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+    // Extract LuaFile from userdata using direct pointer access
+    if let Some(ud) = file_val.as_userdata_mut() {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             // Write all arguments (starting from arg 2)
             let mut i = 2;
             loop {
@@ -463,11 +461,10 @@ fn file_flush(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("file:flush requires file handle".to_string()))?;
 
-    // Extract LuaFile from userdata
-    if let Some(ud) = l.get_userdata(&file_val) {
-        let data = ud.get_data();
-        let mut data_ref = data.borrow_mut();
-        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+    // Extract LuaFile from userdata using direct pointer access
+    if let Some(ud) = file_val.as_userdata_mut() {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.flush() {
                 return Err(l.error(format!("flush error: {}", e)));
             }
@@ -486,11 +483,10 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("file:close requires file handle".to_string()))?;
 
-    // Extract LuaFile from userdata
-    if let Some(ud) = l.get_userdata(&file_val) {
-        let data = ud.get_data();
-        let mut data_ref = data.borrow_mut();
-        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+    // Extract LuaFile from userdata using direct pointer access
+    if let Some(ud) = file_val.as_userdata_mut() {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.close() {
                 return Err(l.error(format!("close error: {}", e)));
             }
@@ -532,10 +528,9 @@ fn file_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
 
     // Read next line
-    if let Some(ud) = l.get_userdata(&file_val) {
-        let data = ud.get_data();
-        let mut data_ref = data.borrow_mut();
-        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+    if let Some(ud) = file_val.as_userdata_mut() {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             let res = lua_file.read_line();
             match res {
                 Ok(Some(line)) => {
@@ -568,10 +563,9 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
 
     let offset = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(0);
 
-    if let Some(ud) = l.get_userdata(&file_val) {
-        let data = ud.get_data();
-        let mut data_ref = data.borrow_mut();
-        if let Some(lua_file) = data_ref.downcast_mut::<LuaFile>() {
+    if let Some(ud) = file_val.as_userdata_mut() {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             let seek_from = match whence.as_str() {
                 "set" => std::io::SeekFrom::Start(offset.max(0) as u64),
                 "cur" => std::io::SeekFrom::Current(offset),

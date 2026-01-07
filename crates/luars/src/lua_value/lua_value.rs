@@ -183,16 +183,6 @@ impl ValueMeta {
     pub fn gcid(&self) -> u32 {
         self.gcid
     }
-
-    #[inline(always)]
-    pub fn set_tt(&mut self, tt: u8) {
-        self.tt = tt;
-    }
-
-    #[inline(always)]
-    pub fn set_gcid(&mut self, gcid: u32) {
-        self.gcid = gcid;
-    }
 }
 
 // ============ TValue ============
@@ -277,10 +267,10 @@ impl LuaValue {
 
     /// Create a string value from StringId
     #[inline(always)]
-    pub fn string(id: StringId, ptr: *const u8) -> Self {
+    pub fn string(id: StringId, ptr: *const String) -> Self {
         Self {
             value: Value {
-                ptr,
+                ptr: ptr as *const u8,
             }, // Pointer set later
             meta: ValueMeta::with_gcid(LUA_VSTR, id.0),
         }

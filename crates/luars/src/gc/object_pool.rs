@@ -223,7 +223,7 @@ impl StringInterner {
                 if let Some(gs) = self.strings.get(id) {
                     if gs.data.as_str() == s.as_str() {
                         let str_id = StringId(id);
-                        let ptr = gs.data.as_ptr();
+                        let ptr = gs.data.as_ref() as *const String;
                         // Found! Drop the owned string
                         return (LuaValue::string(str_id, ptr), false);
                     }
@@ -236,7 +236,7 @@ impl StringInterner {
             header: GcHeader::default(),
             data: Box::new(s),
         };
-        let ptr = gc_string.data.as_ptr();
+        let ptr = gc_string.data.as_ref() as *const String;
         let id = self.strings.alloc(gc_string);
         let str_id = StringId(id);
         self.map.entry(hash).or_insert_with(Vec::new).push(id);
@@ -572,7 +572,7 @@ impl ObjectPool {
     #[inline(always)]
     pub fn get_string_value(&self, id: StringId) -> Option<LuaValue> {
         let gs = self.strings.get(id)?;
-        let ptr = gs.data.as_ptr();
+        let ptr = gs.data.as_ref() as *const String;
         Some(LuaValue::string(id, ptr))
     }
 
