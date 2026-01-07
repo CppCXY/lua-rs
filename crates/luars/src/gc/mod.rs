@@ -268,7 +268,7 @@ impl GC {
         };
 
         self.total_bytes = real_bytes + debt;
-        self.gc_debt = debt;
+        self.gc_debt = self.total_bytes - real_bytes;
     }
 
     /// Apply GC parameter (like applygcparam in Lua)
@@ -336,7 +336,9 @@ impl GC {
         if self.gc_state == GcState::Pause {
             self.set_pause();
         } else {
-            self.set_debt(step_size);
+            // Set negative debt to allow some allocations before next GC
+            // Like Lua 5.5: after GC step, we have a "budget" before next collection
+            self.set_debt(-(step_size as isize));
         }
     }
 
@@ -686,7 +688,8 @@ impl GC {
     pub fn set_pause(&mut self) {
         let threshold = self.apply_param(PAUSE, self.gc_marked);
         let debt = threshold - self.total_bytes;
-        self.set_debt(debt.max(0));
+        // Don't force debt to be non-negative! Negative debt means we have budget before next GC
+        self.set_debt(debt);
     }
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
     /// During marking phase, the invariant must be kept
@@ -768,7 +771,13 @@ impl GC {
 
     /// Set minor debt for generational mode
     fn set_minor_debt(&mut self) {
-        let debt = self.apply_param(MINORMUL, self.gc_majorminor);
+        // Use gc_marked as base if gc_majorminor is 0 (not yet set)
+        let base = if self.gc_majorminor > 0 {
+            self.gc_majorminor
+        } else {
+            self.gc_marked.max(1024 * 1024) // Reasonable default: 1MB
+        };
+        let debt = self.apply_param(MINORMUL, base);
         self.set_debt(-debt); // Negative = credit
     }
 

@@ -464,6 +464,11 @@ pub fn call_metamethod(
     // Don't clean up the stack here - the caller (handle_mmbin) will manage it
     // Calling set_top(func_pos) here would destroy values stored at higher positions
 
+    // **CRITICAL**: Check GC after metamethod call (like Lua 5.5 does after function calls)
+    // Without this, repeated table allocations in __add cause memory to grow indefinitely,
+    // making allocations progressively slower
+    lua_state.vm_mut().check_gc();
+
     Ok(result)
 }
 
@@ -484,6 +489,7 @@ pub fn try_comp_tm(
     if let Some(mm) = metamethod {
         // Call metamethod and convert result to boolean
         let result = call_metamethod(lua_state, mm, p1, p2)?;
+        // GC check is already done in call_metamethod
         Ok(Some(!result.is_falsy()))
     } else {
         Ok(None)
