@@ -3,7 +3,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{get_metatable, LuaResult, LuaState};
+use crate::lua_vm::{LuaResult, LuaState, get_metatable};
 
 pub fn create_debug_lib() -> LibraryModule {
     crate::lib_module!("debug", {

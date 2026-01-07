@@ -3,7 +3,9 @@
 use std::rc::Rc;
 
 use crate::{
-    lua_value::LuaUserdata, lua_vm::{CFunction, LuaState}, Chunk, LuaTable, LuaValue, UpvalueId
+    Chunk, LuaTable, LuaValue, UpvalueId,
+    lua_value::LuaUserdata,
+    lua_vm::{CFunction, LuaState},
 };
 
 // Object ages for generational GC (like Lua 5.4)

@@ -127,9 +127,11 @@ impl LuaTable {
 
     fn migrate_to_hash_table(&mut self) {
         let len = self.len();
+        // 预留 2x 容量，避免频繁扩容
+        let capacity = (len * 2).max(32);
         let old_impl = std::mem::replace(
             &mut self.impl_table,
-            LuaTableDetail::HashTable(LuaHashTable::new(len)),
+            LuaTableDetail::HashTable(LuaHashTable::new(capacity)),
         );
 
         if let LuaTableDetail::HashTable(new_map) = &mut self.impl_table {
@@ -275,8 +277,11 @@ impl LuaTable {
                 }
             }
             LuaTableDetail::HashTable(t) => {
-                for (k, v) in t.table.iter() {
-                    result.push((k.clone(), v.clone()));
+                // 使用 next 方法遵循接口遍历
+                let mut key = LuaValue::nil();
+                while let Some((k, v)) = t.next(&key) {
+                    result.push((k, v));
+                    key = k;
                 }
             }
         }

@@ -18,10 +18,10 @@ pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
 use crate::{LuaFunction, ObjectPool, lib_registry};
 pub use execute::TmKind;
+pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
 use std::ptr::null_mut;
 use std::rc::Rc;
-pub use execute::{get_metamethod_event, get_metatable};
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua

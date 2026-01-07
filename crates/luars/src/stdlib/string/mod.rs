@@ -37,7 +37,7 @@ fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.byte' (string expected)".to_string()))?;
-    
+
     // 直接获取字符串引用 - 无需 to_vec()！
     let Some(s) = s_value.as_string_str() else {
         return Err(l.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
