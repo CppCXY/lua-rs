@@ -1295,15 +1295,6 @@ fn execute_frame(
                         .and_then(|t| t.get_metatable())
                         .is_some();
 
-                    // DEBUG
-                    use std::sync::atomic::{AtomicUsize, Ordering};
-                    static SETI_COUNT: AtomicUsize = AtomicUsize::new(0);
-                    let count = SETI_COUNT.fetch_add(1, Ordering::Relaxed);
-                    if count <= 20 || count % 1000 == 0 {
-                        eprintln!("[SetI #{}] table_id={:?}, has_mt={}, key={}", 
-                            count, table_id, has_metatable, b);
-                    }
-
                     if has_metatable {
                         // Has metatable, might have __newindex
                         let key = LuaValue::integer(b as i64);

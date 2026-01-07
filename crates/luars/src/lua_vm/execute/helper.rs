@@ -377,12 +377,7 @@ pub fn store_to_metatable(
 
     let mut t = *obj;
 
-    for loop_count in 0..MAXTAGLOOP {
-        // Prevent infinite loops in metamethod chains
-        if loop_count > 100 {
-            eprintln!("[WARNING] store_to_metatable: possible infinite loop at iteration {}", loop_count);
-        }
-        
+    for _ in 0..MAXTAGLOOP {
         // Check if t is a table
         if let Some(table_id) = t.as_table_id() {
             // Check if key exists and get metatable in one go
@@ -423,14 +418,6 @@ pub fn store_to_metatable(
                 if let Some(tm) = get_metamethod_from_metatable(lua_state, mt, "__newindex") {
                     // Has __newindex metamethod
                     if tm.is_function() {
-                        // DEBUG
-                        use std::sync::atomic::{AtomicUsize, Ordering};
-                        static MM_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
-                        let count = MM_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-                        if count < 5 || count % 100 == 0 {
-                            eprintln!("[store_to_metatable] Calling __newindex metamethod #{}", count);
-                        }
-                        
                         // Call metamethod: tm(t, key, value)
                         let func_pos = lua_state.get_top();
 
@@ -442,12 +429,9 @@ pub fn store_to_metatable(
 
                         let caller_depth = lua_state.call_depth();
                         let new_base = func_pos + 1;
-
-                        eprintln!("[store_to_metatable] About to push_frame and execute");
                         // Call metamethod (0 results expected)
                         lua_state.push_frame(tm, new_base, 3, 0)?;
                         crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
-                        eprintln!("[store_to_metatable] Metamethod execution finished");
 
                         lua_state.set_top(func_pos); // Clean up stack
                         return Ok(true);
