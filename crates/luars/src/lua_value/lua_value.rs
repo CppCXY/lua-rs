@@ -178,30 +178,6 @@ impl ValueMeta {
     pub fn gcid(&self) -> u32 {
         self.gcid
     }
-
-    #[inline(always)]
-    pub fn set_to_int(&mut self) {
-        self.tt = LUA_VNUMINT;
-        self.gcid = 0;
-    }
-
-    #[inline(always)]
-    pub fn set_to_float(&mut self) {
-        self.tt = LUA_VNUMFLT;
-        self.gcid = 0;
-    }
-
-    #[inline(always)]
-    pub fn set_boolean(&mut self, b: bool) {
-        self.tt = if b { LUA_VTRUE } else { LUA_VFALSE };
-        self.gcid = 0;
-    }
-
-    #[inline(always)]
-    pub fn set_nil(&mut self) {
-        self.tt = LUA_VNIL;
-        self.gcid = 0;
-    }
 }
 
 // ============ TValue ============
@@ -285,24 +261,6 @@ impl LuaValue {
     }
 
     // ============ In-place mutators (for VM performance) ============
-
-    /// Set this value to an integer (mutates in place)
-    /// PERFORMANCE: Avoids creating new LuaValue, directly modifies memory
-    /// Port of Lua 5.5's setivalue macro: v->value_.i = x; settt_(v, LUA_VNUMINT)
-    #[inline(always)]
-    pub fn set_integer(&mut self, i: i64) {
-        self.value.i = i;
-        self.meta.set_to_int();
-    }
-
-    /// Set this value to a float (mutates in place)
-    /// PERFORMANCE: Avoids creating new LuaValue, directly modifies memory
-    /// Port of Lua 5.5's setfltvalue macro: v->value_.n = x; settt_(v, LUA_VNUMFLT)
-    #[inline(always)]
-    pub fn set_float(&mut self, n: f64) {
-        self.value.n = n;
-        self.meta.set_to_float();
-    }
 
     /// Create a string value from StringId
     #[inline(always)]
