@@ -40,7 +40,9 @@ pub fn buildhiddenargs(
         stack[top] = src;
         top += 1;
         // Erase original parameter with nil (for GC)
-        setnilvalue(&mut stack[func_pos + 1 + i]);
+        unsafe {
+            setnilvalue(&mut stack[func_pos + 1 + i] as *mut LuaValue);
+        }
     }
 
     // Step 3: Update ci->func.p and ci->top.p
@@ -71,68 +73,130 @@ pub fn buildhiddenargs(
 }
 
 // ============ Type tag检查宏 (对应 Lua 的 ttis* 宏) ============
+// OPTIMIZED: 指针版本，避免引用/解引用开销
 
 /// ttisinteger - 检查是否是整数 (最快的类型检查)
 #[inline(always)]
-pub fn ttisinteger(v: &LuaValue) -> bool {
+pub unsafe fn ttisinteger(v: *const LuaValue) -> bool {
+    unsafe { (*v).ttisinteger() }
+}
+
+/// ttisinteger_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn ttisinteger_ref(v: &LuaValue) -> bool {
     v.ttisinteger()
 }
 
 /// ttisfloat - 检查是否是浮点数
 #[inline(always)]
-pub fn ttisfloat(v: &LuaValue) -> bool {
+pub unsafe fn ttisfloat(v: *const LuaValue) -> bool {
+    unsafe { (*v).ttisfloat() }
+}
+
+/// ttisfloat_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn ttisfloat_ref(v: &LuaValue) -> bool {
     v.ttisfloat()
 }
 
 /// ttisstring - 检查是否是字符串
 #[inline(always)]
-pub fn ttisstring(v: &LuaValue) -> bool {
+pub unsafe fn ttisstring(v: *const LuaValue) -> bool {
+    unsafe { (*v).is_string() }
+}
+
+/// ttisstring_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn ttisstring_ref(v: &LuaValue) -> bool {
     v.is_string()
 }
 
 // ============ 值访问宏 (对应 Lua 的 ivalue/fltvalue) ============
+// OPTIMIZED: 指针版本，避免引用/解引用开销
 
 /// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)
 #[inline(always)]
-pub fn ivalue(v: &LuaValue) -> i64 {
+pub unsafe fn ivalue(v: *const LuaValue) -> i64 {
+    unsafe { (*v).ivalue() }
+}
+
+/// ivalue_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn ivalue_ref(v: &LuaValue) -> i64 {
     v.ivalue()
 }
 
 /// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
 #[inline(always)]
-pub fn fltvalue(v: &LuaValue) -> f64 {
+pub unsafe fn fltvalue(v: *const LuaValue) -> f64 {
+    unsafe { (*v).fltvalue() }
+}
+
+/// fltvalue_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn fltvalue_ref(v: &LuaValue) -> f64 {
     v.fltvalue()
 }
 
 /// setivalue - 设置整数值
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setivalue macro
 #[inline(always)]
-pub fn setivalue(v: &mut LuaValue, i: i64) {
+pub unsafe fn setivalue(v: *mut LuaValue, i: i64) {
+    unsafe { *v = LuaValue::integer(i); }
+}
+
+/// setivalue_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn setivalue_ref(v: &mut LuaValue, i: i64) {
     *v = LuaValue::integer(i);
 }
 
 /// setfltvalue - 设置浮点值  
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
 #[inline(always)]
-pub fn setfltvalue(v: &mut LuaValue, n: f64) {
+pub unsafe fn setfltvalue(v: *mut LuaValue, n: f64) {
+    unsafe { *v = LuaValue::float(n); }
+}
+
+/// setfltvalue_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn setfltvalue_ref(v: &mut LuaValue, n: f64) {
     *v = LuaValue::float(n);
 }
 
 /// setbfvalue - 设置false
 #[inline(always)]
-pub fn setbfvalue(v: &mut LuaValue) {
+pub unsafe fn setbfvalue(v: *mut LuaValue) {
+    unsafe { *v = LuaValue::boolean(false); }
+}
+
+/// setbfvalue_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn setbfvalue_ref(v: &mut LuaValue) {
     *v = LuaValue::boolean(false);
 }
 
 /// setbtvalue - 设置true
 #[inline(always)]
-pub fn setbtvalue(v: &mut LuaValue) {
+pub unsafe fn setbtvalue(v: *mut LuaValue) {
+    unsafe { *v = LuaValue::boolean(true); }
+}
+
+/// setbtvalue_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn setbtvalue_ref(v: &mut LuaValue) {
     *v = LuaValue::boolean(true);
 }
 
 /// setnilvalue - 设置nil
 #[inline(always)]
-pub fn setnilvalue(v: &mut LuaValue) {
+pub unsafe fn setnilvalue(v: *mut LuaValue) {
+    unsafe { *v = LuaValue::nil(); }
+}
+
+/// setnilvalue_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn setnilvalue_ref(v: &mut LuaValue) {
     *v = LuaValue::nil();
 }
 
@@ -141,27 +205,43 @@ pub fn setnilvalue(v: &mut LuaValue) {
 /// tointegerns - 尝试转换为整数 (不抛出错误)
 /// 对应 Lua 的 tointegerns 宏
 #[inline(always)]
-pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
-    if ttisinteger(v) {
-        *out = ivalue(v);
-        true
-    } else {
-        false
+pub unsafe fn tointegerns(v: *const LuaValue, out: *mut i64) -> bool {
+    unsafe {
+        if ttisinteger(v) {
+            *out = ivalue(v);
+            true
+        } else {
+            false
+        }
     }
+}
+
+/// tointegerns_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn tointegerns_ref(v: &LuaValue, out: &mut i64) -> bool {
+    unsafe { tointegerns(v as *const LuaValue, out as *mut i64) }
 }
 
 /// tonumberns - 尝试转换为浮点数 (不抛出错误)
 #[inline(always)]
-pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
-    if ttisfloat(v) {
-        *out = fltvalue(v);
-        true
-    } else if ttisinteger(v) {
-        *out = ivalue(v) as f64;
-        true
-    } else {
-        false
+pub unsafe fn tonumberns(v: *const LuaValue, out: *mut f64) -> bool {
+    unsafe {
+        if ttisfloat(v) {
+            *out = fltvalue(v);
+            true
+        } else if ttisinteger(v) {
+            *out = ivalue(v) as f64;
+            true
+        } else {
+            false
+        }
     }
+}
+
+/// tonumberns_ref - 引用版本（保留兼容性）
+#[inline(always)]
+pub fn tonumberns_ref(v: &LuaValue, out: &mut f64) -> bool {
+    unsafe { tonumberns(v as *const LuaValue, out as *mut f64) }
 }
 
 /// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
