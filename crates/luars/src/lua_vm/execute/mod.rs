@@ -128,14 +128,12 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                 }
             };
         }
-
         // MAINLOOP: Main instruction dispatch loop
         loop {
             // Fetch instruction and advance PC
             let instr = unsafe { *code.get_unchecked(pc) };
             pc += 1;
 
-            // Dispatch instruction (continues in next replacement...)
             // Dispatch instruction (continues in next replacement...)
             match instr.get_opcode() {
                 OpCode::Move => {
@@ -919,8 +917,8 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // ULTRA-OPTIMIZED: Direct double-pointer dereference
                     // Matches Lua C: setobj2s(L, ra, cl->upvals[b]->v.p)
                     let value = unsafe {
-                        let upval = &*upvalue_ptrs[b].ptr;
-                        *upval.v_ptr
+                        let upval = upvalue_ptrs[b].ptr;
+                        *(*upval).v_ptr
                     };
 
                     let stack = lua_state.stack_mut();
@@ -948,8 +946,8 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // ULTRA-OPTIMIZED: Direct double-pointer write
                     // Matches Lua C: setobj(L, uv->v.p, s2v(ra))
                     unsafe {
-                        let upval = &*upvalue_ptrs[b].ptr;
-                        *upval.v_ptr = value;
+                        let upval = upvalue_ptrs[b].ptr;
+                        *(*upval).v_ptr = value;
                     }
 
                     // GC barrier: luaC_barrier(L, uv, s2v(ra))

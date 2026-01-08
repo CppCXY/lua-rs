@@ -100,6 +100,29 @@ pub fn exec_settable(
     let c = instr.get_c() as usize;
     let k = instr.get_k();
 
+    let stack = lua_state.stack();
+    let ra = stack[base + a];
+    let rb = stack[base + b];
+    let val = if k {
+        if c >= constants.len() {
+            lua_state.set_frame_pc(frame_idx, *pc as u32);
+            return Err(lua_state.error("SETTABLE: invalid constant".to_string()));
+        }
+        constants[c]
+    } else {
+        stack[base + c]
+    };
+
+    // OPTIMIZED: Fast path - check if we can avoid metamethod call
+    if let Some(table) = ra.as_table_mut() {
+        if !table.has_metatable() {
+            // Fast path: no metatable, directly set
+            table.raw_set(&rb, val);
+            lua_state.vm_mut().check_gc();
+            return Ok(());
+        }
+    }
+
     // CRITICAL: Update frame.top to protect all registers before calling metamethod
     let max_reg = a.max(b).max(c) + 1;
     let required_top = base + max_reg;
@@ -109,26 +132,9 @@ pub fn exec_settable(
         lua_state.set_top(required_top);
     }
 
-    // CRITICAL: Copy all values BEFORE any metamethod calls
-    let (ra_value, key, value) = {
-        let stack = lua_state.stack();
-        let ra = stack[base + a];
-        let rb = stack[base + b];
-        let val = if k {
-            if c >= constants.len() {
-                lua_state.set_frame_pc(frame_idx, *pc as u32);
-                return Err(lua_state.error("SETTABLE: invalid constant".to_string()));
-            }
-            constants[c]
-        } else {
-            stack[base + c]
-        };
-        (ra, rb, val)
-    };
-
-    // Always use store_to_metatable which handles __newindex metamethod
+    // Slow path: has __newindex or not a table
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    helper::store_to_metatable(lua_state, &ra_value, &key, value)?;
+    helper::store_to_metatable(lua_state, &ra, &rb, val)?;
 
     // Verify base hasn't changed
     let new_base = lua_state.get_frame_base(frame_idx);
@@ -235,12 +241,14 @@ pub fn exec_seti(
         stack[base + c]
     };
 
-    // Check if table has __newindex metamethod - OPTIMIZED: Direct pointer access
+    // OPTIMIZED: Fast path - check if we need metamethod call
     if let Some(table) = ra.as_table_mut() {
-        let has_metatable = table.get_metatable().is_some();
-
-        if has_metatable {
-            // Has metatable, might have __newindex
+        if !table.has_metatable() {
+            // Fast path: no __newindex, directly set
+            table.set_int(b as i64, value);
+            lua_state.vm_mut().check_gc();
+        } else {
+            // Slow path: has __newindex metamethod
             let key = LuaValue::integer(b as i64);
             lua_state.set_frame_pc(frame_idx, *pc as u32);
             helper::store_to_metatable(lua_state, &ra, &key, value)?;
@@ -248,10 +256,6 @@ pub fn exec_seti(
             if new_base != base {
                 return Err(lua_state.error("base changed in SETI".to_string()));
             }
-        } else {
-            // No metatable, use fast path
-            table.set_int(b as i64, value);
-            lua_state.vm_mut().check_gc();
         }
     } else {
         // Not a table, use __newindex metamethod
@@ -365,7 +369,17 @@ pub fn exec_setfield(
         stack[base + c]
     };
 
-    // Always use store_to_metatable
+    // OPTIMIZED: Fast path - check if we can avoid metamethod call
+    if let Some(table) = ra.as_table_mut() {
+        if !table.has_metatable() {
+            // Fast path: no __newindex metamethod, directly set
+            table.raw_set(&key, value);
+            lua_state.vm_mut().check_gc();
+            return Ok(());
+        }
+    }
+
+    // Slow path: has __newindex or not a table
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     helper::store_to_metatable(lua_state, &ra, &key, value)?;
 

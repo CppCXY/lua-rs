@@ -47,6 +47,11 @@ impl LuaTable {
         (flags as u64) | ((lsizenode as u64) << 8) | (metatable_bits << 16)
     }
 
+    #[inline(always)]
+    pub fn has_metatable(&self) -> bool {
+        self.meta >> 16 != 0
+    }
+
     /// 获取metatable
     #[inline(always)]
     fn metatable(&self) -> Option<crate::TableId> {

@@ -437,6 +437,7 @@ fn get_metamethod_from_metatable(
 
 /// Store a value using __newindex metamethod if key doesn't exist
 /// Port of luaV_finishset from lvm.c:332
+#[inline(always)]
 pub fn store_to_metatable(
     lua_state: &mut LuaState,
     obj: &LuaValue,
@@ -490,18 +491,16 @@ pub fn store_to_metatable(
         }
 
         if !found_tm {
-            if t.as_table().is_some() {
-                // Table without metamethod/newindex, but key didn't exist?
-                // It should have been set if we are here?
-                // Wait, logic above: if key exists -> return.
-                // if !key_exists, search TM. If no TM, just set!
+            // Table without metamethod/newindex, but key didn't exist?
+            // It should have been set if we are here?
+            // Wait, logic above: if key exists -> return.
+            // if !key_exists, search TM. If no TM, just set!
 
-                // So if it was a table AND no TM found:
-                if let Some(table_ref) = t.as_table_mut() {
-                    table_ref.raw_set(key, value);
-                    lua_state.vm_mut().check_gc();
-                    return Ok(true);
-                }
+            // So if it was a table AND no TM found:
+            if let Some(table_ref) = t.as_table_mut() {
+                table_ref.raw_set(key, value);
+                lua_state.vm_mut().check_gc();
+                return Ok(true);
             }
 
             // Not a table and no metamethod -> Error

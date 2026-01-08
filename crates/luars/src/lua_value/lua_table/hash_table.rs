@@ -54,6 +54,7 @@ impl Node {
     }
     
     #[inline(always)]
+    #[allow(unused)]
     fn is_main_position(&self) -> bool {
         self.next == 0 || self.key.is_nil()
     }
