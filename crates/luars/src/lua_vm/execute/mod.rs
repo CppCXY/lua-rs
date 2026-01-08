@@ -31,6 +31,7 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
+    Upvalue, // Import Upvalue for unsafe pointer access
     lua_value::{LUA_VFALSE, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
@@ -941,23 +942,28 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         );
                     }
 
-                    let upval_id = upvalue_ptrs[b].id;
+                    // Set value in upvalue (OPTIMIZED: Uses direct pointer)
+                    // SAFETY: CachedUpvalue ensures pointer is valid
+                    unsafe {
+                        let upvalue = &mut *(upvalue_ptrs[b].ptr as *mut Upvalue);
 
-                    // Set value in upvalue (still need ObjectPool for mutation)
-                    let upvalue = lua_state
-                        .vm_mut()
-                        .object_pool
-                        .get_upvalue_mut(upval_id)
-                        .ok_or(LuaError::RuntimeError)?;
+                        if upvalue.is_open {
+                            // Open: write to stack
+                            let owner = upvalue.thread;
+                            let current = lua_state as *const LuaState;
 
-                    if upvalue.data.is_open() {
-                        // Open: write to stack
-                        let stack_idx = upvalue.data.get_stack_index().unwrap();
-                        lua_state.stack_set(stack_idx, value)?;
-                    } else {
-                        // Closed: write to upvalue storage
-                        unsafe {
-                            upvalue.data.set_closed_value_unchecked(value);
+                            if owner == current {
+                                // Same thread - use direct stack access
+                                let stack = lua_state.stack_mut();
+                                stack[upvalue.stack_index] = value;
+                            } else {
+                                // Cross-thread - dereference owner
+                                let owner_state = &mut *(owner as *mut LuaState);
+                                owner_state.stack_mut()[upvalue.stack_index] = value;
+                            }
+                        } else {
+                            // Closed: write to upvalue storage
+                            upvalue.closed_value = value;
                         }
                     }
 
@@ -1534,8 +1540,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
                     if let Some(table) = table_value.as_table_mut() {
                         table.raw_set(&key, value);
-                    }
-                    else {
+                    } else {
                         // TODO: trigger metamethod for non-table
                     }
                 }
@@ -1552,22 +1557,13 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let rb = lua_state.stack_mut()[base + b];
 
                     // Try to get length based on type
-                    if let Some(string_id) = rb.as_string_id() {
-                        // String: get length from object pool
-                        if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
-                            let len = s.len();
-                            setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
-                        } else {
-                            setivalue(&mut lua_state.stack_mut()[base + a], 0);
-                        }
-                    } else if let Some(table_id) = rb.as_table_id() {
+                    if let Some(s) = rb.as_str() {
+                        // String: get length directly
+                        let len = s.len();
+                        setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                    } else if let Some(table) = rb.as_table() {
                         // Table: check for __len metamethod first
-                        let has_metatable = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table(table_id)
-                            .and_then(|t| t.get_metatable())
-                            .is_some();
+                        let has_metatable = table.get_metatable().is_some();
 
                         if has_metatable {
                             // Try __len metamethod
@@ -1579,24 +1575,13 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                                 lua_state.stack_mut()[base + a] = result;
                             } else {
                                 // No metamethod, use primitive length
-                                if let Some(table) =
-                                    lua_state.vm_mut().object_pool.get_table(table_id)
-                                {
-                                    let len = table.len();
-                                    setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
-                                } else {
-                                    setivalue(&mut lua_state.stack_mut()[base + a], 0);
-                                }
+                                let len = table.len();
+                                setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
                             }
                         } else {
                             // No metatable, use primitive length
-                            if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id)
-                            {
-                                let len = table.len();
-                                setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
-                            } else {
-                                setivalue(&mut lua_state.stack_mut()[base + a], 0);
-                            }
+                            let len = table.len();
+                            setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
                         }
                     } else {
                         // Other types: try __len metamethod
@@ -1711,13 +1696,8 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             na <= nb
                         } else if ttisstring(ra) && ttisstring(rb) {
                             // String comparison - copy IDs first
-                            let sid_a = ra.tsvalue();
-                            let sid_b = rb.tsvalue();
-
-                            let pool = &lua_state.vm_mut().object_pool;
-                            if let (Some(sa), Some(sb)) =
-                                (pool.get_string(sid_a), pool.get_string(sid_b))
-                            {
+                            // OPTIMIZATION: Use as_string_str() for direct access
+                            if let (Some(sa), Some(sb)) = (ra.as_str(), rb.as_str()) {
                                 sa <= sb
                             } else {
                                 false
@@ -1882,14 +1862,8 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let rc = stack[base + c];
 
                     // Check if R[C] is string "n" (get vararg count)
-                    if let Some(string_id) = rc.as_string_id() {
-                        let is_n = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_string(string_id)
-                            .map(|s| s == "n")
-                            .unwrap_or(false);
-                        if is_n {
+                    if let Some(s) = rc.as_str() {
+                        if s == "n" {
                             // Return vararg count
                             let stack = lua_state.stack_mut();
                             setivalue(&mut stack[ra_idx], nextra as i64);
@@ -1935,13 +1909,8 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     if !ra.is_nil() {
                         // Get global name from constants if bx > 0
                         let global_name = if bx > 0 && bx - 1 < constants.len() {
-                            if let Some(string_id) = constants[bx - 1].as_string_id() {
-                                lua_state
-                                    .vm_mut()
-                                    .object_pool
-                                    .get_string(string_id)
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| "?".to_string())
+                            if let Some(s) = constants[bx - 1].as_str() {
+                                s.to_string()
                             } else {
                                 "?".to_string()
                             }

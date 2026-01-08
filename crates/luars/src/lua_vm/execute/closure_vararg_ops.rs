@@ -214,21 +214,20 @@ pub fn exec_varargprep(
         // Place table at base + nfixparams (overwriting first extra arg or empty slot)
         // Ensure stack is large enough
         let target_idx = func_pos + 1 + nfixparams;
-        
+
         // If target_idx is beyond current stack, we need to push
         if target_idx >= lua_state.stack_len() {
-             lua_state.grow_stack(target_idx + 1)?;
+            lua_state.grow_stack(target_idx + 1)?;
         }
-        
+
         let stack = lua_state.stack_mut();
         stack[target_idx] = table_val;
-        
-        // In Lua 5.5 C implementation "luaT_adjustvarargs", the table is placed 
+
+        // In Lua 5.5 C implementation "luaT_adjustvarargs", the table is placed
         // at the slot after fixed parameters. L->top is adjusted to include the table.
         // The remaining extra args on the stack are not explicitly cleared but are effectively ignored.
         // However, for safety in Rust VM, we might want to clear them or just leave them.
         // We will leave them be, as they are "above" the relevant stack usage for this function frame.
-        
     }
     // Implement buildhiddenargs if there are extra args (and no table needed)
     else if nextra > 0 {

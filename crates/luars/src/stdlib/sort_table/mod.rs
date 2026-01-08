@@ -127,7 +127,7 @@ fn lua_compare_values(a: &LuaValue, b: &LuaValue) -> std::cmp::Ordering {
 
     // Both strings - compare lexicographically
     if a.is_string() && b.is_string() {
-        if let (Some(str1), Some(str2)) = (a.as_string_str(), b.as_string_str()) {
+        if let (Some(str1), Some(str2)) = (a.as_str(), b.as_str()) {
             return str1.cmp(str2);
         }
         // Fallback: compare string IDs (maintains stability)

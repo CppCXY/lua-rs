@@ -1,7 +1,7 @@
 use crate::{
     Chunk, LuaResult, LuaValue,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
-    lua_vm::{LuaState, execute},
+    lua_vm::LuaState,
 };
 
 /// Build hidden arguments for vararg functions
@@ -369,11 +369,9 @@ pub fn lookup_from_metatable(
         t = tm;
 
         // Try direct table access first (fast path)
-        if let Some(table_id) = t.as_table_id() {
-            if let Some(table) = lua_state.vm_mut().object_pool.get_table(table_id) {
-                if let Some(value) = table.raw_get(key) {
-                    return Some(value);
-                }
+        if let Some(table) = t.as_table() {
+            if let Some(value) = table.raw_get(key) {
+                return Some(value);
             }
         }
 
@@ -418,11 +416,23 @@ fn get_metamethod_from_metatable(
     mt_val: LuaValue,
     event: &str,
 ) -> Option<LuaValue> {
-    let mt_table_id = mt_val.as_table_id()?;
-    let vm = lua_state.vm_mut();
-    let event_key = vm.object_pool.get_tm_value_by_str(event);
-    let mt = vm.object_pool.get_table(mt_table_id)?;
-    mt.raw_get(&event_key)
+    // OLD optimization: resolve key once
+    // const KEY_CACHE: &str = event;
+    // let event_key = vm.object_pool.get_tm_value_by_str(event);
+
+    // NEW Optimization: Use direct pointer access if possible
+    if let Some(mt) = mt_val.as_table() {
+        // We still need the event key as a LuaValue (string)
+        // Since event is a string literal (e.g. "__index"), we can get it from VM string cache without alloc?
+        // object_pool.get_tm_value_by_str(event) returns a LuaValue (String) from a cache.
+        // We can keep using it.
+        let vm = lua_state.vm_mut();
+        let event_key = vm.object_pool.get_tm_value_by_str(event);
+
+        return mt.raw_get(&event_key);
+    }
+
+    None
 }
 
 /// Store a value using __newindex metamethod if key doesn't exist
@@ -436,136 +446,138 @@ pub fn store_to_metatable(
     const MAXTAGLOOP: usize = 2000;
 
     let mut t = *obj;
+    // We need to declare `tm` outside to use it in calls
+    let mut tm_val = LuaValue::nil();
 
     for _ in 0..MAXTAGLOOP {
-        // Check if t is a table
-        if let Some(table_id) = t.as_table_id() {
-            // Check if key exists and get metatable in one go
-            let (key_exists, mt_val) = {
-                let vm = lua_state.vm_mut();
-                let table_opt = vm.object_pool.get_table(table_id);
+        let mut found_tm = false;
 
-                if let Some(tbl) = table_opt {
-                    let ke = tbl.raw_get(key).is_some();
-                    let mt_id = tbl.get_metatable();
-                    let mt = if let Some(mid) = mt_id {
-                        vm.object_pool.get_table_value(mid)
-                    } else {
-                        None
-                    };
-                    (ke, mt)
-                } else {
-                    return Err(lua_state.error(format!(
-                        "Cannot get table reference for table_id {:?}",
-                        table_id
-                    )));
-                }
+        // Check if t is a table
+        if let Some(table) = t.as_table() {
+            // Check if key exists and get metatable in one go
+            let (key_exists, mt_id) = {
+                let ke = table.raw_get(key).is_some();
+                let mt_id = table.get_metatable();
+                (ke, mt_id)
             };
 
             if key_exists {
-                // Key exists, do direct assignment (no __newindex)
-                let table_result = lua_state.vm_mut().object_pool.get_table_mut(table_id);
-
-                if table_result.is_none() {
-                    return Err(lua_state.error(format!(
-                        "Cannot get mutable table for existing key, table_id {:?}",
-                        table_id
-                    )));
+                // Key exists: set directly
+                // Note: need to re-get as mutable table using as_table_mut
+                if let Some(table_ref) = t.as_table_mut() {
+                    table_ref.raw_set(key, value);
+                    lua_state.vm_mut().check_gc();
+                    return Ok(true);
                 }
-
-                table_result.unwrap().raw_set(key, value);
-                lua_state.vm_mut().check_gc();
-                return Ok(true);
             }
 
-            // Key doesn't exist, check for __newindex metamethod
-            if let Some(mt) = mt_val {
-                if let Some(tm) = get_metamethod_from_metatable(lua_state, mt, "__newindex") {
-                    // Has __newindex metamethod
-                    if tm.is_function() {
-                        // **CRITICAL**: Like Lua 5.5's Protect macro, set stack_top to caller frame's top
-                        // before pushing arguments. This prevents overwriting active registers.
-                        let caller_frame_idx = lua_state.call_depth() - 1;
-                        let caller_frame_top = lua_state.get_call_info(caller_frame_idx).top;
-                        lua_state.set_top(caller_frame_top);
-
-                        // Call metamethod: tm(t, key, value)
-                        let func_pos = lua_state.get_top();
-
-                        // Push function and arguments using push_value to ensure stack grows
-                        // CRITICAL: Push the ORIGINAL table (*obj), not the loop variable t
-                        lua_state.push_value(tm)?;
-                        lua_state.push_value(*obj)?;
-                        lua_state.push_value(*key)?;
-                        lua_state.push_value(value)?;
-
-                        let caller_depth = lua_state.call_depth();
-                        let new_base = func_pos + 1;
-                        // Call metamethod (0 results expected)
-                        lua_state.push_frame(tm, new_base, 3, 0)?;
-                        execute::lua_execute_until(lua_state, caller_depth)?;
-
-                        lua_state.set_top(func_pos); // Clean up stack
-                        return Ok(true);
+            // Key absent: try __newindex
+            if let Some(mid) = mt_id {
+                if let Some(mt_val) = lua_state.vm_mut().object_pool.get_table_value(mid) {
+                    if let Some(mm) = get_metamethod_from_metatable(lua_state, mt_val, "__newindex")
+                    {
+                        tm_val = mm;
+                        found_tm = true;
                     }
-
-                    // __newindex is a table, repeat assignment over it
-                    t = tm;
-                    continue;
                 }
             }
-
-            // No __newindex metamethod, do direct assignment
-            let table_result = lua_state.vm_mut().object_pool.get_table_mut(table_id);
-
-            if table_result.is_none() {
-                return Err(lua_state.error(format!(
-                    "Cannot get mutable table reference for table_id {:?}",
-                    table_id
-                )));
+        } else {
+            // Not a table, get __newindex metamethod
+            if let Some(mm) = get_newindex_metamethod(lua_state, &t) {
+                tm_val = mm;
+                found_tm = true;
             }
-
-            table_result.unwrap().raw_set(key, value);
-            // GC write barrier: check GC after table modification
-            lua_state.vm_mut().check_gc();
-            return Ok(true);
         }
 
-        // Not a table, get __newindex metamethod
-        let tm = get_newindex_metamethod(lua_state, &t);
-        if tm.is_none() {
+        if !found_tm {
+            if t.as_table().is_some() {
+                // Table without metamethod/newindex, but key didn't exist?
+                // It should have been set if we are here?
+                // Wait, logic above: if key exists -> return.
+                // if !key_exists, search TM. If no TM, just set!
+
+                // So if it was a table AND no TM found:
+                if let Some(table_ref) = t.as_table_mut() {
+                    table_ref.raw_set(key, value);
+                    lua_state.vm_mut().check_gc();
+                    return Ok(true);
+                }
+            }
+
+            // Not a table and no metamethod -> Error
             return Err(lua_state.error(format!("attempt to index a {} value", t.type_name())));
         }
 
-        let tm = tm.unwrap();
-
+        // Found metamethod 'tm'
         // If __newindex is a function, call it
-        if tm.is_function() {
+        if tm_val.is_function() {
+            use crate::lua_vm::execute;
+
+            // **CRITICAL**: Like Lua 5.5's Protect macro, set stack_top to caller frame's top
+            // before pushing arguments. This prevents overwriting active registers.
+            let caller_frame_idx = lua_state.call_depth() - 1;
+            let caller_frame_top = lua_state.get_call_info(caller_frame_idx).top;
+            lua_state.set_top(caller_frame_top);
+
+            // Call metamethod: tm(t, key, value)
             let func_pos = lua_state.get_top();
 
-            // Push function and arguments: tm(t, key, value)
-            {
-                let stack = lua_state.stack_mut();
-                stack[func_pos] = tm;
-                stack[func_pos + 1] = t;
-                stack[func_pos + 2] = *key;
-                stack[func_pos + 3] = value;
-            }
-            lua_state.set_top(func_pos + 4);
+            // Push function and arguments using push_value to ensure stack grows
+            // CRITICAL: Push the ORIGINAL table (*obj), not the loop variable t?
+            // "if metamethod is a function, call it with table, key, and value as arguments"
+            // Lua manual: "call it with table, key, value"
+            // Wait, does it call with `t` (current loop obj) or `obj` (original)?
+            // LUA 5.4 manual: "The metamethod is called with t, key, val." where t is the original table/object.
+            // But if we recurse, t changes?
+            // "If __newindex is a function... calls function... with table, key, value."
+            // "If __newindex is a table... does the assignment to this table instead."
+            // It seems it calls with *original* table/object?
+            // Looking at lvm.c: luaV_finishset
+            // It calls `luaT_callTM(L, tm, t, key, val)`
+            // `t` is the parameter passed to luaV_finishset.
+            // If it loops (MAXTAGLOOP), `t` is updated to `tm` (the table).
+            // So if `tm` is a table, next loop `t` is that table.
+            // If `tm` is function, it calls with *current* `t`.
+            // BUT wait, in loop:
+            // "If the metamethod is a function, callit with the table, key, and value." (Manual)
+            // If it is a chain t -> mt -> __newindex = t2 -> mt2 -> __newindex = func
+            // thenfunc is called with t2, key, value?
+            // No, standard says:
+            // "If this metamethod is a table, the interpreter does this assignment to this table instead of the original one."
+            // "If the metamethod is a function, the interpreter calls it with table, key, and value."
+            //
+            // Actually, in lvm.c, it calls with `t`, which is the *current* object being accessed.
+            // So if I have t1 -> t2, it tries to access t2[key] = value.
+
+            // Wait, if I use the *original* object logic...
+            // My previous code used `*obj` which is the original.
+            // lvm.c:363 `luaT_callTM(L, tm, t, key, val);` where t is the argument.
+            // When looping, does it update t?
+            // lvm.c:359: `t = tm; /* else repeat with 'tm' */`
+            // Yes, t updates.
+            // BUT `luaV_finishset` takes `t` as args.
+            // Wait, does it recurse by calling `luaV_finishset` again?
+            // lvm.c loop: `for (;;) { ... if (ttisfunction(tm)) ... return; t = tm; }`
+            // So it iterates.
+            // When it calls the function, it uses `t` (current loop var).
+
+            lua_state.push_value(tm_val)?;
+            lua_state.push_value(t)?; // Use current `t`
+            lua_state.push_value(*key)?;
+            lua_state.push_value(value)?;
 
             let caller_depth = lua_state.call_depth();
             let new_base = func_pos + 1;
-
             // Call metamethod (0 results expected)
-            lua_state.push_frame(tm, new_base, 3, 0)?;
-            crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth)?;
+            lua_state.push_frame(tm_val, new_base, 3, 0)?;
+            execute::lua_execute_until(lua_state, caller_depth)?;
 
             lua_state.set_top(func_pos); // Clean up stack
             return Ok(true);
         }
 
         // __newindex is a table, repeat assignment over it
-        t = tm;
+        t = tm_val;
     }
 
     // Too many iterations - possible loop

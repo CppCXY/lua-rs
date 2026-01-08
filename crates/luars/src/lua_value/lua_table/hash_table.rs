@@ -267,7 +267,7 @@ impl LuaHashTable {
                 // Comparison: fast check on hash_low, then full equality
                 // Note: using direct field access instead of &entry.key
                 if entry.hash_low == hash_low && entry.key == *key {
-                     return Some(entry.value);
+                    return Some(entry.value);
                 }
             }
             idx = (idx + 1) & mask;

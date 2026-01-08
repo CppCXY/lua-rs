@@ -23,11 +23,9 @@ fn value_to_string_content(
     lua_state: &mut LuaState,
     value: &LuaValue,
 ) -> LuaResult<(String, bool)> {
-    // Fast path: already a string
-    if let Some(string_id) = value.as_string_id() {
-        if let Some(s) = lua_state.vm_mut().object_pool.get_string(string_id) {
-            return Ok((s.to_string(), true));
-        }
+    // Fast path: already a string (using direct pointer)
+    if let Some(s) = value.as_str() {
+        return Ok((s.to_string(), true));
     }
 
     // Convert other types to string
@@ -90,7 +88,7 @@ pub fn concat_strings(
     let mut strings = Vec::with_capacity(n);
     for i in 0..n {
         let val = &stack[base + a + i];
-        if let Some(str) = val.as_string_str() {
+        if let Some(str) = val.as_str() {
             total_len += str.len();
             strings.push(str);
         } else {

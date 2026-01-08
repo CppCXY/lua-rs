@@ -682,7 +682,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_string_str(&self) -> Option<&str> {
+    pub fn as_str(&self) -> Option<&str> {
         if self.ttisstring() {
             Some(unsafe {
                 let ptr = self.value.ptr;

@@ -1079,8 +1079,8 @@ mod tests {
         assert_ne!(v1, v3);
 
         // Verify content
-        assert_eq!(v1.as_string_str(), Some("hello"));
-        assert_eq!(v3.as_string_str(), Some("world"));
+        assert_eq!(v1.as_str(), Some("hello"));
+        assert_eq!(v3.as_str(), Some("world"));
     }
 
     #[test]
@@ -1127,7 +1127,7 @@ mod tests {
 
         // Verify all strings are stored correctly
         for (s, id) in &ids {
-            let stored = id.as_string_str();
+            let stored = id.as_str();
             assert_eq!(
                 stored,
                 Some(s.as_str()),
@@ -1171,7 +1171,7 @@ mod tests {
 
         // Verify content
         for (i, s) in strings.iter().enumerate() {
-            assert_eq!(ids[i].as_string_str(), Some(*s));
+            assert_eq!(ids[i].as_str(), Some(*s));
         }
     }
 }
