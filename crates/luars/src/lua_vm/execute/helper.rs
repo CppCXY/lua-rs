@@ -41,7 +41,7 @@ pub fn buildhiddenargs(
         top += 1;
         // Erase original parameter with nil (for GC)
         unsafe {
-            setnilvalue(&mut stack[func_pos + 1 + i] as *mut LuaValue);
+            psetnilvalue(&mut stack[func_pos + 1 + i] as *mut LuaValue);
         }
     }
 
@@ -77,37 +77,38 @@ pub fn buildhiddenargs(
 
 /// ttisinteger - 检查是否是整数 (最快的类型检查)
 #[inline(always)]
-pub unsafe fn ttisinteger(v: *const LuaValue) -> bool {
+pub unsafe fn pttisinteger(v: *const LuaValue) -> bool {
     unsafe { (*v).ttisinteger() }
 }
 
 /// ttisinteger_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn ttisinteger_ref(v: &LuaValue) -> bool {
+pub fn ttisinteger(v: &LuaValue) -> bool {
     v.ttisinteger()
 }
 
 /// ttisfloat - 检查是否是浮点数
 #[inline(always)]
-pub unsafe fn ttisfloat(v: *const LuaValue) -> bool {
+pub unsafe fn pttisfloat(v: *const LuaValue) -> bool {
     unsafe { (*v).ttisfloat() }
 }
 
 /// ttisfloat_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn ttisfloat_ref(v: &LuaValue) -> bool {
+pub fn ttisfloat(v: &LuaValue) -> bool {
     v.ttisfloat()
 }
 
+#[allow(unused)]
 /// ttisstring - 检查是否是字符串
 #[inline(always)]
-pub unsafe fn ttisstring(v: *const LuaValue) -> bool {
+pub unsafe fn pttisstring(v: *const LuaValue) -> bool {
     unsafe { (*v).is_string() }
 }
 
 /// ttisstring_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn ttisstring_ref(v: &LuaValue) -> bool {
+pub fn ttisstring(v: &LuaValue) -> bool {
     v.is_string()
 }
 
@@ -116,87 +117,91 @@ pub fn ttisstring_ref(v: &LuaValue) -> bool {
 
 /// ivalue - 直接获取整数值 (调用前必须用 ttisinteger 检查)
 #[inline(always)]
-pub unsafe fn ivalue(v: *const LuaValue) -> i64 {
+pub unsafe fn pivalue(v: *const LuaValue) -> i64 {
     unsafe { (*v).ivalue() }
 }
 
 /// ivalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn ivalue_ref(v: &LuaValue) -> i64 {
+pub fn ivalue(v: &LuaValue) -> i64 {
     v.ivalue()
 }
 
 /// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
 #[inline(always)]
-pub unsafe fn fltvalue(v: *const LuaValue) -> f64 {
+pub unsafe fn pfltvalue(v: *const LuaValue) -> f64 {
     unsafe { (*v).fltvalue() }
 }
 
 /// fltvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn fltvalue_ref(v: &LuaValue) -> f64 {
+pub fn fltvalue(v: &LuaValue) -> f64 {
     v.fltvalue()
 }
 
 /// setivalue - 设置整数值
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setivalue macro
 #[inline(always)]
-pub unsafe fn setivalue(v: *mut LuaValue, i: i64) {
+pub unsafe fn psetivalue(v: *mut LuaValue, i: i64) {
     unsafe { *v = LuaValue::integer(i); }
 }
 
 /// setivalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn setivalue_ref(v: &mut LuaValue, i: i64) {
+pub fn setivalue(v: &mut LuaValue, i: i64) {
     *v = LuaValue::integer(i);
 }
 
+
 /// setfltvalue - 设置浮点值  
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
+#[allow(unused)]
 #[inline(always)]
-pub unsafe fn setfltvalue(v: *mut LuaValue, n: f64) {
+pub unsafe fn psetfltvalue(v: *mut LuaValue, n: f64) {
     unsafe { *v = LuaValue::float(n); }
 }
 
 /// setfltvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn setfltvalue_ref(v: &mut LuaValue, n: f64) {
+pub fn setfltvalue(v: &mut LuaValue, n: f64) {
     *v = LuaValue::float(n);
 }
 
 /// setbfvalue - 设置false
 #[inline(always)]
-pub unsafe fn setbfvalue(v: *mut LuaValue) {
+#[allow(unused)]
+pub unsafe fn psetbfvalue(v: *mut LuaValue) {
     unsafe { *v = LuaValue::boolean(false); }
 }
 
 /// setbfvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn setbfvalue_ref(v: &mut LuaValue) {
+pub fn setbfvalue(v: &mut LuaValue) {
     *v = LuaValue::boolean(false);
 }
 
 /// setbtvalue - 设置true
 #[inline(always)]
-pub unsafe fn setbtvalue(v: *mut LuaValue) {
+#[allow(unused)]
+pub unsafe fn psetbtvalue(v: *mut LuaValue) {
     unsafe { *v = LuaValue::boolean(true); }
 }
 
 /// setbtvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn setbtvalue_ref(v: &mut LuaValue) {
+pub fn setbtvalue(v: &mut LuaValue) {
     *v = LuaValue::boolean(true);
 }
 
 /// setnilvalue - 设置nil
 #[inline(always)]
-pub unsafe fn setnilvalue(v: *mut LuaValue) {
+pub unsafe fn psetnilvalue(v: *mut LuaValue) {
     unsafe { *v = LuaValue::nil(); }
 }
 
 /// setnilvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn setnilvalue_ref(v: &mut LuaValue) {
+pub fn setnilvalue(v: &mut LuaValue) {
     *v = LuaValue::nil();
 }
 
@@ -205,10 +210,10 @@ pub fn setnilvalue_ref(v: &mut LuaValue) {
 /// tointegerns - 尝试转换为整数 (不抛出错误)
 /// 对应 Lua 的 tointegerns 宏
 #[inline(always)]
-pub unsafe fn tointegerns(v: *const LuaValue, out: *mut i64) -> bool {
+pub unsafe fn ptointegerns(v: *const LuaValue, out: *mut i64) -> bool {
     unsafe {
-        if ttisinteger(v) {
-            *out = ivalue(v);
+        if pttisinteger(v) {
+            *out = pivalue(v);
             true
         } else {
             false
@@ -218,19 +223,19 @@ pub unsafe fn tointegerns(v: *const LuaValue, out: *mut i64) -> bool {
 
 /// tointegerns_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn tointegerns_ref(v: &LuaValue, out: &mut i64) -> bool {
-    unsafe { tointegerns(v as *const LuaValue, out as *mut i64) }
+pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
+    unsafe { ptointegerns(v as *const LuaValue, out as *mut i64) }
 }
 
 /// tonumberns - 尝试转换为浮点数 (不抛出错误)
 #[inline(always)]
-pub unsafe fn tonumberns(v: *const LuaValue, out: *mut f64) -> bool {
+pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
     unsafe {
-        if ttisfloat(v) {
-            *out = fltvalue(v);
+        if pttisfloat(v) {
+            *out = pfltvalue(v);
             true
-        } else if ttisinteger(v) {
-            *out = ivalue(v) as f64;
+        } else if pttisinteger(v) {
+            *out = pivalue(v) as f64;
             true
         } else {
             false
@@ -240,8 +245,8 @@ pub unsafe fn tonumberns(v: *const LuaValue, out: *mut f64) -> bool {
 
 /// tonumberns_ref - 引用版本（保留兼容性）
 #[inline(always)]
-pub fn tonumberns_ref(v: &LuaValue, out: &mut f64) -> bool {
-    unsafe { tonumberns(v as *const LuaValue, out as *mut f64) }
+pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
+    unsafe { ptonumberns(v as *const LuaValue, out as *mut f64) }
 }
 
 /// tonumber - 从LuaValue引用转换为浮点数 (用于常量)

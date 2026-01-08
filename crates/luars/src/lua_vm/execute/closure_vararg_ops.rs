@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use super::{
     closure_handler,
-    helper::{buildhiddenargs, ivalue_ref, setivalue_ref, setnilvalue_ref, ttisinteger_ref},
+    helper::{buildhiddenargs, ivalue, setivalue, setnilvalue, ttisinteger},
 };
 
 /// CLOSURE: R[A] := closure(KPROTO[Bx])
@@ -132,7 +132,7 @@ pub fn exec_vararg(
             // Not a table, fill with nil
             let stack = lua_state.stack_mut();
             for i in 0..touse {
-                setnilvalue_ref(&mut stack[ra + i]);
+                setnilvalue(&mut stack[ra + i]);
             }
         }
     }
@@ -141,7 +141,7 @@ pub fn exec_vararg(
     if wanted >= 0 {
         let stack = lua_state.stack_mut();
         for i in touse..(wanted as usize) {
-            setnilvalue_ref(&mut stack[ra + i]);
+            setnilvalue(&mut stack[ra + i]);
         }
     }
 
@@ -195,15 +195,15 @@ pub fn exec_getvarg(
         if is_n {
             // Return vararg count
             let stack = lua_state.stack_mut();
-            setivalue_ref(&mut stack[ra_idx], nextra as i64);
+            setivalue(&mut stack[ra_idx], nextra as i64);
             *pc += 1;
             return Ok(());
         }
     }
 
     // Check if R[C] is an integer (vararg index, 1-based)
-    if ttisinteger_ref(&rc) {
-        let index = ivalue_ref(&rc);
+    if ttisinteger(&rc) {
+        let index = ivalue(&rc);
 
         // Check if index is valid (1 <= index <= nextraargs)
         let stack = lua_state.stack_mut();
@@ -214,12 +214,12 @@ pub fn exec_getvarg(
             stack[ra_idx] = src_val;
         } else {
             // Out of bounds or no varargs: return nil
-            setnilvalue_ref(&mut stack[ra_idx]);
+            setnilvalue(&mut stack[ra_idx]);
         }
     } else {
         // Not integer or "n": return nil
         let stack = lua_state.stack_mut();
-        setnilvalue_ref(&mut stack[ra_idx]);
+        setnilvalue(&mut stack[ra_idx]);
     }
 
     Ok(())

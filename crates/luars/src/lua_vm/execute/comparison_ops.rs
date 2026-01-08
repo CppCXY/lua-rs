@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    helper::{fltvalue_ref, ivalue_ref, tonumberns_ref, ttisfloat_ref, ttisinteger_ref, ttisstring_ref},
+    helper::{fltvalue, ivalue, tonumberns, ttisfloat, ttisinteger, ttisstring},
     metamethod::{self, TmKind},
 };
 
@@ -71,15 +71,15 @@ pub fn exec_lt(
         let ra = &stack[base + a];
         let rb = &stack[base + b];
 
-        if ttisinteger_ref(ra) && ttisinteger_ref(rb) {
-            ivalue_ref(ra) < ivalue_ref(rb)
-        } else if (ttisinteger_ref(ra) || ttisfloat_ref(ra)) && (ttisinteger_ref(rb) || ttisfloat_ref(rb)) {
+        if ttisinteger(ra) && ttisinteger(rb) {
+            ivalue(ra) < ivalue(rb)
+        } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
             let mut na = 0.0;
             let mut nb = 0.0;
-            tonumberns_ref(ra, &mut na);
-            tonumberns_ref(rb, &mut nb);
+            tonumberns(ra, &mut na);
+            tonumberns(rb, &mut nb);
             na < nb
-        } else if ttisstring_ref(ra) && ttisstring_ref(rb) {
+        } else if ttisstring(ra) && ttisstring(rb) {
             // String comparison
             let sid_a = ra.tsvalue();
             let sid_b = rb.tsvalue();
@@ -138,15 +138,15 @@ pub fn exec_le(
         let ra = &stack[base + a];
         let rb = &stack[base + b];
 
-        if ttisinteger_ref(ra) && ttisinteger_ref(rb) {
-            ivalue_ref(ra) <= ivalue_ref(rb)
-        } else if (ttisinteger_ref(ra) || ttisfloat_ref(ra)) && (ttisinteger_ref(rb) || ttisfloat_ref(rb)) {
+        if ttisinteger(ra) && ttisinteger(rb) {
+            ivalue(ra) <= ivalue(rb)
+        } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
             let mut na = 0.0;
             let mut nb = 0.0;
-            tonumberns_ref(ra, &mut na);
-            tonumberns_ref(rb, &mut nb);
+            tonumberns(ra, &mut na);
+            tonumberns(rb, &mut nb);
             na <= nb
-        } else if ttisstring_ref(ra) && ttisstring_ref(rb) {
+        } else if ttisstring(ra) && ttisstring(rb) {
             // String comparison
             let sid_a = ra.tsvalue();
             let sid_b = rb.tsvalue();
@@ -226,10 +226,10 @@ pub fn exec_eqi(
     let stack = lua_state.stack_mut();
     let ra = &stack[base + a];
 
-    let cond = if ttisinteger_ref(ra) {
-        ivalue_ref(ra) == (sb as i64)
-    } else if ttisfloat_ref(ra) {
-        fltvalue_ref(ra) == (sb as f64)
+    let cond = if ttisinteger(ra) {
+        ivalue(ra) == (sb as i64)
+    } else if ttisfloat(ra) {
+        fltvalue(ra) == (sb as f64)
     } else {
         false
     };
@@ -255,10 +255,10 @@ pub fn exec_lti(
     let stack = lua_state.stack_mut();
     let ra = &stack[base + a];
 
-    let cond = if ttisinteger_ref(ra) {
-        ivalue_ref(ra) < (im as i64)
-    } else if ttisfloat_ref(ra) {
-        fltvalue_ref(ra) < (im as f64)
+    let cond = if ttisinteger(ra) {
+        ivalue(ra) < (im as i64)
+    } else if ttisfloat(ra) {
+        fltvalue(ra) < (im as f64)
     } else {
         false
     };
@@ -284,10 +284,10 @@ pub fn exec_lei(
     let stack = lua_state.stack_mut();
     let ra = &stack[base + a];
 
-    let cond = if ttisinteger_ref(ra) {
-        ivalue_ref(ra) <= (im as i64)
-    } else if ttisfloat_ref(ra) {
-        fltvalue_ref(ra) <= (im as f64)
+    let cond = if ttisinteger(ra) {
+        ivalue(ra) <= (im as i64)
+    } else if ttisfloat(ra) {
+        fltvalue(ra) <= (im as f64)
     } else {
         false
     };
@@ -313,10 +313,10 @@ pub fn exec_gti(
     let stack = lua_state.stack_mut();
     let ra = &stack[base + a];
 
-    let cond = if ttisinteger_ref(ra) {
-        ivalue_ref(ra) > (im as i64)
-    } else if ttisfloat_ref(ra) {
-        fltvalue_ref(ra) > (im as f64)
+    let cond = if ttisinteger(ra) {
+        ivalue(ra) > (im as i64)
+    } else if ttisfloat(ra) {
+        fltvalue(ra) > (im as f64)
     } else {
         false
     };
@@ -342,10 +342,10 @@ pub fn exec_gei(
     let stack = lua_state.stack_mut();
     let ra = &stack[base + a];
 
-    let cond = if ttisinteger_ref(ra) {
-        ivalue_ref(ra) >= (im as i64)
-    } else if ttisfloat_ref(ra) {
-        fltvalue_ref(ra) >= (im as f64)
+    let cond = if ttisinteger(ra) {
+        ivalue(ra) >= (im as i64)
+    } else if ttisfloat(ra) {
+        fltvalue(ra) >= (im as f64)
     } else {
         false
     };

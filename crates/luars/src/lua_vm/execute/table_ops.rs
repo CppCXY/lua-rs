@@ -28,7 +28,7 @@ pub fn exec_gettable(
     frame_idx: usize,
     pc: &mut usize,
 ) -> LuaResult<()> {
-    use super::helper::{ivalue, ttisinteger};
+    use super::helper::{pivalue, pttisinteger};
 
     let a = instr.get_a() as usize;
     let b = instr.get_b() as usize;
@@ -48,8 +48,8 @@ pub fn exec_gettable(
     let result = if let Some(table) = rb.as_table_mut() {
         // Fast path for table - OPTIMIZED: Direct pointer access
         let direct_result = unsafe {
-            if ttisinteger(&rc as *const LuaValue) {
-                let key = ivalue(&rc as *const LuaValue);
+            if pttisinteger(&rc as *const LuaValue) {
+                let key = pivalue(&rc as *const LuaValue);
                 table.get_int(key)
             } else {
                 table.raw_get(&rc)
