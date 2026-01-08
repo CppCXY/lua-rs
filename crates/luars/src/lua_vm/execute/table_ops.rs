@@ -396,6 +396,15 @@ pub fn exec_self(
         return Err(lua_state.error(format!("SELF: invalid constant index {}", c)));
     }
 
+    // CRITICAL: Update frame.top to cover R[A+1] (the object) and R[A] (the method)
+    // We write to A+1 and A. So we need top >= base + a + 2.
+    let write_top = base + a + 2;
+    let call_info = lua_state.get_call_info_mut(frame_idx);
+    if write_top > call_info.top {
+        call_info.top = write_top;
+        lua_state.set_top(write_top);
+    }
+
     let stack = lua_state.stack_mut();
     let rb = stack[base + b];
 
@@ -405,21 +414,27 @@ pub fn exec_self(
     // R[A] := R[B][K[C]] (get method)
     let key = &constants[c];
 
-    let result = if let Some(table) = rb.as_table_mut() {
-        // Fast path: direct table access - OPTIMIZED: Direct pointer
+    // OPTIMIZED: Try raw_get first if it's a table
+    let fast_result = if let Some(table) = rb.as_table_mut() {
         table.raw_get(key)
     } else {
-        // Try metatable lookup
+        None
+    };
+
+    if let Some(val) = fast_result {
+        let stack = lua_state.stack_mut();
+        stack[base + a] = val;
+    } else {
+        // Key not found in table OR not a table: try __index metamethod
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         let result = helper::lookup_from_metatable(lua_state, &rb, key);
         let new_base = lua_state.get_frame_base(frame_idx);
         if new_base != base {
             return Err(lua_state.error("base changed in SELF".to_string()));
         }
-        result
-    };
-
-    let stack = lua_state.stack_mut();
-    stack[base + a] = result.unwrap_or(LuaValue::nil());
+        let stack = lua_state.stack_mut();
+        stack[base + a] = result.unwrap_or(LuaValue::nil());
+    }
+    
     Ok(())
 }
