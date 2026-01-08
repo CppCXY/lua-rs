@@ -34,6 +34,11 @@ pub struct LuaState {
     /// Similar to Lua's CallInfo *ci in lua_State
     pub(crate) call_stack: Vec<CallInfo>,
 
+    /// Current call depth (index into call_stack)
+    /// This is the actual depth, NOT call_stack.len()
+    /// Implements Lua's optimization: never shrink call_stack, only move this index
+    call_depth: usize,
+
     /// Open upvalues - upvalues pointing to stack locations
     /// Uses HashMap for O(1) lookup by stack index (unlike Lua's sorted linked list)
     /// Also maintains a sorted Vec for efficient traversal during close operations
@@ -69,6 +74,7 @@ impl LuaState {
             stack,
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
+            call_depth: 0, // Start with no calls
             open_upvalues_map: HashMap::new(),
             open_upvalues_list: Vec::new(),
             error_msg: String::new(),
@@ -95,23 +101,31 @@ impl LuaState {
     /// Get current call frame (equivalent to Lua's L->ci)
     #[inline(always)]
     pub fn current_frame(&self) -> Option<&CallInfo> {
-        self.call_stack.last()
+        if self.call_depth > 0 {
+            self.call_stack.get(self.call_depth - 1)
+        } else {
+            None
+        }
     }
 
     /// Get mutable current call frame
     #[inline(always)]
     pub fn current_frame_mut(&mut self) -> Option<&mut CallInfo> {
-        self.call_stack.last_mut()
+        if self.call_depth > 0 {
+            self.call_stack.get_mut(self.call_depth - 1)
+        } else {
+            None
+        }
     }
 
     /// Get call stack depth
     #[inline(always)]
     pub fn call_depth(&self) -> usize {
-        self.call_stack.len()
+        self.call_depth
     }
 
     /// Push a new call frame (equivalent to Lua's luaD_precall)
-    /// 按需动态分配 - Lua 5.4 风格
+    /// OPTIMIZED: Reuses CallInfo slots, only allocates when needed
     pub fn push_frame(
         &mut self,
         func: LuaValue,
@@ -120,7 +134,7 @@ impl LuaState {
         nresults: i32,
     ) -> LuaResult<()> {
         // 检查栈深度限制
-        if self.call_stack.len() >= self.safe_option.max_call_depth {
+        if self.call_depth >= self.safe_option.max_call_depth {
             self.error(format!(
                 "call stack overflow: exceeded maximum depth of {}",
                 self.safe_option.max_call_depth
@@ -131,14 +145,9 @@ impl LuaState {
         // Determine call status based on function type
         let call_status = if func.is_cfunction()
             || func
-                .as_function_id()
-                .and_then(|id| {
-                    let vm = unsafe { &*self.vm };
-                    vm.object_pool
-                        .get_function(id)
-                        .and_then(|f| f.data.c_function())
-                })
-                .is_some()
+                .as_lua_function()
+                .map(|f| f.is_c_function())
+                .unwrap_or(false)
         {
             CIST_C
         } else {
@@ -147,45 +156,51 @@ impl LuaState {
 
         // Calculate nextraargs for vararg functions
         // nextraargs = number of arguments passed beyond the function's fixed parameters
-        let nextraargs = if let Some(func_id) = func.as_function_id() {
-            let vm = unsafe { &*self.vm };
-            if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                if let Some(chunk) = func_obj.data.chunk() {
-                    // For Lua functions with prototypes
-                    let numparams = chunk.param_count;
-                    if nparams > numparams {
-                        (nparams - numparams) as i32
-                    } else {
-                        0
-                    }
+        let mut nextraargs = 0;
+        if let Some(func) = func.as_lua_function() {
+            if let Some(chunk) = func.chunk() {
+                // For Lua functions with prototypes
+                let numparams = chunk.param_count;
+                nextraargs = if nparams > numparams {
+                    (nparams - numparams) as i32
                 } else {
-                    // C functions don't use nextraargs
                     0
-                }
-            } else {
-                0
+                };
             }
-        } else {
-            // Light C functions don't use nextraargs
-            0
         };
 
         // Calculate frame top
         let frame_top = base + nparams;
 
-        // 动态分配新的 CallInfo（Lua 5.4 也是这样做的）
-        let frame = CallInfo {
-            func,
-            base,
-            func_offset: 1, // Initially base - 1 = func
-            top: frame_top,
-            pc: 0,
-            nresults, // Use the nresults from caller
-            call_status,
-            nextraargs,
-        };
+        // OPTIMIZATION: Reuse existing CallInfo if available, otherwise allocate new
+        if self.call_depth < self.call_stack.len() {
+            // Reuse existing CallInfo slot (fast path)
+            let frame = &mut self.call_stack[self.call_depth];
+            frame.func = func;
+            frame.base = base;
+            frame.func_offset = 1;
+            frame.top = frame_top;
+            frame.pc = 0;
+            frame.nresults = nresults;
+            frame.call_status = call_status;
+            frame.nextraargs = nextraargs;
+        } else {
+            // Need to allocate new CallInfo (first time reaching this depth)
+            let frame = CallInfo {
+                func,
+                base,
+                func_offset: 1,
+                top: frame_top,
+                pc: 0,
+                nresults,
+                call_status,
+                nextraargs,
+            };
+            self.call_stack.push(frame);
+        }
 
-        self.call_stack.push(frame);
+        // Increment depth (like moving L->ci pointer)
+        self.call_depth += 1;
 
         // CRITICAL: Sync stack_top with new frame's top
         // This ensures C functions see correct stack_top for push_value
@@ -195,8 +210,15 @@ impl LuaState {
     }
 
     /// Pop call frame (equivalent to Lua's luaD_poscall)
+    /// OPTIMIZED: Only decrements depth, never releases memory (Lua-style)
     pub fn pop_frame(&mut self) -> Option<CallInfo> {
-        self.call_stack.pop()
+        if self.call_depth > 0 {
+            self.call_depth -= 1;
+            // Return a clone for compatibility (caller may need frame data)
+            self.call_stack.get(self.call_depth).cloned()
+        } else {
+            None
+        }
     }
 
     /// Get logical stack top (L->top.p in Lua source)
@@ -307,7 +329,7 @@ impl LuaState {
     pub fn error(&mut self, msg: String) -> LuaError {
         // Try to get current source location for the error
         let mut location = String::new();
-        if let Some(ci) = self.call_stack.last() {
+        if let Some(ci) = self.current_frame() {
             if ci.is_lua() {
                 if let Some(func_id) = ci.func.as_function_id() {
                     let vm = unsafe { &*self.vm };
@@ -609,8 +631,8 @@ impl LuaState {
     /// Pop the current call frame
     #[inline]
     pub fn pop_call_frame(&mut self) {
-        if !self.call_stack.is_empty() {
-            self.call_stack.pop();
+        if self.call_depth > 0 {
+            self.call_depth -= 1;
         }
     }
 
@@ -643,11 +665,11 @@ impl LuaState {
     /// Get all arguments for the current C function call
     /// Returns arguments starting from index 1 (index 0 is the function itself)
     pub fn get_args(&self) -> Vec<LuaValue> {
-        if self.call_stack.is_empty() {
+        if self.call_depth == 0 {
             return Vec::new();
         }
 
-        let frame = &self.call_stack[self.call_stack.len() - 1];
+        let frame = &self.call_stack[self.call_depth - 1];
         let base = frame.base;
         let top = frame.top;
 
@@ -670,11 +692,11 @@ impl LuaState {
     /// Get a specific argument (1-based index, Lua convention)
     /// Returns None if index is out of bounds
     pub fn get_arg(&self, index: usize) -> Option<LuaValue> {
-        if index == 0 || self.call_stack.is_empty() {
+        if index == 0 || self.call_depth == 0 {
             return None;
         }
 
-        let frame = &self.call_stack[self.call_stack.len() - 1];
+        let frame = &self.call_stack[self.call_depth - 1];
         let base = frame.base;
         let top = frame.top;
 
@@ -694,11 +716,11 @@ impl LuaState {
 
     /// Get the number of arguments for the current function call
     pub fn arg_count(&self) -> usize {
-        if self.call_stack.is_empty() {
+        if self.call_depth == 0 {
             return 0;
         }
 
-        let frame = &self.call_stack[self.call_stack.len() - 1];
+        let frame = &self.call_stack[self.call_depth - 1];
         let base = frame.base;
         let top = frame.top;
 
@@ -1286,7 +1308,7 @@ impl LuaState {
     }
 
     // ============ GC Barriers ============
-    
+
     /// Forward GC barrier (luaC_barrier in Lua 5.5)
     /// Called when modifying an object to point to another object
     pub fn gc_barrier(&mut self, owner_id: UpvalueId, value_gc_id: crate::gc::GcId) {
@@ -1294,7 +1316,7 @@ impl LuaState {
         let owner_gc_id = crate::gc::GcId::UpvalueId(owner_id);
         vm.gc.barrier(owner_gc_id, value_gc_id, &mut vm.object_pool);
     }
-    
+
     /// Convert LuaValue to GcId (if it's a GC-managed object)
     pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<crate::gc::GcId> {
         use crate::lua_value::LuaValueKind;

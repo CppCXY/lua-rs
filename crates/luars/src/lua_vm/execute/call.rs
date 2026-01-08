@@ -80,14 +80,8 @@ pub fn handle_call(
     }
 
     // Check if it's a GC function (Lua or C)
-    if let Some(new_func_id) = func.as_function_id() {
-        let new_func = lua_state
-            .vm_mut()
-            .object_pool
-            .get_function(new_func_id)
-            .ok_or(LuaError::RuntimeError)?;
-
-        if new_func.data.is_lua_function() {
+    if let Some(new_func) = func.as_lua_function() {
+        if new_func.is_lua_function() {
             // Lua function call: push new frame
             let new_base = func_idx + 1; // Arguments start after function
 
@@ -96,7 +90,7 @@ pub fn handle_call(
 
             // Return FrameAction::Call - main loop will load new chunk and continue
             Ok(FrameAction::Call)
-        } else if new_func.data.is_c_function() {
+        } else if new_func.is_c_function() {
             // GC C function call: execute directly
             call_c_function(lua_state, func_idx, nargs, nresults)?;
 
@@ -168,17 +162,9 @@ pub fn call_c_function(
             let func_ptr = func.value.f as usize;
             std::mem::transmute(func_ptr)
         }
-    } else if let Some(func_id) = func.as_function_id() {
+    } else if let Some(func) = func.as_lua_function() {
         // GC function - need to get from object pool
-        let gc_func = lua_state
-            .vm_mut()
-            .object_pool
-            .get_function(func_id)
-            .ok_or(LuaError::RuntimeError)?;
-
-        gc_func
-            .data
-            .c_function()
+        func.c_function()
             .ok_or_else(|| lua_state.error("Not a C function".to_string()))?
     } else {
         return Err(lua_state.error("Not a callable value".to_string()));
@@ -367,17 +353,14 @@ pub fn handle_tailcall(
 
         if new_func.data.is_lua_function() {
             // Move arguments to current frame base
-            let mut args = Vec::with_capacity(nargs);
+            let mut dist = 0;
             for i in 0..nargs {
                 let src_idx = func_idx + 1 + i;
                 if let Some(arg) = lua_state.stack_get(src_idx) {
-                    args.push(arg);
+                    let dst_idx = base + dist;
+                    lua_state.stack_set(dst_idx, arg)?;
+                    dist += 1;
                 }
-            }
-
-            for (i, arg) in args.into_iter().enumerate() {
-                let dst_idx = base + i;
-                lua_state.stack_set(dst_idx, arg)?;
             }
 
             // Replace function at base-1 (where current function is)
@@ -394,7 +377,6 @@ pub fn handle_tailcall(
             Ok(FrameAction::TailCall)
         } else if new_func.data.is_c_function() {
             // C function tail call: execute directly and continue
-            // Lua \u4e5f\u662f\u8fd9\u6837\u505a\u7684\uff1aluaD_pretailcall \u8c03\u7528 precallC
             call_c_function(lua_state, func_idx, nargs, -1)?;
 
             // Move results to current frame base (for return)
@@ -471,15 +453,8 @@ fn call_c_function_tailcall(
             let func_ptr = func.value.f as usize;
             std::mem::transmute(func_ptr)
         }
-    } else if let Some(func_id) = func.as_function_id() {
-        let gc_func = lua_state
-            .vm_mut()
-            .object_pool
-            .get_function(func_id)
-            .ok_or(LuaError::RuntimeError)?;
-        gc_func
-            .data
-            .c_function()
+    } else if let Some(func) = func.as_lua_function() {
+        func.c_function()
             .ok_or_else(|| lua_state.error("Not a C function".to_string()))?
     } else {
         return Err(lua_state.error("Not a callable value".to_string()));
