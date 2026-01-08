@@ -1,4 +1,4 @@
-# lua_rt
+# luars
 
 [![CI](https://github.com/CppCXY/lua-rs/workflows/CI/badge.svg)](https://github.com/CppCXY/lua-rs/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
