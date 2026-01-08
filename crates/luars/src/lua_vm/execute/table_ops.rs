@@ -1,20 +1,20 @@
 /*----------------------------------------------------------------------
   Table Operations Module - Extracted from main execution loop
-  
+
   This module contains non-hot-path table instructions:
   - GetTable, SetTable
-  - GetI, SetI  
+  - GetI, SetI
   - GetField, SetField
   - Self_
   - NewTable
-  
+
   These operations involve complex logic and metamethod calls,
   so extracting them reduces main loop size without hurting performance.
 ----------------------------------------------------------------------*/
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{Instruction, LuaError, LuaResult, LuaState, OpCode},
+    lua_vm::{Instruction, LuaResult, LuaState, OpCode},
 };
 
 use super::helper;
@@ -129,7 +129,7 @@ pub fn exec_settable(
     // Always use store_to_metatable which handles __newindex metamethod
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     helper::store_to_metatable(lua_state, &ra_value, &key, value)?;
-    
+
     // Verify base hasn't changed
     let new_base = lua_state.get_frame_base(frame_idx);
     if new_base != base {
@@ -368,7 +368,7 @@ pub fn exec_setfield(
     // Always use store_to_metatable
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     helper::store_to_metatable(lua_state, &ra, &key, value)?;
-    
+
     let new_base = lua_state.get_frame_base(frame_idx);
     if new_base != base {
         return Err(lua_state.error("base changed in SETFIELD".to_string()));
@@ -441,11 +441,7 @@ pub fn exec_newtable(
 
     // Calculate hash size
     let hash_size = if vb > 0 {
-        if vb > 31 {
-            0
-        } else {
-            1usize << (vb - 1)
-        }
+        if vb > 31 { 0 } else { 1usize << (vb - 1) }
     } else {
         0
     };
