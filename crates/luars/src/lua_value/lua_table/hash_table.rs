@@ -249,9 +249,30 @@ impl LuaHashTable {
     /// 获取值
     #[inline(always)]
     fn get(&self, key: &LuaValue) -> Option<LuaValue> {
-        let hash = Self::hash_key(&key);
-        self.find_index(key, hash)
-            .map(|idx| unsafe { self.entries.get_unchecked(idx).value })
+        // OPTIMIZATION: Manually inline logic to avoid function call overhead
+        let hash = Self::hash_key(key);
+        let mask = self.indices.len() - 1;
+        let mut idx = (hash as usize) & mask;
+        let hash_low = hash as u32;
+
+        for _ in 0..self.indices.len() {
+            let entry_idx = unsafe { *self.indices.get_unchecked(idx) };
+
+            if entry_idx == EMPTY {
+                return None;
+            }
+
+            if entry_idx != TOMBSTONE {
+                let entry = unsafe { self.entries.get_unchecked(entry_idx as usize) };
+                // Comparison: fast check on hash_low, then full equality
+                // Note: using direct field access instead of &entry.key
+                if entry.hash_low == hash_low && entry.key == *key {
+                     return Some(entry.value);
+                }
+            }
+            idx = (idx + 1) & mask;
+        }
+        None
     }
 }
 

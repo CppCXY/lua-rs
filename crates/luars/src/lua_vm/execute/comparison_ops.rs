@@ -83,7 +83,6 @@ pub fn exec_lt(
             // String comparison
             let sid_a = ra.tsvalue();
             let sid_b = rb.tsvalue();
-            let _ = stack; // Release stack borrow
 
             let pool = &lua_state.vm_mut().object_pool;
             if let (Some(sa), Some(sb)) = (pool.get_string(sid_a), pool.get_string(sid_b)) {

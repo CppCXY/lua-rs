@@ -1465,12 +1465,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let key = &constants[c];
 
                     // Get value from table[key]
-                    let result = if let Some(table_id) = table_value.as_table_id() {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
+                    // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
+                    // This is safe because LuaValue holds a valid pointer to the table data
+                    let result = if let Some(table) = table_value.as_table() {
+                        // Fast path: direct table access
                         let direct_result = table.raw_get(key);
 
                         if direct_result.is_some() {
@@ -1533,15 +1531,13 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     };
 
                     // Set table[key] = value
-                    if let Some(table_id) = table_value.as_table_id() {
-                        let table = lua_state
-                            .vm_mut()
-                            .object_pool
-                            .get_table_mut(table_id)
-                            .ok_or(LuaError::RuntimeError)?;
+                    // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
+                    if let Some(table) = table_value.as_table_mut() {
                         table.raw_set(&key, value);
                     }
-                    // else: should trigger metamethod, but we skip for now
+                    else {
+                        // TODO: trigger metamethod for non-table
+                    }
                 }
 
                 // ============================================================

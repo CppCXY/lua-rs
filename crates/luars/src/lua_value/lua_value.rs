@@ -704,6 +704,15 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn as_table(&self) -> Option<&LuaTable> {
+        if self.ttistable() {
+            Some(unsafe { &*(self.value.ptr as *const LuaTable) })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
     pub fn as_table_mut(&self) -> Option<&mut LuaTable> {
         if self.ttistable() {
             Some(unsafe { &mut *(self.value.ptr as *mut LuaTable) })
