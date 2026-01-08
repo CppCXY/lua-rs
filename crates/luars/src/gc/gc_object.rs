@@ -32,28 +32,22 @@ impl CachedUpvalue {
     /// SAFETY: Caller must ensure the pointer is still valid
     /// current_thread: The thread attempting to read the upvalue (used for stack access optimization)
     #[inline(always)]
-    pub unsafe fn get_value_unchecked(&self, current_thread: &LuaState) -> LuaValue {
+    pub unsafe fn get_value_unchecked(&self, _current_thread: &LuaState) -> LuaValue {
         unsafe {
             let upval = &*self.ptr;
-            if upval.is_open() {
-                // Check if upvalue belongs to current thread
-                let owner = upval.thread;
-                let current_ptr = current_thread as *const LuaState;
-
-                let val = if owner == current_ptr {
-                    // Optimized: use current stack
-                    *current_thread.stack().get_unchecked(upval.stack_index)
-                } else {
-                    // Cross-thread access: dereference owner thread to get its stack
-                    // SAFETY: If upvalue is open, the owner thread must be alive
-                    let owner_ref = &*owner;
-                    *owner_ref.stack().get_unchecked(upval.stack_index)
-                };
-
-                val
-            } else {
-                upval.closed_value
-            }
+            // ZERO-COST: Direct pointer dereference like Lua C's uv->v.p
+            *upval.v_ptr
+        }
+    }
+    
+    /// Set the upvalue value directly through the cached pointer
+    /// SAFETY: Caller must ensure the pointer is still valid
+    #[inline(always)]
+    pub unsafe fn set_value_unchecked(&self, value: LuaValue) {
+        unsafe {
+            let upval = &*self.ptr;
+            // ZERO-COST: Direct pointer write like Lua C's setobj(L, uv->v.p, val)
+            *upval.v_ptr = value;
         }
     }
 }
@@ -328,13 +322,19 @@ impl FunctionBody {
 
 /// Upvalue with embedded GC header
 ///
-/// Hybrid design for safety and performance:
-/// - When open: uses stack_index (safe, no dangling pointers)
-/// - When closed: stores value inline (fast, no indirection)
+/// Mimics Lua 5.5's UpVal structure with v.p pointer optimization:
+/// - v.p always points to the actual value location (stack or u.value)
+/// - When open: v.p points to stack[stack_index]
+/// - When closed: v.p points to closed_value
 ///
-/// Note: We cannot use raw pointers for open upvalues because
-/// register_stack may reallocate, invalidating the pointers.
+/// This eliminates the branch in get/set operations, matching Lua C performance
 pub struct Upvalue {
+    /// Direct pointer to the value (either stack or closed_value)
+    /// CRITICAL: This pointer must be updated when:
+    /// 1. Stack is reallocated
+    /// 2. Upvalue is closed
+    pub v_ptr: *mut LuaValue,
+    
     /// The stack index when open (used for accessing stack value)
     pub stack_index: usize,
     /// Storage for closed value
@@ -366,6 +366,8 @@ impl Upvalue {
     pub fn close(&mut self, value: LuaValue) {
         self.closed_value = value;
         self.is_open = false;
+        // CRITICAL: Update v_ptr to point to closed_value
+        self.v_ptr = &mut self.closed_value as *mut LuaValue;
     }
 
     /// Get the value of a closed upvalue (returns None if still open)
@@ -400,6 +402,8 @@ impl Upvalue {
     pub unsafe fn close_with_value(&mut self, value: LuaValue) {
         self.closed_value = value;
         self.is_open = false;
+        // CRITICAL: Update v_ptr to point to closed_value
+        self.v_ptr = &mut self.closed_value as *mut LuaValue;
     }
 
     /// Get closed value reference directly without Option

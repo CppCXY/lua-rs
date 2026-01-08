@@ -31,7 +31,6 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
-    Upvalue, // Import Upvalue for unsafe pointer access
     lua_value::{LUA_VFALSE, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
@@ -906,7 +905,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
-                    // ZERO-COST: Direct pointer dereference like Lua C's cl->upvals[B]->v
+                    // ZERO-COST: Direct pointer dereference like Lua C's cl->upvals[B]->v.p
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
 
@@ -917,8 +916,12 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         );
                     }
 
-                    // Direct pointer access - matches Lua C performance!
-                    let value = unsafe { upvalue_ptrs[b].get_value_unchecked(lua_state) };
+                    // ULTRA-OPTIMIZED: Direct double-pointer dereference
+                    // Matches Lua C: setobj2s(L, ra, cl->upvals[b]->v.p)
+                    let value = unsafe {
+                        let upval = &*upvalue_ptrs[b].ptr;
+                        *upval.v_ptr
+                    };
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
@@ -942,28 +945,11 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     }
 
                     // Set value in upvalue (OPTIMIZED: Uses direct pointer)
-                    // SAFETY: CachedUpvalue ensures pointer is valid
+                    // ULTRA-OPTIMIZED: Direct double-pointer write
+                    // Matches Lua C: setobj(L, uv->v.p, s2v(ra))
                     unsafe {
-                        let upvalue = &mut *(upvalue_ptrs[b].ptr as *mut Upvalue);
-
-                        if upvalue.is_open {
-                            // Open: write to stack
-                            let owner = upvalue.thread;
-                            let current = lua_state as *const LuaState;
-
-                            if owner == current {
-                                // Same thread - use direct stack access
-                                let stack = lua_state.stack_mut();
-                                stack[upvalue.stack_index] = value;
-                            } else {
-                                // Cross-thread - dereference owner
-                                let owner_state = &mut *(owner as *mut LuaState);
-                                owner_state.stack_mut()[upvalue.stack_index] = value;
-                            }
-                        } else {
-                            // Closed: write to upvalue storage
-                            upvalue.closed_value = value;
-                        }
+                        let upval = &*upvalue_ptrs[b].ptr;
+                        *upval.v_ptr = value;
                     }
 
                     // TODO: GC barrier (luaC_barrier)
