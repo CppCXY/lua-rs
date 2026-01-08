@@ -142,6 +142,7 @@ pub fn fltvalue(v: &LuaValue) -> f64 {
 /// setivalue - 设置整数值
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setivalue macro
 #[inline(always)]
+#[allow(unused)]
 pub unsafe fn psetivalue(v: *mut LuaValue, i: i64) {
     unsafe { *v = LuaValue::integer(i); }
 }

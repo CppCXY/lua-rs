@@ -1,26 +1,26 @@
 /*----------------------------------------------------------------------
   Closure and Vararg Operations Module - Extracted from main execution loop
-  
+
   This module contains complex but non-hot-path instructions:
   - Closure
   - Vararg, GetVarg, VarargPrep
   - SetList (used in table constructors)
-  
+
   These operations involve complex logic but are not in critical hot paths,
   so extracting them reduces main loop size.
 ----------------------------------------------------------------------*/
 
 use crate::{
+    UpvalueId,
     gc::CachedUpvalue,
     lua_value::{Chunk, LuaValue},
-    lua_vm::{Instruction, LuaError, LuaResult, LuaState, OpCode},
-    UpvalueId,
+    lua_vm::{Instruction, LuaResult, LuaState, OpCode},
 };
 use std::rc::Rc;
 
 use super::{
     closure_handler,
-    helper::{buildhiddenargs, ivalue, setivalue, setnilvalue, ttisinteger},
+    helper::{buildhiddenargs, setnilvalue},
 };
 
 /// CLOSURE: R[A] := closure(KPROTO[Bx])
@@ -148,83 +148,6 @@ pub fn exec_vararg(
     Ok(())
 }
 
-/// GETVARG: R[A] := varargs[R[C]]
-#[inline(always)]
-pub fn exec_getvarg(
-    lua_state: &mut LuaState,
-    instr: Instruction,
-    base: usize,
-    frame_idx: usize,
-    pc: &mut usize,
-) -> LuaResult<()> {
-    let a = instr.get_a() as usize;
-    let _b = instr.get_b() as usize; // unused in Lua 5.5
-    let c = instr.get_c() as usize;
-
-    // Get nextraargs from CallInfo
-    let call_info = lua_state.get_call_info(frame_idx);
-    let nextra = call_info.nextraargs as usize;
-    let func_id = call_info
-        .func
-        .as_function_id()
-        .ok_or(LuaError::RuntimeError)?;
-
-    // Get param_count from the function's chunk
-    let param_count = {
-        let vm = lua_state.vm_mut();
-        let func_obj = vm
-            .object_pool
-            .get_function(func_id)
-            .ok_or(LuaError::RuntimeError)?;
-        let chunk = func_obj.data.chunk().ok_or(LuaError::RuntimeError)?;
-        chunk.param_count
-    };
-
-    let stack = lua_state.stack_mut();
-    let ra_idx = base + a;
-    let rc = stack[base + c];
-
-    // Check if R[C] is string "n" (get vararg count)
-    if let Some(string_id) = rc.as_string_id() {
-        let is_n = lua_state
-            .vm_mut()
-            .object_pool
-            .get_string(string_id)
-            .map(|s| s == "n")
-            .unwrap_or(false);
-        if is_n {
-            // Return vararg count
-            let stack = lua_state.stack_mut();
-            setivalue(&mut stack[ra_idx], nextra as i64);
-            *pc += 1;
-            return Ok(());
-        }
-    }
-
-    // Check if R[C] is an integer (vararg index, 1-based)
-    if ttisinteger(&rc) {
-        let index = ivalue(&rc);
-
-        // Check if index is valid (1 <= index <= nextraargs)
-        let stack = lua_state.stack_mut();
-        if nextra > 0 && index >= 1 && (index as usize) <= nextra {
-            // Get value from varargs at base + param_count
-            let vararg_start = base + param_count;
-            let src_val = stack[vararg_start + (index as usize) - 1];
-            stack[ra_idx] = src_val;
-        } else {
-            // Out of bounds or no varargs: return nil
-            setnilvalue(&mut stack[ra_idx]);
-        }
-    } else {
-        // Not integer or "n": return nil
-        let stack = lua_state.stack_mut();
-        setnilvalue(&mut stack[ra_idx]);
-    }
-
-    Ok(())
-}
-
 /// VARARGPREP: Adjust varargs (prepare vararg function)
 #[inline(always)]
 pub fn exec_varargprep(
@@ -317,7 +240,7 @@ pub fn exec_setlist(
         // Direct pointer access - no object_pool needed
         unsafe {
             let stack_ptr = lua_state.stack_mut().as_mut_ptr();
-            
+
             // Set elements: table[vc+i] = R[A+i] for i=1..vb
             for i in 1..=vb {
                 let val = stack_ptr.add(base + a + i);

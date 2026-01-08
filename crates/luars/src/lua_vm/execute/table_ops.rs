@@ -14,7 +14,7 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{Instruction, LuaResult, LuaState, OpCode},
+    lua_vm::{Instruction, LuaResult, LuaState},
 };
 
 use super::helper;
@@ -421,49 +421,5 @@ pub fn exec_self(
 
     let stack = lua_state.stack_mut();
     stack[base + a] = result.unwrap_or(LuaValue::nil());
-    Ok(())
-}
-
-/// NEWTABLE: R[A] := {} (new table)
-#[inline(always)]
-pub fn exec_newtable(
-    lua_state: &mut LuaState,
-    instr: Instruction,
-    code: &[Instruction],
-    base: usize,
-    _frame_idx: usize,
-    pc: &mut usize,
-) -> LuaResult<()> {
-    let a = instr.get_a() as usize;
-    let vb = instr.get_vb() as usize;
-    let mut vc = instr.get_vc() as usize;
-    let k = instr.get_k();
-
-    // Calculate hash size
-    let hash_size = if vb > 0 {
-        if vb > 31 { 0 } else { 1usize << (vb - 1) }
-    } else {
-        0
-    };
-
-    // Check for EXTRAARG instruction for larger array sizes
-    if k {
-        if *pc < code.len() {
-            let extra_instr = code[*pc];
-            if extra_instr.get_opcode() == OpCode::ExtraArg {
-                let extra = extra_instr.get_ax() as usize;
-                vc += extra * 1024;
-            }
-        }
-    }
-
-    // ALWAYS skip the next instruction (EXTRAARG)
-    *pc += 1;
-
-    // Create table with pre-allocated sizes
-    let value = lua_state.create_table(vc, hash_size);
-
-    let stack = lua_state.stack_mut();
-    stack[base + a] = value;
     Ok(())
 }

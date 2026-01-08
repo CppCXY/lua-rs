@@ -35,9 +35,8 @@ use crate::{
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
         execute::helper::{
-            fltvalue, ivalue, psetivalue, setbfvalue, setbtvalue, setfltvalue, setivalue,
-            setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger,
-            ttisstring,
+            fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
+            tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger, ttisstring,
         },
     },
 };
@@ -144,35 +143,29 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // R[A] := R[B] - OPTIMIZED with raw pointers
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    unsafe {
-                        let stack_ptr = lua_state.stack_mut().as_mut_ptr();
-                        *stack_ptr.add(base + a) = *stack_ptr.add(base + b);
-                    }
+                    let stack = lua_state.stack_mut();
+                    stack[base + a] = stack[base + b];
                 }
                 OpCode::LoadI => {
                     // R[A] := sBx - OPTIMIZED with raw pointers
                     let a = instr.get_a() as usize;
                     let sbx = instr.get_sbx();
-                    unsafe {
-                        psetivalue(lua_state.stack_mut().as_mut_ptr().add(base + a), sbx as i64);
-                    }
+                    let stack = lua_state.stack_mut();
+                    stack[base + a] = LuaValue::integer(sbx as i64);
                 }
                 OpCode::LoadF => {
                     // R[A] := (float)sBx
                     let a = instr.get_a() as usize;
                     let sbx = instr.get_sbx();
-
                     let stack = lua_state.stack_mut();
-                    setfltvalue(&mut stack[base + a], sbx as f64);
+                    stack[base + a] = LuaValue::float(sbx as f64);
                 }
                 OpCode::LoadK => {
                     // R[A] := K[Bx] - OPTIMIZED with raw pointers
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
-                    unsafe {
-                        let constant = *constants.get_unchecked(bx);
-                        *lua_state.stack_mut().as_mut_ptr().add(base + a) = constant;
-                    }
+                    let stack = lua_state.stack_mut();
+                    stack[base + a] = constants[bx];
                 }
                 OpCode::LoadKX => {
                     // R[A] := K[extra_arg]; pc++
