@@ -2,19 +2,6 @@ use crate::lua_value::LuaValue;
 /// Tests for C function calling
 use crate::lua_vm::{LuaResult, LuaState, LuaVM, SafeOption};
 
-/// Simple C function that returns the sum of two numbers
-fn test_add(_state: &mut LuaState) -> LuaResult<usize> {
-    // This is a placeholder - we need to implement argument access in LuaState
-    // For now, just push a result
-    Ok(1)
-}
-
-/// C function that returns multiple values
-fn test_multi_return(_state: &mut LuaState) -> LuaResult<usize> {
-    // Returns 3 values: 1, 2, 3
-    Ok(3)
-}
-
 /// C function with no return value
 fn test_no_return(_state: &mut LuaState) -> LuaResult<usize> {
     Ok(0)

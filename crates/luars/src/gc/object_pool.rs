@@ -690,12 +690,6 @@ impl ObjectPool {
         self.tables.get_mut(id.0).map(|gt| gt.data.as_mut())
     }
 
-    #[allow(unused)]
-    #[inline(always)]
-    pub(crate) fn get_table_gc_mut(&mut self, id: TableId) -> Option<&mut GcTable> {
-        self.tables.get_mut(id.0)
-    }
-
     // ==================== Function Operations ====================
 
     /// Create a Lua function (closure with bytecode chunk)
@@ -749,11 +743,6 @@ impl ObjectPool {
     #[inline(always)]
     pub(crate) fn get_function(&self, id: FunctionId) -> Option<&GcFunction> {
         self.functions.get(id.0)
-    }
-
-    #[inline(always)]
-    pub(crate) fn get_function_mut(&mut self, id: FunctionId) -> Option<&mut GcFunction> {
-        self.functions.get_mut(id.0)
     }
 
     // ==================== Upvalue Operations ====================

@@ -159,7 +159,7 @@ pub struct GC {
     pub gc_stopem: bool,
 
     // === GC parameters (from gcparams[LUA_GCPN]) ===
-    gc_params: [i32; GCPARAM_COUNT],
+    pub gc_params: [i32; GCPARAM_COUNT],
 
     // === Gray lists (for marking) ===
     /// Regular gray objects waiting to be visited
@@ -578,9 +578,59 @@ impl GC {
                 }
                 return 1;
             }
-            _ => {}
+            GcId::UserdataId(id) => {
+                // Userdata: mark the userdata itself and its metatable if any
+                let metatable = if let Some(ud) = pool.userdata.get_mut(id.0) {
+                    ud.header.make_black();
+                    ud.data.get_metatable() // Get metatable via public method
+                } else {
+                    return 0;
+                };
+                
+                // Mark metatable if exists (it's a LuaValue, could be table)
+                if let Some(mt_id) = metatable.as_table_id() {
+                    self.mark_table_id(mt_id, pool);
+                }
+                return 1;
+            }
+            GcId::ThreadId(id) => {
+                // Thread: mark all stack values and open upvalues
+                let (stack_values, open_upvalues) = if let Some(thread) = pool.threads.get_mut(id.0) {
+                    thread.header.make_black();
+                    // Collect stack values up to stack_top
+                    let state = &thread.data;
+                    let stack_top = state.stack_top;
+                    let stack_values: Vec<LuaValue> = state.stack.iter()
+                        .take(stack_top)
+                        .copied()
+                        .collect();
+                    
+                    // Collect open upvalues using public getter
+                    let open_upvalues: Vec<UpvalueId> = state.get_open_upvalues().to_vec();
+                    
+                    (stack_values, open_upvalues)
+                } else {
+                    return 0;
+                };
+                
+                // Mark all stack values
+                for value in &stack_values {
+                    self.mark_value(value, pool);
+                }
+                
+                // Mark all open upvalues
+                for upval_id in &open_upvalues {
+                    if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
+                        if uv.header.is_white() {
+                            uv.header.make_gray();
+                            self.gray.push(GcId::UpvalueId(*upval_id));
+                        }
+                    }
+                }
+                
+                return 1 + stack_values.len() as isize;
+            }
         }
-        0
     }
 
     /// Atomic phase (like atomic in Lua 5.5)
@@ -686,6 +736,43 @@ impl GC {
                 pool.remove_string(StringId(id));
                 self.record_deallocation(64);
                 self.stats.objects_collected += 1;
+                swept += 1;
+            }
+        }
+
+        // Sweep userdata
+        if swept < max_sweep {
+            let dead_userdata: Vec<_> = pool
+                .userdata
+                .iter()
+                .filter(|(_, u)| !u.header.is_fixed() && u.header.is_dead(other_white))
+                .map(|(id, _)| id)
+                .take(max_sweep - swept)
+                .collect();
+
+            for id in dead_userdata {
+                pool.userdata.free(id);
+                self.record_deallocation(128); // Approximate size
+                self.stats.objects_collected += 1;
+                swept += 1;
+            }
+        }
+
+        // Sweep threads
+        if swept < max_sweep {
+            let dead_threads: Vec<_> = pool
+                .threads
+                .iter()
+                .filter(|(_, t)| !t.header.is_fixed() && t.header.is_dead(other_white))
+                .map(|(id, _)| id)
+                .take(max_sweep - swept)
+                .collect();
+
+            for id in dead_threads {
+                pool.threads.free(id);
+                self.record_deallocation(512); // Approximate size (threads are big)
+                self.stats.objects_collected += 1;
+                swept += 1;
             }
         }
 

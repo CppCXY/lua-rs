@@ -735,6 +735,11 @@ impl LuaVM {
         self.check_gc_slow();
     }
 
+    /// Public method to force a GC step (for collectgarbage "step")
+    pub fn check_gc_step(&mut self) {
+        self.check_gc_slow();
+    }
+
     #[cold]
     #[inline(never)]
     fn check_gc_slow(&mut self) {
