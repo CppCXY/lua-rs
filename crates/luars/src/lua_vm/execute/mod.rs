@@ -25,10 +25,8 @@ mod return_handler;
 
 use call::FrameAction;
 
-use std::rc::Rc;
-
 use crate::{
-    Chunk, UpvalueId,
+    UpvalueId,
     lua_value::{LUA_VFALSE, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
@@ -60,188 +58,101 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
 /// without affecting caller frames
+///
+/// ARCHITECTURE: Single-loop execution like Lua C's luaV_execute
+/// - Uses labeled loops instead of goto for context switching
+/// - Function calls/returns just update pointers and continue
+/// - Zero Rust function call overhead
 pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
-    // Main execution loop - continues until frames are popped to target depth
-    'vm_loop: loop {
+    
+    // STARTFUNC: Function context switching point (like Lua C's startfunc label)
+    'startfunc: loop {
         // Check if we've reached target depth
         let current_depth = lua_state.call_depth();
         if current_depth <= target_depth {
-            return Ok(()); // Reached target depth, stop execution
+            return Ok(());
         }
 
-        // Get current call frame index
         let frame_idx = current_depth - 1;
-
-        // Load current function's chunk and upvalues
-        let (chunk, upvalues_vec) = {
-            let func_value = lua_state
-                .get_frame_func(frame_idx)
-                .ok_or(LuaError::RuntimeError)?;
-
-            let Some(func_id) = func_value.as_function_id() else {
-                return Err(lua_state.error("Current frame is not a function".to_string()));
-            };
-
-            let gc_function = lua_state
-                .vm_mut()
-                .object_pool
-                .get_function_mut(func_id)
-                .ok_or(LuaError::RuntimeError)?;
-
-            // Check if this is a Lua function
-            // C functions should not reach here because they execute synchronously
-            // in handle_call and return FrameAction::Return immediately
-            if !gc_function.data.is_lua_function() {
-                return Err(lua_state.error("Unexpected C function in main VM loop".to_string()));
-            }
-
-            let Some(chunk_rc) = gc_function.data.chunk() else {
-                return Err(lua_state.error("Lua function has no chunk".to_string()));
-            };
-
-            (chunk_rc.clone(), gc_function.data.upvalues().clone())
-        };
-
-        // Execute this frame until CALL/RETURN/TAILCALL
-        match execute_frame(lua_state, frame_idx, chunk, upvalues_vec)? {
-            FrameAction::Return => {
-                // Frame was already popped by handle_return, just continue with caller
-                // Loop continues with caller's frame (or exits if no caller)
-            }
-            FrameAction::Call => {
-                // New frame was pushed, loop continues with callee's frame
-                // Note: C functions don't push frames, they execute and return Continue
-                continue 'vm_loop;
-            }
-            FrameAction::TailCall => {
-                // Current frame was replaced, loop continues with new function
-                continue 'vm_loop;
-            }
-            FrameAction::Continue => {
-                // C function executed in current frame, continue with same frame
-                // Just loop back to execute_frame with the same frame
-                continue 'vm_loop;
-            }
-        }
-    }
-}
-
-/// Execute a single frame until it calls another function or returns
-fn execute_frame(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    chunk: Rc<Chunk>,
-    upvalues_vec: Vec<UpvalueId>,
-) -> LuaResult<FrameAction> {
-    // Cache values in locals (will be in CPU registers)
-    let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
-    let mut base = lua_state.get_frame_base(frame_idx);
-
-    // CRITICAL: Sync stack_top with current frame's top before execution
-    // This ensures metamethod calls use correct stack positions
-    let frame_top = lua_state.get_call_info(frame_idx).top;
-    lua_state.set_top(frame_top);
-
-    // PRE-GROW STACK: Ensure enough space for this frame
-    // This prevents reallocation during normal instruction execution
-    let needed_size = base + chunk.max_stack_size;
-    lua_state.grow_stack(needed_size)?;
-
-    // Constants and code pointers (avoid repeated dereferencing)
-    let constants = &chunk.constants;
-    let code = &chunk.code;
-
-    // PERFORMANCE OPTIMIZATION: Pre-resolve upvalue values to avoid object_pool lookups
-    // Lua C does: cl->upvals[B]->v.p (1 pointer dereference)
-    // We were doing: get_upvalue(id) + is_open() + stack_get() (3+ indirections + HashMap!)
-    // This cache reduces per-instruction overhead from ~10 cycles to ~1 cycle
-    let mut upvalue_cache: Vec<LuaValue> = Vec::with_capacity(upvalues_vec.len());
-    for upval_id in &upvalues_vec {
-        let upvalue = lua_state
-            .vm_mut()
-            .object_pool
-            .get_upvalue(*upval_id)
+        
+        // ===== LOAD FRAME CONTEXT =====
+        let func_value = lua_state
+            .get_frame_func(frame_idx)
             .ok_or(LuaError::RuntimeError)?;
 
-        let value = if upvalue.data.is_open() {
-            let stack_idx = upvalue.data.get_stack_index().unwrap();
-            lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil())
-        } else {
-            upvalue.data.get_closed_value().unwrap()
+        let Some(func_body) = func_value.as_lua_function() else {
+            return Err(lua_state.error("Current frame is not a function".to_string()));
         };
-        upvalue_cache.push(value);
-    }
 
-    // Macro-like helper to save PC before operations that may call functions
-    // Matches Lua 5.5's savepc(ci) in Protect() macro
-    macro_rules! save_pc {
-        () => {
-            lua_state.set_frame_pc(frame_idx, pc as u32);
+        let Some(chunk) = func_body.chunk() else {
+            return Err(lua_state.error("Lua function has no chunk".to_string()));
         };
-    }
 
-    // Macro-like helper to restore state after operations that may change frames
-    // Matches Lua 5.5's updatebase(ci) and updatetrap(ci) in Protect() macro
-    // NOTE: We do NOT restore PC! The PC has already been incremented in the main loop.
-    // Restoring PC would cause us to execute the wrong instruction or re-execute the current one.
-    // Lua 5.5's updatebase() only updates the base pointer, not the PC.
-    macro_rules! restore_state {
-        () => {
-            // SAFETY: After metamethod calls, we must ensure the frame still exists
-            // The frame_idx parameter refers to THIS frame, which should not have been popped
-            // (only called frames are popped, not the caller frame)
-            if frame_idx < lua_state.call_depth() {
-                // Reload base from frame (may have changed due to stack reallocations)
-                // DO NOT reload PC - it's already been updated by the main loop
-                base = lua_state.get_frame_base(frame_idx);
-            } else {
-                // This should never happen - if it does, it's a bug in frame management
-                panic!(
-                    "restore_state: frame_idx {} >= call_depth {}",
-                    frame_idx,
-                    lua_state.call_depth()
-                );
-            }
-        };
-    }
-
-    // Main interpreter loop
-    loop {
-        // Fetch instruction and advance PC
-        // NOTE: No bounds check - compiler guarantees valid bytecode
-        let instr = unsafe { *code.get_unchecked(pc) };
-        pc += 1;
-
-        // Dispatch instruction
-        // The match compiles to a jump table in release mode
-        match instr.get_opcode() {
-            OpCode::Move => {
-                // R[A] := R[B]
-                // setobjs2s(L, ra, RB(i))
-                // OPTIMIZATION: Use raw pointer for direct access like Lua C
+        let upvalue_ptrs = func_body.cached_upvalues();
+        
+        // Load frame state
+        let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
+        let mut base = lua_state.get_frame_base(frame_idx);
+        
+        // Sync stack top
+        let frame_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top(frame_top);
+        
+        // Pre-grow stack
+        let needed_size = base + chunk.max_stack_size;
+        lua_state.grow_stack(needed_size)?;
+        
+        // Cache pointers
+        let constants = &chunk.constants;
+        let code = &chunk.code;
+        
+        // Macro to save PC before operations that may call functions
+        macro_rules! save_pc {
+            () => {
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+            };
+        }
+        
+        // Macro to restore state after operations that may change frames
+        macro_rules! restore_state {
+            () => {
+                if frame_idx < lua_state.call_depth() {
+                    base = lua_state.get_frame_base(frame_idx);
+                } else {
+                    panic!(
+                        "restore_state: frame_idx {} >= call_depth {}",
+                        frame_idx,
+                        lua_state.call_depth()
+                    );
+                }
+            };
+        }
+        
+        // MAINLOOP: Main instruction dispatch loop
+        loop {
+            // Fetch instruction and advance PC
+            let instr = unsafe { *code.get_unchecked(pc) };
+            pc += 1;
+            
+            // Dispatch instruction (continues in next replacement...)
+            // Dispatch instruction (continues in next replacement...)
+            match instr.get_opcode() {
+                OpCode::Move => {
+                // R[A] := R[B] - OPTIMIZED with raw pointers
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
-
-                let stack = lua_state.stack_mut();
                 unsafe {
-                    let val = *stack.get_unchecked(base + b);
-                    *stack.get_unchecked_mut(base + a) = val;
-                }
-
-                // Update frame.top if we're writing beyond current top
-                let write_pos = base + a;
-                let call_info = lua_state.get_call_info_mut(frame_idx);
-                if write_pos >= call_info.top {
-                    call_info.top = write_pos + 1;
+                    let stack_ptr = lua_state.stack_mut().as_mut_ptr();
+                    *stack_ptr.add(base + a) = *stack_ptr.add(base + b);
                 }
             }
             OpCode::LoadI => {
-                // R[A] := sBx (signed integer immediate)
+                // R[A] := sBx - OPTIMIZED with raw pointers
                 let a = instr.get_a() as usize;
                 let sbx = instr.get_sbx();
-
-                let stack = lua_state.stack_mut();
-                setivalue(&mut stack[base + a], sbx as i64);
+                unsafe {
+                    setivalue(&mut *lua_state.stack_mut().as_mut_ptr().add(base + a), sbx as i64);
+                }
             }
             OpCode::LoadF => {
                 // R[A] := (float)sBx
@@ -252,18 +163,13 @@ fn execute_frame(
                 setfltvalue(&mut stack[base + a], sbx as f64);
             }
             OpCode::LoadK => {
-                // R[A] := K[Bx]
+                // R[A] := K[Bx] - OPTIMIZED with raw pointers
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
-
-                if bx >= constants.len() {
-                    lua_state.set_frame_pc(frame_idx, pc as u32);
-                    return Err(lua_state.error(format!("LOADK: invalid constant index {}", bx)));
+                unsafe {
+                    let constant = *constants.get_unchecked(bx);
+                    *lua_state.stack_mut().as_mut_ptr().add(base + a) = constant;
                 }
-
-                let value = constants[bx];
-                let stack = lua_state.stack_mut();
-                stack[base + a] = value; // setobj2s
             }
             OpCode::LoadKX => {
                 // R[A] := K[extra_arg]; pc++
@@ -965,34 +871,49 @@ fn execute_frame(
                 let k = instr.get_k();
 
                 // Update PC before returning
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
 
-                return return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k);
+                // Handle return
+                return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
+                
+                // Return pops frame, continue to 'startfunc to load caller's context
+                continue 'startfunc;
             }
             OpCode::Return0 => {
                 // return (no values)
-                lua_state.set_frame_pc(frame_idx, pc as u32);
-                return return_handler::handle_return0(lua_state, frame_idx);
+                save_pc!();
+                return_handler::handle_return0(lua_state, frame_idx)?;
+                
+                // Return pops frame, continue to 'startfunc
+                continue 'startfunc;
             }
             OpCode::Return1 => {
                 // return R[A]
                 let a = instr.get_a() as usize;
-                lua_state.set_frame_pc(frame_idx, pc as u32);
-                return return_handler::handle_return1(lua_state, base, frame_idx, a);
+                save_pc!();
+                return_handler::handle_return1(lua_state, base, frame_idx, a)?;
+                
+                // Return pops frame, continue to 'startfunc
+                continue 'startfunc;
             }
             OpCode::GetUpval => {
                 // R[A] := UpValue[B]
+                // ZERO-COST: Direct pointer dereference like Lua C's cl->upvals[B]->v
                 let a = instr.get_a() as usize;
                 let b = instr.get_b() as usize;
 
-                // PERFORMANCE: Use pre-cached upvalue value
-                if b >= upvalue_cache.len() {
+                if b >= upvalue_ptrs.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("GETUPVAL: invalid upvalue index {}", b)));
                 }
 
+                // Direct pointer access - matches Lua C performance!
+                let value = unsafe {
+                    upvalue_ptrs[b].get_value_unchecked(lua_state.stack())
+                };
+
                 let stack = lua_state.stack_mut();
-                stack[base + a] = upvalue_cache[b];
+                stack[base + a] = value;
             }
             OpCode::SetUpval => {
                 // UpValue[B] := R[A]
@@ -1005,14 +926,14 @@ fn execute_frame(
                     stack[base + a]
                 };
 
-                if b >= upvalues_vec.len() {
+                if b >= upvalue_ptrs.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("SETUPVAL: invalid upvalue index {}", b)));
                 }
 
-                let upval_id = upvalues_vec[b];
+                let upval_id = upvalue_ptrs[b].id;
 
-                // Set value in upvalue
+                // Set value in upvalue (still need ObjectPool for mutation)
                 let upvalue = lua_state
                     .vm_mut()
                     .object_pool
@@ -1023,18 +944,11 @@ fn execute_frame(
                     // Open: write to stack
                     let stack_idx = upvalue.data.get_stack_index().unwrap();
                     lua_state.stack_set(stack_idx, value)?;
-
-                    // CRITICAL: Update cache to reflect the change
-                    // This ensures subsequent GetUpval reads the new value
-                    upvalue_cache[b] = value;
                 } else {
                     // Closed: write to upvalue storage
                     unsafe {
                         upvalue.data.set_closed_value_unchecked(value);
                     }
-
-                    // CRITICAL: Update cache for closed upvalue too
-                    upvalue_cache[b] = value;
                 }
 
                 // TODO: GC barrier (luaC_barrier)
@@ -1441,14 +1355,28 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
 
                 // Save PC before call
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
 
-                // Delegate to call handler - returns FrameAction
+                // Delegate to call handler
                 match call::handle_call(lua_state, base, a, b, c) {
                     Ok(FrameAction::Continue) => {
-                        // Continue execution
+                        // C function executed, continue in current frame
+                        restore_state!();
                     }
-                    other => return other,
+                    Ok(FrameAction::Call) => {
+                        // Lua function pushed new frame
+                        // Continue to 'startfunc to load new function context
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::TailCall) => {
+                        // Tail call replaced current frame
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::Return) => {
+                        // Shouldn't happen from handle_call
+                        continue 'startfunc;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             OpCode::TailCall => {
@@ -1457,14 +1385,23 @@ fn execute_frame(
                 let b = instr.get_b() as usize;
 
                 // Save PC before call
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
 
-                // Delegate to tailcall handler (returns FrameAction)
+                // Delegate to tailcall handler
                 match call::handle_tailcall(lua_state, base, a, b) {
                     Ok(FrameAction::Continue) => {
                         // Continue execution
+                        restore_state!();
                     }
-                    other => return other,
+                    Ok(FrameAction::TailCall) => {
+                        // Tail call replaced frame
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::Call) | Ok(FrameAction::Return) => {
+                        // Shouldn't happen from handle_tailcall
+                        continue 'startfunc;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             OpCode::Not => {
@@ -1712,8 +1649,16 @@ fn execute_frame(
                     Ok(FrameAction::Continue) => {
                         // C function completed, results already in place
                         // Fall through to next instruction (TFORLOOP)
+                        restore_state!();
                     }
-                    other => return other,
+                    Ok(FrameAction::Call) => {
+                        // Lua function pushed new frame
+                        continue 'startfunc;
+                    }
+                    Ok(FrameAction::TailCall) | Ok(FrameAction::Return) => {
+                        continue 'startfunc;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             OpCode::TForLoop => {
@@ -1794,14 +1739,14 @@ fn execute_frame(
                     lua_state.set_top(write_pos + 1);
                 }
 
-                // PERFORMANCE: Use pre-cached upvalue value instead of object_pool lookup
-                // OLD: get_upvalue(id) + is_open() + stack_get() → ~10 cycles + HashMap
-                // NEW: upvalue_cache[b] → ~1 cycle
-                if b >= upvalue_cache.len() {
+                // PERFORMANCE: Use cached upvalue pointer for direct access
+                if b >= upvalue_ptrs.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("GETTABUP: invalid upvalue index {}", b)));
                 }
-                let table_value = upvalue_cache[b];
+                let table_value = unsafe {
+                    upvalue_ptrs[b].get_value_unchecked(lua_state.stack())
+                };
 
                 // Get key from constants (K[C])
                 if c >= constants.len() {
@@ -1847,12 +1792,14 @@ fn execute_frame(
                 let c = instr.get_c() as usize;
                 let k = instr.get_k();
 
-                // PERFORMANCE: Use pre-cached upvalue value instead of object_pool lookup
-                if a >= upvalue_cache.len() {
+                // PERFORMANCE: Use cached upvalue pointer for direct access
+                if a >= upvalue_ptrs.len() {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     return Err(lua_state.error(format!("SETTABUP: invalid upvalue index {}", a)));
                 }
-                let table_value = upvalue_cache[a];
+                let table_value = unsafe {
+                    upvalue_ptrs[a].get_value_unchecked(lua_state.stack())
+                };
 
                 // Get key from constants (K[B])
                 if b >= constants.len() {
@@ -2422,8 +2369,11 @@ fn execute_frame(
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
 
+                // Extract upvalue IDs from cached upvalues for closure creation
+                let parent_upvalue_ids: Vec<UpvalueId> = upvalue_ptrs.iter().map(|cu| cu.id).collect();
+                
                 // Create closure from child prototype
-                closure_handler::handle_closure(lua_state, base, a, bx, &chunk, &upvalues_vec)?;
+                closure_handler::handle_closure(lua_state, base, a, bx, &chunk, &parent_upvalue_ids)?;
             }
 
             OpCode::Vararg => {
@@ -2701,9 +2651,10 @@ fn execute_frame(
                 // This instruction should never be executed directly
                 // It's always consumed by the previous instruction (NEWTABLE, SETLIST, etc.)
                 // If we reach here, it's a compiler error
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                save_pc!();
                 return Err(lua_state.error("unexpected EXTRAARG instruction".to_string()));
             }
-        }
-    }
+        } // end match
+    } // end 'mainloop
+    } // end 'startfunc
 }

@@ -543,7 +543,7 @@ impl GC {
                 };
 
                 // Then process them
-                for upval_id in upvalues {
+                for upval_id in &upvalues {
                     if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
                         if uv.header.is_white() {
                             uv.header.make_gray();
