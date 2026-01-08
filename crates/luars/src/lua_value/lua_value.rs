@@ -368,6 +368,12 @@ impl LuaValue {
         (self.tt() & BIT_ISCOLLECTABLE) != 0
     }
 
+    /// is_collectable - alias for Rust naming convention
+    #[inline(always)]
+    pub fn is_collectable(&self) -> bool {
+        self.iscollectable()
+    }
+
     // Specific type checks
     #[inline(always)]
     pub fn ttisnil(&self) -> bool {

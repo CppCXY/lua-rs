@@ -952,7 +952,14 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         *upval.v_ptr = value;
                     }
 
-                    // TODO: GC barrier (luaC_barrier)
+                    // GC barrier: luaC_barrier(L, uv, s2v(ra))
+                    // If upvalue is black and value is white collectable, restore invariant
+                    if value.is_collectable() {
+                        let upvalue_id = upvalue_ptrs[b].id;
+                        if let Some(v_gc_id) = lua_state.value_to_gc_id(&value) {
+                            lua_state.gc_barrier(upvalue_id, v_gc_id);
+                        }
+                    }
                 }
                 OpCode::Close => {
                     // Close all upvalues >= R[A]

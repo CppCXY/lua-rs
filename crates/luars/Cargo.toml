@@ -7,3 +7,4 @@ edition = "2024"
 default = []
 
 [dependencies]
+hashbrown = { version = "0.14", features = ["raw"] }

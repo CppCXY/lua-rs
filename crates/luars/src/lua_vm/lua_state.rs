@@ -1284,6 +1284,29 @@ impl LuaState {
         self.set_yield(values);
         Err(LuaError::Yield)
     }
+
+    // ============ GC Barriers ============
+    
+    /// Forward GC barrier (luaC_barrier in Lua 5.5)
+    /// Called when modifying an object to point to another object
+    pub fn gc_barrier(&mut self, owner_id: UpvalueId, value_gc_id: crate::gc::GcId) {
+        let vm = unsafe { &mut *self.vm };
+        let owner_gc_id = crate::gc::GcId::UpvalueId(owner_id);
+        vm.gc.barrier(owner_gc_id, value_gc_id, &mut vm.object_pool);
+    }
+    
+    /// Convert LuaValue to GcId (if it's a GC-managed object)
+    pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<crate::gc::GcId> {
+        use crate::lua_value::LuaValueKind;
+        match value.kind() {
+            LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
+            LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
+            LuaValueKind::String => value.as_string_id().map(crate::gc::GcId::StringId),
+            LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
+            LuaValueKind::Userdata => value.as_userdata_id().map(crate::gc::GcId::UserdataId),
+            _ => None,
+        }
+    }
 }
 
 impl Default for LuaState {
