@@ -144,7 +144,9 @@ pub fn fltvalue(v: &LuaValue) -> f64 {
 #[inline(always)]
 #[allow(unused)]
 pub unsafe fn psetivalue(v: *mut LuaValue, i: i64) {
-    unsafe { *v = LuaValue::integer(i); }
+    unsafe {
+        *v = LuaValue::integer(i);
+    }
 }
 
 /// setivalue_ref - 引用版本（保留兼容性）
@@ -153,13 +155,14 @@ pub fn setivalue(v: &mut LuaValue, i: i64) {
     *v = LuaValue::integer(i);
 }
 
-
 /// setfltvalue - 设置浮点值  
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
 #[allow(unused)]
 #[inline(always)]
 pub unsafe fn psetfltvalue(v: *mut LuaValue, n: f64) {
-    unsafe { *v = LuaValue::float(n); }
+    unsafe {
+        *v = LuaValue::float(n);
+    }
 }
 
 /// setfltvalue_ref - 引用版本（保留兼容性）
@@ -172,7 +175,9 @@ pub fn setfltvalue(v: &mut LuaValue, n: f64) {
 #[inline(always)]
 #[allow(unused)]
 pub unsafe fn psetbfvalue(v: *mut LuaValue) {
-    unsafe { *v = LuaValue::boolean(false); }
+    unsafe {
+        *v = LuaValue::boolean(false);
+    }
 }
 
 /// setbfvalue_ref - 引用版本（保留兼容性）
@@ -185,7 +190,9 @@ pub fn setbfvalue(v: &mut LuaValue) {
 #[inline(always)]
 #[allow(unused)]
 pub unsafe fn psetbtvalue(v: *mut LuaValue) {
-    unsafe { *v = LuaValue::boolean(true); }
+    unsafe {
+        *v = LuaValue::boolean(true);
+    }
 }
 
 /// setbtvalue_ref - 引用版本（保留兼容性）
@@ -197,7 +204,9 @@ pub fn setbtvalue(v: &mut LuaValue) {
 /// setnilvalue - 设置nil
 #[inline(always)]
 pub unsafe fn psetnilvalue(v: *mut LuaValue) {
-    unsafe { *v = LuaValue::nil(); }
+    unsafe {
+        *v = LuaValue::nil();
+    }
 }
 
 /// setnilvalue_ref - 引用版本（保留兼容性）

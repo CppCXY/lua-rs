@@ -461,10 +461,10 @@ impl LuaState {
         }
 
         // Not found, create a new one
-        let upvalue = crate::lua_value::LuaUpvalue::new_open(stack_index);
         let upval_id = {
+            let thread = self as *const LuaState;
             let vm = self.vm_mut();
-            vm.object_pool.create_upvalue(upvalue)
+            vm.object_pool.create_upvalue_open(stack_index, thread)
         };
 
         // Add to HashMap for O(1) future lookups

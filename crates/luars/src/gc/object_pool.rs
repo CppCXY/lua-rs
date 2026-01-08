@@ -700,13 +700,15 @@ impl ObjectPool {
         let cached_upvalues: Vec<CachedUpvalue> = upvalue_ids
             .into_iter()
             .map(|id| {
-                let ptr = self.upvalues.get(id.0)
+                let ptr = self
+                    .upvalues
+                    .get(id.0)
                     .map(|uv| uv.data.as_ref() as *const Upvalue)
                     .unwrap_or(std::ptr::null());
                 CachedUpvalue::new(id, ptr)
             })
             .collect();
-        
+
         let gc_func = GcFunction {
             header: GcHeader::default(),
             data: Box::new(FunctionBody::Lua(chunk, cached_upvalues)),
@@ -724,13 +726,15 @@ impl ObjectPool {
         let cached_upvalues: Vec<CachedUpvalue> = upvalue_ids
             .into_iter()
             .map(|id| {
-                let ptr = self.upvalues.get(id.0)
+                let ptr = self
+                    .upvalues
+                    .get(id.0)
                     .map(|uv| uv.data.as_ref() as *const Upvalue)
                     .unwrap_or(std::ptr::null());
                 CachedUpvalue::new(id, ptr)
             })
             .collect();
-        
+
         let gc_func = GcFunction {
             header: GcHeader::default(),
             data: Box::new(FunctionBody::CClosure(func, cached_upvalues)),
@@ -749,13 +753,18 @@ impl ObjectPool {
 
     /// Create an open upvalue pointing to a stack location
     #[inline]
-    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
+    pub fn create_upvalue_open(
+        &mut self,
+        stack_index: usize,
+        thread: *const LuaState,
+    ) -> UpvalueId {
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
             data: Box::new(Upvalue {
                 stack_index,
                 closed_value: LuaValue::nil(),
                 is_open: true,
+                thread,
             }),
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
@@ -770,6 +779,7 @@ impl ObjectPool {
                 stack_index: 0,
                 closed_value: value,
                 is_open: false,
+                thread: std::ptr::null(),
             }),
         };
         UpvalueId(self.upvalues.alloc(gc_uv))
@@ -815,6 +825,7 @@ impl ObjectPool {
                 stack_index,
                 closed_value,
                 is_open,
+                thread: std::ptr::null(),
             }),
         };
         UpvalueId(self.upvalues.alloc(gc_uv))

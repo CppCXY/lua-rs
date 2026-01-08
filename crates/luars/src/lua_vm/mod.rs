@@ -632,8 +632,12 @@ impl LuaVM {
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
-    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
-        let id = self.object_pool.create_upvalue_open(stack_index);
+    pub fn create_upvalue_open(
+        &mut self,
+        stack_index: usize,
+        thread: *const LuaState,
+    ) -> UpvalueId {
+        let id = self.object_pool.create_upvalue_open(stack_index, thread);
         self.gc.track_object(GcId::UpvalueId(id), 64);
         id
     }

@@ -690,7 +690,7 @@ fn lua_rawequal(l: &mut LuaState) -> LuaResult<usize> {
 /// Lua 5.5 version with full parameter support including the new 'param' option
 fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
     let arg1 = l.get_arg(1);
-    
+
     let opt = {
         let vm = l.vm_mut();
         arg1.and_then(|v| {
@@ -729,31 +729,29 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         "step" => {
             // LUA_GCSTEP: Single step with optional size argument
             let arg2 = l.get_arg(2);
-            let _step_size = arg2
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as usize;
-            
+            let _step_size = arg2.and_then(|v| v.as_integer()).unwrap_or(0) as usize;
+
             // Perform a GC step using VM's check_gc mechanism
             let old_state = l.vm_mut().gc.gc_state;
-            
+
             // Force a GC step by setting debt to positive
             let old_debt = l.vm_mut().gc.gc_debt;
             l.vm_mut().gc.gc_debt = 1;
-            
+
             l.vm_mut().check_gc_step(); // Will call check_gc_slow -> gc.step()
-            
+
             // Check if we completed a full cycle
             let completed = {
                 let vm = l.vm_mut();
-                matches!(vm.gc.gc_state, crate::gc::GcState::Pause) && 
-                !matches!(old_state, crate::gc::GcState::Pause)
+                matches!(vm.gc.gc_state, crate::gc::GcState::Pause)
+                    && !matches!(old_state, crate::gc::GcState::Pause)
             };
-            
+
             // Restore debt if we didn't complete a cycle
             if !completed {
                 l.vm_mut().gc.gc_debt = old_debt;
             }
-            
+
             l.push_value(LuaValue::boolean(completed))?;
             Ok(1)
         }
@@ -771,10 +769,10 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 crate::gc::GcKind::GenMinor => "generational",
                 crate::gc::GcKind::GenMajor => "generational",
             };
-            
+
             // Switch to generational mode
             vm.gc.gc_kind = crate::gc::GcKind::GenMinor;
-            
+
             // Push previous mode name
             let (mode_value, _) = vm.object_pool.create_string(old_mode);
 
@@ -789,10 +787,10 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 crate::gc::GcKind::GenMinor => "generational",
                 crate::gc::GcKind::GenMajor => "generational",
             };
-            
+
             // Switch to incremental mode
             vm.gc.gc_kind = crate::gc::GcKind::Inc;
-            
+
             // Push previous mode name
             let (mode_value, _) = vm.object_pool.create_string(old_mode);
             l.push_value(mode_value)?;
@@ -802,7 +800,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // LUA_GCPARAM: Get/set GC parameters (NEW in Lua 5.5!)
             let arg2 = l.get_arg(2);
             let arg3 = l.get_arg(3);
-            
+
             // Get parameter name string
             let param_name = {
                 let vm = l.vm_mut();
@@ -816,45 +814,48 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                     None
                 }
             };
-            
+
             if param_name.is_none() {
                 return Err(l.error("collectgarbage 'param': parameter name expected".to_string()));
             }
-            
+
             let param_name = param_name.unwrap();
-            
+
             // Map parameter name to index
             let param_idx = match param_name.as_str() {
-                "minormul" => Some(crate::gc::MINORMUL),     // 3: LUA_GCPMINORMUL
+                "minormul" => Some(crate::gc::MINORMUL), // 3: LUA_GCPMINORMUL
                 "majorminor" => Some(crate::gc::MAJORMINOR), // 5: LUA_GCPMAJORMINOR
                 "minormajor" => Some(crate::gc::MINORMAJOR), // 4: LUA_GCPMINORMAJOR
-                "pause" => Some(crate::gc::PAUSE),           // 0: LUA_GCPPAUSE
-                "stepmul" => Some(crate::gc::STEPMUL),       // 1: LUA_GCPSTEPMUL
-                "stepsize" => Some(crate::gc::STEPSIZE),     // 2: LUA_GCPSTEPSIZE
+                "pause" => Some(crate::gc::PAUSE),       // 0: LUA_GCPPAUSE
+                "stepmul" => Some(crate::gc::STEPMUL),   // 1: LUA_GCPSTEPMUL
+                "stepsize" => Some(crate::gc::STEPSIZE), // 2: LUA_GCPSTEPSIZE
                 _ => None,
             };
-            
+
             if param_idx.is_none() {
-                return Err(l.error(format!("collectgarbage 'param': invalid parameter name '{}'", param_name)));
+                return Err(l.error(format!(
+                    "collectgarbage 'param': invalid parameter name '{}'",
+                    param_name
+                )));
             }
-            
+
             let param_idx = param_idx.unwrap();
-            
+
             // Get old value and potentially set new value
             let old_value = {
                 let vm = l.vm_mut();
                 let old = vm.gc.gc_params[param_idx];
-                
+
                 // Set new value if provided
                 if let Some(new_val) = arg3 {
                     if let Some(new_int) = new_val.as_integer() {
                         vm.gc.gc_params[param_idx] = new_int as i32;
                     }
                 }
-                
+
                 old
             };
-            
+
             // Return old value
             l.push_value(LuaValue::integer(old_value as i64))?;
             Ok(1)
@@ -983,7 +984,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
 /// If no filename is given, executes from stdin
 fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     let arg1 = l.get_arg(1);
-    
+
     // Get filename (nil/none means stdin, which we don't support yet)
     let filename_str = if let Some(v) = arg1 {
         if v.is_nil() {
@@ -1000,7 +1001,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     } else {
         return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
     };
-    
+
     // Load from file
     let vm = l.vm_mut();
     let code = match std::fs::read_to_string(&filename_str) {
@@ -1009,7 +1010,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error(format!("cannot open {}: {}", filename_str, e)));
         }
     };
-    
+
     // Compile the code
     let chunkname = format!("@{}", filename_str);
     let chunk = match vm.compile_with_name(&code, &chunkname) {
@@ -1018,15 +1019,15 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error(format!("error loading {}: {}", filename_str, e)));
         }
     };
-    
+
     // Create function with _ENV upvalue (global table)
     let env_upvalue_id = vm.create_upvalue_closed(vm.global);
     let upvalues = vec![env_upvalue_id];
     let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
-    
+
     // Call the function with 0 arguments
     let (success, results) = l.pcall(func, vec![])?;
-    
+
     if !success {
         // Error occurred - results[0] contains error message
         if !results.is_empty() {
@@ -1034,13 +1035,13 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         }
         return Err(l.error("error in dofile".to_string()));
     }
-    
+
     // Push all results
     let num_results = results.len();
     for result in results {
         l.push_value(result)?;
     }
-    
+
     Ok(num_results)
 }
 

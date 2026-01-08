@@ -3,8 +3,6 @@
 pub mod basic;
 pub mod coroutine;
 pub mod debug;
-// #[cfg(feature = "loadlib")]
-// pub mod ffi;
 pub mod io;
 pub mod math;
 pub mod os;

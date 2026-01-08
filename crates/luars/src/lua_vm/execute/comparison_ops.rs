@@ -1,10 +1,10 @@
 /*----------------------------------------------------------------------
   Comparison Operations Module - Extracted from main execution loop
-  
+
   This module contains comparison instructions with metamethod support:
   - Eq, Lt, Le (register-register comparisons)
   - EqK, EqI, LtI, LeI, GtI, GeI (constant/immediate comparisons)
-  
+
   These operations can trigger metamethods and have complex logic,
   so extracting them reduces main loop size.
 ----------------------------------------------------------------------*/
@@ -40,7 +40,7 @@ pub fn exec_eq(
     // Save PC before potential metamethod call
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     let cond = metamethod::equalobj(lua_state, ra, rb)?;
-    
+
     // Verify base hasn't changed
     let new_base = lua_state.get_frame_base(frame_idx);
     if new_base != base {
@@ -100,16 +100,17 @@ pub fn exec_lt(
             let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
                 Some(result) => result,
                 None => {
-                    return Err(lua_state
-                        .error("attempt to compare non-comparable values".to_string()));
+                    return Err(
+                        lua_state.error("attempt to compare non-comparable values".to_string())
+                    );
                 }
             };
-            
+
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {
                 return Err(lua_state.error("base changed in LT".to_string()));
             }
-            
+
             result
         }
     };

@@ -586,7 +586,7 @@ impl GC {
                 } else {
                     return 0;
                 };
-                
+
                 // Mark metatable if exists (it's a LuaValue, could be table)
                 if let Some(mt_id) = metatable.as_table_id() {
                     self.mark_table_id(mt_id, pool);
@@ -595,29 +595,28 @@ impl GC {
             }
             GcId::ThreadId(id) => {
                 // Thread: mark all stack values and open upvalues
-                let (stack_values, open_upvalues) = if let Some(thread) = pool.threads.get_mut(id.0) {
+                let (stack_values, open_upvalues) = if let Some(thread) = pool.threads.get_mut(id.0)
+                {
                     thread.header.make_black();
                     // Collect stack values up to stack_top
                     let state = &thread.data;
                     let stack_top = state.stack_top;
-                    let stack_values: Vec<LuaValue> = state.stack.iter()
-                        .take(stack_top)
-                        .copied()
-                        .collect();
-                    
+                    let stack_values: Vec<LuaValue> =
+                        state.stack.iter().take(stack_top).copied().collect();
+
                     // Collect open upvalues using public getter
                     let open_upvalues: Vec<UpvalueId> = state.get_open_upvalues().to_vec();
-                    
+
                     (stack_values, open_upvalues)
                 } else {
                     return 0;
                 };
-                
+
                 // Mark all stack values
                 for value in &stack_values {
                     self.mark_value(value, pool);
                 }
-                
+
                 // Mark all open upvalues
                 for upval_id in &open_upvalues {
                     if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
@@ -627,7 +626,7 @@ impl GC {
                         }
                     }
                 }
-                
+
                 return 1 + stack_values.len() as isize;
             }
         }

@@ -5,11 +5,5 @@ edition = "2024"
 
 [features]
 default = []
-async = ["dep:tokio"]
-wasm = []
-loadlib = ["dep:libloading"]
 
 [dependencies]
-libloading = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-

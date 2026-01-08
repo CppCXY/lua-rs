@@ -27,16 +27,30 @@ impl CachedUpvalue {
     pub fn new(id: UpvalueId, ptr: *const Upvalue) -> Self {
         Self { id, ptr }
     }
-    
+
     /// Get the upvalue value directly through the cached pointer
     /// SAFETY: Caller must ensure the pointer is still valid
+    /// current_thread: The thread attempting to read the upvalue (used for stack access optimization)
     #[inline(always)]
-    pub unsafe fn get_value_unchecked(&self, stack: &[LuaValue]) -> LuaValue {
+    pub unsafe fn get_value_unchecked(&self, current_thread: &LuaState) -> LuaValue {
         unsafe {
             let upval = &*self.ptr;
             if upval.is_open() {
-                let stack_idx = upval.stack_index;
-                *stack.get_unchecked(stack_idx)
+                // Check if upvalue belongs to current thread
+                let owner = upval.thread;
+                let current_ptr = current_thread as *const LuaState;
+
+                let val = if owner == current_ptr {
+                    // Optimized: use current stack
+                    *current_thread.stack().get_unchecked(upval.stack_index)
+                } else {
+                    // Cross-thread access: dereference owner thread to get its stack
+                    // SAFETY: If upvalue is open, the owner thread must be alive
+                    let owner_ref = &*owner;
+                    *owner_ref.stack().get_unchecked(upval.stack_index)
+                };
+
+                val
             } else {
                 upval.closed_value
             }
@@ -295,13 +309,13 @@ impl FunctionBody {
             FunctionBody::Lua(_, uv) => uv,
         }
     }
-    
+
     /// Get upvalue IDs (for compatibility)
     #[inline(always)]
     pub fn upvalues(&self) -> Vec<UpvalueId> {
         self.cached_upvalues().iter().map(|cu| cu.id).collect()
     }
-    
+
     /// Get mutable access to cached upvalues for updating pointers
     #[inline(always)]
     pub fn cached_upvalues_mut(&mut self) -> &mut Vec<CachedUpvalue> {
@@ -327,6 +341,9 @@ pub struct Upvalue {
     pub closed_value: LuaValue,
     /// Whether the upvalue is open (still pointing to stack)
     pub is_open: bool,
+    /// The thread (LuaState) that owns the stack this upvalue points to (unsafe ptr)
+    /// Only valid/used when is_open is true
+    pub thread: *const LuaState,
 }
 
 pub type GcUpvalue = Gc<Upvalue>;

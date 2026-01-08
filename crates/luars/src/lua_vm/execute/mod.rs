@@ -918,7 +918,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     }
 
                     // Direct pointer access - matches Lua C performance!
-                    let value = unsafe { upvalue_ptrs[b].get_value_unchecked(lua_state.stack()) };
+                    let value = unsafe { upvalue_ptrs[b].get_value_unchecked(lua_state) };
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
@@ -1453,8 +1453,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("GETTABUP: invalid upvalue index {}", b))
                         );
                     }
-                    let table_value =
-                        unsafe { upvalue_ptrs[b].get_value_unchecked(lua_state.stack()) };
+                    let table_value = unsafe { upvalue_ptrs[b].get_value_unchecked(lua_state) };
 
                     // Get key from constants (K[C])
                     if c >= constants.len() {
@@ -1510,8 +1509,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("SETTABUP: invalid upvalue index {}", a))
                         );
                     }
-                    let table_value =
-                        unsafe { upvalue_ptrs[a].get_value_unchecked(lua_state.stack()) };
+                    let table_value = unsafe { upvalue_ptrs[a].get_value_unchecked(lua_state) };
 
                     // Get key from constants (K[B])
                     if b >= constants.len() {

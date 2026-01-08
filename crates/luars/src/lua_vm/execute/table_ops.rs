@@ -435,6 +435,6 @@ pub fn exec_self(
         let stack = lua_state.stack_mut();
         stack[base + a] = result.unwrap_or(LuaValue::nil());
     }
-    
+
     Ok(())
 }

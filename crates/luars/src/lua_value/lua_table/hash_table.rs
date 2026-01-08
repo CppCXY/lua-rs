@@ -58,7 +58,7 @@ impl LuaHashTable {
     #[inline(always)]
     fn hash_key(key: &LuaValue) -> u64 {
         use crate::lua_value::lua_value::*;
-        
+
         const K: u64 = 0x9e3779b97f4a7c15; // Fibonacci golden ratio
 
         unsafe {

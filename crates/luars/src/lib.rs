@@ -5,18 +5,11 @@
 mod test;
 
 pub mod compiler;
-#[cfg(feature = "loadlib")]
-pub mod ffi;
 pub mod gc;
 pub mod lib_registry;
-#[cfg(feature = "async")]
-pub mod lua_async;
 pub mod lua_value;
 pub mod lua_vm;
 pub mod stdlib;
-// pub use compiler::Compiler; // Removed - using direct parse function now
-#[cfg(feature = "loadlib")]
-pub use ffi::FFIState;
 pub use gc::*;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
