@@ -54,7 +54,6 @@ pub use metamethod::TmKind;
 /// - CALL (C): execute directly, return immediately (no frame push)
 /// - RETURN: pop frame, reload chunk/upvalues, continue loop
 /// - TAILCALL: replace frame, reload chunk/upvalues, continue loop
-#[allow(unused)]
 pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
     lua_execute_until(lua_state, 0)
 }

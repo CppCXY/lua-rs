@@ -197,17 +197,21 @@ pub fn exec_varargprep(
         }
 
         // Create table
-        let table_val = lua_state.create_table(nextra as usize, 1);
+        // Use 0 for hash part to encourage ValueArray creation for efficient named varargs
+        // ValueArray now supports "n" key natively
+        let table_val = lua_state.create_table(nextra as usize, 0);
         let n_str = lua_state.create_string("n");
         let n_val = LuaValue::integer(nextra as i64);
 
         // Populate table
         {
             if let Some(table_ref) = table_val.as_table_mut() {
-                table_ref.raw_set(&n_str, n_val);
+                // Populate array first (ValueArray will push)
                 for (i, val) in args.into_iter().enumerate() {
                     table_ref.set_int((i + 1) as i64, val);
                 }
+                // Set "n" last (ValueArray will confirm matching length or resize)
+                table_ref.raw_set(&n_str, n_val);
             }
         }
 

@@ -37,6 +37,11 @@ impl LuaTableImpl for LuaValueArray {
     fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         if let Some(idx) = key.as_integer() {
             self.get_int(idx)
+        } else if let Some(s) = key.as_str() {
+            if s == "n" {
+                return Some(LuaValue::integer(self.array.len() as i64));
+            }
+            None
         } else {
             None
         }
@@ -45,6 +50,24 @@ impl LuaTableImpl for LuaValueArray {
     fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> LuaInsertResult {
         if let Some(idx) = key.as_integer() {
             self.set_int(idx, value)
+        } else if let Some(s) = key.as_str() {
+            if s == "n" {
+                // If setting "n", resize array
+                if let Some(n) = value.as_integer() {
+                    let new_len = n as usize;
+                    if new_len > self.array.len() {
+                        self.array.resize(new_len, LuaValue::nil());
+                    } else {
+                        self.array.truncate(new_len);
+                    }
+                    LuaInsertResult::Success
+                } else {
+                    // Setting n to non-integer?
+                    LuaInsertResult::NeedConvertToHashTable
+                }
+            } else {
+                LuaInsertResult::NeedConvertToHashTable
+            }
         } else {
             LuaInsertResult::NeedConvertToHashTable
         }

@@ -29,6 +29,9 @@ pub struct LuaHashTable {
 
     /// 已删除的条目数量（墓碑）
     tombstones: usize,
+    
+    /// 数组部分长度记录
+    array_len: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -51,6 +54,7 @@ impl LuaHashTable {
             entries: Vec::new(),
             indices: vec![EMPTY; capacity],
             tombstones: 0,
+            array_len: 0,
         }
     }
 
@@ -151,6 +155,29 @@ impl LuaHashTable {
         (None, first_tombstone.unwrap_or(0))
     }
 
+    /// Update array_len when inserting an integer key
+    fn update_array_len_insert(&mut self, key: i64) {
+        if key == (self.array_len as i64 + 1) {
+            self.array_len += 1;
+            let mut next = self.array_len as i64 + 1;
+            // Check consecutive keys
+            // Note: get() is reasonably fast (hash lookup)
+            while self.get(&LuaValue::integer(next)).is_some() {
+                self.array_len += 1;
+                next += 1;
+            }
+        }
+    }
+
+    /// Update array_len when removing an integer key
+    fn update_array_len_remove(&mut self, key: i64) {
+        if key > 0 && key <= self.array_len as i64 {
+            // If we remove an element inside the sequence, the sequence breaks there.
+            // The new length is the element before the removed one.
+            self.array_len = (key - 1) as usize;
+        }
+    }
+
     /// 扩容：重建哈希索引
     fn grow(&mut self) {
         let new_capacity = (self.indices.len() * 2).max(INITIAL_CAPACITY);
@@ -186,6 +213,8 @@ impl LuaHashTable {
     /// 插入或更新键值对
     #[inline]
     fn insert(&mut self, key: LuaValue, value: LuaValue) {
+        let int_key = key.as_integer();
+
         if self.indices.is_empty() {
             self.indices = vec![EMPTY; INITIAL_CAPACITY];
         }
@@ -218,6 +247,10 @@ impl LuaHashTable {
                 self.grow();
             }
         }
+
+        if let Some(k) = int_key {
+            self.update_array_len_insert(k);
+        }
     }
 
     /// 删除键（标记为墓碑，保持遍历顺序）
@@ -232,6 +265,11 @@ impl LuaHashTable {
                 if self.indices[idx] == entry_idx as u32 {
                     self.indices[idx] = TOMBSTONE;
                     self.tombstones += 1;
+
+                    // Update array len if integer key removed
+                    if let Some(k) = key.as_integer() {
+                        self.update_array_len_remove(k);
+                    }
 
                     // 注意：我们不从entries中删除，保持索引稳定
                     // 在遍历时跳过墓碑即可
@@ -289,7 +327,11 @@ impl LuaTableImpl for LuaHashTable {
     }
 
     fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
-        self.get(key)
+        if let Some(v) = self.get(key) {
+            Some(v)
+        } else {
+            None
+        }
     }
 
     fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> LuaInsertResult {
@@ -322,8 +364,8 @@ impl LuaTableImpl for LuaHashTable {
     }
 
     fn len(&self) -> usize {
-        // 返回实际存储的键值对数量
-        self.entries.len()
+        // 返回数组部分长度 (Lua # operator behavior)
+        self.array_len
     }
 
     fn insert_at(&mut self, _index: usize, _value: LuaValue) -> LuaInsertResult {
