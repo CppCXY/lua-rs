@@ -3,8 +3,8 @@ use crate::*;
 
 #[test]
 fn test_package_loaded() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -20,8 +20,8 @@ fn test_package_loaded() {
 
 #[test]
 fn test_package_preload() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -36,13 +36,17 @@ fn test_package_preload() {
     "#,
     );
 
+    if let Err(e) = &result {
+        let error_msg = vm.get_error_message();
+        eprintln!("Error: {:?}, Message: {}", e, error_msg);
+    }
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_package_path() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -56,8 +60,8 @@ fn test_package_path() {
 
 #[test]
 fn test_package_cpath() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -71,8 +75,8 @@ fn test_package_cpath() {
 
 #[test]
 fn test_package_config() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -85,24 +89,20 @@ fn test_package_config() {
     "#,
     );
 
-    if let Err(e) = &result {
-        eprintln!("Error: {}", e);
-    }
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Error: {:?}", result);
 }
 
 #[test]
 fn test_package_searchers() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
         assert(type(package.searchers) == "table")
-        assert(type(package.searchers[1]) == "function")
-        assert(type(package.searchers[2]) == "function")
-        assert(type(package.searchers[3]) == "function")
-        assert(type(package.searchers[4]) == "function")
+        assert(type(package.searchers[1]) == "function")  -- preload searcher
+        assert(type(package.searchers[2]) == "function")  -- lua file searcher
+        assert(package.searchers[3] == nil)  -- we only have 2 searchers
     "#,
     );
 
@@ -111,8 +111,8 @@ fn test_package_searchers() {
 
 #[test]
 fn test_package_searchpath() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -127,8 +127,8 @@ fn test_package_searchpath() {
 
 #[test]
 fn test_require_preload() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -149,13 +149,17 @@ fn test_require_preload() {
     "#,
     );
 
+    if let Err(e) = &result {
+        let error_msg = vm.get_error_message();
+        panic!("Error: {:?}, Message: {}", e, error_msg);
+    }
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_require_cache() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -179,8 +183,8 @@ fn test_require_cache() {
 
 #[test]
 fn test_require_error() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -195,8 +199,8 @@ fn test_require_error() {
 
 #[test]
 fn test_require_return_value() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"

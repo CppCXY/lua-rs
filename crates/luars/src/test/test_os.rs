@@ -10,8 +10,8 @@ fn get_test_data_dir() -> String {
 
 #[test]
 fn test_os_time() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -26,8 +26,8 @@ fn test_os_time() {
 
 #[test]
 fn test_os_time_with_table() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Note: os.time with table argument not fully implemented
     // Just verify it doesn't crash
@@ -44,8 +44,8 @@ fn test_os_time_with_table() {
 
 #[test]
 fn test_os_date_default() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -60,8 +60,8 @@ fn test_os_date_default() {
 
 #[test]
 fn test_os_date_table() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Note: os.date("*t") not fully implemented
     // Just verify os.date() returns a string
@@ -77,8 +77,8 @@ fn test_os_date_table() {
 
 #[test]
 fn test_os_date_format() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Note: os.date format strings not fully implemented
     // Just verify basic functionality
@@ -95,8 +95,8 @@ fn test_os_date_format() {
 
 #[test]
 fn test_os_difftime() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -112,8 +112,8 @@ fn test_os_difftime() {
 
 #[test]
 fn test_os_clock() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -135,8 +135,8 @@ fn test_os_clock() {
 
 #[test]
 fn test_os_getenv() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -155,8 +155,8 @@ fn test_os_getenv() {
 
 #[test]
 fn test_os_remove() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
     let result = vm.execute_string(&format!(
@@ -184,8 +184,8 @@ fn test_os_remove() {
 
 #[test]
 fn test_os_remove_nonexistent() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -200,8 +200,8 @@ fn test_os_remove_nonexistent() {
 
 #[test]
 fn test_os_rename() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
     let result = vm.execute_string(&format!(
@@ -240,8 +240,8 @@ fn test_os_rename() {
 
 #[test]
 fn test_os_tmpname() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -258,8 +258,8 @@ fn test_os_tmpname() {
 fn test_os_exit() {
     // Note: We don't actually test os.exit() as it would terminate the process
     // Just verify the function exists
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"
@@ -272,8 +272,8 @@ fn test_os_exit() {
 
 #[test]
 fn test_os_setlocale() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute_string(
         r#"

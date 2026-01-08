@@ -8,6 +8,10 @@ pub enum LuaError {
     CompileError,
     /// Coroutine yield - values stored in vm.yield_values
     Yield,
+    /// Stack overflow
+    StackOverflow,
+
+    IndexOutOfBounds,
     /// VM exit (internal use) - returned when top-level frame returns
     Exit,
 }
@@ -18,6 +22,8 @@ impl std::fmt::Display for LuaError {
             LuaError::RuntimeError => write!(f, "Runtime Error"),
             LuaError::CompileError => write!(f, "Compile Error"),
             LuaError::Yield => write!(f, "Coroutine Yield"),
+            LuaError::StackOverflow => write!(f, "Stack Overflow"),
+            LuaError::IndexOutOfBounds => write!(f, "Index Out Of Bounds"),
             LuaError::Exit => write!(f, "VM Exit"),
         }
     }

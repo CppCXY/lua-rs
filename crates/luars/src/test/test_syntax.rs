@@ -5,8 +5,8 @@ use crate::*;
 
 #[test]
 fn test_local_variable_scope() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local x = 10
@@ -22,8 +22,8 @@ fn test_local_variable_scope() {
 
 #[test]
 fn test_global_variable() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         globalVar = 42
@@ -36,8 +36,8 @@ fn test_global_variable() {
 
 #[test]
 fn test_multiple_assignment() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local a, b, c = 1, 2, 3
@@ -51,8 +51,8 @@ fn test_multiple_assignment() {
 
 #[test]
 fn test_swap_variables() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local a, b = 1, 2
@@ -67,8 +67,8 @@ fn test_swap_variables() {
 
 #[test]
 fn test_vararg_function() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function sum(...)
@@ -89,8 +89,8 @@ fn test_vararg_function() {
 
 #[test]
 fn test_table_constructor_array() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {10, 20, 30}
@@ -103,8 +103,8 @@ fn test_table_constructor_array() {
 
 #[test]
 fn test_table_constructor_hash() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {x = 1, y = 2, z = 3}
@@ -116,8 +116,8 @@ fn test_table_constructor_hash() {
 
 #[test]
 fn test_table_constructor_mixed() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {10, 20, x = "a", y = "b", 30}
@@ -130,8 +130,8 @@ fn test_table_constructor_mixed() {
 
 #[test]
 fn test_table_constructor_expression_key() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local key = "mykey"
@@ -146,8 +146,8 @@ fn test_table_constructor_expression_key() {
 
 #[test]
 fn test_simple_function() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function add(a, b)
@@ -162,8 +162,8 @@ fn test_simple_function() {
 
 #[test]
 fn test_function_as_table_method() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local obj = {value = 10}
@@ -184,8 +184,8 @@ fn test_function_as_table_method() {
 
 #[test]
 fn test_while_loop() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local i = 0
@@ -202,8 +202,8 @@ fn test_while_loop() {
 
 #[test]
 fn test_repeat_until() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local i = 0
@@ -220,8 +220,8 @@ fn test_repeat_until() {
 
 #[test]
 fn test_numeric_for() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local sum = 0
@@ -236,8 +236,8 @@ fn test_numeric_for() {
 
 #[test]
 fn test_numeric_for_with_step() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local sum = 0
@@ -252,8 +252,8 @@ fn test_numeric_for_with_step() {
 
 #[test]
 fn test_break_statement() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local sum = 0
@@ -271,8 +271,8 @@ fn test_break_statement() {
 
 #[test]
 fn test_nested_loops() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local sum = 0
@@ -291,8 +291,8 @@ fn test_nested_loops() {
 
 #[test]
 fn test_if_elseif_else() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function classify(n)
@@ -314,8 +314,8 @@ fn test_if_elseif_else() {
 
 #[test]
 fn test_truthiness() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert(true)
@@ -332,8 +332,8 @@ fn test_truthiness() {
 
 #[test]
 fn test_and_operator() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert((true and true) == true)
@@ -347,8 +347,8 @@ fn test_and_operator() {
 
 #[test]
 fn test_or_operator() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert((false or true) == true)
@@ -361,8 +361,8 @@ fn test_or_operator() {
 
 #[test]
 fn test_not_operator() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert(not false)
@@ -376,8 +376,8 @@ fn test_not_operator() {
 
 #[test]
 fn test_short_circuit_evaluation() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local called = false
@@ -396,8 +396,8 @@ fn test_short_circuit_evaluation() {
 
 #[test]
 fn test_type_function() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert(type(nil) == "nil")
@@ -415,8 +415,8 @@ fn test_type_function() {
 
 #[test]
 fn test_pcall_success() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function safe_func()
@@ -432,8 +432,8 @@ fn test_pcall_success() {
 
 #[test]
 fn test_pcall_error() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function error_func()
@@ -451,8 +451,8 @@ fn test_pcall_error() {
 
 #[test]
 fn test_ipairs() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {10, 20, 30}
@@ -468,8 +468,8 @@ fn test_ipairs() {
 
 #[test]
 fn test_pairs() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {a = 1, b = 2, c = 3}
@@ -487,8 +487,8 @@ fn test_pairs() {
 
 #[test]
 fn test_tonumber() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert(tonumber("123") == 123)
@@ -502,8 +502,8 @@ fn test_tonumber() {
 
 #[test]
 fn test_tostring() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert(tostring(123) == "123")
@@ -518,8 +518,8 @@ fn test_tostring() {
 
 #[test]
 fn test_string_concatenation() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local s = "Hello" .. " " .. "World"
@@ -531,8 +531,8 @@ fn test_string_concatenation() {
 
 #[test]
 fn test_string_length() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local s = "hello"
@@ -547,8 +547,8 @@ fn test_string_length() {
 
 #[test]
 fn test_table_insert() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {1, 2, 3}
@@ -563,8 +563,8 @@ fn test_table_insert() {
 
 #[test]
 fn test_table_remove() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {1, 2, 3, 4}
@@ -579,8 +579,8 @@ fn test_table_remove() {
 
 #[test]
 fn test_table_concat() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {"a", "b", "c"}
@@ -595,8 +595,8 @@ fn test_table_concat() {
 
 #[test]
 fn test_simple_upvalue() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local x = 10
@@ -615,8 +615,8 @@ fn test_simple_upvalue() {
 
 #[test]
 fn test_nil_in_table() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local t = {1, 2, nil, 4}
@@ -635,8 +635,8 @@ fn test_nil_in_table() {
 
 #[test]
 fn test_equality_comparison() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert(5 == 5)
@@ -653,8 +653,8 @@ fn test_equality_comparison() {
 
 #[test]
 fn test_relational_comparison() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         assert(5 < 10)
@@ -664,8 +664,5 @@ fn test_relational_comparison() {
         assert("a" < "b")
     "#,
     );
-    if let Err(e) = &result {
-        eprintln!("Error: {}", e);
-    }
     assert!(result.is_ok());
 }

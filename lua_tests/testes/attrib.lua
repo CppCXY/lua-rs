@@ -1,5 +1,5 @@
 -- $Id: testes/attrib.lua $
--- See Copyright Notice in file all.lua
+-- See Copyright Notice in file lua.h
 
 print "testing require"
 
@@ -236,7 +236,7 @@ package.path = oldpath
 local fname = "file_does_not_exist2"
 local m, err = pcall(require, fname)
 for t in string.gmatch(package.path..";"..package.cpath, "[^;]+") do
-  t = string.gsub(t, "?", fname)
+  local t = string.gsub(t, "?", fname)
   assert(string.find(err, t, 1, true))
 end
 
@@ -308,11 +308,11 @@ else
   _ENV.x, _ENV.y = nil
 end
 
+
 _ENV = _G
 
 
 -- testing preload
-
 do
   local p = package
   package = {}
@@ -329,6 +329,26 @@ do
 
   package = p
   assert(type(package.path) == "string")
+end
+
+
+do  print("testing external strings")
+  package.cpath = DC"?"
+  local lib2 = require"lib2-v2"
+  local t = {}
+  for _, len in ipairs{0, 10, 39, 40, 41, 1000} do
+    local str = string.rep("a", len)
+    local str1 = lib2.newstr(str)
+    assert(str == str1)
+    assert(not T or T.hash(str) == T.hash(str1))
+    t[str1] = 20; assert(t[str] == 20 and t[str1] == 20)
+    t[str] = 10; assert(t[str1] == 10)
+    local tt = {[str1] = str1}
+    assert(next(tt) == str1 and next(tt, str1) == nil)
+    assert(tt[str] == str)
+    local str2 = lib2.newstr(str1)
+    assert(str == str2 and t[str2] == 10 and tt[str2] == str)
+  end
 end
 
 print('+')
@@ -447,7 +467,7 @@ do
 end
 
 
--- test of large float/integer indices 
+-- test of large float/integer indices
 
 -- compute maximum integer where all bits fit in a float
 local maxint = math.maxinteger

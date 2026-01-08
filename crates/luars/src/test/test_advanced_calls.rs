@@ -1,10 +1,10 @@
 /// Complex call patterns and edge cases
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::{LuaVM, SafeOption};
 
 #[test]
 fn test_call_with_table_constructor() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function process(t)
@@ -18,8 +18,8 @@ fn test_call_with_table_constructor() {
 
 #[test]
 fn test_call_with_nested_table_constructor() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function sum_nested(t)
@@ -34,7 +34,7 @@ fn test_call_with_nested_table_constructor() {
 // Temporarily disabled due to VM issue with table.unpack
 // #[test]
 // fn test_call_with_spread_operator() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local function sum(a, b, c)
@@ -48,8 +48,8 @@ fn test_call_with_nested_table_constructor() {
 
 #[test]
 fn test_call_with_spread_operator_simple() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function sum(a, b, c)
@@ -66,7 +66,7 @@ fn test_call_with_spread_operator_simple() {
 // Temporarily disabled due to VM issue
 // #[test]
 // fn test_call_with_partial_unpack() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local function test(a, b, c, d, e)
@@ -80,8 +80,8 @@ fn test_call_with_spread_operator_simple() {
 
 #[test]
 fn test_call_chaining_methods() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local builder = {
@@ -107,8 +107,8 @@ fn test_call_chaining_methods() {
 
 #[test]
 fn test_call_with_assignment_expression() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local x
@@ -125,8 +125,8 @@ fn test_call_with_assignment_expression() {
 
 #[test]
 fn test_call_in_table_constructor() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function double(x) return x * 2 end
@@ -143,8 +143,8 @@ fn test_call_in_table_constructor() {
 
 #[test]
 fn test_call_as_array_index() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function get_index() return 2 end
@@ -157,8 +157,8 @@ fn test_call_as_array_index() {
 
 #[test]
 fn test_call_with_conditional_return() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function maybe(b, x, y)
@@ -173,8 +173,8 @@ fn test_call_with_conditional_return() {
 
 #[test]
 fn test_call_recursive_fibonacci() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function fib(n)
@@ -190,7 +190,7 @@ fn test_call_recursive_fibonacci() {
 // Temporarily disabled - needs debugging
 // #[test]
 // fn test_call_mutual_recursion() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local even, odd
@@ -214,8 +214,8 @@ fn test_call_recursive_fibonacci() {
 
 #[test]
 fn test_call_with_boolean_logic() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function is_valid(x)
@@ -232,8 +232,8 @@ fn test_call_with_boolean_logic() {
 
 #[test]
 fn test_call_string_function_on_literal() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local result = ("hello"):upper()
@@ -245,8 +245,8 @@ fn test_call_string_function_on_literal() {
 
 #[test]
 fn test_call_table_method_on_literal() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local len = table.concat({"a", "b", "c"}, ",")
@@ -259,7 +259,7 @@ fn test_call_table_method_on_literal() {
 // Temporarily disabled due to VM issue with select
 // #[test]
 // fn test_call_with_select() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local function multi()
@@ -275,8 +275,8 @@ fn test_call_table_method_on_literal() {
 
 #[test]
 fn test_call_in_loop_condition() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local counter = 0
@@ -295,8 +295,8 @@ fn test_call_in_loop_condition() {
 
 #[test]
 fn test_call_generator_pattern() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function range(n)
@@ -318,8 +318,8 @@ fn test_call_generator_pattern() {
 
 #[test]
 fn test_call_with_error_handling() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function add_func(x, y)
@@ -336,7 +336,7 @@ fn test_call_with_error_handling() {
 // Temporarily disabled - needs debugging
 // #[test]
 // fn test_call_memoization_pattern() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local function expensive(n)
@@ -360,8 +360,8 @@ fn test_call_with_error_handling() {
 
 #[test]
 fn test_call_curry_pattern() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function add(x, y)
@@ -382,8 +382,8 @@ fn test_call_curry_pattern() {
 
 #[test]
 fn test_call_compose_pattern() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function double(x) return x * 2 end
@@ -402,8 +402,8 @@ fn test_call_compose_pattern() {
 
 #[test]
 fn test_call_with_default_parameters() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function greet(name, greeting)
@@ -419,8 +419,8 @@ fn test_call_with_default_parameters() {
 
 #[test]
 fn test_call_with_named_parameters_pattern() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function create_obj(params)
@@ -439,8 +439,8 @@ fn test_call_with_named_parameters_pattern() {
 
 #[test]
 fn test_call_immediate_function_expression() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local result = (function()
@@ -456,8 +456,8 @@ fn test_call_immediate_function_expression() {
 
 #[test]
 fn test_call_with_side_effects() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local log = {}
@@ -478,7 +478,7 @@ fn test_call_with_side_effects() {
 // Temporarily disabled - needs debugging
 // #[test]
 // fn test_call_pipeline_pattern() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local function pipe(value, ...)
@@ -500,7 +500,7 @@ fn test_call_with_side_effects() {
 // Temporarily disabled - needs debugging
 // #[test]
 // fn test_call_lazy_evaluation() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local function lazy(f)
@@ -529,8 +529,8 @@ fn test_call_with_side_effects() {
 
 #[test]
 fn test_call_retry_pattern() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function retry(f, times)
@@ -557,8 +557,8 @@ fn test_call_retry_pattern() {
 
 #[test]
 fn test_call_callback_pattern() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local function async_operation(callback)
@@ -577,8 +577,8 @@ fn test_call_callback_pattern() {
 
 #[test]
 fn test_call_event_handler_pattern() {
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute_string(
         r#"
         local event_system = {

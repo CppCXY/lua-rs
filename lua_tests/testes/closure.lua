@@ -1,5 +1,7 @@
 -- $Id: testes/closure.lua $
--- See Copyright Notice in file all.lua
+-- See Copyright Notice in file lua.h
+
+global <const> *
 
 print "testing closures"
 
@@ -31,7 +33,6 @@ local function f(x)
 end
 
 local a = f(10)
-print("f(10)")
 -- force a GC in this level
 local x = {[1] = {}}   -- to detect a GC
 setmetatable(x, {__mode = 'kv'})
@@ -50,7 +51,7 @@ assert(a[8]() == 10+A)
 assert(getmetatable(x).__mode == 'kv')
 assert(B.g == 19)
 
-print("B.g == 19")
+
 -- testing equality
 a = {}
 
@@ -69,32 +70,29 @@ end
 -- testing closures with 'for' control variable
 a = {}
 for i=1,10 do
-  a[i] = {set = function(x) i=x end, get = function () return i end}
+  a[i] = function () return i end
   if i == 3 then break end
 end
 assert(a[4] == undef)
-a[1].set(10)
-assert(a[2].get() == 2)
-a[2].set('a')
-assert(a[3].get() == 3)
-assert(a[2].get() == 'a')
+assert(a[2]() == 2)
+assert(a[3]() == 3)
 
 a = {}
 local t = {"a", "b"}
 for i = 1, #t do
   local k = t[i]
-  a[i] = {set = function(x, y) i=x; k=y end,
+  a[i] = {set = function(x) k=x end,
           get = function () return i, k end}
   if i == 2 then break end
 end
-a[1].set(10, 20)
+a[1].set(10)
 local r,s = a[2].get()
 assert(r == 2 and s == 'b')
 r,s = a[1].get()
-assert(r == 10 and s == 20)
-a[2].set('a', 'b')
+assert(r == 1 and s == 10)
+a[2].set('a')
 r,s = a[2].get()
-assert(r == "a" and s == "b")
+assert(r == 2 and s == "a")
 
 
 -- testing closures with 'for' control variable x break

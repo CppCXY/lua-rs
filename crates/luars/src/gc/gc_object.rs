@@ -2,7 +2,61 @@
 
 use std::rc::Rc;
 
-use crate::{Chunk, LuaString, LuaTable, LuaValue, UpvalueId, lua_value::LuaThread};
+use crate::{
+    Chunk, LuaTable, LuaValue, UpvalueId,
+    lua_value::LuaUserdata,
+    lua_vm::{CFunction, LuaState},
+};
+
+/// Cached upvalue - stores both ID and direct pointer for fast access
+/// Mimics Lua C's cl->upvals[i] which is a direct pointer to UpValue
+#[derive(Clone, Copy, Debug)]
+pub struct CachedUpvalue {
+    pub id: UpvalueId,
+    /// Direct pointer to the Upvalue object for fast access
+    /// SAFETY: This pointer is valid as long as the Upvalue exists in ObjectPool
+    /// The Upvalue is kept alive by the GC as long as this function exists
+    pub ptr: *const Upvalue,
+}
+
+unsafe impl Send for CachedUpvalue {}
+unsafe impl Sync for CachedUpvalue {}
+
+impl CachedUpvalue {
+    #[inline(always)]
+    pub fn new(id: UpvalueId, ptr: *const Upvalue) -> Self {
+        Self { id, ptr }
+    }
+
+    /// Get the upvalue value directly through the cached pointer
+    /// SAFETY: Caller must ensure the pointer is still valid
+    /// current_thread: The thread attempting to read the upvalue (used for stack access optimization)
+    #[inline(always)]
+    pub unsafe fn get_value_unchecked(&self, current_thread: &LuaState) -> LuaValue {
+        unsafe {
+            let upval = &*self.ptr;
+            if upval.is_open() {
+                // Check if upvalue belongs to current thread
+                let owner = upval.thread;
+                let current_ptr = current_thread as *const LuaState;
+
+                let val = if owner == current_ptr {
+                    // Optimized: use current stack
+                    *current_thread.stack().get_unchecked(upval.stack_index)
+                } else {
+                    // Cross-thread access: dereference owner thread to get its stack
+                    // SAFETY: If upvalue is open, the owner thread must be alive
+                    let owner_ref = &*owner;
+                    *owner_ref.stack().get_unchecked(upval.stack_index)
+                };
+
+                val
+            } else {
+                upval.closed_value
+            }
+        }
+    }
+}
 
 // Object ages for generational GC (like Lua 5.4)
 // Uses 3 bits (0-7)
@@ -33,7 +87,7 @@ pub const AGEBITS: u8 = 0x07; // Bits 0-2 for age
 /// - Bit 5: BLACK (fully marked)
 /// - Bit 6: FIXED (never collected)
 /// - Bit 7: Reserved
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
     pub marked: u8, // Color and age bits combined
@@ -133,6 +187,30 @@ impl GcHeader {
         (self.marked & (1 << (WHITE0BIT + other_white))) != 0
     }
 
+    /// Check if object has a specific white bit set
+    #[inline(always)]
+    pub fn has_white_bit(&self, white_bit: u8) -> bool {
+        (self.marked & (1 << (WHITE0BIT + white_bit))) != 0
+    }
+
+    /// Make object OLD0 (first old generation)
+    #[inline(always)]
+    pub fn make_old0(&mut self) {
+        self.set_age(G_OLD0);
+    }
+
+    /// Make object TOUCHED1 (old object modified in this cycle)
+    #[inline(always)]
+    pub fn make_touched1(&mut self) {
+        self.set_age(G_TOUCHED1);
+    }
+
+    /// Make object OLD (fully old)
+    #[inline(always)]
+    pub fn make_old(&mut self) {
+        self.set_age(G_OLD);
+    }
+
     // Legacy compatibility
     #[inline(always)]
     pub fn is_marked(&self) -> bool {
@@ -149,119 +227,128 @@ impl GcHeader {
     }
 }
 
-// Legacy field accessors for compatibility
-impl GcHeader {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gc<T> {
+    pub header: GcHeader,
+    pub data: Box<T>, // Use Box to ensure stable pointer even when Pool array grows
+}
+
+impl<T> Gc<T> {
+    /// Create a new GC object with default header
+    pub fn new(data: T) -> Self {
+        Gc {
+            header: GcHeader::default(),
+            data: Box::new(data),
+        }
+    }
+
+    /// Get raw pointer to data (stable across Pool reallocations)
     #[inline(always)]
-    pub fn get_fixed(&self) -> bool {
-        self.is_fixed()
+    pub fn as_ptr(&self) -> *const T {
+        self.data.as_ref() as *const T
+    }
+
+    /// Get mutable raw pointer to data
+    #[inline(always)]
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.data.as_mut() as *mut T
     }
 }
 
 // ============ GC-managed Objects ============
 
-/// Table with embedded GC header
-pub struct GcTable {
-    pub header: GcHeader,
-    pub data: LuaTable,
-}
-
-/// C Function type - Rust function callable from Lua
-pub type CFunction =
-    fn(&mut crate::lua_vm::LuaVM) -> crate::lua_vm::LuaResult<crate::lua_value::MultiValue>;
+pub type GcTable = Gc<LuaTable>;
 
 /// Function body - either Lua bytecode or C function
 pub enum FunctionBody {
     /// Lua function with bytecode chunk
-    Lua(Rc<Chunk>),
-    /// C function (native Rust function) - no upvalues
-    C(CFunction),
-    /// C closure with single inline upvalue (fast path for common case)
-    /// Used by coroutine.wrap, ipairs iterator, etc.
-    CClosureInline1(CFunction, LuaValue),
+    /// Now includes cached upvalue pointers for direct access (zero-overhead like Lua C)
+    Lua(Rc<Chunk>, Vec<CachedUpvalue>),
+    /// C function (native Rust function) with cached upvalues
+    CClosure(CFunction, Vec<CachedUpvalue>),
 }
 
-/// Unified function with embedded GC header
-/// Supports both Lua closures and C closures (with upvalues)
-pub struct GcFunction {
-    pub header: GcHeader,
-    pub body: FunctionBody,
-    pub upvalues: Vec<UpvalueId>, // Upvalue IDs - used for Lua closures and C closures with >1 upvalue
-}
+pub type GcFunction = Gc<FunctionBody>;
 
-impl GcFunction {
+impl FunctionBody {
     /// Check if this is a C function (any C variant)
     #[inline(always)]
     pub fn is_c_function(&self) -> bool {
-        matches!(
-            self.body,
-            FunctionBody::C(_) | FunctionBody::CClosureInline1(_, _)
-        )
+        matches!(self, FunctionBody::CClosure(_, _))
     }
 
     /// Check if this is a Lua function
     #[inline(always)]
     pub fn is_lua_function(&self) -> bool {
-        matches!(self.body, FunctionBody::Lua(_))
+        matches!(self, FunctionBody::Lua(_, _))
     }
 
     /// Get the chunk if this is a Lua function
     #[inline(always)]
     pub fn chunk(&self) -> Option<&Rc<Chunk>> {
-        match &self.body {
-            FunctionBody::Lua(chunk) => Some(chunk),
+        match &self {
+            FunctionBody::Lua(chunk, _) => Some(chunk),
             _ => None,
-        }
-    }
-
-    /// Get the chunk reference for Lua functions (panics if C function)
-    /// Use this in contexts where we know it's a Lua function
-    #[inline(always)]
-    pub fn lua_chunk(&self) -> &Rc<Chunk> {
-        match &self.body {
-            FunctionBody::Lua(chunk) => chunk,
-            _ => panic!("Called lua_chunk() on a C function"),
         }
     }
 
     /// Get the C function pointer if this is any C function variant
     #[inline(always)]
     pub fn c_function(&self) -> Option<CFunction> {
-        match &self.body {
-            FunctionBody::C(f) => Some(*f),
-            FunctionBody::CClosureInline1(f, _) => Some(*f),
-            FunctionBody::Lua(_) => None,
+        match &self {
+            FunctionBody::CClosure(f, _) => Some(*f),
+            FunctionBody::Lua(_, _) => None,
         }
     }
 
-    /// Get inline upvalue 1 for CClosureInline1
+    /// Get cached upvalues (direct pointers for fast access)
     #[inline(always)]
-    pub fn inline_upvalue1(&self) -> Option<LuaValue> {
-        match &self.body {
-            FunctionBody::CClosureInline1(_, uv) => Some(*uv),
-            _ => None,
+    pub fn cached_upvalues(&self) -> &Vec<CachedUpvalue> {
+        match &self {
+            FunctionBody::CClosure(_, uv) => uv,
+            FunctionBody::Lua(_, uv) => uv,
+        }
+    }
+
+    /// Get upvalue IDs (for compatibility)
+    #[inline(always)]
+    pub fn upvalues(&self) -> Vec<UpvalueId> {
+        self.cached_upvalues().iter().map(|cu| cu.id).collect()
+    }
+
+    /// Get mutable access to cached upvalues for updating pointers
+    #[inline(always)]
+    pub fn cached_upvalues_mut(&mut self) -> &mut Vec<CachedUpvalue> {
+        match self {
+            FunctionBody::CClosure(_, uv) => uv,
+            FunctionBody::Lua(_, uv) => uv,
         }
     }
 }
 
 /// Upvalue with embedded GC header
-/// 
+///
 /// Hybrid design for safety and performance:
 /// - When open: uses stack_index (safe, no dangling pointers)
 /// - When closed: stores value inline (fast, no indirection)
-/// 
+///
 /// Note: We cannot use raw pointers for open upvalues because
 /// register_stack may reallocate, invalidating the pointers.
-pub struct GcUpvalue {
-    pub header: GcHeader,
+pub struct Upvalue {
     /// The stack index when open (used for accessing stack value)
     pub stack_index: usize,
     /// Storage for closed value
     pub closed_value: LuaValue,
     /// Whether the upvalue is open (still pointing to stack)
     pub is_open: bool,
+    /// The thread (LuaState) that owns the stack this upvalue points to (unsafe ptr)
+    /// Only valid/used when is_open is true
+    pub thread: *const LuaState,
 }
 
-impl GcUpvalue {
+pub type GcUpvalue = Gc<Upvalue>;
+
+impl Upvalue {
     /// Check if this upvalue points to the given absolute stack index
     #[inline]
     pub fn points_to_index(&self, index: usize) -> bool {
@@ -308,6 +395,13 @@ impl GcUpvalue {
         self.closed_value = value;
     }
 
+    /// Close upvalue with given value (used during stack unwinding)
+    #[inline]
+    pub unsafe fn close_with_value(&mut self, value: LuaValue) {
+        self.closed_value = value;
+        self.is_open = false;
+    }
+
     /// Get closed value reference directly without Option
     /// SAFETY: Must only be called when upvalue is in Closed state
     #[inline(always)]
@@ -317,13 +411,10 @@ impl GcUpvalue {
 }
 
 /// String with embedded GC header
-pub struct GcString {
-    pub header: GcHeader,
-    pub data: LuaString,
-}
+pub type GcString = Gc<String>;
 
 /// Thread (coroutine) with embedded GC header
-pub struct GcThread {
-    pub header: GcHeader,
-    pub data: LuaThread,
-}
+/// TODO: Remove Rc<RefCell> once we have proper pointer-based design
+pub type GcThread = Gc<LuaState>;
+
+pub type GcUserdata = Gc<LuaUserdata>;

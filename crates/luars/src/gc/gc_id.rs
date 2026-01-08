@@ -25,6 +25,16 @@ pub struct UserdataId(pub u32);
 #[repr(transparent)]
 pub struct ThreadId(pub u32);
 
+impl ThreadId {
+    pub fn main_id() -> Self {
+        ThreadId(u32::MAX)
+    }
+
+    pub fn is_main(self) -> bool {
+        self.0 == u32::MAX
+    }
+}
+
 /// Object type tags (3 bits, supports up to 8 types)
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

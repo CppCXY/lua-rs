@@ -1,4 +1,6 @@
 use luars::LuaVM;
+use luars::lua_vm::SafeOption;
+use luars::stdlib;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -167,7 +169,7 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
                     // Generate traceback for uncaught runtime errors
                     let error_msg = vm.get_error_message();
                     let traceback = vm.generate_traceback(error_msg);
-                    Err(format!("Runtime Error: {}", traceback))
+                    Err(traceback.to_string())
                 }
             }
         }
@@ -240,11 +242,13 @@ fn run_repl(vm: &mut LuaVM) {
         match vm.compile(&code_to_run) {
             Ok(chunk) => {
                 match vm.execute(Rc::new(chunk)) {
-                    Ok(result) => {
-                        // Print non-nil results
-                        if !result.is_nil() {
-                            // Use Debug format for display
-                            println!("{:?}", result);
+                    Ok(results) => {
+                        // Print non-nil first result
+                        if let Some(first) = results.into_iter().next() {
+                            if !first.is_nil() {
+                                // Use Debug format for display
+                                println!("{:?}", first);
+                            }
                         }
                         incomplete.clear();
                     }
@@ -288,8 +292,8 @@ fn main() {
     }
 
     // Create VM
-    let mut vm = LuaVM::new();
-    vm.open_libs();
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::All).unwrap();
 
     // Setup arg table
     // FIXME: Disabled due to compiler bug with negative table indices
@@ -327,11 +331,15 @@ fn main() {
             eprintln!("lua: {}", e);
             std::process::exit(1);
         }
+        // for ai debug
+        eprintln!("");
     } else if opts.read_stdin {
         if let Err(e) = execute_stdin(&mut vm) {
             eprintln!("lua: {}", e);
             std::process::exit(1);
         }
+        // for ai debug
+        eprintln!("");
     }
 
     // Enter interactive mode if requested or if no script was provided

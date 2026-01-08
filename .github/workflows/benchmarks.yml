@@ -26,11 +26,11 @@ jobs:
       - name: Extract Lua source
         run: |
           cd lua_src
-          unzip -o lua-5.4.8.zip
+          unzip -o lua-5.5.0.zip
 
       - name: Build and Install Native Lua from source
         run: |
-          cd lua_src/lua-5.4.8
+          cd lua_src/lua-5.5.0
           make linux
           sudo make install INSTALL_TOP=/usr/local
           echo "/usr/local/bin" >> $GITHUB_PATH
@@ -65,12 +65,12 @@ jobs:
         shell: pwsh
         run: |
           cd lua_src
-          Expand-Archive -Path lua-5.4.8.zip -DestinationPath . -Force
+          Expand-Archive -Path lua-5.5.0.zip -DestinationPath . -Force
 
       - name: Build Native Lua with CMake
         shell: pwsh
         run: |
-          cd lua_src/lua-5.4.8
+          cd lua_src/lua-5.5.0
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DLUA_BUILD_INTERPRETER=ON
           cmake --build build --config Release
           # Add to PATH for this job
@@ -116,11 +116,11 @@ jobs:
       - name: Extract Lua source
         run: |
           cd lua_src
-          unzip -o lua-5.4.8.zip
+          unzip -o lua-5.5.0.zip
 
       - name: Build and Install Native Lua from source
         run: |
-          cd lua_src/lua-5.4.8
+          cd lua_src/lua-5.5.0
           make macosx
           sudo make install INSTALL_TOP=/usr/local
           echo "/usr/local/bin" >> $GITHUB_PATH

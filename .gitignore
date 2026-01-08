@@ -1,2 +1,6 @@
 /target
-lua_src/lua-5.4.8
+bytecode_comparison_output
+lua_src/lua-5.5.0/
+lua_src/lua-5.5.0/doc
+lua_src/lua-5.5.0/out
+lua_src/lua-5.5.0/.vs

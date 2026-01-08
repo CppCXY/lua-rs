@@ -3,7 +3,7 @@ use crate::lua_vm::LuaVM;
 
 #[test]
 fn test_simple_closure() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function make_counter()
@@ -23,7 +23,7 @@ fn test_simple_closure() {
 
 #[test]
 fn test_multiple_closures_share_upvalue() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function make_getset()
@@ -48,7 +48,7 @@ fn test_multiple_closures_share_upvalue() {
 
 #[test]
 fn test_nested_closures() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function outer(x)
@@ -68,7 +68,7 @@ fn test_nested_closures() {
 
 #[test]
 fn test_closure_captures_loop_variable() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local funcs = {}
@@ -84,7 +84,7 @@ fn test_closure_captures_loop_variable() {
 
 #[test]
 fn test_closure_modifies_upvalue_in_loop() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local sum = 0
@@ -104,7 +104,7 @@ fn test_closure_modifies_upvalue_in_loop() {
 
 #[test]
 fn test_closure_factory_pattern() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function make_adder(n)
@@ -123,7 +123,7 @@ fn test_closure_factory_pattern() {
 
 #[test]
 fn test_closure_with_multiple_upvalues() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function make_calc(a, b, c)
@@ -141,7 +141,7 @@ fn test_closure_with_multiple_upvalues() {
 
 #[test]
 fn test_closure_returning_multiple_values() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function make_pair(a, b)
@@ -159,7 +159,7 @@ fn test_closure_returning_multiple_values() {
 // Temporarily disabled due to VM issue with varargs
 // #[test]
 // fn test_closure_with_vararg() {
-//     let mut vm = LuaVM::new();
+//     let mut vm = LuaVM::new(SafeOption::default());
 //     vm.open_libs();
 //     let result = vm.execute_string(r#"
 //         local function make_collector(...)
@@ -177,7 +177,7 @@ fn test_closure_returning_multiple_values() {
 
 #[test]
 fn test_closure_recursive_upvalue() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function make_factorial()
@@ -200,7 +200,7 @@ fn test_closure_recursive_upvalue() {
 
 #[test]
 fn test_closure_chain_calls() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function chain(value)
@@ -226,7 +226,7 @@ fn test_closure_chain_calls() {
 
 #[test]
 fn test_closure_array_of_closures() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local operations = {}
@@ -248,7 +248,7 @@ fn test_closure_array_of_closures() {
 
 #[test]
 fn test_closure_with_table_capture() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function make_obj(name)
@@ -270,7 +270,7 @@ fn test_closure_with_table_capture() {
 
 #[test]
 fn test_closure_deep_nesting() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local function level1(a)
@@ -291,7 +291,7 @@ fn test_closure_deep_nesting() {
 
 #[test]
 fn test_closure_mutually_recursive() {
-    let mut vm = LuaVM::new();
+    let mut vm = LuaVM::new(SafeOption::default());
     vm.open_libs();
     let result = vm.execute_string(r#"
         local is_even, is_odd

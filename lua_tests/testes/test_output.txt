@@ -1,5 +1,0 @@
-Starting test
-Loading bwcoercion
-require result: true nil
-Testing string band
-band result: false attempt to 'band' a string with a string

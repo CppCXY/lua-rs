@@ -1,5 +1,14 @@
 {
     "diagnostics": {
         "enable": false
+    },
+    "runtime": {
+        "extensions": [],
+        "frameworkVersions": [],
+        "nonstandardSymbol": [],
+        "requireLikeFunction": [],
+        "requirePattern": [],
+        "special": {},
+        "version": "Lua5.5"
     }
 }

@@ -1,0 +1,952 @@
+// Expression parsing - Port from lparser.c (Lua 5.4.8)
+// This file corresponds to expression parsing parts of lua-5.5.0/src/lparser.c
+use crate::compiler::expression::{ExpDesc, ExpKind, ExpUnion};
+use crate::compiler::func_state::{BlockCnt, FuncState};
+use crate::compiler::parse_literal::{
+    NumberResult, parse_float_token_value, parse_int_token_value, parse_string_token_value,
+};
+use crate::compiler::parser::{
+    BinaryOperator, LuaTokenKind, UNARY_PRIORITY, UnaryOperator, to_binary_operator,
+    to_unary_operator,
+};
+use crate::compiler::statement::{self, mark_upval};
+use crate::compiler::{VarKind, code, string_k};
+use crate::lua_value::UpvalueDesc;
+use crate::lua_vm::OpCode;
+
+// From lopcodes.h - maximum list items per flush
+const LFIELDS_PER_FLUSH: u32 = 50;
+
+// Port of init_exp from lparser.c
+fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {
+    e.kind = kind;
+    e.u = ExpUnion::Info(info);
+    e.t = -1;
+    e.f = -1;
+}
+
+// Port of expr from lparser.c
+pub fn expr(fs: &mut FuncState) -> Result<ExpDesc, String> {
+    let mut v = ExpDesc::new_void();
+    subexpr(fs, &mut v, 0)?; // Discard returned operator
+    Ok(v)
+}
+
+// Internal version that uses mutable reference
+pub(crate) fn expr_internal(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    subexpr(fs, v, 0)?; // Discard returned operator
+    Ok(())
+}
+
+fn get_unary_opcode(op: UnaryOperator) -> OpCode {
+    match op {
+        UnaryOperator::OpBNot => OpCode::BNot,
+        UnaryOperator::OpNot => OpCode::Not,
+        UnaryOperator::OpLen => OpCode::Len,
+        UnaryOperator::OpUnm => OpCode::Unm,
+        UnaryOperator::OpNop => unreachable!("No opcode for OpNop"),
+    }
+}
+
+// Port of subexpr from lparser.c
+// Returns the first untreated operator (like Lua C implementation)
+fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<BinaryOperator, String> {
+    let uop = to_unary_operator(fs.lexer.current_token());
+    if uop != UnaryOperator::OpNop {
+        let op = get_unary_opcode(uop);
+        fs.lexer.bump();
+        let _ = subexpr(fs, v, UNARY_PRIORITY)?; // Discard returned op from recursive call
+        code::prefix(fs, op, v);
+    } else {
+        simpleexp(fs, v)?;
+    }
+
+    // Expand while operators have priorities higher than limit
+    // Port of lparser.c:1273-1284
+    let mut op = to_binary_operator(fs.lexer.current_token());
+    while op != BinaryOperator::OpNop && op.get_priority().left > limit {
+        fs.lexer.bump();
+
+        // lcode.c:1637-1676: luaK_infix handles special cases like 'and', 'or'
+        code::infix(fs, op, v);
+
+        let mut v2 = ExpDesc::new_void();
+        // Recursive call returns next untreated operator (lparser.c:1283)
+        let nextop = subexpr(fs, &mut v2, op.get_priority().right)?;
+
+        // lcode.c:1706-1783: luaK_posfix
+        // 'and' and 'or' don't generate opcodes - they use control flow
+        code::posfix(fs, op, v, &mut v2);
+
+        op = nextop; // Use returned operator instead of re-checking token (lparser.c:1284)
+    }
+
+    Ok(op) // Return first untreated operator (lparser.c:1286)
+}
+
+// Port of simpleexp from lparser.c
+fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    match fs.lexer.current_token() {
+        LuaTokenKind::TkInt => {
+            // Parse integer literal using int_token_value
+            let text = fs.lexer.current_token_text();
+            match parse_int_token_value(text) {
+                Ok(NumberResult::Int(val)) => {
+                    *v = ExpDesc::new_int(val);
+                }
+                Ok(NumberResult::Uint(val)) => {
+                    // Reinterpret unsigned as signed
+                    *v = ExpDesc::new_int(val as i64);
+                }
+                Ok(NumberResult::Float(val)) => {
+                    // Integer overflow, use float
+                    *v = ExpDesc::new_float(val);
+                }
+                Err(e) => {
+                    return Err(fs.syntax_error(&format!("invalid integer literal: {}", e)));
+                }
+            }
+            fs.lexer.bump();
+        }
+        LuaTokenKind::TkFloat => {
+            // Parse float literal
+            let num_text = fs.lexer.current_token_text();
+            match parse_float_token_value(num_text) {
+                Ok(val) => {
+                    *v = ExpDesc::new_float(val);
+                }
+                Err(e) => {
+                    return Err(
+                        fs.syntax_error(&format!("invalid float literal '{}': {}", num_text, e))
+                    );
+                }
+            }
+            fs.lexer.bump();
+        }
+        LuaTokenKind::TkString | LuaTokenKind::TkLongString => {
+            // String constant - remove quotes
+            // Port of lparser.c:1111: codestring(v, ls->t.seminfo.ts)
+            // DON'T call string_k here - that would add to constant table immediately
+            // Instead, create VKSTR expression and defer adding to constant table until needed
+            let text = fs.lexer.current_token_text();
+            let string_content = parse_string_token_value(text, fs.lexer.current_token());
+            match string_content {
+                Ok(s) => {
+                    // Intern string to ObjectPool and get StringId
+                    let (string, _) = fs.pool.create_string(&s);
+                    // Create VKSTR expression (not VK!) - will convert to VK when needed
+                    *v = ExpDesc::new_vkstr(string.as_string_id().unwrap());
+                }
+                Err(e) => {
+                    return Err(fs.syntax_error(&format!("invalid string literal: {}", e)));
+                }
+            }
+            fs.lexer.bump();
+        }
+        LuaTokenKind::TkNil => {
+            *v = ExpDesc::new_nil();
+            fs.lexer.bump();
+        }
+        LuaTokenKind::TkTrue => {
+            *v = ExpDesc::new_bool(true);
+            fs.lexer.bump();
+        }
+        LuaTokenKind::TkFalse => {
+            *v = ExpDesc::new_bool(false);
+            fs.lexer.bump();
+        }
+        LuaTokenKind::TkDots => {
+            // lparser.c:1169-1173: vararg
+            // Check if inside vararg function
+            if !fs.is_vararg {
+                return Err(fs.syntax_error("cannot use '...' outside a vararg function"));
+            }
+            // lparser.c:1173: Always generate VARARG instruction for ... expression
+            // The k flag will be set in finish() if needed
+            let numparams = fs.numparams as u32;
+            let pc = code::code_abc(fs, OpCode::Vararg, 0, numparams, 1);
+            *v = ExpDesc::new_void();
+            v.kind = ExpKind::VVARARG;
+            v.u = ExpUnion::Info(pc as i32);
+            fs.lexer.bump();
+        }
+        LuaTokenKind::TkLeftBrace => {
+            // Table constructor
+            constructor(fs, v)?;
+        }
+        LuaTokenKind::TkFunction => {
+            // Anonymous function
+            fs.lexer.bump();
+            body(fs, v, false)?;
+        }
+        _ => {
+            // Try suffixed expression (variables, function calls, indexing)
+            suffixedexp(fs, v)?;
+        }
+    }
+    Ok(())
+}
+
+// Port of primaryexp from lparser.c (lines 1080-1099)
+// primaryexp -> NAME | '(' expr ')'
+fn primaryexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    match fs.lexer.current_token() {
+        LuaTokenKind::TkLeftParen => {
+            // (expr)
+            fs.lexer.bump();
+            expr_internal(fs, v)?;
+            expect(fs, LuaTokenKind::TkRightParen)?;
+            code::discharge_vars(fs, v);
+        }
+        LuaTokenKind::TkName => {
+            // Variable name
+            singlevar(fs, v)?;
+        }
+        _ => {
+            return Err(fs.token_error("unexpected symbol"));
+        }
+    }
+    Ok(())
+}
+
+// Port of suffixedexp from lparser.c (lines 1102-1136)
+// suffixedexp -> primaryexp { '.' NAME | '[' exp ']' | ':' NAME funcargs | funcargs }
+pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    primaryexp(fs, v)?;
+
+    loop {
+        match fs.lexer.current_token() {
+            LuaTokenKind::TkDot => {
+                // fieldsel
+                fieldsel(fs, v)?;
+            }
+            LuaTokenKind::TkLeftBracket => {
+                // [exp]
+                let mut key = ExpDesc::new_void();
+                // Lua 5.5: Don't discharge VVARGVAR, keep it so indexed can generate GETVARG
+                if v.kind != ExpKind::VVARGVAR {
+                    code::exp2anyregup(fs, v);
+                }
+                yindex(fs, &mut key)?;
+                code::indexed(fs, v, &mut key);
+            }
+            LuaTokenKind::TkColon => {
+                // : NAME funcargs (method call)
+                fs.lexer.bump();
+                let method_name = fs.lexer.current_token_text().to_string();
+                expect(fs, LuaTokenKind::TkName)?;
+
+                // self:method(...) is sugar for self.method(self, ...)
+                // Generate SELF instruction
+                // Create VKSTR expression for the method name (deferred addition to constant table)
+                // This matches official Lua's codestring (lparser.c:160-164)
+                // which creates VKSTR without calling stringK immediately.
+                // The stringK call happens later in luaK_self via luaK_exp2K (lcode.c:1333)
+                let (string, _) = fs.pool.create_string(&method_name);
+                let mut key = ExpDesc::new_vkstr(string.as_string_id().unwrap());
+                code::self_op(fs, v, &mut key);
+
+                funcargs(fs, v)?;
+            }
+            LuaTokenKind::TkLeftParen
+            | LuaTokenKind::TkString
+            | LuaTokenKind::TkLongString
+            | LuaTokenKind::TkLeftBrace => {
+                // funcargs - must convert to register first
+                code::exp2nextreg(fs, v);
+                funcargs(fs, v)?;
+            }
+            _ => {
+                return Ok(());
+            }
+        }
+    }
+}
+
+// Port of funcargs from lparser.c (lines 1024-1065)
+fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
+    use crate::compiler::expression::ExpKind;
+
+    let mut args = ExpDesc::new_void();
+    let line = fs.lexer.line; // Save line number before processing arguments (lparser.c:1028)
+
+    match fs.lexer.current_token() {
+        LuaTokenKind::TkLeftParen => {
+            // funcargs -> '(' [ explist ] ')'
+            fs.lexer.bump();
+            if fs.lexer.current_token() == LuaTokenKind::TkRightParen {
+                args.kind = ExpKind::VVOID;
+            } else {
+                crate::compiler::statement::explist(fs, &mut args)?;
+                if matches!(args.kind, ExpKind::VCALL | ExpKind::VVARARG) {
+                    code::setmultret(fs, &mut args);
+                }
+            }
+            expect(fs, LuaTokenKind::TkRightParen)?;
+        }
+        LuaTokenKind::TkLeftBrace => {
+            // funcargs -> constructor (table constructor)
+            constructor(fs, &mut args)?;
+        }
+        LuaTokenKind::TkString | LuaTokenKind::TkLongString => {
+            // funcargs -> STRING
+            let text = fs.lexer.current_token_text();
+            let string_content = parse_string_token_value(text, fs.lexer.current_token())?;
+            let k_idx = string_k(fs, string_content);
+            fs.lexer.bump();
+            args = ExpDesc::new_k(k_idx);
+        }
+        _ => {
+            return Err("function arguments expected".to_string());
+        }
+    }
+
+    // Generate CALL instruction
+    if f.kind != ExpKind::VNONRELOC {
+        return Err("function must be in register".to_string());
+    }
+
+    let base = f.u.info() as u8;
+    let nparams = if matches!(args.kind, ExpKind::VCALL | ExpKind::VVARARG) {
+        255 // LUA_MULTRET = -1, which is 255 in u8. nparams+1 will overflow to 0
+    } else {
+        if args.kind != ExpKind::VVOID {
+            code::exp2nextreg(fs, &mut args);
+        }
+        fs.freereg - (base + 1)
+    };
+
+    let pc = code::code_abc(
+        fs,
+        OpCode::Call,
+        base as u32,
+        (nparams.wrapping_add(1)) as u32,
+        2,
+    );
+
+    code::fixline(fs, line); // Fix line number for CALL instruction (lparser.c:1063)
+    f.kind = ExpKind::VCALL;
+    f.u = ExpUnion::Info(pc as i32);
+    fs.freereg = base + 1; // Call resets freereg to base+1
+
+    Ok(())
+}
+
+// Port of yindex from lparser.c
+fn yindex(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    fs.lexer.bump(); // skip '['
+    expr_internal(fs, v)?;
+    code::exp2val(fs, v);
+    expect(fs, LuaTokenKind::TkRightBracket)?;
+    Ok(())
+}
+
+// Port of singlevar/buildvar from lparser.c (lines 520-534)
+pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    let name = fs.lexer.current_token_text().to_string();
+    fs.lexer.bump();
+
+    // lparser.c:522: global by default
+    init_exp(v, ExpKind::VGLOBAL, -1);
+
+    // lparser.c:523: Call singlevaraux with base=1
+    singlevaraux(fs, &name, v, true);
+
+    // lparser.c:524: If global name?
+    if v.kind == ExpKind::VGLOBAL {
+        let info = v.u.info();
+
+        // lparser.c:526-527: global by default in the scope of a global declaration?
+        if info == -2 {
+            return Err(format!("variable '{}' not declared", name));
+        }
+
+        // lparser.c:528: buildglobal(ls, varname, var)
+        buildglobal(fs, &name, v)?;
+
+        // lparser.c:529-531: check if it's a const global (in collective declaration scope)
+        if info != -1 {
+            // info >= 0 means we're in scope of a collective declaration
+            let abs_idx = info as usize;
+            if let Some(vd) = fs.actvar.get(abs_idx) {
+                if vd.kind == VarKind::GDKCONST {
+                    // lparser.c:530: var->u.ind.ro = 1; /* mark variable as read-only */
+                    v.u.ind_mut().ro = true;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// Port of buildglobal from lparser.c (lines 502-513)
+pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Result<(), String> {
+    // lparser.c:505: global by default
+    init_exp(var, ExpKind::VGLOBAL, -1);
+
+    // lparser.c:506: get environment variable (_ENV)
+    singlevaraux(fs, "_ENV", var, true);
+
+    // lparser.c:507-509: _ENV is global when accessing variable?
+    if var.kind == ExpKind::VGLOBAL {
+        return Err(format!(
+            "_ENV is global when accessing variable '{}'",
+            varname
+        ));
+    }
+
+    // lparser.c:510: _ENV could be a constant
+    code::exp2anyregup(fs, var);
+
+    // lparser.c:511: codestring(&key, varname); /* key is variable name */
+    // Port of codestring from lparser.c:159-164
+    // static void codestring (expdesc *e, TString *s) {
+    //   e->f = e->t = NO_JUMP;
+    //   e->k = VKSTR;
+    //   e->u.strval = s;
+    // }
+    // Create key as VKSTR (not VK) so indexed can track it correctly
+    let (string, _) = fs.pool.create_string(&varname);
+    let mut key = ExpDesc::new_void();
+    key.kind = ExpKind::VKSTR;
+    key.u = ExpUnion::Str(string.as_string_id().unwrap());
+    key.t = -1;
+    key.f = -1;
+
+    // lparser.c:512: var represents _ENV[varname]
+    code::indexed(fs, var, &mut key);
+
+    Ok(())
+}
+
+// Port of singlevaraux from lparser.c (lines 475-495)
+fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
+    let vkind = fs.searchvar(name, var);
+    if vkind >= 0 {
+        // lparser.c:478-486: found at current level
+        if !base {
+            // lparser.c:480-484: variable will be used as upvalue
+            if var.kind == ExpKind::VVARGVAR {
+                // lparser.c:481: vararg parameter used as upvalue needs vararg table
+                code::vapar_to_local(fs, var);
+            }
+            if var.kind == ExpKind::VLOCAL {
+                // lparser.c:483: mark that this local will be used as upvalue
+                let vidx = var.u.var().vidx;
+                mark_upval(fs, vidx as u8);
+            }
+        }
+        // lparser.c:485: else nothing else to be done (base=true, used in current scope)
+    } else {
+        let vidx = fs.searchupvalue(name);
+        if vidx < 0 {
+            if let Some(prev) = &mut fs.prev {
+                singlevaraux(prev, name, var, false);
+
+                // Port of lparser.c:451-453: don't create upvalue for compile-time constants
+                // If the variable is a compile-time constant (VCONST), convert it to value immediately
+                // This enables constant folding in nested functions
+                if var.kind == ExpKind::VCONST {
+                    // Convert VCONST to actual constant value (VKINT/VKFLT/etc)
+                    // Port of const2exp from lcode.c:693-720
+                    let vidx = var.u.info() as usize;
+                    if let Some(prev_var) = prev.actvar.get(vidx) {
+                        if let Some(value) = prev_var.const_value {
+                            code::const_to_exp(value, var);
+                        }
+                    }
+                } else if var.kind == ExpKind::VLOCAL
+                    || var.kind == ExpKind::VUPVAL
+                    || var.kind == ExpKind::VVARGVAR
+                {
+                    // lparser.c:460-462: create upvalue for local, upvalue, or vararg parameter
+                    let idx = fs.newupvalue(name, var) as u8;
+                    init_exp(var, ExpKind::VUPVAL, idx as i32);
+                }
+            }
+            // lparser.c:498-503: else it's a global or constant, don't change anything (return)
+            // Don't set to VVOID - preserve VGLOBAL/VCONST from earlier initialization
+        } else {
+            init_exp(var, ExpKind::VUPVAL, vidx as i32);
+        }
+    }
+}
+
+// Port of fieldsel from lparser.c:811-819
+// fieldsel -> ['.' | ':'] NAME
+pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    // lparser.c:815: luaK_exp2anyregup(fs, v);
+    // Lua 5.5: Don't discharge VVARGVAR, keep it so indexed can generate GETVARG
+    if v.kind != ExpKind::VVARGVAR {
+        code::exp2anyregup(fs, v);
+    }
+
+    // lparser.c:816: luaX_next(ls);  /* skip the dot or colon */
+    fs.lexer.bump();
+
+    // lparser.c:817: codename(ls, &key);
+    if fs.lexer.current_token() != LuaTokenKind::TkName {
+        return Err(fs.token_error("expected field name"));
+    }
+
+    let field = fs.lexer.current_token_text().to_string();
+    fs.lexer.bump();
+
+    // lparser.c:818: luaK_indexed(fs, v, &key);
+    // Create a string constant key
+    let idx = string_k(fs, field);
+    let mut key = ExpDesc::new_void();
+    key.kind = ExpKind::VK;
+    key.u = ExpUnion::Info(idx as i32);
+
+    // Call indexed to determine correct index type (VINDEXSTR vs VINDEXED)
+    code::indexed(fs, v, &mut key);
+
+    Ok(())
+}
+
+// Port of ConsControl from lparser.c
+struct ConsControl {
+    v: ExpDesc,    // last list item read
+    table_reg: u8, // table register
+    na: u32,       // number of array elements already stored
+    nh: u32,       // total number of record elements
+    tostore: u32,  // number of array elements pending to be stored
+}
+
+impl ConsControl {
+    fn new(table_reg: u8) -> Self {
+        Self {
+            v: ExpDesc::new_void(),
+            table_reg,
+            na: 0,
+            nh: 0,
+            tostore: 0,
+        }
+    }
+}
+
+// Port of closelistfield from lparser.c
+fn closelistfield(fs: &mut FuncState, cc: &mut ConsControl) {
+    if cc.v.kind == ExpKind::VVOID {
+        return; // there is no list item
+    }
+    code::exp2nextreg(fs, &mut cc.v);
+    cc.v.kind = ExpKind::VVOID;
+    if cc.tostore == LFIELDS_PER_FLUSH {
+        code::setlist(fs, cc.table_reg, cc.na, cc.tostore); // flush
+        cc.na += cc.tostore;
+        cc.tostore = 0; // no more items pending
+    }
+}
+
+// Port of lastlistfield from lparser.c
+fn lastlistfield(fs: &mut FuncState, cc: &mut ConsControl) {
+    if cc.tostore == 0 {
+        return;
+    }
+    if code::hasmultret(&cc.v) {
+        code::setmultret(fs, &mut cc.v);
+        code::setlist(fs, cc.table_reg, cc.na, code::LUA_MULTRET);
+        // lparser.c:975: cc->na--; do not count last expression (unknown number of elements)
+        // IMPORTANT: In C, this can underflow if na=0, wrapping to MAX_u32. This is intentional!
+        // The subsequent cc->na += cc->tostore will correct it: MAX_u32 + 1 = 0
+        // We must use wrapping_sub, not saturating_sub
+        cc.na = cc.na.wrapping_sub(1);
+    } else {
+        if cc.v.kind != ExpKind::VVOID {
+            code::exp2nextreg(fs, &mut cc.v);
+        }
+        code::setlist(fs, cc.table_reg, cc.na, cc.tostore);
+    }
+    // Use wrapping_add to handle intentional overflow (matching C behavior)
+    // When cc.na underflows above, this addition corrects it
+    cc.na = cc.na.wrapping_add(cc.tostore);
+}
+
+// Port of listfield from lparser.c
+fn listfield(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
+    expr_internal(fs, &mut cc.v)?;
+    cc.tostore += 1;
+    Ok(())
+}
+
+// Port of field from lparser.c
+fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
+    if fs.lexer.current_token() == LuaTokenKind::TkLeftBracket {
+        // [exp] = exp (general field)
+        // Port of recfield from lparser.c:917-935
+        // Save freereg to restore after processing field
+        let saved_freereg = fs.freereg;
+
+        fs.lexer.bump();
+        let mut key = ExpDesc::new_void();
+        expr_internal(fs, &mut key)?;
+        expect(fs, LuaTokenKind::TkRightBracket)?;
+        expect(fs, LuaTokenKind::TkAssign)?;
+
+        let mut val = ExpDesc::new_void();
+        expr_internal(fs, &mut val)?;
+
+        // Port of recfield logic from lparser.c:847-867
+        // Use indexed to determine VINDEXSTR vs VINDEXED based on key
+        let mut tab = ExpDesc::new_void();
+        tab.kind = ExpKind::VNONRELOC;
+        tab.u = ExpUnion::Info(cc.table_reg as i32);
+
+        code::indexed(fs, &mut tab, &mut key);
+
+        // Generate appropriate store instruction based on tab.kind
+        match tab.kind {
+            ExpKind::VINDEXSTR => {
+                // String key with index <= 255, use SETFIELD
+                code::code_abrk(
+                    fs,
+                    OpCode::SetField,
+                    tab.u.ind().t as u32,
+                    tab.u.ind().idx as u32,
+                    &mut val,
+                );
+            }
+            ExpKind::VINDEXI => {
+                // Integer key in range 0-255, use SETI
+                code::code_abrk(
+                    fs,
+                    OpCode::SetI,
+                    tab.u.ind().t as u32,
+                    tab.u.ind().idx as u32,
+                    &mut val,
+                );
+            }
+            ExpKind::VINDEXED => {
+                // General case (string index > 255 or non-constant key), use SETTABLE
+                code::code_abrk(
+                    fs,
+                    OpCode::SetTable,
+                    tab.u.ind().t as u32,
+                    tab.u.ind().idx as u32,
+                    &mut val,
+                );
+            }
+            _ => {
+                panic!("Unexpected expression kind in table constructor [key]=value");
+            }
+        }
+        cc.nh += 1;
+
+        // Restore freereg - free temporary registers used for key/value
+        fs.freereg = saved_freereg;
+    } else if fs.lexer.current_token() == LuaTokenKind::TkName {
+        // Check if it's name = exp (record field) or just a list item
+        let next = fs.lexer.peek_next_token();
+        if next == LuaTokenKind::TkAssign {
+            // name = exp (record field)
+            // Port of recfield from lparser.c:847-867
+            let saved_freereg = fs.freereg;
+
+            let field_name = fs.lexer.current_token_text().to_string();
+            fs.lexer.bump();
+            fs.lexer.bump(); // skip =
+
+            // Create key expression (string constant)
+            let field_idx = string_k(fs, field_name);
+            let mut key = ExpDesc::new_void();
+            key.kind = ExpKind::VK;
+
+            key.u = ExpUnion::Info(field_idx as i32);
+
+            // Create table expression
+            let mut tab = ExpDesc::new_void();
+            tab.kind = ExpKind::VNONRELOC;
+
+            tab.u = ExpUnion::Info(cc.table_reg as i32);
+
+            // indexed will handle VINDEXSTR vs VINDEXED based on constant index size
+            // If field_idx > 255, it will set tab.kind = VINDEXED
+            // Otherwise, it will set tab.kind = VINDEXSTR
+            code::indexed(fs, &mut tab, &mut key);
+
+            // Parse value expression
+            let mut val = ExpDesc::new_void();
+            expr_internal(fs, &mut val)?;
+
+            // Generate the appropriate store instruction based on tab.kind
+            match tab.kind {
+                ExpKind::VINDEXSTR => {
+                    // Field index fits in B operand, use SETFIELD
+                    code::code_abrk(
+                        fs,
+                        OpCode::SetField,
+                        tab.u.ind().t as u32,
+                        tab.u.ind().idx as u32,
+                        &mut val,
+                    );
+                }
+                ExpKind::VINDEXED => {
+                    // Field index too large, use SETTABLE
+                    code::code_abrk(
+                        fs,
+                        OpCode::SetTable,
+                        tab.u.ind().t as u32,
+                        tab.u.ind().idx as u32,
+                        &mut val,
+                    );
+                }
+                _ => {
+                    // Should not happen in table constructor
+                    panic!("Unexpected expression kind in table constructor");
+                }
+            }
+
+            cc.nh += 1;
+            fs.freereg = saved_freereg;
+        } else {
+            // Just a list item
+            listfield(fs, cc)?;
+        }
+    } else {
+        // List item
+        listfield(fs, cc)?;
+    }
+
+    Ok(())
+}
+
+// Port of constructor from lparser.c
+fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    expect(fs, LuaTokenKind::TkLeftBrace)?;
+
+    let table_reg = fs.freereg;
+    code::reserve_regs(fs, 1);
+    let pc = code::code_abc(fs, OpCode::NewTable, table_reg as u32, 0, 0);
+    code::code_extraarg(fs, 0); // space for extra arg
+    *v = ExpDesc::new_nonreloc(table_reg);
+
+    let mut cc = ConsControl::new(table_reg);
+
+    // Parse table fields
+    loop {
+        if fs.lexer.current_token() == LuaTokenKind::TkRightBrace {
+            break;
+        }
+        closelistfield(fs, &mut cc);
+        field(fs, &mut cc)?;
+
+        if !matches!(
+            fs.lexer.current_token(),
+            LuaTokenKind::TkComma | LuaTokenKind::TkSemicolon
+        ) {
+            break;
+        }
+        fs.lexer.bump();
+    }
+
+    expect(fs, LuaTokenKind::TkRightBrace)?;
+    lastlistfield(fs, &mut cc);
+    code::settablesize(fs, pc, table_reg, cc.na, cc.nh);
+    Ok(())
+}
+
+// Port of body from lparser.c
+pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), String> {
+    // Record the line where function is defined
+    let linedefined = fs.lexer.line;
+
+    expect(fs, LuaTokenKind::TkLeftParen)?;
+
+    // Determine if vararg before creating child
+    let mut is_vararg = false;
+    let mut params = Vec::new();
+    let mut param_kinds = Vec::new();
+
+    // Collect parameter names first
+    if is_method {
+        params.push("self".to_string());
+        param_kinds.push(VarKind::VDKREG);
+    }
+
+    if fs.lexer.current_token() != LuaTokenKind::TkRightParen {
+        loop {
+            if fs.lexer.current_token() == LuaTokenKind::TkName {
+                let param_name = fs.lexer.current_token_text().to_string();
+                fs.lexer.bump();
+                params.push(param_name);
+                param_kinds.push(VarKind::VDKREG);
+            } else if fs.lexer.current_token() == LuaTokenKind::TkDots {
+                fs.lexer.bump();
+                is_vararg = true;
+                // Lua 5.5: Named vararg parameter (...name)
+                if fs.lexer.current_token() == LuaTokenKind::TkName {
+                    let vararg_name = fs.lexer.current_token_text().to_string();
+                    fs.lexer.bump();
+                    params.push(vararg_name);
+                    param_kinds.push(VarKind::RDKVAVAR);
+                } else {
+                    // Anonymous vararg - still needs a placeholder local variable
+                    // Use empty string as marker (like Lua 5.5)
+                    params.push("".to_string());
+                    param_kinds.push(VarKind::RDKVAVAR);
+                }
+                break;
+            } else {
+                return Err("expected parameter".to_string());
+            }
+
+            if fs.lexer.current_token() != LuaTokenKind::TkComma {
+                break;
+            }
+            fs.lexer.bump();
+        }
+    }
+
+    expect(fs, LuaTokenKind::TkRightParen)?;
+
+    // Port of body function from lparser.c:989-1008
+    // body ->  '(' parlist ')' block END
+
+    // lparser.c:993: Create new FuncState for nested function
+    // FuncState new_fs; new_fs.f = addprototype(ls); open_func(ls, &new_fs, &bl);
+    let fs_ptr = fs as *mut FuncState;
+    let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
+
+    // lparser.c:753: open_func calls enterblock(fs, bl, 0) - create function body block
+    // CRITICAL: Must be done BEFORE registering parameters, with nactvar=0
+    // This is critical - every function body needs an outer block!
+    let func_bl_id = child_fs.compiler_state.alloc_blockcnt(BlockCnt {
+        previous: None,
+        first_label: 0,
+        first_goto: 0,
+        nactvar: child_fs.nactvar, // Should be 0 at this point
+        upval: false,
+        is_loop: 0,
+        in_scope: true,
+    });
+    statement::enterblock(&mut child_fs, func_bl_id, 0);
+
+    // Lua 5.5 parlist: Register parameters (fixed parameters first)
+    // Count fixed parameters (exclude vararg parameter)
+    let mut nparams = 0;
+    for kind in param_kinds.iter() {
+        if *kind != VarKind::RDKVAVAR {
+            nparams += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Register fixed parameters
+    for i in 0..nparams {
+        child_fs.new_localvar(params[i].clone(), param_kinds[i]);
+    }
+    child_fs.adjust_local_vars(nparams as u8);
+
+    // lparser.c:982: Set numparams BEFORE registering vararg parameter
+    // f->numparams = cast_byte(fs->nactvar);
+    let param_count = child_fs.nactvar as usize;
+    child_fs.numparams = param_count as u8; // Store in FuncState for VARARG instruction
+
+    // If vararg, setvararg and register vararg parameter AFTER setting numparams
+    if is_vararg {
+        child_fs.chunk.is_vararg = true;
+        // lparser.c:1060: By default, use hidden vararg arguments (PF_VAHID)
+        // This will be cleared in finish() if vararg table is actually used (PF_VATAB)
+        child_fs.chunk.use_hidden_vararg = true;
+        // Register the vararg parameter variable (after numparams is set)
+        if params.len() > nparams {
+            // Named or anonymous vararg parameter
+            let vararg_name = &params[nparams];
+            // Note: We do NOT set needs_vararg_table here!
+            // It will be set later if the vararg table is actually used
+            // (e.g., via GETVARG, vapar2local, check_readonly)
+            child_fs.new_localvar(vararg_name.clone(), param_kinds[nparams]);
+            child_fs.adjust_local_vars(1); // vararg parameter
+        }
+    } else {
+        // Non-vararg functions don't use hidden vararg
+        child_fs.chunk.use_hidden_vararg = false;
+    }
+
+    // lparser.c:1001: luaK_reserveregs(fs, fs->nactvar);
+    // Reserve registers for parameters
+    let nactvar = child_fs.nactvar;
+    code::reserve_regs(&mut child_fs, nactvar as u8);
+
+    // Lua 5.5: Generate VARARGPREP after registering parameters but before statlist
+    // This must be the first instruction in the function
+    // Note: In Lua 5.5, VARARGPREP parameter is 0 (not the number of fixed params)
+    if is_vararg {
+        code::code_abc(&mut child_fs, OpCode::VarargPrep, 0, 0, 0);
+    }
+
+    // lparser.c:1002: Parse function body statements
+    // statlist(ls);
+    statement::statlist(&mut child_fs)?;
+
+    // Record the line where function ends (before consuming END token)
+    let lastlinedefined = child_fs.lexer.line;
+
+    // lparser.c:1004: Expect END token
+    expect(&mut child_fs, LuaTokenKind::TkEnd)?;
+
+    // Generate final RETURN instruction
+    // Port of lparser.c:765: luaK_ret(fs, luaY_nvarstack(fs), 0);
+    let first_reg = child_fs.nvarstack();
+    code::ret(&mut child_fs, first_reg, 0);
+
+    // lparser.c:760: close_func calls leaveblock(fs) - close function body block
+    statement::leaveblock(&mut child_fs);
+
+    // Set param_count on chunk BEFORE calling finish, so finish can use it for RETURN instructions
+    child_fs.chunk.param_count = param_count;
+    // Note: is_vararg and use_hidden_vararg are already set earlier when processing vararg parameters
+
+    // Port of close_func from lparser.c:763 - finish code generation
+    code::finish(&mut child_fs);
+
+    // Get completed child chunk and upvalue information
+    let mut child_chunk = child_fs.chunk;
+    child_chunk.is_vararg = child_fs.is_vararg; // Set vararg flag on chunk
+    // param_count excludes ... (vararg), only counts regular parameters
+    child_chunk.param_count = param_count;
+    child_chunk.linedefined = linedefined;
+    child_chunk.lastlinedefined = lastlinedefined;
+    child_chunk.source_name = Some(child_fs.source_name.clone());
+    let child_upvalues = child_fs.upvalues;
+
+    // Port of lparser.c:722-726 (codeclosure)
+    // In Lua 5.4, upvalue information is stored in Proto.upvalues[], NOT as pseudo-instructions
+    // This is different from Lua 5.1 which used pseudo-instructions after OP_CLOSURE
+    for upval in &child_upvalues {
+        child_chunk.upvalue_descs.push(UpvalueDesc {
+            is_local: upval.in_stack, // true if captures parent local
+            index: upval.idx as u32,  // index in parent's register or upvalue array
+        });
+    }
+    child_chunk.upvalue_count = child_upvalues.len();
+
+    // lparser.c:1005: Add child proto to parent (addprototype)
+    let proto_idx = fs.chunk.child_protos.len();
+    fs.chunk.child_protos.push(std::rc::Rc::new(child_chunk));
+
+    // lparser.c:722-726: Generate CLOSURE instruction (codeclosure)
+    // static void codeclosure (LexState *ls, expdesc *v) {
+    //   FuncState *fs = ls->fs->prev;
+    //   init_exp(v, VRELOC, luaK_codeABx(fs, OP_CLOSURE, 0, fs->np - 1));
+    //   luaK_exp2nextreg(fs, v);  /* fix it at the last register */
+    // }
+    let pc = code::code_abx(fs, OpCode::Closure, 0, proto_idx as u32);
+    *v = ExpDesc::new_reloc(pc);
+    code::exp2nextreg(fs, v);
+    Ok(())
+}
+
+// Helper: expect a token
+fn expect(fs: &mut FuncState, tk: LuaTokenKind) -> Result<(), String> {
+    if fs.lexer.current_token() == tk {
+        fs.lexer.bump();
+        Ok(())
+    } else {
+        Err(fs.token_error(&format!("expected '{:?}'", tk)))
+    }
+}

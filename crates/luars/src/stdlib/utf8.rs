@@ -1,9 +1,10 @@
 // UTF-8 library
 // Implements: char, charpattern, codes, codepoint, len, offset
 
-use crate::lib_registry::{LibraryModule, get_arg, get_args, require_arg};
-use crate::lua_value::{LuaValue, MultiValue};
-use crate::lua_vm::{LuaResult, LuaVM};
+use crate::lib_registry::LibraryModule;
+use crate::lua_value::LuaValue;
+use crate::lua_vm::LuaResult;
+use crate::lua_vm::LuaState;
 
 pub fn create_utf8_lib() -> LibraryModule {
     let mut module = crate::lib_module!("utf8", {
@@ -25,44 +26,46 @@ pub fn create_utf8_lib() -> LibraryModule {
     module
 }
 
-fn utf8_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 1, "utf8.len")?;
+fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
+    let s_value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'len' (string expected)".to_string()))?;
     let Some(s_id) = s_value.as_string_id() else {
-        return Err(vm.error("bad argument #1 to 'utf8.len' (string expected)".to_string()));
+        return Err(l.error("bad argument #1 to 'len' (string expected)".to_string()));
     };
     let s_str = {
+        let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(vm.error("bad argument #1 to 'utf8.len' (string expected)".to_string()));
+            return Err(l.error("bad argument #1 to 'len' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
     let bytes = s_str.as_bytes();
     let len = bytes.len() as i64;
 
     // Fast path: no range specified, count entire string
-    let i_arg = get_arg(vm, 2);
-    let j_arg = get_arg(vm, 3);
-    let lax = get_arg(vm, 4).and_then(|v| v.as_bool()).unwrap_or(false);
+    let i_arg = l.get_arg(2);
+    let j_arg = l.get_arg(3);
+    let lax = l.get_arg(4).and_then(|v| v.as_bool()).unwrap_or(false);
 
     if i_arg.is_none() && j_arg.is_none() {
         // Fast path: validate and count entire string
         match std::str::from_utf8(bytes) {
             Ok(valid_str) => {
-                return Ok(MultiValue::single(LuaValue::integer(
-                    valid_str.chars().count() as i64,
-                )));
+                l.push_value(LuaValue::integer(valid_str.chars().count() as i64))?;
+                return Ok(1);
             }
             Err(e) if !lax => {
                 // Return nil and position of first invalid byte (1-based)
-                return Ok(MultiValue::multiple(vec![
-                    LuaValue::nil(),
-                    LuaValue::integer(e.valid_up_to() as i64 + 1),
-                ]));
+                l.push_value(LuaValue::nil())?;
+                l.push_value(LuaValue::integer(e.valid_up_to() as i64 + 1))?;
+                return Ok(2);
             }
             Err(_) if lax => {
                 // In lax mode, just return nil
-                return Ok(MultiValue::single(LuaValue::nil()));
+                l.push_value(LuaValue::nil())?;
+                return Ok(1);
             }
             _ => unreachable!(),
         }
@@ -77,111 +80,113 @@ fn utf8_len(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let end_byte = (j.max(0) as usize).min(bytes.len());
 
     if start_byte > end_byte {
-        return Ok(MultiValue::multiple(vec![
-            LuaValue::nil(),
-            LuaValue::integer(start_byte as i64 + 1),
-        ]));
+        l.push_value(LuaValue::nil())?;
+        l.push_value(LuaValue::integer(start_byte as i64 + 1))?;
+        return Ok(2);
     }
 
     // Count UTF-8 characters in byte range
     match std::str::from_utf8(&bytes[start_byte..end_byte]) {
         Ok(valid_str) => {
             let len = valid_str.chars().count();
-            Ok(MultiValue::single(LuaValue::integer(len as i64)))
+            l.push_value(LuaValue::integer(len as i64))?;
+            Ok(1)
         }
         Err(e) if !lax => {
             // Return nil and position of first invalid byte (1-based)
             let error_pos = start_byte + e.valid_up_to() + 1;
-            Ok(MultiValue::multiple(vec![
-                LuaValue::nil(),
-                LuaValue::integer(error_pos as i64),
-            ]))
+            l.push_value(LuaValue::nil())?;
+            l.push_value(LuaValue::integer(error_pos as i64))?;
+            Ok(2)
         }
         Err(_) if lax => {
             // In lax mode, just return nil
-            Ok(MultiValue::single(LuaValue::nil()))
+            l.push_value(LuaValue::nil())?;
+            Ok(1)
         }
         _ => unreachable!(),
     }
 }
 
-fn utf8_char(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let args = get_args(vm);
+fn utf8_char(l: &mut LuaState) -> LuaResult<usize> {
+    let args = l.get_args();
 
     let mut result = String::new();
     for arg in args {
         if let Some(code) = arg.as_integer() {
             if code < 0 || code > 0x10FFFF {
-                return Err(
-                    vm.error("bad argument to 'utf8.char' (value out of range)".to_string())
-                );
+                return Err(l.error("bad argument to 'char' (value out of range)".to_string()));
             }
             if let Some(ch) = char::from_u32(code as u32) {
                 result.push(ch);
             } else {
-                return Err(
-                    vm.error("bad argument to 'utf8.char' (invalid code point)".to_string())
-                );
+                return Err(l.error("bad argument to 'char' (invalid code point)".to_string()));
             }
         } else {
-            return Err(vm.error("bad argument to 'utf8.char' (number expected)".to_string()));
+            return Err(l.error("bad argument to 'char' (number expected)".to_string()));
         }
     }
 
-    let s = vm.create_string(&result);
-    Ok(MultiValue::single(s))
+    let s = l.create_string(&result);
+    l.push_value(s)?;
+    Ok(1)
 }
 
 /// utf8.codes(s) - Returns an iterator for UTF-8 characters
-fn utf8_codes(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 1, "utf8.codes")?;
+fn utf8_codes(l: &mut LuaState) -> LuaResult<usize> {
+    let s_value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'codes' (string expected)".to_string()))?;
     if !s_value.is_string() {
-        return Err(vm.error("bad argument #1 to 'utf8.codes' (string expected)".to_string()));
+        return Err(l.error("bad argument #1 to 'codes' (string expected)".to_string()));
     }
 
     // Create state table: {string = s, position = 0}
-    let state_table = vm.create_table(2, 0);
+    let state_table = l.create_table(2, 0);
     let string_key = LuaValue::integer(1);
     let position_key = LuaValue::integer(2);
 
     // Use ObjectPool for table access
     if let Some(table_id) = state_table.as_table_id() {
+        let vm = l.vm_mut();
         if let Some(table) = vm.object_pool.get_table_mut(table_id) {
-            table.raw_set(string_key, s_value);
-            table.raw_set(position_key, LuaValue::integer(0));
+            table.raw_set(&string_key, s_value);
+            table.raw_set(&position_key, LuaValue::integer(0));
         }
     }
 
-    Ok(MultiValue::multiple(vec![
-        LuaValue::cfunction(utf8_codes_iterator),
-        state_table,
-        LuaValue::nil(),
-    ]))
+    l.push_value(LuaValue::cfunction(utf8_codes_iterator))?;
+    l.push_value(state_table)?;
+    l.push_value(LuaValue::nil())?;
+    Ok(3)
 }
 
 /// Iterator function for utf8.codes
-fn utf8_codes_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let t_value = require_arg(vm, 1, "utf8.codes iterator")?;
+fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
+    let t_value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("utf8.codes iterator: invalid state".to_string()))?;
 
     let string_key = 1;
     let position_key = 2;
 
     let Some(table_id) = t_value.as_table_id() else {
-        return Err(vm.error("utf8.codes iterator: invalid state".to_string()));
+        return Err(l.error("utf8.codes iterator: invalid state".to_string()));
     };
 
     // Extract string and position from state table
     let (s_str, pos) = {
+        let vm = l.vm_mut();
         let Some(table) = vm.object_pool.get_table(table_id) else {
-            return Err(vm.error("utf8.codes iterator: invalid state".to_string()));
+            return Err(l.error("utf8.codes iterator: invalid state".to_string()));
         };
 
         let Some(s_val) = table.get_int(string_key) else {
-            return Err(vm.error("utf8.codes iterator: string not found".to_string()));
+            return Err(l.error("utf8.codes iterator: string not found".to_string()));
         };
 
         let Some(s_id) = s_val.as_string_id() else {
-            return Err(vm.error("utf8.codes iterator: invalid string".to_string()));
+            return Err(l.error("utf8.codes iterator: invalid string".to_string()));
         };
 
         let pos = table
@@ -191,15 +196,16 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
 
         // Get string content
         let Some(lua_str) = vm.object_pool.get_string(s_id) else {
-            return Err(vm.error("utf8.codes iterator: invalid string".to_string()));
+            return Err(l.error("utf8.codes iterator: invalid string".to_string()));
         };
 
-        (lua_str.as_str().to_string(), pos)
+        (lua_str.to_string(), pos)
     };
 
     let bytes = s_str.as_bytes();
     if pos >= bytes.len() {
-        return Ok(MultiValue::single(LuaValue::nil()));
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
     }
 
     // Decode next UTF-8 character
@@ -209,40 +215,43 @@ fn utf8_codes_iterator(vm: &mut LuaVM) -> LuaResult<MultiValue> {
         let code_point = ch as u32;
 
         // Update position in the state table
+        let vm = l.vm_mut();
         if let Some(table) = vm.object_pool.get_table_mut(table_id) {
             table.raw_set(
-                LuaValue::integer(position_key),
+                &LuaValue::integer(position_key),
                 LuaValue::integer((pos + char_len) as i64),
             );
         }
 
-        Ok(MultiValue::multiple(vec![
-            LuaValue::integer((pos + 1) as i64), // 1-based position
-            LuaValue::integer(code_point as i64),
-        ]))
+        l.push_value(LuaValue::integer((pos + 1) as i64))?; // 1-based position
+        l.push_value(LuaValue::integer(code_point as i64))?;
+        Ok(2)
     } else {
-        Ok(MultiValue::single(LuaValue::nil()))
+        l.push_value(LuaValue::nil())?;
+        Ok(1)
     }
 }
 
 /// utf8.codepoint(s [, i [, j]]) - Returns code points of characters
-fn utf8_codepoint(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 1, "utf8.codepoint")?;
+fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
+    let s_value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'codepoint' (string expected)".to_string()))?;
     let Some(s_id) = s_value.as_string_id() else {
-        return Err(vm.error("bad argument #1 to 'utf8.codepoint' (string expected)".to_string()));
+        return Err(l.error("bad argument #1 to 'codepoint' (string expected)".to_string()));
     };
     let s_str = {
+        let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(
-                vm.error("bad argument #1 to 'utf8.codepoint' (string expected)".to_string())
-            );
+            return Err(l.error("bad argument #1 to 'codepoint' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
-    let i = get_arg(vm, 2).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
+    let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
 
-    let j = get_arg(vm, 3)
+    let j = l
+        .get_arg(3)
         .and_then(|v| v.as_integer())
         .map(|v| v as usize)
         .unwrap_or(i);
@@ -252,43 +261,50 @@ fn utf8_codepoint(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let end_byte = if j > 0 { j } else { bytes.len() };
 
     if start_byte >= bytes.len() {
-        return Err(vm.error("bad argument #2 to 'utf8.codepoint' (out of range)".to_string()));
+        return Err(l.error("bad argument #2 to 'codepoint' (out of range)".to_string()));
     }
 
-    let mut results = Vec::new();
+    let mut count = 0;
     let mut pos = start_byte;
 
     while pos < end_byte && pos < bytes.len() {
         let remaining = &s_str[pos..];
         if let Some(ch) = remaining.chars().next() {
-            results.push(LuaValue::integer(ch as u32 as i64));
+            l.push_value(LuaValue::integer(ch as u32 as i64))?;
+            count += 1;
             pos += ch.len_utf8();
         } else {
             break;
         }
     }
 
-    Ok(MultiValue::multiple(results))
+    Ok(count)
 }
 
 /// utf8.offset(s, n [, i]) - Returns byte position of n-th character
-fn utf8_offset(vm: &mut LuaVM) -> LuaResult<MultiValue> {
-    let s_value = require_arg(vm, 1, "utf8.offset")?;
+fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
+    let s_value = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'offset' (string expected)".to_string()))?;
     let Some(s_id) = s_value.as_string_id() else {
-        return Err(vm.error("bad argument #1 to 'utf8.offset' (string expected)".to_string()));
+        return Err(l.error("bad argument #1 to 'offset' (string expected)".to_string()));
     };
     let s_str = {
+        let vm = l.vm_mut();
         let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(vm.error("bad argument #1 to 'utf8.offset' (string expected)".to_string()));
+            return Err(l.error("bad argument #1 to 'offset' (string expected)".to_string()));
         };
-        s.as_str().to_string()
+        s.to_string()
     };
 
-    let n_value = require_arg(vm, 2, "utf8.offset")?;
+    let n_value = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("bad argument #2 to 'offset' (number expected)".to_string()))?;
     let Some(n) = n_value.as_integer() else {
-        return Err(vm.error("bad argument #2 to 'utf8.offset' (number expected)".to_string()));
+        return Err(l.error("bad argument #2 to 'offset' (number expected)".to_string()));
     };
-    let i = get_arg(vm, 3)
+    let i = l
+        .get_arg(3)
         .and_then(|v| v.as_integer())
         .unwrap_or(if n >= 0 { 1 } else { (s_str.len() + 1) as i64 }) as usize;
 
@@ -296,7 +312,8 @@ fn utf8_offset(vm: &mut LuaVM) -> LuaResult<MultiValue> {
     let start_byte = if i > 0 { i - 1 } else { 0 };
 
     if start_byte > bytes.len() {
-        return Ok(MultiValue::single(LuaValue::nil()));
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
     }
 
     let mut pos = start_byte;
@@ -313,13 +330,16 @@ fn utf8_offset(vm: &mut LuaVM) -> LuaResult<MultiValue> {
                 pos += ch.len_utf8();
                 count -= 1;
             } else {
-                return Ok(MultiValue::single(LuaValue::nil()));
+                l.push_value(LuaValue::nil())?;
+                return Ok(1);
             }
         }
         if count == 0 {
-            Ok(MultiValue::single(LuaValue::integer((pos + 1) as i64)))
+            l.push_value(LuaValue::integer((pos + 1) as i64))?;
+            Ok(1)
         } else {
-            Ok(MultiValue::single(LuaValue::nil()))
+            l.push_value(LuaValue::nil())?;
+            Ok(1)
         }
     } else {
         // Backward
@@ -332,9 +352,11 @@ fn utf8_offset(vm: &mut LuaVM) -> LuaResult<MultiValue> {
             count += 1;
         }
         if count == 0 {
-            Ok(MultiValue::single(LuaValue::integer((pos + 1) as i64)))
+            l.push_value(LuaValue::integer((pos + 1) as i64))?;
+            Ok(1)
         } else {
-            Ok(MultiValue::single(LuaValue::nil()))
+            l.push_value(LuaValue::nil())?;
+            Ok(1)
         }
     }
 }

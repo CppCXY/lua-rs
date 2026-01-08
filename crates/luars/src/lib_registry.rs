@@ -1,12 +1,17 @@
 // Library registration system for Lua standard libraries
 // Provides a clean way to register Rust functions as Lua libraries
 
-use crate::lua_value::{CFunction, LuaValue};
-use crate::lua_vm::{LuaResult, LuaVM};
-use crate::stdlib;
+use crate::lua_value::LuaValue;
+use crate::lua_vm::LuaState;
+use crate::lua_vm::{CFunction, LuaResult, LuaVM};
+use crate::stdlib::{self, Stdlib};
+// use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
 pub type ValueInitializer = fn(&mut LuaVM) -> LuaValue;
+
+/// Type for module initializers - functions that set up additional module fields
+pub type ModuleInitializer = fn(&mut LuaState) -> LuaResult<()>;
 
 /// Entry in a library module - can be a function or a value
 pub enum LibraryEntry {
@@ -18,6 +23,7 @@ pub enum LibraryEntry {
 pub struct LibraryModule {
     pub name: &'static str,
     pub entries: Vec<(&'static str, LibraryEntry)>,
+    pub initializer: Option<ModuleInitializer>,
 }
 
 impl LibraryModule {
@@ -26,6 +32,7 @@ impl LibraryModule {
         Self {
             name,
             entries: Vec::new(),
+            initializer: None,
         }
     }
 
@@ -38,6 +45,12 @@ impl LibraryModule {
     /// Add a value to this library
     pub fn with_value(mut self, name: &'static str, value_init: ValueInitializer) -> Self {
         self.entries.push((name, LibraryEntry::Value(value_init)));
+        self
+    }
+
+    /// Set the module initializer function
+    pub fn with_initializer(mut self, init: ModuleInitializer) -> Self {
+        self.initializer = Some(init);
         self
     }
 }
@@ -54,31 +67,6 @@ macro_rules! lib_module {
         )*
         module
     }};
-}
-
-/// Builder for creating library modules with explicit types
-#[macro_export]
-macro_rules! lib_module_ex {
-    ($name:expr, {
-        $($item_type:ident : $item_name:expr => $item:expr),* $(,)?
-    }) => {{
-        let mut module = $crate::lib_registry::LibraryModule::new($name);
-        $(
-            module.entries.push((
-                $item_name,
-                lib_module_ex!(@entry $item_type, $item)
-            ));
-        )*
-        module
-    }};
-
-    (@entry function, $func:expr) => {
-        $crate::lib_registry::LibraryEntry::Function($func)
-    };
-
-    (@entry value, $value_init:expr) => {
-        $crate::lib_registry::LibraryEntry::Value($value_init)
-    };
 }
 
 /// Registry for all Lua standard libraries
@@ -161,6 +149,11 @@ impl LibraryRegistry {
             }
         }
 
+        // Call the module initializer if it exists
+        if let Some(init_fn) = module.initializer {
+            init_fn(&mut vm.main_state)?;
+        }
+
         Ok(())
     }
 
@@ -177,91 +170,44 @@ impl Default for LibraryRegistry {
 }
 
 /// Create a standard Lua 5.4 library registry with all standard libraries
-pub fn create_standard_registry() -> LibraryRegistry {
+pub fn create_standard_registry(open_lib: Stdlib) -> LibraryRegistry {
     let mut registry = LibraryRegistry::new();
 
-    // Register package library FIRST so package.loaded exists
-    // before other libraries try to register themselves
-    registry.register(stdlib::package::create_package_lib());
-
+    if matches!(open_lib, Stdlib::All | Stdlib::Package) {
+        registry.register(stdlib::package::create_package_lib());
+    }
     // Register all other standard libraries
-    registry.register(stdlib::basic::create_basic_lib());
-    registry.register(stdlib::string::create_string_lib());
-    registry.register(stdlib::table::create_table_lib());
-    registry.register(stdlib::math::create_math_lib());
-    registry.register(stdlib::io::create_io_lib());
-    registry.register(stdlib::os::create_os_lib());
-    registry.register(stdlib::utf8::create_utf8_lib());
-    registry.register(stdlib::coroutine::create_coroutine_lib());
-    registry.register(stdlib::debug::create_debug_lib());
-    #[cfg(feature = "loadlib")]
-    registry.register(stdlib::ffi::create_ffi_lib());
-    #[cfg(feature = "async")]
-    registry.register(stdlib::async_lib::create_async_lib());
+    if matches!(open_lib, Stdlib::All | Stdlib::Basic) {
+        registry.register(stdlib::basic::create_basic_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::String) {
+        registry.register(stdlib::string::create_string_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Table) {
+        registry.register(stdlib::table::create_table_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Math) {
+        registry.register(stdlib::math::create_math_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Io) {
+        registry.register(stdlib::io::create_io_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Os) {
+        registry.register(stdlib::os::create_os_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Utf8) {
+        registry.register(stdlib::utf8::create_utf8_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Coroutine) {
+        registry.register(stdlib::coroutine::create_coroutine_lib());
+    }
+    if matches!(open_lib, Stdlib::All | Stdlib::Debug) {
+        registry.register(stdlib::debug::create_debug_lib());
+    }
+    // #[cfg(feature = "loadlib")]
+    // registry.register(stdlib::ffi::create_ffi_lib());
+    // #[cfg(feature = "async")]
+    // registry.register(stdlib::async_lib::create_async_lib());
 
     registry
-}
-
-/// Helper to get function arguments from VM registers
-pub fn get_args(vm: &LuaVM) -> Vec<LuaValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-
-    // Skip register 0 (the function itself), collect from 1 to top
-    (1..top).map(|i| vm.register_stack[base_ptr + i]).collect()
-}
-
-/// Iterate over all arguments without allocation
-/// Returns an iterator that yields (1-based index, value) pairs
-#[inline(always)]
-pub fn args_iter(vm: &LuaVM) -> impl Iterator<Item = (usize, LuaValue)> + '_ {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-
-    (1..top).map(move |i| (i, vm.register_stack[base_ptr + i]))
-}
-
-/// Helper to get a specific argument
-/// 1 based index
-#[inline(always)]
-pub fn get_arg(vm: &LuaVM, index: usize) -> Option<LuaValue> {
-    let frame = vm.current_frame();
-    let base_ptr = frame.base_ptr as usize;
-    let top = frame.top as usize;
-
-    // Arguments use 1-based indexing (Lua convention)
-    // Register 0 is the function itself
-    // get_arg(1) returns register[base_ptr + 1] (first argument)
-    // get_arg(2) returns register[base_ptr + 2] (second argument)
-    let reg_offset = index;
-    if reg_offset < top {
-        let reg_index = base_ptr + reg_offset;
-        if reg_index < vm.register_stack.len() {
-            Some(vm.register_stack[reg_index])
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
-/// Helper to require an argument
-/// 1 based index
-#[inline]
-pub fn require_arg(vm: &mut LuaVM, index: usize, func_name: &str) -> LuaResult<LuaValue> {
-    let Some(arg) = get_arg(vm, index) else {
-        return Err(vm.error(format!("{}() requires argument {}", func_name, index + 1)));
-    };
-    Ok(arg)
-}
-
-/// Helper to get argument count
-#[inline(always)]
-pub fn arg_count(vm: &LuaVM) -> usize {
-    let frame = vm.current_frame();
-    // Subtract 1 for the function itself
-    frame.top.saturating_sub(1) as usize
 }
