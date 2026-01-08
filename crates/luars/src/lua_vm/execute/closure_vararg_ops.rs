@@ -179,8 +179,59 @@ pub fn exec_varargprep(
     let call_info = lua_state.get_call_info_mut(frame_idx);
     call_info.nextraargs = nextra as i32;
 
-    // Implement buildhiddenargs if there are extra args
-    if nextra > 0 {
+    // Handle Lua 5.5 named varargs (requires table)
+    if chunk.needs_vararg_table {
+        // Create table with size 'nextra'
+        // Collect arguments first to avoid borrow conflicts
+        let mut args = Vec::with_capacity(nextra as usize);
+        {
+            let stack = lua_state.stack();
+            let args_start = func_pos + 1 + nfixparams;
+            for i in 0..nextra {
+                if args_start + (i as usize) < stack.len() {
+                    args.push(stack[args_start + (i as usize)].clone());
+                } else {
+                    args.push(LuaValue::nil());
+                }
+            }
+        }
+
+        // Create table
+        let table_val = lua_state.create_table(nextra as usize, 1);
+        let n_str = lua_state.create_string("n");
+        let n_val = LuaValue::integer(nextra as i64);
+
+        // Populate table
+        {
+            if let Some(table_ref) = table_val.as_table_mut() {
+                table_ref.raw_set(&n_str, n_val);
+                for (i, val) in args.into_iter().enumerate() {
+                    table_ref.set_int((i + 1) as i64, val);
+                }
+            }
+        }
+
+        // Place table at base + nfixparams (overwriting first extra arg or empty slot)
+        // Ensure stack is large enough
+        let target_idx = func_pos + 1 + nfixparams;
+        
+        // If target_idx is beyond current stack, we need to push
+        if target_idx >= lua_state.stack_len() {
+             lua_state.grow_stack(target_idx + 1)?;
+        }
+        
+        let stack = lua_state.stack_mut();
+        stack[target_idx] = table_val;
+        
+        // In Lua 5.5 C implementation "luaT_adjustvarargs", the table is placed 
+        // at the slot after fixed parameters. L->top is adjusted to include the table.
+        // The remaining extra args on the stack are not explicitly cleared but are effectively ignored.
+        // However, for safety in Rust VM, we might want to clear them or just leave them.
+        // We will leave them be, as they are "above" the relevant stack usage for this function frame.
+        
+    }
+    // Implement buildhiddenargs if there are extra args (and no table needed)
+    else if nextra > 0 {
         // Ensure stack has enough space
         let required_size = func_pos + totalargs + 1 + nfixparams + chunk.max_stack_size;
         if lua_state.stack_len() < required_size {
