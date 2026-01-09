@@ -7,3 +7,4 @@ edition = "2024"
 default = []
 
 [dependencies]
+ahash = "0.8"

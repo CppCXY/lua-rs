@@ -2,13 +2,15 @@ use crate::{
     LuaResult, LuaValue,
     lua_value::{LuaTableImpl, lua_table::LuaInsertResult},
 };
+use ahash::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 
 /// 高性能Lua哈希表实现 - 简化的链式哈希
 ///
 /// 关键特性：
 /// 1. 开放寻址 + 链式哈希混合
 /// 2. 使用绝对索引而非相对偏移（避免溢出）
-/// 3. 简化哈希函数
+/// 3. 使用 ahash 快速哈希算法
 /// 4. 快速路径优化
 pub struct LuaHashTable {
     /// 节点数组：直接存储键值对 + 链表指针
@@ -22,6 +24,9 @@ pub struct LuaHashTable {
 
     /// 实际元素数量
     count: usize,
+
+    /// ahash 随机状态（用于快速哈希）
+    hasher_state: RandomState,
 }
 
 /// 哈希节点
@@ -69,34 +74,16 @@ impl LuaHashTable {
             last_free,
             array_len: 0,
             count: 0,
+            hasher_state: RandomState::new(),
         }
     }
 
-    /// 哈希函数
+    /// 快速哈希函数 - 使用 ahash 和 LuaValue 的 Hash trait
     #[inline(always)]
-    fn hash_key(key: &LuaValue) -> u64 {
-        use crate::lua_value::lua_value::*;
-
-        unsafe {
-            match key.ttype() {
-                LUA_TNIL => 0,
-                LUA_TBOOLEAN => key.value.i as u64,
-                LUA_TNUMBER => {
-                    if key.tt() & 1 == 0 {
-                        key.value.n.to_bits()
-                    } else {
-                        key.value.i as u64
-                    }
-                }
-                LUA_TSTRING => key.value.p as u64,
-                LUA_TTABLE => key.value.p as u64,
-                LUA_TFUNCTION => key.value.p as u64,
-                LUA_TUSERDATA => key.value.p as u64,
-                LUA_TTHREAD => key.value.p as u64,
-                LUA_TLIGHTUSERDATA => key.value.p as u64,
-                _ => 0,
-            }
-        }
+    fn hash_key(&self, key: &LuaValue) -> u64 {
+        let mut hasher = self.hasher_state.build_hasher();
+        key.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// 计算主位置
@@ -140,8 +127,21 @@ impl LuaHashTable {
     fn grow_to_size(&mut self, min_size: usize) {
         if self.nodes.len() < min_size {
             let new_capacity = min_size.max(INITIAL_CAPACITY);
-            self.nodes = vec![Node::new_empty(); new_capacity];
+            let old_nodes = std::mem::replace(
+                &mut self.nodes,
+                vec![Node::new_empty(); new_capacity],
+            );
+            
             self.last_free = new_capacity;
+            self.count = 0;
+            self.array_len = 0;
+
+            // 重新插入所有元素
+            for node in old_nodes {
+                if node.is_occupied() {
+                    self.insert(node.key, node.value);
+                }
+            }
         }
     }
 
@@ -151,7 +151,7 @@ impl LuaHashTable {
             return None;
         }
 
-        let hash = Self::hash_key(key);
+        let hash = self.hash_key(key);
         let mut idx = self.main_position(hash);
 
         // 沿着链表查找
@@ -243,7 +243,7 @@ impl LuaHashTable {
             self.last_free = INITIAL_CAPACITY;
         }
 
-        let hash = Self::hash_key(&key);
+        let hash = self.hash_key(&key);
         let main_pos = self.main_position(hash);
 
         // 检查主位置
@@ -309,7 +309,7 @@ impl LuaHashTable {
             return None;
         }
 
-        let hash = Self::hash_key(key);
+        let hash = self.hash_key(key);
         let mut idx = self.main_position(hash);
 
         loop {
@@ -338,8 +338,9 @@ impl LuaTableImpl for LuaHashTable {
             return None;
         }
 
-        let hash = key as u64;
-        let mut idx = (hash as usize) % self.nodes.len();
+        let key_value = LuaValue::integer(key);
+        let hash = self.hash_key(&key_value);
+        let mut idx = self.main_position(hash);
 
         loop {
             let node = &self.nodes[idx];
@@ -367,8 +368,9 @@ impl LuaTableImpl for LuaHashTable {
             self.grow_to_size(4);
         }
 
-        let hash = key as u64;
-        let mut idx = (hash as usize) % self.nodes.len();
+        let key_value = LuaValue::integer(key);
+        let hash = self.hash_key(&key_value);
+        let mut idx = self.main_position(hash);
 
         loop {
             let node = &self.nodes[idx];
