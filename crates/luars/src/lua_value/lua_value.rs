@@ -56,25 +56,29 @@ pub const LUA_TPROTO: u8 = LUA_NUMTYPES + 1; // function prototypes
 pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2; // removed keys in table
 
 // ============ Variant tags (with bits 4-5) ============
-// makevariant(t,v) = ((t) | ((v) << 4))
+macro_rules! makevariant {
+    ($base:expr, $variant:expr) => {
+        $base | ($variant << 4)
+    };
+}
 
 // Nil variants
-pub const LUA_VNIL: u8 = 0; // makevariant(LUA_TNIL, 0)
-pub const LUA_VEMPTY: u8 = 0x10; // makevariant(LUA_TNIL, 1) - empty slot in table
-pub const LUA_VABSTKEY: u8 = 0x20; // makevariant(LUA_TNIL, 2) - absent key in table
+pub const LUA_VNIL: u8 = makevariant!(LUA_TNIL, 0);
+pub const LUA_VEMPTY: u8 = makevariant!(LUA_TNIL, 1); // empty slot in table
+pub const LUA_VABSTKEY: u8 = makevariant!(LUA_TNIL, 2); // absent key in table
 #[allow(unused)]
-pub const LUA_VNOTABLE: u8 = 0x30; // makevariant(LUA_TNIL, 3) - fast get non-table signal
+pub const LUA_VNOTABLE: u8 = makevariant!(LUA_TNIL, 3); // fast get non-table signal
 
 // Boolean variants
-pub const LUA_VFALSE: u8 = 0x01; // makevariant(LUA_TBOOLEAN, 0)
-pub const LUA_VTRUE: u8 = 0x11; // makevariant(LUA_TBOOLEAN, 1)
+pub const LUA_VFALSE: u8 = makevariant!(LUA_TBOOLEAN, 0);
+pub const LUA_VTRUE: u8 = makevariant!(LUA_TBOOLEAN, 1);
 
 // Number variants
-pub const LUA_VNUMINT: u8 = 0x03; // makevariant(LUA_TNUMBER, 0) - integer
-pub const LUA_VNUMFLT: u8 = 0x13; // makevariant(LUA_TNUMBER, 1) - float
+pub const LUA_VNUMINT: u8 = makevariant!(LUA_TNUMBER, 0); // integer
+pub const LUA_VNUMFLT: u8 = makevariant!(LUA_TNUMBER, 1); // float
 
 // Light userdata (NOT collectable)
-pub const LUA_VLIGHTUSERDATA: u8 = 0x02; // makevariant(LUA_TLIGHTUSERDATA, 0)
+pub const LUA_VLIGHTUSERDATA: u8 = makevariant!(LUA_TLIGHTUSERDATA, 0);
 
 // Collectable types (bit 6 set)
 pub const BIT_ISCOLLECTABLE: u8 = 1 << 6;
@@ -87,12 +91,6 @@ pub const LUA_VTHREAD: u8 = LUA_TTHREAD | BIT_ISCOLLECTABLE; // 0x48
 
 // Light C function (NOT collectable - function pointer stored directly)
 pub const LUA_VLCF: u8 = 0x06; // makevariant(LUA_TFUNCTION, 0) - light C function
-
-#[allow(unused)]
-#[inline(always)]
-const fn makevariant(t: u8, v: u8) -> u8 {
-    t | (v << 4)
-}
 
 #[inline(always)]
 pub const fn novariant(tt: u8) -> u8 {
@@ -141,10 +139,6 @@ impl Value {
     #[inline(always)]
     pub fn cfunction(f: CFunction) -> Self {
         Value { f: f as usize }
-    }
-
-    pub fn raw(&self) -> u64 {
-        unsafe { self.i as u64 }
     }
 }
 
@@ -861,8 +855,17 @@ impl LuaValue {
 
 impl PartialEq for LuaValue {
     fn eq(&self, other: &Self) -> bool {
-        if self.tt() == other.tt() && self.value.raw() == other.value.raw() {
-            return true; // Exact match
+        if self.tt() == other.tt() {
+            if unsafe { self.value.i == other.value.i } {
+                return true;
+            } else if self.ttisstring() {
+                // Compare string contents
+                let s1 = unsafe { &*(self.value.ptr as *const String) };
+                let s2 = unsafe { &*(other.value.ptr as *const String) };
+                return s1 == s2;
+            }
+
+            return false;
         } else if self.ttisinteger() && other.ttisfloat() {
             return self.ivalue() as f64 == other.fltvalue();
         } else if self.ttisfloat() && other.ttisinteger() {
@@ -929,12 +932,16 @@ impl std::fmt::Display for LuaValue {
                     write!(f, "{}", n)
                 }
             }
-            LuaValueKind::String => write!(f, "string({})", self.tsvalue().0),
-            LuaValueKind::Table => write!(f, "table: {:x}", self.hvalue().0),
-            LuaValueKind::Function => write!(f, "function: {:x}", self.clvalue().0),
-            LuaValueKind::CFunction => write!(f, "function: {:x}", unsafe { self.value.f }),
-            LuaValueKind::Userdata => write!(f, "userdata: {:x}", self.uvalue().0),
-            LuaValueKind::Thread => write!(f, "thread: {:x}", self.thvalue().0),
+            LuaValueKind::String => write!(f, "{}", self.as_str().unwrap_or("<invalid string>")),
+            LuaValueKind::Table => write!(f, "table({:x})", unsafe { self.value.ptr as usize }),
+            LuaValueKind::Function => {
+                write!(f, "function({:x})", unsafe { self.value.ptr as usize })
+            }
+            LuaValueKind::CFunction => write!(f, "cfunction({:x})", unsafe { self.value.f }),
+            LuaValueKind::Userdata => {
+                write!(f, "userdata({:x})", unsafe { self.value.ptr as usize })
+            }
+            LuaValueKind::Thread => write!(f, "thread({:x})", unsafe { self.value.ptr as usize }),
         }
     }
 }
@@ -953,6 +960,13 @@ impl std::hash::Hash for LuaValue {
                     self.value.n.to_bits().hash(state);
                 }
             },
+            LUA_TSTRING => {
+                if let Some(s) = self.as_str() {
+                    s.hash(state);
+                } else {
+                    self.meta.gcid().hash(state);
+                }
+            }
             // For GC types (string, table, function, etc.), hash the gc_id
             _ => self.meta.gcid().hash(state),
         }
@@ -1034,8 +1048,8 @@ mod tests {
         assert_eq!(novariant(LUA_VNUMINT), LUA_TNUMBER);
         assert_eq!(novariant(LUA_VNUMFLT), LUA_TNUMBER);
         assert_eq!(withvariant(LUA_VNUMINT), LUA_VNUMINT);
-        assert_eq!(makevariant(LUA_TNUMBER, 0), LUA_VNUMINT);
-        assert_eq!(makevariant(LUA_TNUMBER, 1), LUA_VNUMFLT);
+        assert_eq!(makevariant!(LUA_TNUMBER, 0), LUA_VNUMINT);
+        assert_eq!(makevariant!(LUA_TNUMBER, 1), LUA_VNUMFLT);
     }
 
     #[test]

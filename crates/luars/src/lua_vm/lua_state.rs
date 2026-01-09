@@ -67,11 +67,9 @@ impl LuaState {
     /// Create a new execution state
     /// 按需分配，而不是预分配 200 个 CallInfo（像 Lua 5.4）
     pub fn new(call_stack_size: usize, vm: *mut LuaVM, safe_option: SafeOption) -> Self {
-        // Start with BASIC_STACK_SIZE, will grow dynamically up to MAX_STACK_SIZE
-        let stack = Vec::with_capacity(Self::BASIC_STACK_SIZE);
         Self {
             vm,
-            stack,
+            stack: Vec::with_capacity(Self::BASIC_STACK_SIZE),
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
             call_depth: 0, // Start with no calls

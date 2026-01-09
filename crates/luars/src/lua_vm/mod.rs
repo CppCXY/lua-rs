@@ -61,7 +61,7 @@ impl LuaVM {
         let mut vm = Box::new(LuaVM {
             global: LuaValue::nil(),
             registry: LuaValue::nil(),
-            object_pool: ObjectPool::new(),
+            object_pool: ObjectPool::new(option.clone()),
             gc: GC::new(),
             main_state: LuaState::new(6, null_mut(), option.clone()),
             string_mt: None,

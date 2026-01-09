@@ -10,7 +10,7 @@
 
 use crate::gc::gc_object::{CachedUpvalue, FunctionBody};
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
-use crate::lua_vm::{CFunction, LuaState, TmKind};
+use crate::lua_vm::{CFunction, LuaState, SafeOption, TmKind};
 use crate::{
     FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable,
     LuaValue, StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
@@ -199,13 +199,16 @@ struct StringInterner {
     // Key is (hash, start_idx) where start_idx is index into strings pool
     // This avoids storing string content twice
     map: HashMap<u64, Vec<u32>>, // hash -> list of StringIds with that hash
+
+    small_string_limit: usize, // Max length for small strings (stored inline)
 }
 
 impl StringInterner {
-    fn new() -> Self {
+    fn new(small_string_limit: usize) -> Self {
         Self {
             strings: Pool::with_capacity(256),
             map: HashMap::with_capacity(256),
+            small_string_limit,
         }
     }
 
@@ -216,6 +219,18 @@ impl StringInterner {
 
     /// Intern an owned string (avoids clone)
     fn intern_owned(&mut self, s: String) -> (LuaValue, bool) {
+        if s.len() > self.small_string_limit {
+            // Large string - store in Box to avoid large stack usage
+            let gc_string = GcString {
+                header: GcHeader::default(),
+                data: Box::new(s),
+            };
+            let ptr = gc_string.data.as_ref() as *const String;
+            let id = self.strings.alloc(gc_string);
+            let str_id = StringId(id);
+            return (LuaValue::string(str_id, ptr), true);
+        }
+
         let hash = Self::hash_string(&s);
 
         // Check if already interned
@@ -353,9 +368,9 @@ pub struct ObjectPool {
 }
 
 impl ObjectPool {
-    pub fn new() -> Self {
+    pub fn new(option: SafeOption) -> Self {
         let mut pool = Self {
-            strings: StringInterner::new(),
+            strings: StringInterner::new(option.small_string_limit),
             tables: Pool::with_capacity(64),
             functions: Pool::with_capacity(32),
             upvalues: Pool::with_capacity(32),
@@ -992,7 +1007,7 @@ impl ObjectPool {
 
 impl Default for ObjectPool {
     fn default() -> Self {
-        Self::new()
+        Self::new(SafeOption::default())
     }
 }
 
@@ -1039,7 +1054,7 @@ mod tests {
 
     #[test]
     fn test_string_interning() {
-        let mut pool = ObjectPool::new();
+        let mut pool = ObjectPool::default();
 
         let v1 = pool.create_string("hello").0;
         let v2 = pool.create_string("hello").0;
@@ -1056,7 +1071,7 @@ mod tests {
 
     #[test]
     fn test_table_operations() {
-        let mut pool = ObjectPool::new();
+        let mut pool = ObjectPool::default();
 
         let table_value = pool.create_table(4, 4);
         let table_id = table_value.as_table_id().unwrap();
@@ -1086,7 +1101,7 @@ mod tests {
     fn test_string_interning_many_strings() {
         // Test that many different strings with potential hash collisions
         // are all stored correctly
-        let mut pool = ObjectPool::new();
+        let mut pool = ObjectPool::default();
         let mut ids = Vec::new();
 
         // Create 1000 different strings
@@ -1117,7 +1132,7 @@ mod tests {
     #[test]
     fn test_string_interning_similar_strings() {
         // Test strings that might have similar hashes
-        let mut pool = ObjectPool::new();
+        let mut pool = ObjectPool::default();
 
         let strings = vec![
             "a", "b", "c", "aa", "ab", "ba", "bb", "aaa", "aab", "aba", "abb", "baa", "bab", "bba",
