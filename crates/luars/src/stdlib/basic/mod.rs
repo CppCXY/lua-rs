@@ -71,6 +71,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
         LuaValueKind::Boolean => "boolean",
         LuaValueKind::Integer | LuaValueKind::Float => "number",
         LuaValueKind::String => "string",
+        LuaValueKind::Binary => "string", // Binary is also a string type
         LuaValueKind::Table => "table",
         LuaValueKind::Function | LuaValueKind::CFunction => "function",
         LuaValueKind::Userdata => "userdata",
@@ -814,6 +815,8 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
 fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
+    use crate::lua_value::chunk_serializer;
+    
     let chunk_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'load' (value expected)".to_string()))?;
@@ -821,11 +824,13 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let arg3 = l.get_arg(3);
     let arg4 = l.get_arg(4);
 
-    let vm = l.vm_mut();
-
-    // Get the chunk string
-    let code_str = if let Some(s) = chunk_val.as_str() {
-        s.to_string()
+    // Get the chunk string or binary data
+    let (code_bytes, is_binary) = if let Some(b) = chunk_val.as_binary() {
+        (b.to_vec(), true)
+    } else if let Some(s) = chunk_val.as_str() {
+        // Check if this is binary bytecode by looking at first byte
+        let is_binary = s.as_bytes().first() == Some(&0x1B);
+        (s.as_bytes().to_vec(), is_binary)
     } else {
         return Err(l.error("bad argument #1 to 'load' (string expected)".to_string()));
     };
@@ -843,9 +848,36 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     // Optional environment table
     let env = arg4;
 
-    // Compile the code using VM's string pool with chunk name
-    match vm.compile_with_name(&code_str, &chunkname) {
+    let chunk_result = if is_binary {
+        // Deserialize binary bytecode
+        let vm = l.vm_mut();
+        match chunk_serializer::deserialize_chunk_with_strings(&code_bytes) {
+            Ok((mut chunk, string_constants)) => {
+                // Register string constants in the object pool and update constants
+                for (const_idx, string_val) in string_constants {
+                    let string_id = vm.create_string_owned(string_val);
+                    if const_idx < chunk.constants.len() {
+                        chunk.constants[const_idx] = string_id;
+                    }
+                }
+                Ok(chunk)
+            }
+            Err(e) => Err(format!("binary load error: {}", e)),
+        }
+    } else {
+        // Compile text code using VM's string pool with chunk name
+        let code_str = match String::from_utf8(code_bytes) {
+            Ok(s) => s,
+            Err(_) => return Err(l.error("invalid UTF-8 in text code".to_string())),
+        };
+        let vm = l.vm_mut();
+        vm.compile_with_name(&code_str, &chunkname)
+            .map_err(|e| format!("{}", e))
+    };
+
+    match chunk_result {
         Ok(chunk) => {
+            let vm = l.vm_mut();
             // Create upvalue for _ENV (global table)
             let env_upvalue_id = if let Some(env) = env {
                 vm.create_upvalue_closed(env)
@@ -860,6 +892,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
         Err(e) => {
             // Return nil and error message
+            let vm = l.vm_mut();
             let err_msg = vm.create_string(&format!("load error: {}", e));
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;

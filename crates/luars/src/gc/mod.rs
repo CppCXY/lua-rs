@@ -578,6 +578,12 @@ impl GC {
                 }
                 return 1;
             }
+            GcId::BinaryId(id) => {
+                if let Some(b) = pool.binaries.get_mut(id.0) {
+                    b.header.make_black();
+                }
+                return 1;
+            }
             GcId::UserdataId(id) => {
                 // Userdata: mark the userdata itself and its metatable if any
                 let metatable = if let Some(ud) = pool.userdata.get_mut(id.0) {
@@ -1138,6 +1144,11 @@ impl GC {
             GcId::StringId(id) => {
                 if let Some(s) = pool.get_string_gc_mut(id) {
                     s.header.make_black(); // Strings are leaves
+                }
+            }
+            GcId::BinaryId(id) => {
+                if let Some(b) = pool.binaries.get_mut(id.0) {
+                    b.header.make_black(); // Binary data is a leaf
                 }
             }
             _ => {}

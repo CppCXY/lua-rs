@@ -31,7 +31,7 @@
 use crate::gc::{FunctionId, StringId, TableId, ThreadId, UserdataId};
 use crate::lua_value::LuaUserdata;
 use crate::lua_vm::{CFunction, LuaState};
-use crate::{FunctionBody, LuaTable};
+use crate::{BinaryId, FunctionBody, LuaTable};
 
 // ============ Basic type tags (bits 0-3) ============
 // From lua.h
@@ -84,6 +84,7 @@ pub const LUA_VLIGHTUSERDATA: u8 = makevariant!(LUA_TLIGHTUSERDATA, 0);
 pub const BIT_ISCOLLECTABLE: u8 = 1 << 6;
 
 pub const LUA_VSTR: u8 = LUA_TSTRING | BIT_ISCOLLECTABLE; // 0x44 - short string
+pub const LUA_VBINARY: u8 = makevariant!(LUA_TSTRING, 1) | BIT_ISCOLLECTABLE; // 0x54 - binary data
 pub const LUA_VTABLE: u8 = LUA_TTABLE | BIT_ISCOLLECTABLE; // 0x45
 pub const LUA_VFUNCTION: u8 = LUA_TFUNCTION | BIT_ISCOLLECTABLE; // 0x46  
 pub const LUA_VUSERDATA: u8 = LUA_TUSERDATA | BIT_ISCOLLECTABLE; // 0x47
@@ -268,6 +269,16 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn binary(id: BinaryId, ptr: *const Vec<u8>) -> Self {
+        Self {
+            value: Value {
+                ptr: ptr as *const u8,
+            },
+            meta: ValueMeta::with_gcid(LUA_VBINARY, id.0),
+        }
+    }
+
+    #[inline(always)]
     pub fn table(id: TableId, ptr: *const LuaTable) -> Self {
         Self {
             value: Value {
@@ -425,6 +436,11 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn ttisbinary(&self) -> bool {
+        self.checktag(LUA_VBINARY)
+    }
+
+    #[inline(always)]
     pub fn ttistable(&self) -> bool {
         self.checktag(LUA_VTABLE)
     }
@@ -572,6 +588,11 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn is_binary(&self) -> bool {
+        self.ttisbinary()
+    }
+
+    #[inline(always)]
     pub fn is_table(&self) -> bool {
         self.ttistable()
     }
@@ -688,6 +709,28 @@ impl LuaValue {
                 let ptr = self.value.ptr;
                 let s: &String = &*(ptr as *const String);
                 s.as_str()
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_binary_id(&self) -> Option<BinaryId> {
+        if self.ttisbinary() {
+            Some(BinaryId(self.gcid()))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_binary(&self) -> Option<&[u8]> {
+        if self.ttisbinary() {
+            Some(unsafe {
+                let ptr = self.value.ptr;
+                let v: &Vec<u8> = &*(ptr as *const Vec<u8>);
+                v.as_slice()
             })
         } else {
             None
@@ -827,7 +870,13 @@ impl LuaValue {
                     LuaValueKind::Float
                 }
             }
-            LUA_TSTRING => LuaValueKind::String,
+            LUA_TSTRING => {
+                if self.ttisbinary() {
+                    LuaValueKind::Binary
+                } else {
+                    LuaValueKind::String
+                }
+            }
             LUA_TTABLE => LuaValueKind::Table,
             LUA_TFUNCTION => {
                 if self.ttiscfunction() {
@@ -885,6 +934,7 @@ pub enum LuaValueKind {
     Integer,
     Float,
     String,
+    Binary,
     Table,
     Function,
     CFunction,
@@ -909,6 +959,7 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Integer => write!(f, "{}", self.ivalue()),
             LuaValueKind::Float => write!(f, "{}", self.fltvalue()),
             LuaValueKind::String => write!(f, "string({})", self.tsvalue().0),
+            LuaValueKind::Binary => write!(f, "binary({})", self.gcid()),
             LuaValueKind::Table => write!(f, "table({})", self.hvalue().0),
             LuaValueKind::Function => write!(f, "function({})", self.clvalue().0),
             LuaValueKind::CFunction => write!(f, "cfunction({:#x})", unsafe { self.value.f }),
@@ -942,6 +993,9 @@ impl std::fmt::Display for LuaValue {
                 write!(f, "userdata({:x})", unsafe { self.value.ptr as usize })
             }
             LuaValueKind::Thread => write!(f, "thread({:x})", unsafe { self.value.ptr as usize }),
+            LuaValueKind::Binary => {
+                write!(f, "binary({:x})", unsafe { self.value.ptr as usize })
+            }
         }
     }
 }

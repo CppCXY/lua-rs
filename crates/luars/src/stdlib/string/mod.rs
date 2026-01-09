@@ -32,21 +32,24 @@ pub fn create_string_lib() -> LibraryModule {
 }
 
 /// string.byte(s [, i [, j]]) - Return byte values
-/// ULTRA-OPTIMIZED: Direct pointer access, no allocation!
+/// Supports both string and binary types
 fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.byte' (string expected)".to_string()))?;
 
-    // 直接获取字符串引用 - 无需 to_vec()！
-    let Some(s) = s_value.as_str() else {
-        return Err(l.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
-    };
-
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
     let j = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(i);
 
-    let bytes = s.as_bytes(); // 直接获取字节切片，零拷贝！
+    // Get bytes - works for both string and binary
+    let bytes = if let Some(s) = s_value.as_str() {
+        s.as_bytes()
+    } else if let Some(b) = s_value.as_binary() {
+        b
+    } else {
+        return Err(l.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
+    };
+
     let len = bytes.len() as i64;
 
     // Convert negative indices
@@ -110,13 +113,11 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
         bytes.push(byte as u8);
     }
 
-    let result_str = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => {
-            return Err(l.error("invalid byte sequence in 'string.char'".to_string()));
-        }
+    // Try to create a valid UTF-8 string first, otherwise return binary
+    let result = match String::from_utf8(bytes.clone()) {
+        Ok(s) => l.vm_mut().create_string(&s),
+        Err(_) => l.vm_mut().object_pool.create_binary(bytes),
     };
-    let result = l.vm_mut().create_string_owned(result_str);
     l.push_value(result)?;
     Ok(1)
 }
@@ -153,10 +154,8 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     // Serialize the chunk with pool access for string constants
     match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_pool) {
         Ok(bytes) => {
-            // Convert bytes to a string using Latin-1 encoding (each byte -> char)
-            // This is how Lua handles binary strings
-            let result_str: String = bytes.iter().map(|&b| b as char).collect();
-            let result = vm.create_string_owned(result_str);
+            // Create binary value directly - no encoding needed
+            let result = vm.object_pool.create_binary(bytes);
             l.push_value(result)?;
             Ok(1)
         }
@@ -164,21 +163,22 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
-/// string.len(s) - Return string length
-/// OPTIMIZED: Use byte length directly, Lua string.len returns byte length not char count
+/// string.len(s) - Return string length in bytes
+/// Supports both string and binary types
 fn string_len(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.len' (string expected)".to_string()))?;
 
-    let Some(s) = s_value.as_str() else {
+    let len = if let Some(s) = s_value.as_str() {
+        s.len()
+    } else if let Some(b) = s_value.as_binary() {
+        b.len()
+    } else {
         return Err(l.error("bad argument #1 to 'string.len' (string expected)".to_string()));
     };
 
-    // Lua string.len returns byte length, not UTF-8 character count
-    // This is correct and much faster than chars().count()
-    let len = s.len() as i64;
-    l.push_value(LuaValue::integer(len))?;
+    l.push_value(LuaValue::integer(len as i64))?;
     Ok(1)
 }
 

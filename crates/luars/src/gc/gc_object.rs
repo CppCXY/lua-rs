@@ -390,6 +390,9 @@ impl Upvalue {
 /// String with embedded GC header
 pub type GcString = Gc<String>;
 
+/// Binary data with embedded GC header
+pub type GcBinary = Gc<Vec<u8>>;
+
 /// Thread (coroutine) with embedded GC header
 pub type GcThread = Gc<LuaState>;
 

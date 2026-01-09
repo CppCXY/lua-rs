@@ -12,8 +12,8 @@ use crate::gc::gc_object::{CachedUpvalue, FunctionBody};
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption, TmKind};
 use crate::{
-    FunctionId, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable,
-    LuaValue, StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
+    FunctionId, GcFunction, GcString, GcTable, GcThread, GcUpvalue, GcUserdata, GcBinary, GcHeader, LuaTable,
+    LuaValue, StringId, BinaryId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -320,6 +320,7 @@ impl StringInterner {
 /// - ALL strings are interned via StringInterner for O(1) equality checks
 pub struct ObjectPool {
     strings: StringInterner, // Private - use create_string() to intern
+    pub binaries: Pool<GcBinary>,
     pub tables: Pool<GcTable>,
     pub functions: Pool<GcFunction>,
     pub upvalues: Pool<GcUpvalue>,
@@ -370,6 +371,7 @@ impl ObjectPool {
     pub fn new(option: SafeOption) -> Self {
         let mut pool = Self {
             strings: StringInterner::new(option.small_string_limit),
+            binaries: Pool::with_capacity(8),
             tables: Pool::with_capacity(64),
             functions: Pool::with_capacity(32),
             upvalues: Pool::with_capacity(32),
@@ -582,6 +584,36 @@ impl ObjectPool {
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     pub fn create_string_owned(&mut self, s: String) -> (LuaValue, bool) {
         self.strings.intern_owned(s)
+    }
+
+    /// Create a binary value from Vec<u8>
+    #[inline]
+    pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
+        let gc_binary = GcBinary {
+            header: GcHeader::default(),
+            data: Box::new(data),
+        };
+        let id = self.binaries.alloc(gc_binary);
+        let binary_id = BinaryId(id);
+        
+        // Get pointer after allocation to ensure it's stable
+        let ptr = self.binaries.get(id)
+            .map(|gb| gb.data.as_ref() as *const Vec<u8>)
+            .expect("Just allocated binary should exist");
+        
+        LuaValue::binary(binary_id, ptr)
+    }
+
+    #[inline(always)]
+    pub fn get_binary(&self, id: BinaryId) -> Option<&[u8]> {
+        self.binaries.get(id.0).map(|gb| gb.data.as_slice())
+    }
+
+    #[inline(always)]
+    pub fn get_binary_value(&self, id: BinaryId) -> Option<LuaValue> {
+        let gb = self.binaries.get(id.0)?;
+        let ptr = gb.data.as_ref() as *const Vec<u8>;
+        Some(LuaValue::binary(id, ptr))
     }
 
     #[inline(always)]

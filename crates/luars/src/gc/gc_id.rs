@@ -25,6 +25,10 @@ pub struct UserdataId(pub u32);
 #[repr(transparent)]
 pub struct ThreadId(pub u32);
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[repr(transparent)]
+pub struct BinaryId(pub u32);
+
 impl ThreadId {
     pub fn main_id() -> Self {
         ThreadId(u32::MAX)
@@ -45,6 +49,7 @@ pub enum GcObjectType {
     Upvalue = 3,
     Thread = 4,
     Userdata = 5,
+    Binary = 6,
 }
 
 /// Unified GC object identifier
@@ -58,6 +63,7 @@ pub enum GcId {
     UpvalueId(UpvalueId),
     ThreadId(ThreadId),
     UserdataId(UserdataId),
+    BinaryId(BinaryId),
 }
 
 impl GcId {
@@ -70,6 +76,7 @@ impl GcId {
             GcId::UpvalueId(_) => GcObjectType::Upvalue,
             GcId::ThreadId(_) => GcObjectType::Thread,
             GcId::UserdataId(_) => GcObjectType::Userdata,
+            GcId::BinaryId(_) => GcObjectType::Binary,
         }
     }
 
@@ -81,6 +88,7 @@ impl GcId {
             GcId::FunctionId(FunctionId(id)) => id,
             GcId::UpvalueId(UpvalueId(id)) => id,
             GcId::ThreadId(ThreadId(id)) => id,
+            GcId::BinaryId(BinaryId(id)) => id,
             GcId::UserdataId(UserdataId(id)) => id,
         }
     }

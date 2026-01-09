@@ -1321,6 +1321,7 @@ impl LuaState {
             LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
             LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
             LuaValueKind::String => value.as_string_id().map(crate::gc::GcId::StringId),
+            LuaValueKind::Binary => value.as_binary_id().map(crate::gc::GcId::BinaryId),
             LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
             LuaValueKind::Userdata => value.as_userdata_id().map(crate::gc::GcId::UserdataId),
             _ => None,
