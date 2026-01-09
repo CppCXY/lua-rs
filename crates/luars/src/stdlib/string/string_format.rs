@@ -11,18 +11,11 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'format' (string expected)".to_string()))?;
 
-    let format_str_id = format_str_value
-        .as_string_id()
-        .ok_or_else(|| l.error("bad argument #1 to 'format' (string expected)".to_string()))?;
-
-    // Copy format string once to avoid borrow conflicts
-    let format = {
-        let vm = l.vm_mut();
-        vm.object_pool
-            .get_string(format_str_id)
-            .map(|s| s.to_string())
-            .ok_or_else(|| l.error("invalid string".to_string()))?
-    };
+    // Get format string directly without object_pool
+    let format = format_str_value
+        .as_str()
+        .ok_or_else(|| l.error("invalid format string".to_string()))?
+        .to_string();
 
     // Collect arguments
     let args = l.get_args();
@@ -238,14 +231,8 @@ fn format_auto(buf: &mut String, arg: &LuaValue, upper: bool, l: &mut LuaState) 
 
 #[inline]
 fn format_string(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
-    if let Some(str_id) = arg.as_string_id() {
-        let s = l
-            .vm_mut()
-            .object_pool
-            .get_string(str_id)
-            .map(|s| s.to_string())
-            .ok_or_else(|| l.error("invalid string".to_string()))?;
-        buf.push_str(&s);
+    if let Some(s) = arg.as_str() {
+        buf.push_str(s);
     } else if let Some(n) = arg.as_integer() {
         write!(buf, "{}", n).unwrap();
     } else if let Some(n) = arg.as_number() {
@@ -259,16 +246,9 @@ fn format_string(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
 
 #[inline]
 fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
-    let str_id = arg
-        .as_string_id()
+    let s = arg
+        .as_str()
         .ok_or_else(|| l.error("bad argument to 'format' (string expected for %q)".to_string()))?;
-
-    let s = l
-        .vm_mut()
-        .object_pool
-        .get_string(str_id)
-        .map(|s| s.to_string())
-        .ok_or_else(|| l.error("invalid string".to_string()))?;
 
     buf.push('"');
     for ch in s.chars() {

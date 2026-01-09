@@ -3,6 +3,71 @@
 
 use super::parser::{AnchorType, Pattern, RepeatMode};
 
+/// Information about a pattern match
+#[derive(Debug, Clone)]
+pub struct MatchInfo {
+    pub start: usize,    // Start byte offset
+    pub end: usize,      // End byte offset
+    pub captures: Vec<String>,  // Captured strings
+}
+
+/// Find all matches of pattern in text
+pub fn find_all_matches(text: &str, pattern: &Pattern, max: Option<usize>) -> Vec<MatchInfo> {
+    let mut matches = Vec::new();
+    let mut pos = 0;
+    let text_chars: Vec<char> = text.chars().collect();
+    let mut last_was_nonempty = false;
+
+    while pos <= text_chars.len() {
+        if let Some(max_count) = max {
+            if matches.len() >= max_count {
+                break;
+            }
+        }
+
+        if let Some((end_pos, captures)) = try_match(pattern, &text_chars, pos) {
+            // Skip empty match right after non-empty match
+            if end_pos == pos && last_was_nonempty {
+                if pos < text_chars.len() {
+                    pos += 1;
+                }
+                last_was_nonempty = false;
+                continue;
+            }
+
+            // Calculate byte offsets
+            let start_bytes: usize = text_chars[..pos].iter().map(|c| c.len_utf8()).sum();
+            let end_bytes: usize = text_chars[..end_pos].iter().map(|c| c.len_utf8()).sum();
+
+            matches.push(MatchInfo {
+                start: start_bytes,
+                end: end_bytes,
+                captures,
+            });
+
+            // Handle empty vs non-empty match
+            if end_pos == pos {
+                if pos < text_chars.len() {
+                    pos += 1;
+                }
+                last_was_nonempty = false;
+            } else {
+                pos = end_pos;
+                last_was_nonempty = true;
+            }
+        } else {
+            if pos < text_chars.len() {
+                pos += 1;
+            } else {
+                break;
+            }
+            last_was_nonempty = false;
+        }
+    }
+
+    matches
+}
+
 /// Find pattern in string, returns (start, end, captures)
 /// Positions are char indices (not byte indices)
 pub fn find(text: &str, pattern: &Pattern, init: usize) -> Option<(usize, usize, Vec<String>)> {

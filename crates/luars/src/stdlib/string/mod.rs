@@ -533,11 +533,6 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(3)
         .ok_or_else(|| l.error("bad argument #3 to 'gsub' (value expected)".to_string()))?;
 
-    let Some(repl_str) = repl_value.as_str() else {
-        return Err(l.error("bad argument #3 to 'gsub' (string expected)".to_string()));
-    };
-    let repl_str = repl_str.to_string();
-
     let max = l
         .get_arg(4)
         .and_then(|v| v.as_integer())
@@ -548,8 +543,9 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
     };
 
-    // Currently only support string replacement
-    if repl_value.is_string() {
+    // String replacement
+    if let Some(repl_str) = repl_value.as_str() {
+        let repl_str = repl_str.to_string();
         match pattern::gsub(&s_str, &pattern, &repl_str, max) {
             Ok((result_str, count)) => {
                 let result = l.create_string(&result_str);
@@ -559,9 +555,60 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             }
             Err(e) => Err(l.error(e)),
         }
+    } else if repl_value.is_function() {
+        // Function replacement - currently not fully implemented
+        // TODO: Need proper protected call support for Lua functions in gsub
+        return Err(l.error("gsub with function replacement not yet fully implemented".to_string()));
+    } else if repl_value.is_table() {
+        // Table replacement
+        let matches = pattern::find_all_matches(&s_str, &pattern, max);
+        let mut result = String::new();
+        let mut last_end = 0;
+        let mut count = 0;
+
+        for m in &matches {
+            // Copy text before match
+            result.push_str(&s_str[last_end..m.start]);
+
+            // Table lookup
+            let key = if m.captures.is_empty() {
+                // No captures, use whole match as key
+                l.create_string(&s_str[m.start..m.end])
+            } else {
+                // Use first capture as key
+                l.create_string(&m.captures[0])
+            };
+
+            let result_val = l.table_get(&repl_value, &key).unwrap_or(LuaValue::nil());
+
+            let replacement = if result_val.is_nil() {
+                // nil means no replacement, use original match
+                s_str[m.start..m.end].to_string()
+            } else if let Some(s) = result_val.as_str() {
+                s.to_string()
+            } else if let Some(n) = result_val.as_integer() {
+                n.to_string()
+            } else if let Some(n) = result_val.as_number() {
+                n.to_string()
+            } else {
+                // Use original match for non-string/number results
+                s_str[m.start..m.end].to_string()
+            };
+
+            result.push_str(&replacement);
+            last_end = m.end;
+            count += 1;
+        }
+
+        // Copy remaining text
+        result.push_str(&s_str[last_end..]);
+
+        let result_val = l.create_string(&result);
+        l.push_value(result_val)?;
+        l.push_value(LuaValue::integer(count as i64))?;
+        Ok(2)
     } else {
-        // TODO: Implement function and table replacement when LuaState supports pcall
-        Err(l.error("gsub with function/table replacement not yet implemented".to_string()))
+        Err(l.error("bad argument #3 to 'gsub' (string/function/table expected)".to_string()))
     }
 }
 
