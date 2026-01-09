@@ -557,8 +557,8 @@ impl GC {
                 // First get the closed value
                 let closed_value = if let Some(upval) = pool.upvalues.get_mut(id.0) {
                     upval.header.make_black();
-                    if !upval.data.is_open {
-                        Some(upval.data.closed_value.clone())
+                    if !upval.data.is_open() {
+                        Some(upval.data.get_closed_value().unwrap())
                     } else {
                         None
                     }

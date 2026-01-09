@@ -697,7 +697,7 @@ impl ObjectPool {
     #[inline]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         // Build cached upvalues with direct pointers
-        let cached_upvalues: Vec<CachedUpvalue> = upvalue_ids
+        let upvalues: Vec<CachedUpvalue> = upvalue_ids
             .into_iter()
             .map(|id| {
                 let ptr = self
@@ -711,7 +711,7 @@ impl ObjectPool {
 
         let gc_func = GcFunction {
             header: GcHeader::default(),
-            data: Box::new(FunctionBody::Lua(chunk, cached_upvalues)),
+            data: Box::new(FunctionBody::Lua(chunk, upvalues)),
         };
         let ptr = gc_func.data.as_ref() as *const FunctionBody;
         let id = FunctionId(self.functions.alloc(gc_func));
@@ -754,29 +754,9 @@ impl ObjectPool {
     /// Create an open upvalue pointing to a stack location
     /// CRITICAL: Must call update_upvalue_ptr after this to set v_ptr
     #[inline]
-    pub fn create_upvalue_open(
-        &mut self,
-        stack_index: usize,
-        thread: *const LuaState,
-    ) -> UpvalueId {
-        let mut upvalue = Upvalue {
-            v_ptr: std::ptr::null_mut(),  // Will be set by update_upvalue_ptr
-            stack_index,
-            closed_value: LuaValue::nil(),
-            is_open: true,
-            thread,
-        };
-        
-        // CRITICAL: Set v_ptr to point to stack location
-        // SAFETY: thread pointer must be valid
-        unsafe {
-            if !thread.is_null() {
-                let thread_ref = &*thread;
-                let stack_ptr = thread_ref.stack().as_ptr() as *mut LuaValue;
-                upvalue.v_ptr = stack_ptr.add(stack_index);
-            }
-        }
-        
+    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
+        let upvalue = Upvalue::Open(stack_index);
+
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
             data: Box::new(upvalue),
@@ -787,28 +767,12 @@ impl ObjectPool {
     /// Create a closed upvalue with a value
     #[inline]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
-        let mut closed_value = value;
-        let v_ptr = &mut closed_value as *mut LuaValue;
-        
+        let upvalue = Upvalue::Closed(value);
         let gc_uv = GcUpvalue {
             header: GcHeader::default(),
-            data: Box::new(Upvalue {
-                v_ptr,
-                stack_index: 0,
-                closed_value,
-                is_open: false,
-                thread: std::ptr::null(),
-            }),
+            data: Box::new(upvalue),
         };
-        let id = UpvalueId(self.upvalues.alloc(gc_uv));
-        
-        // CRITICAL: Update v_ptr to point to the actual closed_value in the Box
-        // The closed_value we created above is now moved into the Box
-        if let Some(uv) = self.upvalues.get_mut(id.0) {
-            uv.data.v_ptr = &mut uv.data.closed_value as *mut LuaValue;
-        }
-        
-        id
+        UpvalueId(self.upvalues.alloc(gc_uv))
     }
 
     #[inline(always)]
@@ -831,37 +795,10 @@ impl ObjectPool {
     /// Create upvalue from LuaUpvalue
     pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>) -> UpvalueId {
         // Check if open and get stack index
-        let (is_open, stack_index, closed_value) = if upvalue.is_open() {
-            (
-                true,
-                upvalue.get_stack_index().unwrap_or(0),
-                LuaValue::nil(),
-            )
+        if upvalue.is_open() {
+            self.create_upvalue_open(upvalue.get_stack_index().unwrap_or(0))
         } else {
-            (
-                false,
-                0,
-                upvalue.get_closed_value().unwrap_or(LuaValue::nil()),
-            )
-        };
-
-        if is_open {
-            // For open upvalues, we can't properly set v_ptr here without the thread pointer
-            // This is a legacy path - should use create_upvalue_open instead
-            let gc_uv = GcUpvalue {
-                header: GcHeader::default(),
-                data: Box::new(Upvalue {
-                    v_ptr: std::ptr::null_mut(),  // Will need to be fixed up
-                    stack_index,
-                    closed_value,
-                    is_open,
-                    thread: std::ptr::null(),
-                }),
-            };
-            UpvalueId(self.upvalues.alloc(gc_uv))
-        } else {
-            // For closed upvalues, create properly with v_ptr
-            self.create_upvalue_closed(closed_value)
+            self.create_upvalue_closed(upvalue.get_closed_value().unwrap_or(LuaValue::nil()))
         }
     }
 

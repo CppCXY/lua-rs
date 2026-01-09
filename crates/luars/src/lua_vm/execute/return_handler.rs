@@ -246,9 +246,7 @@ fn close_upvalues(lua_state: &mut LuaState, level: usize) -> LuaResult<()> {
 
         // Close the upvalue (move value from stack to upvalue storage)
         if let Some(upval) = lua_state.vm_mut().object_pool.get_upvalue_mut(upval_id) {
-            unsafe {
-                upval.data.close_with_value(value);
-            }
+            upval.data.close(value);
         }
     }
 

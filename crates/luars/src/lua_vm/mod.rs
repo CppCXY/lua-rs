@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{LuaFunction, ObjectPool, lib_registry};
+use crate::{GcUpvalue, LuaFunction, ObjectPool, lib_registry};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -329,7 +329,7 @@ impl LuaVM {
             return false;
         };
         table.raw_set(&key, value.clone());
-        
+
         // GC backward barrier (luaC_barrierback)
         // Tables use backward barrier since they may be modified many times
         if value.is_collectable() {
@@ -486,15 +486,16 @@ impl LuaVM {
     }
 
     // ============ GC Write Barriers ============
-    
+
     /// Forward GC barrier (luaC_barrier in Lua 5.5)
     /// Called when modifying an object to point to another object
     /// If owner is black and value is white, restore invariant
     pub fn gc_barrier(&mut self, owner_id: UpvalueId, value_gc_id: GcId) {
         let owner_gc_id = GcId::UpvalueId(owner_id);
-        self.gc.barrier(owner_gc_id, value_gc_id, &mut self.object_pool);
+        self.gc
+            .barrier(owner_gc_id, value_gc_id, &mut self.object_pool);
     }
-    
+
     /// Backward GC barrier (luaC_barrierback in Lua 5.5)  
     /// Called when modifying a table - marks table as gray again
     /// More efficient than forward barrier for objects with many modifications
@@ -502,7 +503,7 @@ impl LuaVM {
         let table_gc_id = GcId::TableId(table_id);
         self.gc.barrier_back(table_gc_id, &mut self.object_pool);
     }
-    
+
     /// Convert LuaValue to GcId (if it's a GC-managed object)
     pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<GcId> {
         match value.kind() {
@@ -516,8 +517,6 @@ impl LuaVM {
     }
 
     // ============ Legacy GC Barrier Methods (deprecated) ============
-
-
 
     /// Create a new table in object pool
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
@@ -606,13 +605,10 @@ impl LuaVM {
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
-    pub fn create_upvalue_open(
-        &mut self,
-        stack_index: usize,
-        thread: *const LuaState,
-    ) -> UpvalueId {
-        let id = self.object_pool.create_upvalue_open(stack_index, thread);
-        self.gc.track_object(GcId::UpvalueId(id), 64);
+    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
+        let id = self.object_pool.create_upvalue_open(stack_index);
+        self.gc
+            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>());
         id
     }
 
@@ -620,7 +616,8 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let id = self.object_pool.create_upvalue_closed(value);
-        self.gc.track_object(GcId::UpvalueId(id), 64);
+        self.gc
+            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>());
         id
     }
 

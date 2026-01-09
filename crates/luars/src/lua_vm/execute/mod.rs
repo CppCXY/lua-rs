@@ -916,10 +916,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
 
                     // ULTRA-OPTIMIZED: Direct double-pointer dereference
                     // Matches Lua C: setobj2s(L, ra, cl->upvals[b]->v.p)
-                    let value = unsafe {
-                        let upval = upvalue_ptrs[b].ptr;
-                        *(*upval).v_ptr
-                    };
+                    let value = upvalue_ptrs[b].get_value(lua_state);
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
@@ -945,10 +942,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // Set value in upvalue (OPTIMIZED: Uses direct pointer)
                     // ULTRA-OPTIMIZED: Direct double-pointer write
                     // Matches Lua C: setobj(L, uv->v.p, s2v(ra))
-                    unsafe {
-                        let upval = upvalue_ptrs[b].ptr;
-                        *(*upval).v_ptr = value;
-                    }
+                    upvalue_ptrs[b].set_value(value);
 
                     // GC barrier: luaC_barrier(L, uv, s2v(ra))
                     // If upvalue is black and value is white collectable, restore invariant
@@ -1449,7 +1443,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("GETTABUP: invalid upvalue index {}", b))
                         );
                     }
-                    let table_value = unsafe { upvalue_ptrs[b].get_value_unchecked(lua_state) };
+                    let table_value = upvalue_ptrs[b].get_value(lua_state);
 
                     // Get key from constants (K[C])
                     if c >= constants.len() {
@@ -1503,7 +1497,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("SETTABUP: invalid upvalue index {}", a))
                         );
                     }
-                    let table_value = unsafe { upvalue_ptrs[a].get_value_unchecked(lua_state) };
+                    let table_value = upvalue_ptrs[a].get_value(lua_state);
 
                     // Get key from constants (K[B])
                     if b >= constants.len() {

@@ -32,22 +32,24 @@ impl CachedUpvalue {
     /// SAFETY: Caller must ensure the pointer is still valid
     /// current_thread: The thread attempting to read the upvalue (used for stack access optimization)
     #[inline(always)]
-    pub unsafe fn get_value_unchecked(&self, _current_thread: &LuaState) -> LuaValue {
+    pub fn get_value(&self, l: &LuaState) -> LuaValue {
         unsafe {
             let upval = &*self.ptr;
-            // ZERO-COST: Direct pointer dereference like Lua C's uv->v.p
-            *upval.v_ptr
+            match upval {
+                Upvalue::Open(stack_index) => {
+                    // Directly access the stack value
+                    l.stack()[*stack_index].clone()
+                }
+                Upvalue::Closed(val) => val.clone(),
+            }
         }
     }
-    
-    /// Set the upvalue value directly through the cached pointer
-    /// SAFETY: Caller must ensure the pointer is still valid
+
     #[inline(always)]
-    pub unsafe fn set_value_unchecked(&self, value: LuaValue) {
+    pub fn set_value(&self, value: LuaValue) {
         unsafe {
-            let upval = &*self.ptr;
-            // ZERO-COST: Direct pointer write like Lua C's setobj(L, uv->v.p, val)
-            *upval.v_ptr = value;
+            let upval = &mut *(self.ptr as *mut Upvalue);
+            upval.close(value);
         }
     }
 }
@@ -328,22 +330,9 @@ impl FunctionBody {
 /// - When closed: v.p points to closed_value
 ///
 /// This eliminates the branch in get/set operations, matching Lua C performance
-pub struct Upvalue {
-    /// Direct pointer to the value (either stack or closed_value)
-    /// CRITICAL: This pointer must be updated when:
-    /// 1. Stack is reallocated
-    /// 2. Upvalue is closed
-    pub v_ptr: *mut LuaValue,
-    
-    /// The stack index when open (used for accessing stack value)
-    pub stack_index: usize,
-    /// Storage for closed value
-    pub closed_value: LuaValue,
-    /// Whether the upvalue is open (still pointing to stack)
-    pub is_open: bool,
-    /// The thread (LuaState) that owns the stack this upvalue points to (unsafe ptr)
-    /// Only valid/used when is_open is true
-    pub thread: *const LuaState,
+pub enum Upvalue {
+    Open(usize),
+    Closed(LuaValue),
 }
 
 pub type GcUpvalue = Gc<Upvalue>;
@@ -352,65 +341,40 @@ impl Upvalue {
     /// Check if this upvalue points to the given absolute stack index
     #[inline]
     pub fn points_to_index(&self, index: usize) -> bool {
-        self.is_open && self.stack_index == index
+        match self {
+            Upvalue::Open(i) => *i == index,
+            Upvalue::Closed(_) => false,
+        }
     }
 
     /// Check if this upvalue is open (still points to stack)
     #[inline]
     pub fn is_open(&self) -> bool {
-        self.is_open
+        matches!(self, Upvalue::Open(_))
     }
 
     /// Close this upvalue with the given value
     #[inline]
     pub fn close(&mut self, value: LuaValue) {
-        self.closed_value = value;
-        self.is_open = false;
-        // CRITICAL: Update v_ptr to point to closed_value
-        self.v_ptr = &mut self.closed_value as *mut LuaValue;
+        *self = Upvalue::Closed(value);
     }
 
     /// Get the value of a closed upvalue (returns None if still open)
     #[inline]
     pub fn get_closed_value(&self) -> Option<LuaValue> {
-        if self.is_open {
-            None
-        } else {
-            Some(self.closed_value)
+        match self {
+            Upvalue::Closed(val) => Some(val.clone()),
+            Upvalue::Open(_) => None,
         }
     }
 
     /// Get the absolute stack index if this upvalue is open
     #[inline]
     pub fn get_stack_index(&self) -> Option<usize> {
-        if self.is_open {
-            Some(self.stack_index)
-        } else {
-            None
+        match self {
+            Upvalue::Open(i) => Some(*i),
+            Upvalue::Closed(_) => None,
         }
-    }
-
-    /// Set closed upvalue value directly without checking state
-    /// SAFETY: Must only be called when upvalue is in Closed state
-    #[inline(always)]
-    pub unsafe fn set_closed_value_unchecked(&mut self, value: LuaValue) {
-        self.closed_value = value;
-    }
-
-    /// Close upvalue with given value (used during stack unwinding)
-    #[inline]
-    pub unsafe fn close_with_value(&mut self, value: LuaValue) {
-        self.closed_value = value;
-        self.is_open = false;
-        // CRITICAL: Update v_ptr to point to closed_value
-        self.v_ptr = &mut self.closed_value as *mut LuaValue;
-    }
-
-    /// Get closed value reference directly without Option
-    /// SAFETY: Must only be called when upvalue is in Closed state
-    #[inline(always)]
-    pub unsafe fn get_closed_value_ref_unchecked(&self) -> &LuaValue {
-        &self.closed_value
     }
 }
 
@@ -418,7 +382,6 @@ impl Upvalue {
 pub type GcString = Gc<String>;
 
 /// Thread (coroutine) with embedded GC header
-/// TODO: Remove Rc<RefCell> once we have proper pointer-based design
 pub type GcThread = Gc<LuaState>;
 
 pub type GcUserdata = Gc<LuaUserdata>;
