@@ -440,19 +440,14 @@ fn math_tointeger(l: &mut LuaState) -> LuaResult<usize> {
         LuaValue::integer(i)
     } else if let Some(f) = val.as_number() {
         float_to_integer(f)
-    } else if let Some(s_id) = val.as_string_id() {
+    } else if let Some(s) = val.as_str() {
         // Try to parse string as integer
-        let vm = l.vm_mut();
-        if let Some(s) = vm.object_pool.get_string(s_id) {
-            let s_str = s.trim();
-            if let Ok(i) = s_str.parse::<i64>() {
-                LuaValue::integer(i)
-            } else if let Ok(f) = s_str.parse::<f64>() {
-                // String is a float, check if it's a whole number
-                float_to_integer(f)
-            } else {
-                LuaValue::nil()
-            }
+        let s_str = s.trim();
+        if let Ok(i) = s_str.parse::<i64>() {
+            LuaValue::integer(i)
+        } else if let Ok(f) = s_str.parse::<f64>() {
+            // String is a float, check if it's a whole number
+            float_to_integer(f)
         } else {
             LuaValue::nil()
         }

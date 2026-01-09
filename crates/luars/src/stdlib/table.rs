@@ -61,15 +61,8 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     let sep_value = l.get_arg(2);
     let sep = match sep_value {
         Some(v) => {
-            if let Some(string_id) = v.as_string_id() {
-                let vm = l.vm_mut();
-                if let Some(s) = vm.object_pool.get_string(string_id) {
-                    s.to_string()
-                } else {
-                    return Err(
-                        l.error("bad argument #2 to 'concat' (string expected)".to_string())
-                    );
-                }
+            if let Some(s) = v.as_str() {
+                s.to_string()
             } else {
                 return Err(l.error("bad argument #2 to 'concat' (string expected)".to_string()));
             }
@@ -77,44 +70,28 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         None => "".to_string(),
     };
 
-    let Some(table_id) = table_val.as_table_id() else {
+    let Some(table) = table_val.as_table() else {
         return Err(l.error("bad argument #1 to 'concat' (table expected)".to_string()));
     };
 
-    // Get arguments before vm_mut borrow
+    // Get arguments
     let i = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j_opt = l.get_arg(4).and_then(|v| v.as_integer());
+    let j = l
+        .get_arg(4)
+        .and_then(|v| v.as_integer())
+        .unwrap_or_else(|| table.len() as i64);
 
-    let parts = {
-        let vm = l.vm_mut();
-        let Some(table_borrowed) = vm.object_pool.get_table(table_id) else {
-            let _ = vm; // Explicitly end borrow
-            return Err(l.error("bad argument #1 to 'concat' (table expected)".to_string()));
-        };
-        let len = table_borrowed.len();
-        let j = j_opt.unwrap_or(len as i64);
-
-        let mut parts = Vec::new();
-        for idx in i..=j {
-            if let Some(value) = table_borrowed.get_int(idx) {
-                if let Some(string_id) = value.as_string_id() {
-                    if let Some(s) = vm.object_pool.get_string(string_id) {
-                        parts.push(s.to_string());
-                    } else {
-                        let msg =
-                            format!("bad value at index {} in 'concat' (string expected)", idx);
-                        let _ = vm;
-                        return Err(l.error(msg));
-                    }
-                } else {
-                    let msg = format!("bad value at index {} in 'concat' (string expected)", idx);
-                    let _ = vm;
-                    return Err(l.error(msg));
-                }
+    let mut parts = Vec::new();
+    for idx in i..=j {
+        if let Some(value) = table.get_int(idx) {
+            if let Some(s) = value.as_str() {
+                parts.push(s.to_string());
+            } else {
+                let msg = format!("bad value at index {} in 'concat' (string expected)", idx);
+                return Err(l.error(msg));
             }
         }
-        parts
-    };
+    }
 
     // Concat the parts with separator
     let result = l.create_string(&parts.join(&sep));
@@ -129,25 +106,18 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'insert' (table expected)".to_string()))?;
     let argc = l.arg_count();
 
-    let Some(table_id) = table_val.as_table_id() else {
+    let Some(table) = table_val.as_table() else {
         return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
     };
 
-    let len = {
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
-            return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
-        };
-        table_ref.len()
-    };
+    let len = table.len();
 
     if argc == 2 {
         // table.insert(list, value) - append at end
         let value = l
             .get_arg(2)
             .ok_or_else(|| l.error("bad argument #2 to 'insert' (value expected)".to_string()))?;
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+        let Some(table_ref) = table_val.as_table_mut() else {
             return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
         };
         // Append at position len + 1 (1-based indexing)
@@ -172,8 +142,7 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         if pos < 1 || pos > len as i64 + 1 {
             return Err(l.error("bad argument #2 to 'insert' (position out of bounds)".to_string()));
         }
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+        let Some(table_ref) = table_val.as_table_mut() else {
             return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
         };
         match table_ref.insert_array_at(pos, value) {
@@ -195,17 +164,11 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'remove' (table expected)".to_string()))?;
 
-    let Some(table_id) = table_val.as_table_id() else {
+    let Some(table) = table_val.as_table() else {
         return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
     };
 
-    let len = {
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
-            return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
-        };
-        table_ref.len()
-    };
+    let len = table.len();
 
     if len == 0 {
         l.push_value(LuaValue::nil())?;
@@ -221,8 +184,7 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
     }
 
-    let vm = l.vm_mut();
-    let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+    let Some(table_ref) = table_val.as_table_mut() else {
         return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
     };
 
@@ -265,33 +227,21 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
     let dst_value = l.get_arg(5).unwrap_or_else(|| src_val.clone());
 
     // Copy elements
-    let mut values = Vec::new();
-    {
-        let Some(src_id) = src_val.as_table_id() else {
-            return Err(l.error("bad argument #1 to 'move' (table expected)".to_string()));
-        };
-        let vm = l.vm_mut();
-        let Some(src_ref) = vm.object_pool.get_table(src_id) else {
-            return Err(l.error("bad argument #1 to 'move' (table expected)".to_string()));
-        };
+    let Some(src_ref) = src_val.as_table() else {
+        return Err(l.error("bad argument #1 to 'move' (table expected)".to_string()));
+    };
 
-        for i in f..=e {
-            let val = src_ref.get_int(i).unwrap_or(LuaValue::nil());
-            values.push(val);
-        }
+    let mut values = Vec::new();
+    for i in f..=e {
+        let val = src_ref.get_int(i).unwrap_or(LuaValue::nil());
+        values.push(val);
     }
 
-    {
-        let Some(dst_id) = dst_value.as_table_id() else {
-            return Err(l.error("bad argument #5 to 'move' (table expected)".to_string()));
-        };
-        let vm = l.vm_mut();
-        let Some(dst_ref) = vm.object_pool.get_table_mut(dst_id) else {
-            return Err(l.error("bad argument #5 to 'move' (table expected)".to_string()));
-        };
-        for (offset, val) in values.into_iter().enumerate() {
-            dst_ref.set_int(t + offset as i64, val);
-        }
+    let Some(dst_ref) = dst_value.as_table_mut() else {
+        return Err(l.error("bad argument #5 to 'move' (table expected)".to_string()));
+    };
+    for (offset, val) in values.into_iter().enumerate() {
+        dst_ref.set_int(t + offset as i64, val);
     }
 
     l.push_value(dst_value)?;
@@ -305,11 +255,7 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
 
     // Set 'n' field
     let n_key = l.create_string("n");
-    let Some(table_id) = table.as_table_id() else {
-        return Err(l.error("failed to create table".to_string()));
-    };
-    let vm = l.vm_mut();
-    let Some(table_ref) = vm.object_pool.get_table_mut(table_id) else {
+    let Some(table_ref) = table.as_table_mut() else {
         return Err(l.error("failed to create table".to_string()));
     };
 
@@ -329,38 +275,28 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'unpack' (table expected)".to_string()))?;
 
-    let Some(table_id) = table_val.as_table_id() else {
+    let Some(table_ref) = table_val.as_table() else {
         return Err(l.error("bad argument #1 to 'unpack' (table expected)".to_string()));
     };
 
-    // Get arguments before vm_mut borrow
-    let i_opt = l.get_arg(2).and_then(|v| v.as_integer());
-    let j_opt = l.get_arg(3).and_then(|v| v.as_integer());
+    // Get arguments
+    let len = table_ref.len();
+    let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
+    let j = l
+        .get_arg(3)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(len as i64);
 
-    // Collect values while borrowing vm
-    let values = {
-        let vm = l.vm_mut();
-        let Some(table_ref) = vm.object_pool.get_table(table_id) else {
-            let _ = vm;
-            return Err(l.error("bad argument #1 to 'unpack' (table expected)".to_string()));
-        };
+    // Handle empty range
+    if i > j {
+        return Ok(0);
+    }
 
-        let len = table_ref.len();
-        let i = i_opt.unwrap_or(1);
-        let j = j_opt.unwrap_or(len as i64);
-
-        // Handle empty range
-        if i > j {
-            return Ok(0);
-        }
-
-        // Collect all values
-        let mut values = Vec::new();
-        for idx in i..=j {
-            values.push(table_ref.get_int(idx).unwrap_or(LuaValue::nil()));
-        }
-        values
-    };
+    // Collect all values
+    let mut values = Vec::new();
+    for idx in i..=j {
+        values.push(table_ref.get_int(idx).unwrap_or(LuaValue::nil()));
+    }
 
     // Push values after vm borrow ends
     let count = values.len();

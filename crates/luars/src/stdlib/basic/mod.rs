@@ -92,10 +92,7 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
     if !condition.is_truthy() {
         let message = l
             .get_arg(2)
-            .and_then(|v| {
-                v.as_string_id()
-                    .and_then(|id| l.vm_mut().object_pool.get_string(id).map(|s| s.to_string()))
-            })
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "assertion failed!".to_string());
         return Err(l.error(message));
     }
@@ -184,25 +181,20 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #2 to 'tonumber' (base out of range)".to_string()));
     }
 
-    let vm = l.vm_mut();
     let result = match value.kind() {
         LuaValueKind::Integer => value.clone(),
         LuaValueKind::Float => value.clone(),
         LuaValueKind::String => {
-            if let Some(string_id) = value.as_string_id() {
-                if let Some(s) = vm.object_pool.get_string(string_id) {
-                    let s_str = s.trim();
-                    if base == 10 {
-                        parse_lua_number(s_str)
-                    } else {
-                        if let Ok(i) = i64::from_str_radix(s_str, base as u32) {
-                            LuaValue::integer(i)
-                        } else {
-                            LuaValue::nil()
-                        }
-                    }
+            if let Some(s) = value.as_str() {
+                let s_str = s.trim();
+                if base == 10 {
+                    parse_lua_number(s_str)
                 } else {
-                    LuaValue::nil()
+                    if let Ok(i) = i64::from_str_radix(s_str, base as u32) {
+                        LuaValue::integer(i)
+                    } else {
+                        LuaValue::nil()
+                    }
                 }
             } else {
                 LuaValue::nil()
@@ -286,14 +278,11 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
     let vararg_count = if total_args > 0 { total_args - 1 } else { 0 };
 
     // FAST PATH: Check for "#"
-    if let Some(string_id) = index_arg.as_string_id() {
-        let vm = l.vm_mut();
-        if let Some(s) = vm.object_pool.get_string(string_id) {
-            if s == "#" {
-                let result = LuaValue::integer(vararg_count as i64);
-                l.push_value(result)?;
-                return Ok(1);
-            }
+    if let Some(s) = index_arg.as_str() {
+        if s == "#" {
+            let result = LuaValue::integer(vararg_count as i64);
+            l.push_value(result)?;
+            return Ok(1);
         }
         return Err(l.error("bad argument #1 to 'select' (number expected)".to_string()));
     }
@@ -372,23 +361,19 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("ipairs iterator: missing index".to_string()))?;
 
     // Fast path: both table and index are valid
-    if let Some(table_id) = table_val.as_table_id() {
+    if let Some(table) = table_val.as_table() {
         if let Some(index) = index_val.as_integer() {
             let next_index = index + 1;
 
-            // Access table via ObjectPool
-            let vm = l.vm_mut();
-            if let Some(table) = vm.object_pool.get_table(table_id) {
-                if let Some(value) = table.get_int(next_index) {
-                    // Return (next_index, value)
-                    l.push_value(LuaValue::integer(next_index))?;
-                    l.push_value(value)?;
-                    return Ok(2);
-                }
-                // Reached end of array - return nil
-                l.push_value(LuaValue::nil())?;
-                return Ok(1);
+            if let Some(value) = table.get_int(next_index) {
+                // Return (next_index, value)
+                l.push_value(LuaValue::integer(next_index))?;
+                l.push_value(value)?;
+                return Ok(2);
             }
+            // Reached end of array - return nil
+            l.push_value(LuaValue::nil())?;
+            return Ok(1);
         }
     }
 
@@ -424,29 +409,23 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
 
-    let table_id = table_val
-        .as_table_id()
-        .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
-
     let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
 
-    // Use efficient lua_next implementation
-    let vm = l.vm_mut();
-    let table = vm.object_pool.get_table(table_id);
-    if table.is_none() {
-        return Err(l.error("table not found".to_string()));
-    }
+    // Use efficient lua_next implementation - direct table access
+    let table = table_val
+        .as_table()
+        .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
 
     // First, if index is not nil, verify it exists in the table
     // This distinguishes "key not found" from "no more keys"
     if !index_val.is_nil() {
-        let key_exists = table.unwrap().raw_get(&index_val).is_some();
+        let key_exists = table.raw_get(&index_val).is_some();
         if !key_exists {
             return Err(l.error("invalid key to 'next'".to_string()));
         }
     }
 
-    let result = table.unwrap().next(&index_val);
+    let result = table.next(&index_val);
 
     // Return next key-value pair, or nil if at end
     if let Some((k, v)) = result {
@@ -593,13 +572,10 @@ fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'rawget' (value expected)".to_string()))?;
 
-    if let Some(table_id) = table.as_table_id() {
-        let vm = l.vm_mut();
-        if let Some(table_ref) = vm.object_pool.get_table(table_id) {
-            let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
-            l.push_value(value)?;
-            return Ok(1);
-        }
+    if let Some(table_ref) = table.as_table() {
+        let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
+        l.push_value(value)?;
+        return Ok(1);
     }
     Err(l.error("bad argument #1 to 'rawget' (table expected)".to_string()))
 }
@@ -616,13 +592,10 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(3)
         .ok_or_else(|| l.error("bad argument #3 to 'rawset' (value expected)".to_string()))?;
 
-    if let Some(table_id) = table.as_table_id() {
-        let vm = l.vm_mut();
-        if let Some(table_ref) = vm.object_pool.get_table_mut(table_id) {
-            table_ref.raw_set(&key, value);
-            l.push_value(table)?;
-            return Ok(1);
-        }
+    if let Some(table_ref) = table.as_table_mut() {
+        table_ref.raw_set(&key, value);
+        l.push_value(table)?;
+        return Ok(1);
     }
     Err(l.error("bad argument #1 to 'rawset' (table expected)".to_string()))
 }
@@ -633,17 +606,10 @@ fn lua_rawlen(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'rawlen' (value expected)".to_string()))?;
 
-    let vm = l.vm_mut();
     let len = match value.kind() {
         LuaValueKind::Table => {
-            if let Some(table_id) = value.as_table_id() {
-                if let Some(table) = vm.object_pool.get_table(table_id) {
-                    table.len() as i64
-                } else {
-                    return Err(l.error(
-                        "bad argument #1 to 'rawlen' (table or string expected)".to_string(),
-                    ));
-                }
+            if let Some(table) = value.as_table() {
+                table.len() as i64
             } else {
                 return Err(
                     l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string())
@@ -651,14 +617,8 @@ fn lua_rawlen(l: &mut LuaState) -> LuaResult<usize> {
             }
         }
         LuaValueKind::String => {
-            if let Some(string_id) = value.as_string_id() {
-                if let Some(s) = vm.object_pool.get_string(string_id) {
-                    s.len() as i64
-                } else {
-                    return Err(l.error(
-                        "bad argument #1 to 'rawlen' (table or string expected)".to_string(),
-                    ));
-                }
+            if let Some(s) = value.as_str() {
+                s.len() as i64
             } else {
                 return Err(
                     l.error("bad argument #1 to 'rawlen' (table or string expected)".to_string())
@@ -691,14 +651,9 @@ fn lua_rawequal(l: &mut LuaState) -> LuaResult<usize> {
 fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
     let arg1 = l.get_arg(1);
 
-    let opt = {
-        let vm = l.vm_mut();
-        arg1.and_then(|v| {
-            v.as_string_id()
-                .and_then(|id| vm.object_pool.get_string(id).map(|s| s.to_string()))
-        })
-        .unwrap_or_else(|| "collect".to_string())
-    };
+    let opt = arg1
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "collect".to_string());
 
     match opt.as_str() {
         "collect" => {
@@ -802,17 +757,10 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let arg3 = l.get_arg(3);
 
             // Get parameter name string
-            let param_name = {
-                let vm = l.vm_mut();
-                if let Some(v) = arg2 {
-                    if let Some(id) = v.as_string_id() {
-                        vm.object_pool.get_string(id).map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+            let param_name = if let Some(v) = arg2 {
+                v.as_str().map(|s| s.to_string())
+            } else {
+                None
             };
 
             if param_name.is_none() {
@@ -876,30 +824,20 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let vm = l.vm_mut();
 
     // Get the chunk string
-    let Some(string_id) = chunk_val.as_string_id() else {
+    let code_str = if let Some(s) = chunk_val.as_str() {
+        s.to_string()
+    } else {
         return Err(l.error("bad argument #1 to 'load' (string expected)".to_string()));
-    };
-    let code_str = {
-        let Some(code) = vm.object_pool.get_string(string_id) else {
-            return Err(l.error("bad argument #1 to 'load' (string expected)".to_string()));
-        };
-        code.to_string()
     };
 
     // Optional chunk name for error messages
     let chunkname = arg2
-        .and_then(|v| {
-            v.as_string_id()
-                .and_then(|id| vm.object_pool.get_string(id).map(|s| s.to_string()))
-        })
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "=(load)".to_string());
 
     // Optional mode ("b", "t", or "bt") - we only support "t" (text)
     let _mode = arg3
-        .and_then(|v| {
-            v.as_string_id()
-                .and_then(|id| vm.object_pool.get_string(id).map(|s| s.to_string()))
-        })
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "bt".to_string());
 
     // Optional environment table
@@ -936,16 +874,13 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'loadfile' (value expected)".to_string()))?;
 
-    let vm = l.vm_mut();
-    let Some(string_id) = filename.as_string_id() else {
+    let filename_str = if let Some(s) = filename.as_str() {
+        s.to_string()
+    } else {
         return Err(l.error("bad argument #1 to 'loadfile' (string expected)".to_string()));
     };
-    let filename_str = {
-        let Some(s) = vm.object_pool.get_string(string_id) else {
-            return Err(l.error("bad argument #1 to 'loadfile' (string expected)".to_string()));
-        };
-        s.to_string()
-    };
+
+    let vm = l.vm_mut();
 
     // Load from specified file
     let code = match std::fs::read_to_string(&filename_str) {
@@ -990,14 +925,11 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         if v.is_nil() {
             return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
         }
-        let vm = l.vm_mut();
-        let Some(string_id) = v.as_string_id() else {
+        if let Some(s) = v.as_str() {
+            s.to_string()
+        } else {
             return Err(l.error("bad argument #1 to 'dofile' (string expected)".to_string()));
-        };
-        let Some(s) = vm.object_pool.get_string(string_id) else {
-            return Err(l.error("bad argument #1 to 'dofile' (invalid string)".to_string()));
-        };
-        s.to_string()
+        }
     } else {
         return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
     };

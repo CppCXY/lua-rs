@@ -21,16 +21,10 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'pack' (string expected)".to_string()))?;
 
-    let Some(fmt_id) = fmt_value.as_string_id() else {
+    let Some(fmt_str) = fmt_value.as_str() else {
         return Err(l.error("bad argument #1 to 'pack' (string expected)".to_string()));
     };
-
-    let fmt_str = {
-        let Some(fmt) = l.vm_mut().object_pool.get_string(fmt_id) else {
-            return Err(l.error("bad argument #1 to 'pack' (string expected)".to_string()));
-        };
-        fmt.to_string()
-    };
+    let fmt_str = fmt_str.to_string();
 
     let argc = l.arg_count();
     let mut result = Vec::new();
@@ -169,14 +163,8 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 let s_value = l.get_arg(value_idx).ok_or_else(|| {
                     l.error("bad argument to 'pack' (string expected)".to_string())
                 })?;
-                let Some(s_id) = s_value.as_string_id() else {
+                let Some(s_str) = s_value.as_str() else {
                     return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
-                };
-                let s_str = {
-                    let Some(s) = l.vm_mut().object_pool.get_string(s_id) else {
-                        return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
-                    };
-                    s.to_string()
                 };
                 result.extend_from_slice(s_str.as_bytes());
                 result.push(0); // null terminator
@@ -203,14 +191,8 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 let s_value = l.get_arg(value_idx).ok_or_else(|| {
                     l.error("bad argument to 'pack' (string expected)".to_string())
                 })?;
-                let Some(s_id) = s_value.as_string_id() else {
+                let Some(s_str) = s_value.as_str() else {
                     return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
-                };
-                let s_str = {
-                    let Some(s) = l.vm_mut().object_pool.get_string(s_id) else {
-                        return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
-                    };
-                    s.to_string()
                 };
                 let bytes = s_str.as_bytes();
                 result.extend_from_slice(&bytes[..size.min(bytes.len())]);
@@ -254,16 +236,10 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'packsize' (string expected)".to_string()))?;
 
-    let Some(fmt_id) = fmt_value.as_string_id() else {
+    let Some(fmt_str) = fmt_value.as_str() else {
         return Err(l.error("bad argument #1 to 'packsize' (string expected)".to_string()));
     };
-
-    let fmt_str = {
-        let Some(fmt) = l.vm_mut().object_pool.get_string(fmt_id) else {
-            return Err(l.error("bad argument #1 to 'packsize' (string expected)".to_string()));
-        };
-        fmt.to_string()
-    };
+    let fmt_str = fmt_str.to_string();
 
     let mut size = 0usize;
     let mut chars = fmt_str.chars().peekable();
@@ -320,31 +296,19 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'unpack' (string expected)".to_string()))?;
 
-    let Some(fmt_id) = fmt_value.as_string_id() else {
+    let Some(fmt_str) = fmt_value.as_str() else {
         return Err(l.error("bad argument #1 to 'unpack' (string expected)".to_string()));
     };
-
-    let fmt_str = {
-        let Some(fmt) = l.vm_mut().object_pool.get_string(fmt_id) else {
-            return Err(l.error("bad argument #1 to 'unpack' (string expected)".to_string()));
-        };
-        fmt.to_string()
-    };
+    let fmt_str = fmt_str.to_string();
 
     let s_value = l
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'unpack' (string expected)".to_string()))?;
 
-    let Some(s_id) = s_value.as_string_id() else {
+    let Some(s_str) = s_value.as_str() else {
         return Err(l.error("bad argument #2 to 'unpack' (string expected)".to_string()));
     };
-
-    let bytes = {
-        let Some(s) = l.vm_mut().object_pool.get_string(s_id) else {
-            return Err(l.error("bad argument #2 to 'unpack' (string expected)".to_string()));
-        };
-        s.as_bytes().to_vec()
-    };
+    let bytes = s_str.as_bytes().to_vec();
 
     let pos = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
 

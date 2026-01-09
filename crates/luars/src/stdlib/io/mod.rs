@@ -33,42 +33,24 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
         .get_global("io")
         .ok_or_else(|| l.error("io table not found".to_string()))?;
 
-    let Some(io_id) = io_table.as_table_id() else {
+    let Some(io_tbl) = io_table.as_table_mut() else {
         return Err(l.error("io must be a table".to_string()));
     };
 
     // Create stdin
     let stdin_val = create_stdin(l)?;
     let stdin_key = l.create_string("stdin");
-    {
-        let vm = l.vm_mut();
-        let Some(io_tbl) = vm.object_pool.get_table_mut(io_id) else {
-            return Err(l.error("io table not found".to_string()));
-        };
-        io_tbl.raw_set(&stdin_key, stdin_val);
-    }
+    io_tbl.raw_set(&stdin_key, stdin_val);
 
     // Create stdout
     let stdout_val = create_stdout(l)?;
     let stdout_key = l.create_string("stdout");
-    {
-        let vm = l.vm_mut();
-        let Some(io_tbl) = vm.object_pool.get_table_mut(io_id) else {
-            return Err(l.error("io table not found".to_string()));
-        };
-        io_tbl.raw_set(&stdout_key, stdout_val);
-    }
+    io_tbl.raw_set(&stdout_key, stdout_val);
 
     // Create stderr
     let stderr_val = create_stderr(l)?;
     let stderr_key = l.create_string("stderr");
-    {
-        let vm = l.vm_mut();
-        let Some(io_tbl) = vm.object_pool.get_table_mut(io_id) else {
-            return Err(l.error("io table not found".to_string()));
-        };
-        io_tbl.raw_set(&stderr_key, stderr_val);
-    }
+    io_tbl.raw_set(&stderr_key, stderr_val);
 
     Ok(())
 }

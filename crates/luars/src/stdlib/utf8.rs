@@ -30,15 +30,8 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'len' (string expected)".to_string()))?;
-    let Some(s_id) = s_value.as_string_id() else {
+    let Some(s_str) = s_value.as_str() else {
         return Err(l.error("bad argument #1 to 'len' (string expected)".to_string()));
-    };
-    let s_str = {
-        let vm = l.vm_mut();
-        let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(l.error("bad argument #1 to 'len' (string expected)".to_string()));
-        };
-        s.to_string()
     };
 
     let bytes = s_str.as_bytes();
@@ -146,13 +139,9 @@ fn utf8_codes(l: &mut LuaState) -> LuaResult<usize> {
     let string_key = LuaValue::integer(1);
     let position_key = LuaValue::integer(2);
 
-    // Use ObjectPool for table access
-    if let Some(table_id) = state_table.as_table_id() {
-        let vm = l.vm_mut();
-        if let Some(table) = vm.object_pool.get_table_mut(table_id) {
-            table.raw_set(&string_key, s_value);
-            table.raw_set(&position_key, LuaValue::integer(0));
-        }
+    if let Some(table) = state_table.as_table_mut() {
+        table.raw_set(&string_key, s_value);
+        table.raw_set(&position_key, LuaValue::integer(0));
     }
 
     l.push_value(LuaValue::cfunction(utf8_codes_iterator))?;
@@ -170,37 +159,23 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
     let string_key = 1;
     let position_key = 2;
 
-    let Some(table_id) = t_value.as_table_id() else {
+    // Extract string and position from state table
+    let Some(table) = t_value.as_table() else {
         return Err(l.error("utf8.codes iterator: invalid state".to_string()));
     };
 
-    // Extract string and position from state table
-    let (s_str, pos) = {
-        let vm = l.vm_mut();
-        let Some(table) = vm.object_pool.get_table(table_id) else {
-            return Err(l.error("utf8.codes iterator: invalid state".to_string()));
-        };
-
-        let Some(s_val) = table.get_int(string_key) else {
-            return Err(l.error("utf8.codes iterator: string not found".to_string()));
-        };
-
-        let Some(s_id) = s_val.as_string_id() else {
-            return Err(l.error("utf8.codes iterator: invalid string".to_string()));
-        };
-
-        let pos = table
-            .get_int(position_key)
-            .and_then(|v| v.as_integer())
-            .unwrap_or(0) as usize;
-
-        // Get string content
-        let Some(lua_str) = vm.object_pool.get_string(s_id) else {
-            return Err(l.error("utf8.codes iterator: invalid string".to_string()));
-        };
-
-        (lua_str.to_string(), pos)
+    let Some(s_val) = table.get_int(string_key) else {
+        return Err(l.error("utf8.codes iterator: string not found".to_string()));
     };
+
+    let Some(s_str) = s_val.as_str() else {
+        return Err(l.error("utf8.codes iterator: invalid string".to_string()));
+    };
+
+    let pos = table
+        .get_int(position_key)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0) as usize;
 
     let bytes = s_str.as_bytes();
     if pos >= bytes.len() {
@@ -215,8 +190,7 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
         let code_point = ch as u32;
 
         // Update position in the state table
-        let vm = l.vm_mut();
-        if let Some(table) = vm.object_pool.get_table_mut(table_id) {
+        if let Some(table) = t_value.as_table_mut() {
             table.raw_set(
                 &LuaValue::integer(position_key),
                 LuaValue::integer((pos + char_len) as i64),
@@ -237,15 +211,8 @@ fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'codepoint' (string expected)".to_string()))?;
-    let Some(s_id) = s_value.as_string_id() else {
+    let Some(s_str) = s_value.as_str() else {
         return Err(l.error("bad argument #1 to 'codepoint' (string expected)".to_string()));
-    };
-    let s_str = {
-        let vm = l.vm_mut();
-        let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(l.error("bad argument #1 to 'codepoint' (string expected)".to_string()));
-        };
-        s.to_string()
     };
 
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
@@ -286,15 +253,8 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'offset' (string expected)".to_string()))?;
-    let Some(s_id) = s_value.as_string_id() else {
+    let Some(s_str) = s_value.as_str() else {
         return Err(l.error("bad argument #1 to 'offset' (string expected)".to_string()));
-    };
-    let s_str = {
-        let vm = l.vm_mut();
-        let Some(s) = vm.object_pool.get_string(s_id) else {
-            return Err(l.error("bad argument #1 to 'offset' (string expected)".to_string()));
-        };
-        s.to_string()
     };
 
     let n_value = l

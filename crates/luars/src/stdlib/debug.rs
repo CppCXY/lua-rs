@@ -136,20 +136,17 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
     let metatable = l.get_arg(2);
 
     // Only support tables for now
-    if let Some(table_id) = value.as_table_id() {
-        let vm = l.vm_mut();
-        if let Some(table) = vm.object_pool.get_table_mut(table_id) {
-            if let Some(mt) = metatable {
-                if mt.is_nil() {
-                    table.set_metatable(None);
-                } else if mt.is_table() {
-                    table.set_metatable(Some(mt));
-                } else {
-                    return Err(l.error("setmetatable() requires a table or nil".to_string()));
-                }
-            } else {
+    if let Some(table) = value.as_table_mut() {
+        if let Some(mt) = metatable {
+            if mt.is_nil() {
                 table.set_metatable(None);
+            } else if mt.is_table() {
+                table.set_metatable(Some(mt));
+            } else {
+                return Err(l.error("setmetatable() requires a table or nil".to_string()));
             }
+        } else {
+            table.set_metatable(None);
         }
     }
 
