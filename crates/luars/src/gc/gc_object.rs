@@ -46,10 +46,19 @@ impl CachedUpvalue {
     }
 
     #[inline(always)]
-    pub fn set_value(&self, value: LuaValue) {
+    pub fn set_value(&self, l: &mut LuaState, value: LuaValue) {
         unsafe {
             let upval = &mut *(self.ptr as *mut Upvalue);
-            upval.close(value);
+            match upval {
+                Upvalue::Open(stack_index) => {
+                    // Set value directly on the stack
+                    l.stack_mut()[*stack_index] = value;
+                }
+                Upvalue::Closed(val) => {
+                    // Update closed value
+                    *val = value;
+                }
+            }
         }
     }
 }

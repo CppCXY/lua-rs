@@ -942,7 +942,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // Set value in upvalue (OPTIMIZED: Uses direct pointer)
                     // ULTRA-OPTIMIZED: Direct double-pointer write
                     // Matches Lua C: setobj(L, uv->v.p, s2v(ra))
-                    upvalue_ptrs[b].set_value(value);
+                    upvalue_ptrs[b].set_value(lua_state, value);
 
                     // GC barrier: luaC_barrier(L, uv, s2v(ra))
                     // If upvalue is black and value is white collectable, restore invariant
