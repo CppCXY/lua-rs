@@ -683,30 +683,35 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "step" => {
-            // LUA_GCSTEP: Single step with optional size argument
+            // LUA_GCSTEP: Single step with optional size argument (in KB)
+            // Like Lua 5.5's lapi.c:1203-1212
             let arg2 = l.get_arg(2);
-            let _step_size = arg2.and_then(|v| v.as_integer()).unwrap_or(0) as usize;
+            let step_size_kb = arg2.and_then(|v| v.as_integer()).unwrap_or(0);
 
-            // Perform a GC step using VM's check_gc mechanism
+            // Save old state to check if we complete a cycle  
             let old_state = l.vm_mut().gc.gc_state;
 
-            // Force a GC step by setting debt to positive
+            // Calculate n (bytes to subtract from debt)
+            // If n <= 0, use current GCdebt to force one basic step
+            let n = if step_size_kb <= 0 {
+                l.vm_mut().gc.gc_debt // Force to run one basic step
+            } else {
+                (step_size_kb * 1024) as isize // Convert KB to bytes
+            };
+
+            // Set debt = GCdebt - n (like Lua's luaE_setdebt(g, g->GCdebt - n))
             let old_debt = l.vm_mut().gc.gc_debt;
-            l.vm_mut().gc.gc_debt = 1;
+            l.vm_mut().gc.set_debt(old_debt - n);
 
-            l.vm_mut().check_gc_step(); // Will call check_gc_slow -> gc.step()
+            // Perform the GC step (if debt > 0)
+            l.vm_mut().check_gc_step();
 
-            // Check if we completed a full cycle
+            // Check if we completed a full cycle (ended at Pause state)
             let completed = {
                 let vm = l.vm_mut();
                 matches!(vm.gc.gc_state, crate::gc::GcState::Pause)
                     && !matches!(old_state, crate::gc::GcState::Pause)
             };
-
-            // Restore debt if we didn't complete a cycle
-            if !completed {
-                l.vm_mut().gc.gc_debt = old_debt;
-            }
 
             l.push_value(LuaValue::boolean(completed))?;
             Ok(1)

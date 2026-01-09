@@ -134,7 +134,7 @@ impl LibraryRegistry {
             // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)
             // No need for Lua override anymore
 
-            // Also register in package.loaded (if package exists)
+            // Also register in package.loaded and package.preload (if package exists)
             // This allows require() to find standard libraries
             if let Some(package_table) = vm.get_global("package") {
                 if package_table.is_table() {

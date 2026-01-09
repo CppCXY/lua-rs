@@ -309,26 +309,40 @@ impl GC {
 
     /// Incremental GC step (like incstep in Lua 5.5)
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        // Calculate work to do based on STEPSIZE and STEPMUL parameters
-        let step_size = self.apply_param(STEPSIZE, 100) * 1024; // Convert KB to bytes
-        let work_to_do = self.apply_param(STEPMUL, step_size / 8); // Divide by pointer size estimate
+        // Calculate step size and work to do (like Lua 5.5)
+        let stepsize = self.apply_param(STEPSIZE, 100) * 1024; // in bytes
+        let mut work2do = self.apply_param(STEPMUL, stepsize / 8); // work units
+        let fast = work2do == 0; // Special case: do full collection
 
-        let mut work_done = 0isize;
-        let fast = work_to_do == 0; // Special case: do full collection
-
+        // Repeat until enough work is done (like Lua 5.5's do-while loop)
         loop {
-            let step_result = self.single_step(roots, pool, fast);
+            let stres = self.single_step(roots, pool, fast);
 
-            match step_result {
-                StepResult::Pause | StepResult::Atomic if !fast => break,
-                StepResult::MinorMode => return, // Returned to minor collections
-                StepResult::Work(w) => {
-                    work_done += w;
-                    if !fast && work_done >= work_to_do {
+            match stres {
+                StepResult::MinorMode => {
+                    // Returned to minor collections
+                    return;
+                }
+                StepResult::Pause => {
+                    // End of cycle (step2pause in Lua)
+                    break;
+                }
+                StepResult::Atomic => {
+                    // Atomic step completed (atomicstep in Lua)
+                    if !fast {
                         break;
                     }
+                    // In fast mode, continue
                 }
-                _ => {}
+                StepResult::Work(w) => {
+                    // Normal work done
+                    work2do -= w;
+                }
+            }
+
+            // Continue if fast mode or still have work to do
+            if !fast && work2do <= 0 {
+                break;
             }
         }
 
@@ -336,9 +350,7 @@ impl GC {
         if self.gc_state == GcState::Pause {
             self.set_pause();
         } else {
-            // Set negative debt to allow some allocations before next GC
-            // Like Lua 5.5: after GC step, we have a "budget" before next collection
-            self.set_debt(-(step_size as isize));
+            self.set_debt(stepsize);
         }
     }
 
