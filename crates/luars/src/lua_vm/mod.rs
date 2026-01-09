@@ -458,7 +458,7 @@ impl LuaVM {
         if is_new {
             let size = 32 + s.len();
             let s_id = value.as_string_id().unwrap();
-            self.gc.track_object(GcId::StringId(s_id), size);
+            self.gc.track_object(GcId::StringId(s_id), size, &mut self.object_pool);
         }
         value
     }
@@ -471,7 +471,7 @@ impl LuaVM {
         if is_new {
             let size = 32 + len;
             let s_id = value.as_string_id().unwrap();
-            self.gc.track_object(GcId::StringId(s_id), size);
+            self.gc.track_object(GcId::StringId(s_id), size, &mut self.object_pool);
         }
         value
     }
@@ -523,9 +523,9 @@ impl LuaVM {
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let value = self.object_pool.create_table(array_size, hash_size);
-        // Track object for GC - adds to young_list in generational mode and updates gc_debt
         let id = value.as_table_id().unwrap();
-        self.gc.track_object(GcId::TableId(id), 256);
+        // Track object for GC - sets to current white and updates gc_debt
+        self.gc.track_object(GcId::TableId(id), 256, &mut self.object_pool);
         value
     }
 
@@ -572,7 +572,7 @@ impl LuaVM {
         let value = self.object_pool.create_userdata(data);
         let id = value.as_userdata_id().unwrap();
         self.gc
-            .track_object(GcId::UserdataId(id), std::mem::size_of::<LuaUserdata>());
+            .track_object(GcId::UserdataId(id), std::mem::size_of::<LuaUserdata>(), &mut self.object_pool);
         value
     }
 
@@ -583,7 +583,7 @@ impl LuaVM {
         let value = self.object_pool.create_function(chunk, upvalue_ids);
         let id = value.as_function_id().unwrap();
         self.gc
-            .track_object(GcId::FunctionId(id), std::mem::size_of::<LuaFunction>());
+            .track_object(GcId::FunctionId(id), std::mem::size_of::<LuaFunction>(), &mut self.object_pool);
         value
     }
 
@@ -600,7 +600,7 @@ impl LuaVM {
         let value = self.object_pool.create_c_closure(func, upvalue_ids);
         let id = value.as_function_id().unwrap();
         self.gc
-            .track_object(GcId::FunctionId(id), std::mem::size_of::<GcFunction>());
+            .track_object(GcId::FunctionId(id), std::mem::size_of::<GcFunction>(), &mut self.object_pool);
         value
     }
 
@@ -609,7 +609,7 @@ impl LuaVM {
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let id = self.object_pool.create_upvalue_open(stack_index);
         self.gc
-            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>());
+            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>(), &mut self.object_pool);
         id
     }
 
@@ -618,7 +618,7 @@ impl LuaVM {
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let id = self.object_pool.create_upvalue_closed(value);
         self.gc
-            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>());
+            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>(), &mut self.object_pool);
         id
     }
 

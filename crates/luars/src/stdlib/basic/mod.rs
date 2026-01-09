@@ -665,20 +665,23 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         }
         "count" => {
             // LUA_GCCOUNT + LUA_GCCOUNTB: Return memory in KB (with fraction)
-            let bytes = l.vm_mut().gc.total_bytes.max(0) as f64;
-            let kb = bytes / 1024.0;
+            // Like Lua 5.5: gettotalbytes(g) = GCtotalbytes - GCdebt
+            let gc = &l.vm_mut().gc;
+            let real_bytes = (gc.total_bytes - gc.gc_debt).max(0) as f64;
+            let kb = real_bytes / 1024.0;
             l.push_value(LuaValue::number(kb))?;
             Ok(1)
         }
         "stop" => {
-            // LUA_GCSTOP: Stop collector
-            l.vm_mut().gc.gc_debt = isize::MIN / 2;
+            // LUA_GCSTOP: Stop collector (like Lua's gcstp = GCSTPUSR)
+            l.vm_mut().gc.gc_stopped = true;
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "restart" => {
             // LUA_GCRESTART: Restart collector
-            l.vm_mut().gc.gc_debt = 0;
+            l.vm_mut().gc.gc_stopped = false;
+            l.vm_mut().gc.set_debt(0); // Reset debt to allow GC to run
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
@@ -718,7 +721,8 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         }
         "isrunning" => {
             // LUA_GCISRUNNING: Check if collector is running
-            let is_running = l.vm_mut().gc.gc_debt > (isize::MIN / 4);
+            // GC is running if not stopped by user
+            let is_running = !l.vm_mut().gc.gc_stopped;
             l.push_value(LuaValue::boolean(is_running))?;
             Ok(1)
         }
@@ -749,8 +753,8 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 crate::gc::GcKind::GenMajor => "generational",
             };
 
-            // Switch to incremental mode
-            vm.gc.gc_kind = crate::gc::GcKind::Inc;
+            // Switch to incremental mode (like luaC_changemode in Lua 5.5)
+            vm.gc.change_to_incremental_mode(&mut vm.object_pool);
 
             // Push previous mode name
             let (mode_value, _) = vm.object_pool.create_string(old_mode);

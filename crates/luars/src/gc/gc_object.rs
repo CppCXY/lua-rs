@@ -100,11 +100,10 @@ pub struct GcHeader {
 
 impl Default for GcHeader {
     fn default() -> Self {
-        // New objects start as BLACK with age G_NEW
-        // This ensures they survive the current GC cycle
-        // They will be properly marked or turned white at the start of next cycle
+        // Temp default - should be overridden with current_white immediately
+        // after creation (see GcHeader::new() for proper initialization)
         GcHeader {
-            marked: (1 << BLACKBIT) | G_NEW,
+            marked: G_NEW, // Neutral initial state
         }
     }
 }
@@ -167,11 +166,13 @@ impl GcHeader {
     }
 
     /// Make object white with given current_white (0 or 1)
+    /// For new objects, use with is_new=true to set G_NEW age
     #[inline(always)]
     pub fn make_white(&mut self, current_white: u8) {
-        // Clear color bits, set appropriate white bit, keep age
-        let age = self.age();
-        self.marked = (1 << (WHITE0BIT + current_white)) | age;
+        // For new objects, luaC_white(g) just returns (currentwhite & WHITEBITS)
+        // which means setting only the white bit without age bits
+        // According to lgc.h, new objects are created with white color only
+        self.marked = (1 << (WHITE0BIT + current_white)) | G_NEW;
     }
 
     /// Make object gray (clear all color bits)

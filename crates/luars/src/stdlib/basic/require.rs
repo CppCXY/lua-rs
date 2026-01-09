@@ -183,11 +183,8 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             LuaValue::nil()
         };
 
-        // Call loader(modname, loader_data)
-        // 注意：不要在获取 loader 后立即清理栈，因为 LuaValue 可能包含对栈的引用
-        // 我们直接在现有栈上继续操作
-
-        // 清理 searcher 的参数和结果，准备调用 loader
+        // Call loader(modname, loader_data) to get the module
+        // Clean stack and prepare to call loader
         l.set_top(func_idx);
 
         l.push_value(loader)?;
@@ -220,49 +217,9 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             )));
         }
 
-        // Get the chunk function from loader
-        let chunk_func = if loader_result_count > 0 {
+        // Get the module result from loader
+        let module_result = if loader_result_count > 0 {
             l.stack_get(loader_func_idx).unwrap_or(LuaValue::nil())
-        } else {
-            LuaValue::nil()
-        };
-
-        // If loader returned nil, error
-        if chunk_func.is_nil() {
-            return Err(l.error(format!("loader returned nil for module '{}'", modname_str)));
-        }
-
-        // Now execute the chunk to get the module
-        // Clean stack and prepare to call chunk
-        l.set_top(loader_func_idx);
-        l.push_value(chunk_func)?;
-        l.push_value(modname_val)?; // chunk receives modname as first arg
-        
-        let chunk_func_idx = l.get_top() - 2;
-        let (chunk_success, chunk_result_count) = l.pcall_stack_based(chunk_func_idx, 1)?;
-
-        if !chunk_success {
-            // Chunk execution failed
-            let error_val = l.stack_get(chunk_func_idx).unwrap_or(LuaValue::nil());
-            let error_msg = if let Some(err_id) = error_val.as_string_id() {
-                let vm = l.vm_mut();
-                if let Some(err_str) = vm.object_pool.get_string(err_id) {
-                    err_str.to_string()
-                } else {
-                    "error running module".to_string()
-                }
-            } else {
-                "error running module".to_string()
-            };
-            return Err(l.error(format!(
-                "error loading module '{}': {}",
-                modname_str, error_msg
-            )));
-        }
-
-        // Get the result from chunk execution
-        let module_result = if chunk_result_count > 0 {
-            l.stack_get(chunk_func_idx).unwrap_or(LuaValue::nil())
         } else {
             LuaValue::nil()
         };
@@ -283,7 +240,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         // Clean up stack and return result
-        l.set_top(chunk_func_idx);
+        l.set_top(loader_func_idx);
         l.push_value(final_result)?;
         return Ok(1);
     }

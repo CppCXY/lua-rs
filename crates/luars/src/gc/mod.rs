@@ -158,6 +158,9 @@ pub struct GC {
     /// stops emergency collections during finalizers
     pub gc_stopem: bool,
 
+    /// GC stopped by user (gcstp in Lua, GCSTPUSR bit)
+    pub gc_stopped: bool,
+
     // === GC parameters (from gcparams[LUA_GCPN]) ===
     pub gc_params: [i32; GCPARAM_COUNT],
 
@@ -211,6 +214,7 @@ impl GC {
             current_white: 0,
             gc_emergency: false,
             gc_stopem: false,
+            gc_stopped: false,
             gc_params: [
                 DEFAULT_PAUSE,      // PAUSE = 0
                 DEFAULT_STEPMUL,    // STEPMUL = 1
@@ -229,10 +233,75 @@ impl GC {
         }
     }
 
+    /// Change to incremental mode (like minor2inc in Lua 5.5)
+    pub fn change_to_incremental_mode(&mut self, pool: &mut ObjectPool) {
+        if self.gc_kind == GcKind::Inc {
+            return; // Already in incremental mode
+        }
+
+        // Save number of live bytes
+        self.gc_majorminor = self.gc_marked;
+
+        // Switch mode
+        self.gc_kind = GcKind::Inc;
+
+        // Clear generational lists
+        self.reallyold = None;
+        self.old1 = None;
+        self.survival = None;
+
+        // Enter sweep phase (like Lua 5.5's entersweep)
+        self.enter_sweep(pool);
+
+        // Set debt for next step
+        let stepsize = self.apply_param(STEPSIZE, 100) * 1024;
+        self.set_debt(stepsize);
+    }
+
     /// Track a new object allocation (like luaC_newobj in Lua)
     /// This increments debt - when debt becomes positive, GC should run
+    /// Also sets object to current white color
     #[inline]
-    pub fn track_object(&mut self, _gc_id: GcId, size: usize) {
+    pub fn track_object(&mut self, gc_id: GcId, size: usize, pool: &mut ObjectPool) {
+        // Set object to current white (like Lua 5.5's luaC_newobj)
+        match gc_id {
+            GcId::TableId(id) => {
+                if let Some(t) = pool.tables.get_mut(id.0) {
+                    t.header.make_white(self.current_white);
+                }
+            }
+            GcId::FunctionId(id) => {
+                if let Some(f) = pool.functions.get_mut(id.0) {
+                    f.header.make_white(self.current_white);
+                }
+            }
+            GcId::UpvalueId(id) => {
+                if let Some(u) = pool.upvalues.get_mut(id.0) {
+                    u.header.make_white(self.current_white);
+                }
+            }
+            GcId::StringId(id) => {
+                if let Some(s) = pool.get_string_gc_mut(id) {
+                    s.header.make_white(self.current_white);
+                }
+            }
+            GcId::BinaryId(id) => {
+                if let Some(b) = pool.binaries.get_mut(id.0) {
+                    b.header.make_white(self.current_white);
+                }
+            }
+            GcId::UserdataId(id) => {
+                if let Some(u) = pool.userdata.get_mut(id.0) {
+                    u.header.make_white(self.current_white);
+                }
+            }
+            GcId::ThreadId(id) => {
+                if let Some(t) = pool.threads.get_mut(id.0) {
+                    t.header.make_white(self.current_white);
+                }
+            }
+        }
+        
         let size_signed = size as isize;
         self.total_bytes += size_signed;
         self.gc_debt += size_signed;
@@ -291,6 +360,10 @@ impl GC {
 
     /// Main GC step function (like luaC_step in Lua 5.5)
     pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+        // Check if GC is stopped by user
+        if self.gc_stopped {
+            return;
+        }
         if self.gc_debt <= 0 {
             return; // No need to collect yet
         }
@@ -514,10 +587,47 @@ impl GC {
     fn propagate_mark(&mut self, pool: &mut ObjectPool) -> isize {
         if let Some(gc_id) = self.gray.pop() {
             let work = self.mark_one(gc_id, pool);
-            self.gc_marked += work;
+            // Note: work returned by mark_one is the traversal work (number of objects/fields)
+            // But gc_marked should track the SIZE of marked objects (like Lua's GCmarked)
+            // We need to estimate the size based on the object type
+            let size = self.estimate_object_size(gc_id, pool);
+            self.gc_marked += size;
             work
         } else {
             0
+        }
+    }
+
+    /// Estimate object size for GC accounting (like objsize in Lua)
+    fn estimate_object_size(&self, gc_id: GcId, pool: &ObjectPool) -> isize {
+        match gc_id {
+            GcId::TableId(id) => {
+                if let Some(table) = pool.tables.get(id.0) {
+                    // Rough estimate: base size + entries
+                    let entry_count = table.data.len();
+                    256 + (entry_count * 24) as isize // Base + entries
+                } else {
+                    256
+                }
+            }
+            GcId::FunctionId(_) => 128, // Base function size
+            GcId::UpvalueId(_) => 64,   // Upvalue size
+            GcId::StringId(id) => {
+                if let Some(s) = pool.get_string(id) {
+                    32 + s.len() as isize // Base + string length
+                } else {
+                    32
+                }
+            }
+            GcId::BinaryId(id) => {
+                if let Some(b) = pool.binaries.get(id.0) {
+                    32 + b.data.len() as isize // Base + binary length
+                } else {
+                    32
+                }
+            }
+            GcId::UserdataId(_) => 64, // Base userdata size
+            GcId::ThreadId(_) => 512,   // Thread with stack
         }
     }
 
