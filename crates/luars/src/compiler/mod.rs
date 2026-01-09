@@ -61,7 +61,7 @@ pub fn compile_code_with_name(
         pool,
         &mut compiler_state,
         true,
-        chunk_name.to_string(),
+        chunk_name.to_string()
     );
 
     // Port of mainfunc from lparser.c

@@ -325,7 +325,6 @@ pub struct ObjectPool {
     pub upvalues: Pool<GcUpvalue>,
     pub userdata: Pool<GcUserdata>,
     pub threads: Pool<GcThread>,
-
     // Pre-cached metamethod name StringIds (like Lua's G(L)->tmname[])
     // These are created at initialization and never collected
     // Stored as StringId to avoid repeated hash lookup in hot paths
@@ -490,6 +489,10 @@ impl ObjectPool {
         pool.fix_string(pool.str_dead.as_string_id().unwrap());
 
         pool
+    }
+
+    pub fn get_short_string_limit(&self) -> usize {
+        self.strings.small_string_limit
     }
 
     /// Get pre-cached metamethod StringId by TM enum value

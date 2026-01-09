@@ -2351,6 +2351,11 @@ fn is_kstr(fs: &FuncState, e: &ExpDesc) -> bool {
         return false;
     }
 
+    let const_val = &fs.chunk.constants[k_idx];
+    if let Some(str) = const_val.as_str() {
+        return str.len() <= 40;
+    }
+
     false
 }
 
