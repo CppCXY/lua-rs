@@ -792,7 +792,7 @@ impl LuaVM {
     }
 
     /// Collect all GC roots (objects that must not be collected)
-    fn collect_roots(&self) -> Vec<LuaValue> {
+    pub fn collect_roots(&self) -> Vec<LuaValue> {
         let mut roots = Vec::with_capacity(128);
 
         // 1. Global table

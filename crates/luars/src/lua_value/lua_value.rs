@@ -958,7 +958,7 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Boolean => write!(f, "{}", self.bvalue()),
             LuaValueKind::Integer => write!(f, "{}", self.ivalue()),
             LuaValueKind::Float => write!(f, "{}", self.fltvalue()),
-            LuaValueKind::String => write!(f, "string({})", self.tsvalue().0),
+            LuaValueKind::String => write!(f, "string({}) \"{}\"", self.tsvalue().0, self.as_str().unwrap_or("<invalid string>")),
             LuaValueKind::Binary => write!(f, "binary({})", self.gcid()),
             LuaValueKind::Table => write!(f, "table({})", self.hvalue().0),
             LuaValueKind::Function => write!(f, "function({})", self.clvalue().0),

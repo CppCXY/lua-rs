@@ -622,6 +622,11 @@ impl ObjectPool {
     }
 
     #[inline(always)]
+    pub fn contains_string(&self, id: StringId) -> bool {
+        self.strings.get(id).is_some()
+    }
+
+    #[inline(always)]
     pub fn get_string_value(&self, id: StringId) -> Option<LuaValue> {
         let gs = self.strings.get(id)?;
         let ptr = gs.data.as_ref() as *const String;

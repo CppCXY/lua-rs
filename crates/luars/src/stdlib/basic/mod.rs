@@ -688,6 +688,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         "step" => {
             // LUA_GCSTEP: Single step with optional size argument (in KB)
             // Like Lua 5.5's lapi.c:1203-1212
+            // NOTE: This should work even when GC is stopped (force=true)
             let arg2 = l.get_arg(2);
             let step_size_kb = arg2.and_then(|v| v.as_integer()).unwrap_or(0);
 
@@ -706,13 +707,21 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let old_debt = l.vm_mut().gc.gc_debt;
             l.vm_mut().gc.set_debt(old_debt - n);
 
-            // Perform the GC step (if debt > 0)
-            l.vm_mut().check_gc_step();
+            // Perform the GC step with force=true (ignore gc_stopped)
+            let vm = l.vm_mut();
+            let roots = vm.collect_roots();
+            vm.gc.step_internal(&roots, &mut vm.object_pool, true);
 
-            // Check if we completed a full cycle (ended at Pause state)
+            // Check if we completed a full cycle
+            // A full cycle means: either we reached Pause from non-Pause,
+            // or we started at Pause and went through at least one non-Pause state
             let completed = {
                 let vm = l.vm_mut();
-                matches!(vm.gc.gc_state, crate::gc::GcState::Pause)
+                let current_state = vm.gc.gc_state;
+                
+                // If we started at Pause and are still at Pause, we didn't do a full cycle
+                // If we started at non-Pause and reached Pause, we completed a cycle
+                matches!(current_state, crate::gc::GcState::Pause)
                     && !matches!(old_state, crate::gc::GcState::Pause)
             };
 

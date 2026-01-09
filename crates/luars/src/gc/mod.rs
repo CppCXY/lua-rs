@@ -39,7 +39,7 @@ mod gc_id;
 mod gc_object;
 mod object_pool;
 
-use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::lua_value::{LuaValue, LuaValueKind, Chunk};
 pub use gc_id::*;
 pub use gc_object::*;
 pub use object_pool::*;
@@ -360,11 +360,18 @@ impl GC {
 
     /// Main GC step function (like luaC_step in Lua 5.5)
     pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        // Check if GC is stopped by user
-        if self.gc_stopped {
+        self.step_internal(roots, pool, false);
+    }
+
+    /// Internal step function with force parameter
+    /// If force=true, ignore gc_stopped flag (used by collectgarbage("step"))
+    pub fn step_internal(&mut self, roots: &[LuaValue], pool: &mut ObjectPool, force: bool) {
+        // Check if GC is stopped by user (unless forced)
+        if !force && self.gc_stopped {
             return;
         }
-        if self.gc_debt <= 0 {
+        // If not forced, check debt
+        if !force && self.gc_debt <= 0 {
             return; // No need to collect yet
         }
 
@@ -565,12 +572,29 @@ impl GC {
             LuaValueKind::String => {
                 if let Some(id) = value.as_string_id() {
                     if let Some(s) = pool.get_string_gc_mut(id) {
-                        // Strings are leaves - mark black directly
-                        s.header.make_black();
+                        // Strings are leaves - mark black directly (but only if white)
+                        if s.header.is_white() {
+                            s.header.make_black();
+                        }
+                    } else {
+                        eprintln!("[GC] FATAL: String {} not found in pool during mark!", id.0);
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Mark all constants in a chunk and its nested chunks (like Lua 5.5's traverseproto)
+    fn mark_chunk_constants(&mut self, chunk: &Chunk, pool: &mut ObjectPool) {
+        // Mark all constants in this chunk
+        for constant in &chunk.constants {
+            self.mark_value(constant, pool);
+        }
+        
+        // Recursively mark constants in child protos (nested functions)
+        for child_chunk in &chunk.child_protos {
+            self.mark_chunk_constants(child_chunk, pool);
         }
     }
 
@@ -656,15 +680,17 @@ impl GC {
                 return 1 + entries.len() as isize;
             }
             GcId::FunctionId(id) => {
-                // First collect upvalues
-                let upvalues = if let Some(func) = pool.functions.get_mut(id.0) {
+                // First mark the function black and get references to data we need
+                let (upvalues, chunk) = if let Some(func) = pool.functions.get_mut(id.0) {
                     func.header.make_black();
-                    func.data.upvalues()
+                    let upvalues = func.data.upvalues();
+                    let chunk = func.data.chunk().map(|c| c.clone()); // Clone Rc<Chunk>
+                    (upvalues, chunk)
                 } else {
                     return 0;
                 };
 
-                // Then process them
+                // Mark upvalues
                 for upval_id in &upvalues {
                     if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
                         if uv.header.is_white() {
@@ -673,7 +699,14 @@ impl GC {
                         }
                     }
                 }
-                return 1 + upvalues.len() as isize;
+
+                // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
+                if let Some(chunk) = chunk {
+                    self.mark_chunk_constants(&chunk, pool);
+                    return 1 + upvalues.len() as isize + chunk.constants.len() as isize + chunk.child_protos.len() as isize;
+                } else {
+                    return 1 + upvalues.len() as isize;
+                }
             }
             GcId::UpvalueId(id) => {
                 // First get the closed value
