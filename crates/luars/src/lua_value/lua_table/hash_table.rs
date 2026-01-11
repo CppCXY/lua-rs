@@ -34,6 +34,8 @@ pub struct LuaHashTable {
 struct Node {
     key: LuaValue,
     value: LuaValue,
+    /// 缓存的键哈希值（避免重复计算）
+    key_hash: u64,
     /// 链表指针：直接存储下一个节点索引 (usize::MAX = 链尾)
     next: usize,
 }
@@ -48,6 +50,7 @@ impl Node {
         Self {
             key: DEAD_KEY,
             value: LuaValue::nil(),
+            key_hash: 0,
             next: NO_NEXT,
         }
     }
@@ -158,7 +161,8 @@ impl LuaHashTable {
         loop {
             let node = &self.nodes[idx];
 
-            if &node.key == key {
+            // 快速路径：先比较 hash，不同则跳过
+            if node.key_hash == hash && &node.key == key {
                 return Some(idx);
             }
 
@@ -183,6 +187,7 @@ impl LuaHashTable {
             self.nodes[main_pos] = Node {
                 key,
                 value,
+                key_hash: hash,
                 next: NO_NEXT,
             };
             self.count += 1;
@@ -202,6 +207,7 @@ impl LuaHashTable {
         self.nodes[free_pos] = Node {
             key,
             value,
+            key_hash: hash,
             next: NO_NEXT,
         };
 
@@ -256,7 +262,8 @@ impl LuaHashTable {
         let mut idx = main_pos;
         loop {
             let node = &self.nodes[idx];
-            if &node.key == &key {
+            // 快速路径：先比较 hash
+            if node.key_hash == hash && &node.key == &key {
                 self.nodes[idx].value = value;
                 if let Some(k) = key.as_integer() {
                     self.update_array_len_insert(k);
@@ -315,7 +322,8 @@ impl LuaHashTable {
         loop {
             let node = &self.nodes[idx];
 
-            if &node.key == key {
+            // 快速路径：先比较 hash
+            if node.key_hash == hash && &node.key == key {
                 return Some(node.value);
             }
 
@@ -345,9 +353,12 @@ impl LuaTableImpl for LuaHashTable {
         loop {
             let node = &self.nodes[idx];
 
-            if let Some(node_key) = node.key.as_integer() {
-                if node_key == key {
-                    return Some(node.value);
+            // 快速路径：先比较 hash，再检查是否为整数键
+            if node.key_hash == hash {
+                if let Some(node_key) = node.key.as_integer() {
+                    if node_key == key {
+                        return Some(node.value);
+                    }
                 }
             }
 
@@ -375,10 +386,13 @@ impl LuaTableImpl for LuaHashTable {
         loop {
             let node = &self.nodes[idx];
 
-            if let Some(node_key) = node.key.as_integer() {
-                if node_key == key {
-                    self.nodes[idx].value = value;
-                    return LuaInsertResult::Success;
+            // 快速路径：先比较 hash，再检查是否为整数键
+            if node.key_hash == hash {
+                if let Some(node_key) = node.key.as_integer() {
+                    if node_key == key {
+                        self.nodes[idx].value = value;
+                        return LuaInsertResult::Success;
+                    }
                 }
             }
 
