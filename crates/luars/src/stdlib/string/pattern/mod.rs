@@ -14,6 +14,6 @@ mod matcher;
 mod parser;
 
 #[allow(unused)]
-pub use matcher::{find, find_all_matches, gsub, match_pattern, try_match, MatchInfo};
+pub use matcher::{MatchInfo, find, find_all_matches, gsub, match_pattern, try_match};
 #[allow(unused)]
-pub use parser::{parse_pattern, Pattern};
+pub use parser::{Pattern, parse_pattern};

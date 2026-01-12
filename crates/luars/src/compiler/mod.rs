@@ -16,23 +16,23 @@ pub use expression::*;
 pub use func_state::*;
 pub use parse_literal::*;
 
+use crate::LuaVM;
 use crate::compiler::parser::{
     LuaLanguageLevel, LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig,
 };
-use crate::gc::ObjectPool;
 use crate::lua_value::Chunk;
 use crate::lua_vm::OpCode;
 
 // Structures are now in separate files (func_state.rs, expression.rs)
 
 // Port of luaY_parser from lparser.c
-pub fn compile_code(source: &str, pool: &mut ObjectPool) -> Result<Chunk, String> {
-    compile_code_with_name(source, pool, "@chunk")
+pub fn compile_code(source: &str, vm: &mut LuaVM) -> Result<Chunk, String> {
+    compile_code_with_name(source, vm, "@chunk")
 }
 
 pub fn compile_code_with_name(
     source: &str,
-    pool: &mut ObjectPool,
+    vm: &mut LuaVM,
     chunk_name: &str,
 ) -> Result<Chunk, String> {
     let level = LuaLanguageLevel::Lua55;
@@ -58,10 +58,10 @@ pub fn compile_code_with_name(
     let mut compiler_state = CompilerState::new();
     let mut fs = FuncState::new(
         &mut parser,
-        pool,
+        vm,
         &mut compiler_state,
         true,
-        chunk_name.to_string()
+        chunk_name.to_string(),
     );
 
     // Port of mainfunc from lparser.c

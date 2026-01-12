@@ -118,7 +118,7 @@ pub fn exec_settable(
         if !table.has_metatable() {
             // Fast path: no metatable, directly set
             table.raw_set(&rb, val);
-            
+
             // CRITICAL: Update frame.top to protect all registers before GC
             // GC might be triggered by check_gc(), so we must ensure all used
             // registers are included in the stack scan
@@ -129,7 +129,7 @@ pub fn exec_settable(
                 call_info.top = required_top;
                 lua_state.set_top(required_top);
             }
-            
+
             lua_state.vm_mut().check_gc();
             return Ok(());
         }
@@ -386,7 +386,7 @@ pub fn exec_setfield(
         if !table.has_metatable() {
             // Fast path: no __newindex metamethod, directly set
             table.raw_set(&key, value);
-            
+
             // CRITICAL: Update frame.top to protect all registers before GC
             let max_reg = a.max(c) + 1;
             let required_top = base + max_reg;
@@ -395,7 +395,7 @@ pub fn exec_setfield(
                 call_info.top = required_top;
                 lua_state.set_top(required_top);
             }
-            
+
             lua_state.vm_mut().check_gc();
             return Ok(());
         }

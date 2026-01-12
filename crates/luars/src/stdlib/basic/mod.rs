@@ -692,7 +692,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let arg2 = l.get_arg(2);
             let step_size_kb = arg2.and_then(|v| v.as_integer()).unwrap_or(0);
 
-            // Save old state to check if we complete a cycle  
+            // Save old state to check if we complete a cycle
             let old_state = l.vm_mut().gc.gc_state;
 
             // Calculate n (bytes to subtract from debt)
@@ -720,7 +720,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let completed = {
                 let vm = l.vm_mut();
                 let current_state = vm.gc.gc_state;
-                
+
                 // If we started at Pause and are still at Pause, we didn't do a full cycle
                 // If we started at non-Pause and reached Pause, we completed a cycle
                 matches!(current_state, crate::gc::GcState::Pause)
@@ -836,7 +836,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 /// load(chunk [, chunkname [, mode [, env]]]) - Load a chunk
 fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     use crate::lua_value::chunk_serializer;
-    
+
     let chunk_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'load' (value expected)".to_string()))?;

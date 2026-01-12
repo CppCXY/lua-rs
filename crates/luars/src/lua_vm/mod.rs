@@ -216,7 +216,7 @@ impl LuaVM {
 
     /// Compile source code using VM's string pool
     pub fn compile(&mut self, source: &str) -> LuaResult<Chunk> {
-        let chunk = match compile_code(source, &mut self.object_pool) {
+        let chunk = match compile_code(source, self) {
             Ok(c) => c,
             Err(e) => return Err(self.compile_error(e)),
         };
@@ -225,7 +225,7 @@ impl LuaVM {
     }
 
     pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<Chunk> {
-        let chunk = match compile_code_with_name(source, &mut self.object_pool, chunk_name) {
+        let chunk = match compile_code_with_name(source, self, chunk_name) {
             Ok(c) => c,
             Err(e) => return Err(self.compile_error(e)),
         };

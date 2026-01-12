@@ -990,7 +990,7 @@ fn integer_k(fs: &mut FuncState, i: i64) -> usize {
 // static int stringK (FuncState *fs, TString *s)
 pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     // Intern string to ObjectPool and get StringId
-    let (string, _) = fs.pool.create_string(&s);
+    let string = fs.vm.create_string(&s);
 
     // Add LuaValue with StringId to constants (check for duplicates)
     // For strings, key == value (strings are deduplicated globally)
@@ -1018,7 +1018,7 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) -> usize {
     debug_assert!(e.kind == ExpKind::VKSTR);
     e.kind = ExpKind::VK;
     let str_id = e.u.str();
-    let value = fs.pool.get_string_value(str_id).unwrap();
+    let value = fs.vm.object_pool.get_string_value(str_id).unwrap();
     let k = add_constant(fs, value);
     e.u = ExpUnion::Info(k as i32);
     k
@@ -2386,14 +2386,13 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     // Only emit OP_SELF when method name is a SHORT string constant.
     // Lua 5.5 has LUAI_MAXSHORTLEN=40, strings longer than that cannot use SELF optimization
     // (see lcode.c:1333: strisshr check).
-    const LUAI_MAXSHORTLEN: usize = 40; // Lua 5.5 short string length limit
 
     // Check if key is a VKSTR (method name string)
     let can_use_self = if key.kind == ExpKind::VKSTR {
         // Check if it's a short string
         let str_id = key.u.str();
-        if let Some(lua_str) = fs.pool.get_string(str_id) {
-            lua_str.len() <= LUAI_MAXSHORTLEN
+        if let Some(lua_str) = fs.vm.object_pool.get_string(str_id) {
+            lua_str.len() <= fs.short_string_limit
         } else {
             false
         }
@@ -2463,7 +2462,7 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
         ExpKind::VKSTR => {
             // String constant - already in constants
             let id = e.u.str();
-            let str_value = fs.pool.get_string_value(id)?;
+            let str_value = fs.vm.object_pool.get_string_value(id)?;
             Some(str_value)
         }
         ExpKind::VK => {

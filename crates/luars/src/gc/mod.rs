@@ -39,7 +39,7 @@ mod gc_id;
 mod gc_object;
 mod object_pool;
 
-use crate::lua_value::{LuaValue, LuaValueKind, Chunk};
+use crate::lua_value::{Chunk, LuaValue, LuaValueKind};
 pub use gc_id::*;
 pub use gc_object::*;
 pub use object_pool::*;
@@ -267,7 +267,7 @@ impl GC {
         // This ensures new objects are considered "visited" (or "reachable")
         // for the current cycle, preventing premature collection if
         // the cycle advances (Atomic/Sweep) before the object is anchored.
-        
+
         match gc_id {
             // Leaves: Can be marked Black immediately (no outgoing refs to scan)
             GcId::StringId(id) => {
@@ -312,7 +312,7 @@ impl GC {
                 }
             }
         }
-        
+
         // Update debt tracking
         let size_signed = size as isize;
         // Update total_bytes to include both the new allocation AND the debt
@@ -328,7 +328,7 @@ impl GC {
         self.total_bytes = self.total_bytes.saturating_sub(size_signed);
         // Do NOT change debt when deallocating during sweep
         // Changing debt would disturb the cycle control
-        // self.gc_debt += size_signed; 
+        // self.gc_debt += size_signed;
         self.stats.bytes_freed += size;
     }
 
@@ -404,7 +404,7 @@ impl GC {
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         // Calculate step size (like Lua 5.5)
         let stepsize = self.apply_param(STEPSIZE, 100) * 1024; // in bytes (isize)
-        
+
         // Calculate base work from debt, relying on updated accounting
         let debt = self.gc_debt;
         let stepmul = self.apply_param(STEPMUL, 200);
@@ -412,10 +412,10 @@ impl GC {
         // Calculate effective work
         // work2do = debt * stepmul / 100
         let effective_debt = debt;
-        
+
         // Use i128 to prevent overflow when debt and stepmul are both very large
         let mut work2do = ((effective_debt as i128 * stepmul as i128) / 100) as isize;
-        
+
         let fast = work2do == 0; // Special case: do full collection
 
         // Repeat until enough work is done (like Lua 5.5's do-while loop)
@@ -614,7 +614,7 @@ impl GC {
         for constant in &chunk.constants {
             self.mark_value(constant, pool);
         }
-        
+
         // Recursively mark constants in child protos (nested functions)
         for child_chunk in &chunk.child_protos {
             self.mark_chunk_constants(child_chunk, pool);
@@ -648,9 +648,9 @@ impl GC {
     /// Estimate object size for GC accounting (like objsize in Lua)
     fn estimate_object_size(&self, gc_id: GcId, pool: &ObjectPool) -> isize {
         match gc_id {
-            GcId::TableId(_) => 512,      // Reasonable average for test tables
-            GcId::FunctionId(_) => 256,   // Base + some upvalues
-            GcId::UpvalueId(_) => 64,     // Fixed size
+            GcId::TableId(_) => 512,    // Reasonable average for test tables
+            GcId::FunctionId(_) => 256, // Base + some upvalues
+            GcId::UpvalueId(_) => 64,   // Fixed size
             GcId::StringId(id) => {
                 if let Some(s) = pool.get_string(id) {
                     32 + s.len() as isize
@@ -666,7 +666,7 @@ impl GC {
                 }
             }
             GcId::UserdataId(_) => 128,
-            GcId::ThreadId(_) => 2048,    // Thread + Stack
+            GcId::ThreadId(_) => 2048, // Thread + Stack
         }
     }
 
@@ -718,7 +718,10 @@ impl GC {
                 // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
                 if let Some(chunk) = chunk {
                     self.mark_chunk_constants(&chunk, pool);
-                    return 1 + upvalues.len() as isize + chunk.constants.len() as isize + chunk.child_protos.len() as isize;
+                    return 1
+                        + upvalues.len() as isize
+                        + chunk.constants.len() as isize
+                        + chunk.child_protos.len() as isize;
                 } else {
                     return 1 + upvalues.len() as isize;
                 }
@@ -827,11 +830,11 @@ impl GC {
         let grayagain = std::mem::take(&mut self.grayagain);
         for gc_id in grayagain {
             self.mark_one(gc_id, pool);
-            
-            // DRAIN GRAY IMMEDIATELY after each mark_one? 
+
+            // DRAIN GRAY IMMEDIATELY after each mark_one?
             // Or just drain after all? Lua drains after all.
         }
-        
+
         // Propagate again to handle anything pushed by grayagain processing
         while !self.gray.is_empty() {
             self.propagate_mark(pool);

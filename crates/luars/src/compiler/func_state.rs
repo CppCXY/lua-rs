@@ -1,7 +1,5 @@
-use crate::Chunk;
 use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
-// Port of FuncState and related structures from lparser.h
-use crate::gc::ObjectPool;
+use crate::{Chunk, LuaVM};
 use crate::{LuaValue, compiler::parser::LuaLexer};
 
 // Upvalue descriptor
@@ -18,7 +16,7 @@ pub struct FuncState<'a> {
     pub chunk: Chunk,
     pub prev: Option<&'a mut FuncState<'a>>, // parent function state
     pub lexer: &'a mut LuaLexer<'a>,
-    pub pool: &'a mut ObjectPool,
+    pub vm: &'a mut LuaVM,
     pub compiler_state: &'a mut CompilerState,
     pub block_cnt_id: Option<BlockCntId>,
     pub pc: usize,                     // next position to code (equivalent to pc)
@@ -176,19 +174,19 @@ pub struct VarDesc {
 impl<'a> FuncState<'a> {
     pub fn new(
         lexer: &'a mut LuaLexer<'a>,
-        pool: &'a mut ObjectPool,
+        vm: &'a mut LuaVM,
         compiler_state: &'a mut CompilerState,
         is_vararg: bool,
         source_name: String,
     ) -> Self {
         // Create kcache table for constant deduplication (like Lua 5.5's open_func)
-        let kcache = pool.create_table(0, 0);
-        let short_string_limit = pool.get_short_string_limit();
+        let kcache = vm.create_table(0, 0);
+        let short_string_limit = vm.object_pool.get_short_string_limit();
         FuncState {
             chunk: Chunk::new(),
             prev: None,
             lexer,
-            pool,
+            vm,
             compiler_state,
             block_cnt_id: None,
             pc: 0,
@@ -246,13 +244,13 @@ impl<'a> FuncState<'a> {
     // Create child function state
     pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
         // Create new kcache table for child function
-        let kcache = parent.pool.create_table(0, 0);
-        let short_string_limit = parent.pool.get_short_string_limit();
+        let kcache = parent.vm.create_table(0, 0);
+        let short_string_limit = parent.vm.object_pool.get_short_string_limit();
         FuncState {
             chunk: Chunk::new(),
             prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
             lexer: parent.lexer,
-            pool: parent.pool,
+            vm: parent.vm,
             compiler_state: parent.compiler_state,
             block_cnt_id: None,
             pc: 0,

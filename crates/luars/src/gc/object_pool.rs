@@ -12,8 +12,8 @@ use crate::gc::gc_object::{CachedUpvalue, FunctionBody};
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption, TmKind};
 use crate::{
-    FunctionId, GcFunction, GcString, GcTable, GcThread, GcUpvalue, GcUserdata, GcBinary, GcHeader, LuaTable,
-    LuaValue, StringId, BinaryId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
+    BinaryId, FunctionId, GcBinary, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue,
+    GcUserdata, LuaTable, LuaValue, StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -595,12 +595,14 @@ impl ObjectPool {
         };
         let id = self.binaries.alloc(gc_binary);
         let binary_id = BinaryId(id);
-        
+
         // Get pointer after allocation to ensure it's stable
-        let ptr = self.binaries.get(id)
+        let ptr = self
+            .binaries
+            .get(id)
             .map(|gb| gb.data.as_ref() as *const Vec<u8>)
             .expect("Just allocated binary should exist");
-        
+
         LuaValue::binary(binary_id, ptr)
     }
 

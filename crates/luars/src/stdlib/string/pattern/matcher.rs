@@ -6,9 +6,9 @@ use super::parser::{AnchorType, Pattern, RepeatMode};
 /// Information about a pattern match
 #[derive(Debug, Clone)]
 pub struct MatchInfo {
-    pub start: usize,    // Start byte offset
-    pub end: usize,      // End byte offset
-    pub captures: Vec<String>,  // Captured strings
+    pub start: usize,          // Start byte offset
+    pub end: usize,            // End byte offset
+    pub captures: Vec<String>, // Captured strings
 }
 
 /// Find all matches of pattern in text

@@ -109,11 +109,8 @@ impl LuaHashTable {
     /// 扩容并重新哈希
     fn resize(&mut self) {
         let new_capacity = (self.nodes.len() * 2).max(INITIAL_CAPACITY);
-        let old_nodes = std::mem::replace(
-            &mut self.nodes,
-            vec![Node::new_empty(); new_capacity],
-        );
-        
+        let old_nodes = std::mem::replace(&mut self.nodes, vec![Node::new_empty(); new_capacity]);
+
         self.last_free = new_capacity;
         self.count = 0;
         self.array_len = 0;
@@ -130,11 +127,9 @@ impl LuaHashTable {
     fn grow_to_size(&mut self, min_size: usize) {
         if self.nodes.len() < min_size {
             let new_capacity = min_size.max(INITIAL_CAPACITY);
-            let old_nodes = std::mem::replace(
-                &mut self.nodes,
-                vec![Node::new_empty(); new_capacity],
-            );
-            
+            let old_nodes =
+                std::mem::replace(&mut self.nodes, vec![Node::new_empty(); new_capacity]);
+
             self.last_free = new_capacity;
             self.count = 0;
             self.array_len = 0;
@@ -224,7 +219,7 @@ impl LuaHashTable {
                 break;
             }
         }
-        
+
         self.count += 1;
     }
 
