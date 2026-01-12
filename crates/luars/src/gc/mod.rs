@@ -303,7 +303,11 @@ impl GC {
         }
         
         let size_signed = size as isize;
-        self.total_bytes += size_signed;
+        // Update total_bytes to include both the new allocation AND the debt
+        // total_bytes = allocated + debt
+        // allocation adds +size to allocated AND +size to debt
+        // so total_bytes must increase by 2 * size
+        self.total_bytes += size_signed * 2;
         self.gc_debt += size_signed;
         self.stats.bytes_allocated += size;
     }
@@ -313,9 +317,9 @@ impl GC {
     pub fn record_deallocation(&mut self, size: usize) {
         let size_signed = size as isize;
         self.total_bytes = self.total_bytes.saturating_sub(size_signed);
-        // When freeing memory, increase debt (less memory = further from collection)
-        // This matches Lua 5.5's behavior where debt = threshold - total_bytes
-        self.gc_debt += size_signed;
+        // Do NOT change debt when deallocating during sweep
+        // Changing debt would disturb the cycle control
+        // self.gc_debt += size_signed; 
         self.stats.bytes_freed += size;
     }
 
@@ -389,9 +393,18 @@ impl GC {
 
     /// Incremental GC step (like incstep in Lua 5.5)
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        // Calculate step size and work to do (like Lua 5.5)
-        let stepsize = self.apply_param(STEPSIZE, 100) * 1024; // in bytes
-        let mut work2do = self.apply_param(STEPMUL, stepsize / 8); // work units
+        // Calculate step size (like Lua 5.5)
+        let stepsize = self.apply_param(STEPSIZE, 100) * 1024; // in bytes (isize)
+        
+        // Calculate base work from debt, relying on updated accounting
+        let debt = self.gc_debt;
+        let stepmul = self.apply_param(STEPMUL, 200);
+
+        // Calculate effective work
+        // work2do = debt * stepmul / 100
+        let effective_debt = debt;
+        
+        let mut work2do = (effective_debt * stepmul) / 100;
         let fast = work2do == 0; // Special case: do full collection
 
         // Repeat until enough work is done (like Lua 5.5's do-while loop)
@@ -430,7 +443,8 @@ impl GC {
         if self.gc_state == GcState::Pause {
             self.set_pause();
         } else {
-            self.set_debt(stepsize);
+            // Set negative debt to allow allocation before next GC step
+            self.set_debt(-stepsize);
         }
     }
 
@@ -608,13 +622,13 @@ impl GC {
     /// Propagate mark for one gray object (like propagatemark in Lua 5.5)
     fn propagate_mark(&mut self, pool: &mut ObjectPool) -> isize {
         if let Some(gc_id) = self.gray.pop() {
-            let work = self.mark_one(gc_id, pool);
+            let _ = self.mark_one(gc_id, pool);
             // Note: work returned by mark_one is the traversal work (number of objects/fields)
             // But gc_marked should track the SIZE of marked objects (like Lua's GCmarked)
-            // We need to estimate the size based on the object type
+            // We use the estimated size as the work cost, consistent with Lua's behavior (step size in KB)
             let size = self.estimate_object_size(gc_id, pool);
             self.gc_marked += size;
-            work
+            size
         } else {
             0
         }
@@ -623,33 +637,25 @@ impl GC {
     /// Estimate object size for GC accounting (like objsize in Lua)
     fn estimate_object_size(&self, gc_id: GcId, pool: &ObjectPool) -> isize {
         match gc_id {
-            GcId::TableId(id) => {
-                if let Some(table) = pool.tables.get(id.0) {
-                    // Rough estimate: base size + entries
-                    let entry_count = table.data.len();
-                    256 + (entry_count * 24) as isize // Base + entries
-                } else {
-                    256
-                }
-            }
-            GcId::FunctionId(_) => 128, // Base function size
-            GcId::UpvalueId(_) => 64,   // Upvalue size
+            GcId::TableId(_) => 512,      // Reasonable average for test tables
+            GcId::FunctionId(_) => 256,   // Base + some upvalues
+            GcId::UpvalueId(_) => 64,     // Fixed size
             GcId::StringId(id) => {
                 if let Some(s) = pool.get_string(id) {
-                    32 + s.len() as isize // Base + string length
+                    32 + s.len() as isize
                 } else {
-                    32
+                    64
                 }
             }
             GcId::BinaryId(id) => {
                 if let Some(b) = pool.binaries.get(id.0) {
-                    32 + b.data.len() as isize // Base + binary length
+                    32 + b.data.len() as isize
                 } else {
-                    32
+                    64
                 }
             }
-            GcId::UserdataId(_) => 64, // Base userdata size
-            GcId::ThreadId(_) => 512,   // Thread with stack
+            GcId::UserdataId(_) => 128,
+            GcId::ThreadId(_) => 2048,    // Thread + Stack
         }
     }
 

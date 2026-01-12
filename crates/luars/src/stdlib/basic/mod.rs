@@ -698,14 +698,16 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // Calculate n (bytes to subtract from debt)
             // If n <= 0, use current GCdebt to force one basic step
             let n = if step_size_kb <= 0 {
-                l.vm_mut().gc.gc_debt // Force to run one basic step
+                // If 0, use current debt (force standard step)
+                // If negative debt, we'll effectively use min_step
+                l.vm_mut().gc.gc_debt
             } else {
-                (step_size_kb * 1024) as isize // Convert KB to bytes
+                (step_size_kb * 1024) as isize
             };
 
-            // Set debt = GCdebt - n (like Lua's luaE_setdebt(g, g->GCdebt - n))
-            let old_debt = l.vm_mut().gc.gc_debt;
-            l.vm_mut().gc.set_debt(old_debt - n);
+            // Set debt to n to force proportional work
+            // set_debt preserves real_bytes, so this is safe
+            l.vm_mut().gc.set_debt(n);
 
             // Perform the GC step with force=true (ignore gc_stopped)
             let vm = l.vm_mut();
