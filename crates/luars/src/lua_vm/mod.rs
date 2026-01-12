@@ -458,7 +458,8 @@ impl LuaVM {
         if is_new {
             let size = 32 + s.len();
             let s_id = value.as_string_id().unwrap();
-            self.gc.track_object(GcId::StringId(s_id), size, &mut self.object_pool);
+            self.gc
+                .track_object(GcId::StringId(s_id), size, &mut self.object_pool);
         }
         value
     }
@@ -471,7 +472,8 @@ impl LuaVM {
         if is_new {
             let size = 32 + len;
             let s_id = value.as_string_id().unwrap();
-            self.gc.track_object(GcId::StringId(s_id), size, &mut self.object_pool);
+            self.gc
+                .track_object(GcId::StringId(s_id), size, &mut self.object_pool);
         }
         value
     }
@@ -525,7 +527,8 @@ impl LuaVM {
         let value = self.object_pool.create_table(array_size, hash_size);
         let id = value.as_table_id().unwrap();
         // Track object for GC - sets to current white and updates gc_debt
-        self.gc.track_object(GcId::TableId(id), 256, &mut self.object_pool);
+        self.gc
+            .track_object(GcId::TableId(id), 256, &mut self.object_pool);
         value
     }
 
@@ -571,8 +574,11 @@ impl LuaVM {
     pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
         let value = self.object_pool.create_userdata(data);
         let id = value.as_userdata_id().unwrap();
-        self.gc
-            .track_object(GcId::UserdataId(id), std::mem::size_of::<LuaUserdata>(), &mut self.object_pool);
+        self.gc.track_object(
+            GcId::UserdataId(id),
+            std::mem::size_of::<LuaUserdata>(),
+            &mut self.object_pool,
+        );
         value
     }
 
@@ -582,8 +588,11 @@ impl LuaVM {
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         let value = self.object_pool.create_function(chunk, upvalue_ids);
         let id = value.as_function_id().unwrap();
-        self.gc
-            .track_object(GcId::FunctionId(id), std::mem::size_of::<LuaFunction>(), &mut self.object_pool);
+        self.gc.track_object(
+            GcId::FunctionId(id),
+            std::mem::size_of::<LuaFunction>(),
+            &mut self.object_pool,
+        );
         value
     }
 
@@ -599,8 +608,11 @@ impl LuaVM {
 
         let value = self.object_pool.create_c_closure(func, upvalue_ids);
         let id = value.as_function_id().unwrap();
-        self.gc
-            .track_object(GcId::FunctionId(id), std::mem::size_of::<GcFunction>(), &mut self.object_pool);
+        self.gc.track_object(
+            GcId::FunctionId(id),
+            std::mem::size_of::<GcFunction>(),
+            &mut self.object_pool,
+        );
         value
     }
 
@@ -608,8 +620,11 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let id = self.object_pool.create_upvalue_open(stack_index);
-        self.gc
-            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>(), &mut self.object_pool);
+        self.gc.track_object(
+            GcId::UpvalueId(id),
+            std::mem::size_of::<GcUpvalue>(),
+            &mut self.object_pool,
+        );
         id
     }
 
@@ -617,8 +632,11 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let id = self.object_pool.create_upvalue_closed(value);
-        self.gc
-            .track_object(GcId::UpvalueId(id), std::mem::size_of::<GcUpvalue>(), &mut self.object_pool);
+        self.gc.track_object(
+            GcId::UpvalueId(id),
+            std::mem::size_of::<GcUpvalue>(),
+            &mut self.object_pool,
+        );
         id
     }
 
@@ -687,9 +705,9 @@ impl LuaVM {
             LuaValueKind::Nil => "nil",
             LuaValueKind::Boolean => "boolean",
             LuaValueKind::Integer | LuaValueKind::Float => "number",
-            LuaValueKind::String => "string",            
-            LuaValueKind::Binary => "string", // Binary is also a string type in Lua         
-             LuaValueKind::Table => "table",
+            LuaValueKind::String => "string",
+            LuaValueKind::Binary => "string", // Binary is also a string type in Lua
+            LuaValueKind::Table => "table",
             LuaValueKind::Function | LuaValueKind::CFunction => "function",
             LuaValueKind::Thread => "thread",
             LuaValueKind::Userdata => "userdata",
@@ -708,18 +726,12 @@ impl LuaVM {
         if self.gc.gc_debt <= 0 {
             return;
         }
-        // Slow path: actual GC work
-        self.check_gc_slow();
+
+        self.check_gc_step();
     }
 
     /// Public method to force a GC step (for collectgarbage "step")
     pub fn check_gc_step(&mut self) {
-        self.check_gc_slow();
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn check_gc_slow(&mut self) {
         // Collect roots for GC (like luaC_step in Lua 5.5)
         let roots = self.collect_roots();
 

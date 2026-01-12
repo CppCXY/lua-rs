@@ -263,50 +263,59 @@ impl GC {
     /// Also sets object to current white color
     #[inline]
     pub fn track_object(&mut self, gc_id: GcId, size: usize, pool: &mut ObjectPool) {
-        // Set object to current white (like Lua 5.5's luaC_newobj)
+        // STRATEGY CHANGE: Allocate "Gray" or "Black" instead of "White".
+        // This ensures new objects are considered "visited" (or "reachable")
+        // for the current cycle, preventing premature collection if
+        // the cycle advances (Atomic/Sweep) before the object is anchored.
+        
         match gc_id {
-            GcId::TableId(id) => {
-                if let Some(t) = pool.tables.get_mut(id.0) {
-                    t.header.make_white(self.current_white);
-                }
-            }
-            GcId::FunctionId(id) => {
-                if let Some(f) = pool.functions.get_mut(id.0) {
-                    f.header.make_white(self.current_white);
-                }
-            }
-            GcId::UpvalueId(id) => {
-                if let Some(u) = pool.upvalues.get_mut(id.0) {
-                    u.header.make_white(self.current_white);
-                }
-            }
+            // Leaves: Can be marked Black immediately (no outgoing refs to scan)
             GcId::StringId(id) => {
                 if let Some(s) = pool.get_string_gc_mut(id) {
-                    s.header.make_white(self.current_white);
+                    s.header.make_black();
                 }
             }
             GcId::BinaryId(id) => {
                 if let Some(b) = pool.binaries.get_mut(id.0) {
-                    b.header.make_white(self.current_white);
+                    b.header.make_black();
+                }
+            }
+            // Complex objects: Mark Gray and schedule for scanning
+            GcId::TableId(id) => {
+                if let Some(t) = pool.tables.get_mut(id.0) {
+                    t.header.make_gray();
+                    self.gray.push(gc_id);
+                }
+            }
+            GcId::FunctionId(id) => {
+                if let Some(f) = pool.functions.get_mut(id.0) {
+                    f.header.make_gray();
+                    self.gray.push(gc_id);
+                }
+            }
+            GcId::UpvalueId(id) => {
+                if let Some(u) = pool.upvalues.get_mut(id.0) {
+                    u.header.make_gray();
+                    self.gray.push(gc_id);
                 }
             }
             GcId::UserdataId(id) => {
                 if let Some(u) = pool.userdata.get_mut(id.0) {
-                    u.header.make_white(self.current_white);
+                    u.header.make_gray();
+                    self.gray.push(gc_id);
                 }
             }
             GcId::ThreadId(id) => {
                 if let Some(t) = pool.threads.get_mut(id.0) {
-                    t.header.make_white(self.current_white);
+                    t.header.make_gray();
+                    self.gray.push(gc_id);
                 }
             }
         }
         
+        // Update debt tracking
         let size_signed = size as isize;
         // Update total_bytes to include both the new allocation AND the debt
-        // total_bytes = allocated + debt
-        // allocation adds +size to allocated AND +size to debt
-        // so total_bytes must increase by 2 * size
         self.total_bytes += size_signed * 2;
         self.gc_debt += size_signed;
         self.stats.bytes_allocated += size;
@@ -404,7 +413,9 @@ impl GC {
         // work2do = debt * stepmul / 100
         let effective_debt = debt;
         
-        let mut work2do = (effective_debt * stepmul) / 100;
+        // Use i128 to prevent overflow when debt and stepmul are both very large
+        let mut work2do = ((effective_debt as i128 * stepmul as i128) / 100) as isize;
+        
         let fast = work2do == 0; // Special case: do full collection
 
         // Repeat until enough work is done (like Lua 5.5's do-while loop)
