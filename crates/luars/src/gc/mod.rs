@@ -576,8 +576,6 @@ impl GC {
                         if s.header.is_white() {
                             s.header.make_black();
                         }
-                    } else {
-                        eprintln!("[GC] FATAL: String {} not found in pool during mark!", id.0);
                     }
                 }
             }
@@ -802,15 +800,24 @@ impl GC {
             self.mark_value(value, pool);
         }
 
-        // Propagate all marks
+        // Propagate all marks (empty the gray list)
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
 
-        // Process grayagain list
+        // Process grayagain list (objects that were blackened but then mutated)
+        // Moving them to gray list effectively
         let grayagain = std::mem::take(&mut self.grayagain);
         for gc_id in grayagain {
             self.mark_one(gc_id, pool);
+            
+            // DRAIN GRAY IMMEDIATELY after each mark_one? 
+            // Or just drain after all? Lua drains after all.
+        }
+        
+        // Propagate again to handle anything pushed by grayagain processing
+        while !self.gray.is_empty() {
+            self.propagate_mark(pool);
         }
 
         // Flip white color for next cycle
