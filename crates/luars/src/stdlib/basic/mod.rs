@@ -750,7 +750,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             vm.gc.gc_kind = crate::gc::GcKind::GenMinor;
 
             // Push previous mode name
-            let (mode_value, _) = vm.object_pool.create_string(old_mode);
+            let (mode_value, _) = vm.object_pool.create_string(old_mode, vm.gc.current_white);
 
             l.push_value(mode_value)?;
             Ok(1)
@@ -768,7 +768,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             vm.gc.change_to_incremental_mode(&mut vm.object_pool);
 
             // Push previous mode name
-            let (mode_value, _) = vm.object_pool.create_string(old_mode);
+            let (mode_value, _) = vm.object_pool.create_string(old_mode, vm.gc.current_white);
             l.push_value(mode_value)?;
             Ok(1)
         }

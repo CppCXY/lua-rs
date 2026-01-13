@@ -32,7 +32,9 @@ impl StringInterner {
 
     /// Intern a string - returns existing StringId if already interned, creates new otherwise
     /// 所有字符串都会被 intern，保证相同内容只存储一份
-    pub fn intern(&mut self, s: &str, gc_pool: &mut GcPool) -> (LuaValue, bool) {
+    /// 
+    /// **CRITICAL**: current_white MUST be passed from GC.current_white for correct marking
+    pub fn intern(&mut self, s: &str, gc_pool: &mut GcPool, current_white: u8) -> (LuaValue, bool) {
         let hash = self.hash_string(s);
 
         // Check if already interned
@@ -63,8 +65,8 @@ impl StringInterner {
             }
         }
 
-        // Not found - use owned string directly
-        let gc_string = GcObject::new(GcPtrObject::String(Box::new(s.to_string())));
+        // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
+        let gc_string = GcObject::with_white(GcPtrObject::String(Box::new(s.to_string())), current_white);
         let ptr = gc_string.ptr.as_str_ptr().unwrap();
         let id = gc_pool.alloc(gc_string);
         let str_id = StringId(id);

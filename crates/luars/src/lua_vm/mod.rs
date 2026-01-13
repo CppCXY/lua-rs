@@ -254,7 +254,7 @@ impl LuaVM {
     /// This allows string methods to be called with : syntax (e.g., str:upper())
     pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) {
         // Create a metatable with __index pointing to the string library
-        let mt_value = self.object_pool.create_table(0, 1);
+        let mt_value = self.object_pool.create_table(0, 1, self.gc.current_white);
 
         // Set __index to point to the string library
         let index_key = self.create_string("__index");
@@ -281,7 +281,8 @@ impl LuaVM {
             .expect("Failed to push function onto coroutine stack");
 
         // Create thread in ObjectPool and return LuaValue
-        self.object_pool.create_thread(thread)
+        let current_white = self.gc.current_white;
+        self.object_pool.create_thread(thread, current_white)
     }
 
     /// Resume a coroutine - DEPRECATED: Use thread_state.resume() instead
@@ -454,7 +455,8 @@ impl LuaVM {
     /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
-        let (value, is_new) = self.object_pool.create_string(s);
+        let current_white = self.gc.current_white;
+        let (value, is_new) = self.object_pool.create_string(s, current_white);
         if is_new {
             let size = 32 + s.len();
             let s_id = value.as_string_id().unwrap();
@@ -466,7 +468,8 @@ impl LuaVM {
 
     pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
         let len = data.len();
-        let value = self.object_pool.create_binary(data);
+        let current_white = self.gc.current_white;
+        let value = self.object_pool.create_binary(data, current_white);
         let id = value.as_binary_id().unwrap();
         self.gc
             .track_object(GcId::BinaryId(id), 32 + len, &mut self.object_pool);
@@ -477,7 +480,8 @@ impl LuaVM {
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let len = s.len();
-        let (value, is_new) = self.object_pool.create_string_owned(s);
+        let current_white = self.gc.current_white;
+        let (value, is_new) = self.object_pool.create_string_owned(s, current_white);
         if is_new {
             let size = 32 + len;
             let s_id = value.as_string_id().unwrap();
@@ -485,6 +489,13 @@ impl LuaVM {
                 .track_object(GcId::StringId(s_id), size, &mut self.object_pool);
         }
         value
+    }
+
+    /// Create substring (optimized for string.sub)
+    #[inline]
+    pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
+        let current_white = self.gc.current_white;
+        self.object_pool.create_substring(s_value, start, end, current_white)
     }
 
     /// Get string by LuaValue (resolves ID from object pool)
@@ -533,7 +544,8 @@ impl LuaVM {
     /// Create a new table in object pool
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let value = self.object_pool.create_table(array_size, hash_size);
+        let current_white = self.gc.current_white;
+        let value = self.object_pool.create_table(array_size, hash_size, current_white);
         let id = value.as_table_id().unwrap();
         // Track object for GC - sets to current white and updates gc_debt
         self.gc
@@ -581,7 +593,8 @@ impl LuaVM {
 
     /// Create new userdata in object pool
     pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
-        let value = self.object_pool.create_userdata(data);
+        let current_white = self.gc.current_white;
+        let value = self.object_pool.create_userdata(data, current_white);
         let id = value.as_userdata_id().unwrap();
         self.gc.track_object(
             GcId::UserdataId(id),
@@ -595,7 +608,8 @@ impl LuaVM {
     /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
-        let value = self.object_pool.create_function(chunk, upvalue_ids);
+        let current_white = self.gc.current_white;
+        let value = self.object_pool.create_function(chunk, upvalue_ids, current_white);
         let id = value.as_function_id().unwrap();
         self.gc.track_object(
             GcId::FunctionId(id),
@@ -615,7 +629,8 @@ impl LuaVM {
             .map(|v| self.create_upvalue_closed(v))
             .collect();
 
-        let value = self.object_pool.create_c_closure(func, upvalue_ids);
+        let current_white = self.gc.current_white;
+        let value = self.object_pool.create_c_closure(func, upvalue_ids, current_white);
         let id = value.as_function_id().unwrap();
         self.gc.track_object(
             GcId::FunctionId(id),
@@ -628,7 +643,8 @@ impl LuaVM {
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
-        let id = self.object_pool.create_upvalue_open(stack_index);
+        let current_white = self.gc.current_white;
+        let id = self.object_pool.create_upvalue_open(stack_index, current_white);
         self.gc.track_object(
             GcId::UpvalueId(id),
             std::mem::size_of::<Upvalue>(),
@@ -640,7 +656,8 @@ impl LuaVM {
     /// Create a closed upvalue with a value
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
-        let id = self.object_pool.create_upvalue_closed(value);
+        let current_white = self.gc.current_white;
+        let id = self.object_pool.create_upvalue_closed(value, current_white);
         self.gc.track_object(
             GcId::UpvalueId(id),
             std::mem::size_of::<Upvalue>(),

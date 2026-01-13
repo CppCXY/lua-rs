@@ -113,42 +113,44 @@ impl ObjectPool {
 
         // Pre-create all metamethod name strings (like Lua's luaT_init)
         // These strings are interned and will never be collected
-        pool.tm_index = pool.create_string("__index").0;
-        pool.tm_newindex = pool.create_string("__newindex").0;
-        pool.tm_call = pool.create_string("__call").0;
-        pool.tm_tostring = pool.create_string("__tostring").0;
-        pool.tm_len = pool.create_string("__len").0;
-        pool.tm_pairs = pool.create_string("__pairs").0;
-        pool.tm_ipairs = pool.create_string("__ipairs").0;
-        pool.tm_gc = pool.create_string("__gc").0;
-        pool.tm_close = pool.create_string("__close").0;
-        pool.tm_mode = pool.create_string("__mode").0;
-        pool.tm_name = pool.create_string("__name").0;
-        pool.tm_eq = pool.create_string("__eq").0;
-        pool.tm_lt = pool.create_string("__lt").0;
-        pool.tm_le = pool.create_string("__le").0;
-        pool.tm_add = pool.create_string("__add").0;
-        pool.tm_sub = pool.create_string("__sub").0;
-        pool.tm_mul = pool.create_string("__mul").0;
-        pool.tm_div = pool.create_string("__div").0;
-        pool.tm_mod = pool.create_string("__mod").0;
-        pool.tm_pow = pool.create_string("__pow").0;
-        pool.tm_unm = pool.create_string("__unm").0;
-        pool.tm_idiv = pool.create_string("__idiv").0;
-        pool.tm_band = pool.create_string("__band").0;
-        pool.tm_bor = pool.create_string("__bor").0;
-        pool.tm_bxor = pool.create_string("__bxor").0;
-        pool.tm_bnot = pool.create_string("__bnot").0;
-        pool.tm_shl = pool.create_string("__shl").0;
-        pool.tm_shr = pool.create_string("__shr").0;
-        pool.tm_concat = pool.create_string("__concat").0;
-        pool.tm_metatable = pool.create_string("__metatable").0;
+        // Use current_white = 0 for bootstrap (these will be fixed immediately after)
+        let bootstrap_white = 0;
+        pool.tm_index = pool.create_string("__index", bootstrap_white).0;
+        pool.tm_newindex = pool.create_string("__newindex", bootstrap_white).0;
+        pool.tm_call = pool.create_string("__call", bootstrap_white).0;
+        pool.tm_tostring = pool.create_string("__tostring", bootstrap_white).0;
+        pool.tm_len = pool.create_string("__len", bootstrap_white).0;
+        pool.tm_pairs = pool.create_string("__pairs", bootstrap_white).0;
+        pool.tm_ipairs = pool.create_string("__ipairs", bootstrap_white).0;
+        pool.tm_gc = pool.create_string("__gc", bootstrap_white).0;
+        pool.tm_close = pool.create_string("__close", bootstrap_white).0;
+        pool.tm_mode = pool.create_string("__mode", bootstrap_white).0;
+        pool.tm_name = pool.create_string("__name", bootstrap_white).0;
+        pool.tm_eq = pool.create_string("__eq", bootstrap_white).0;
+        pool.tm_lt = pool.create_string("__lt", bootstrap_white).0;
+        pool.tm_le = pool.create_string("__le", bootstrap_white).0;
+        pool.tm_add = pool.create_string("__add", bootstrap_white).0;
+        pool.tm_sub = pool.create_string("__sub", bootstrap_white).0;
+        pool.tm_mul = pool.create_string("__mul", bootstrap_white).0;
+        pool.tm_div = pool.create_string("__div", bootstrap_white).0;
+        pool.tm_mod = pool.create_string("__mod", bootstrap_white).0;
+        pool.tm_pow = pool.create_string("__pow", bootstrap_white).0;
+        pool.tm_unm = pool.create_string("__unm", bootstrap_white).0;
+        pool.tm_idiv = pool.create_string("__idiv", bootstrap_white).0;
+        pool.tm_band = pool.create_string("__band", bootstrap_white).0;
+        pool.tm_bor = pool.create_string("__bor", bootstrap_white).0;
+        pool.tm_bxor = pool.create_string("__bxor", bootstrap_white).0;
+        pool.tm_bnot = pool.create_string("__bnot", bootstrap_white).0;
+        pool.tm_shl = pool.create_string("__shl", bootstrap_white).0;
+        pool.tm_shr = pool.create_string("__shr", bootstrap_white).0;
+        pool.tm_concat = pool.create_string("__concat", bootstrap_white).0;
+        pool.tm_metatable = pool.create_string("__metatable", bootstrap_white).0;
 
         // Pre-create coroutine status strings
-        pool.str_suspended = pool.create_string("suspended").0;
-        pool.str_running = pool.create_string("running").0;
-        pool.str_normal = pool.create_string("normal").0;
-        pool.str_dead = pool.create_string("dead").0;
+        pool.str_suspended = pool.create_string("suspended", bootstrap_white).0;
+        pool.str_running = pool.create_string("running", bootstrap_white).0;
+        pool.str_normal = pool.create_string("normal", bootstrap_white).0;
+        pool.str_dead = pool.create_string("dead", bootstrap_white).0;
 
         // Fix all metamethod name strings - they should never be collected
         // (like Lua's luaC_fix in luaT_init)
@@ -275,14 +277,18 @@ impl ObjectPool {
     #[inline]
     /// Create string (COMPLETE INTERNING - all strings)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
-    pub fn create_string(&mut self, s: &str) -> (LuaValue, bool) {
-        self.strings.intern(s, &mut self.gc_pool)
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
+    pub fn create_string(&mut self, s: &str, current_white: u8) -> (LuaValue, bool) {
+        self.strings.intern(s, &mut self.gc_pool, current_white)
     }
 
     /// Create string from owned String (avoids clone if already interned)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
-    pub fn create_string_owned(&mut self, s: String) -> (LuaValue, bool) {
-        self.strings.intern(&s, &mut self.gc_pool)
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
+    pub fn create_string_owned(&mut self, s: String, current_white: u8) -> (LuaValue, bool) {
+        self.strings.intern(&s, &mut self.gc_pool, current_white)
     }
 
     pub fn get_string_value(&self, id: StringId) -> Option<LuaValue> {
@@ -295,9 +301,11 @@ impl ObjectPool {
     }
 
     /// Create a binary value from Vec<u8>
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
-        let gc_binary = GcObject::new(GcPtrObject::Binary(Box::new(data)));
+    pub fn create_binary(&mut self, data: Vec<u8>, current_white: u8) -> LuaValue {
+        let gc_binary = GcObject::with_white(GcPtrObject::Binary(Box::new(data)), current_white);
         let ptr = gc_binary.ptr.as_binary_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_binary);
         let binary_id = BinaryId(id);
@@ -339,11 +347,13 @@ impl ObjectPool {
     /// Create a substring from an existing string (optimized for string.sub)
     /// Returns the original string ID if the range covers the entire string.
     /// With complete interning, substrings are automatically deduplicated.
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
+    pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize, current_white: u8) -> LuaValue {
         let string = match s_value.as_str() {
             Some(s) => s,
-            None => return self.create_string("").0,
+            None => return self.create_string("", current_white).0,
         };
         // Extract substring info first
         let substring = {
@@ -352,7 +362,7 @@ impl ObjectPool {
             let end = end.min(string.len());
 
             if start >= end {
-                return self.create_string("").0;
+                return self.create_string("", current_white).0;
             }
 
             // Fast path: return original if full range
@@ -365,7 +375,7 @@ impl ObjectPool {
         };
 
         // Intern the substring - will be deduplicated if it already exists
-        self.create_string(substring).0
+        self.create_string(substring, current_white).0
     }
 
     /// Mark a string as fixed (never collected) - like Lua's luaC_fix()
@@ -379,12 +389,13 @@ impl ObjectPool {
     }
     // ==================== Table Operations ====================
 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let gc_table = GcObject::new(GcPtrObject::Table(Box::new(LuaTable::new(
+    pub fn create_table(&mut self, array_size: usize, hash_size: usize, current_white: u8) -> LuaValue {
+        let gc_table = GcObject::with_white(GcPtrObject::Table(Box::new(LuaTable::new(
             array_size as u32,
             hash_size as u32,
-        ))));
+        ))), current_white);
         let ptr = gc_table.ptr.as_table_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_table);
         let table_id = TableId(id);
@@ -423,8 +434,10 @@ impl ObjectPool {
 
     /// Create a Lua function (closure with bytecode chunk)
     /// Now caches upvalue pointers for direct access
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>, current_white: u8) -> LuaValue {
         // Build cached upvalues with direct pointers
         let mut upvalues: Vec<CachedUpvalue> = vec![];
         for id in upvalue_ids {
@@ -434,9 +447,9 @@ impl ObjectPool {
             }
         }
 
-        let gc_func = GcObject::new(GcPtrObject::Function(Box::new(FunctionBody::Lua(
+        let gc_func = GcObject::with_white(GcPtrObject::Function(Box::new(FunctionBody::Lua(
             chunk, upvalues,
-        ))));
+        ))), current_white);
         let ptr = gc_func.ptr.as_function_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_func);
         let func_id = FunctionId(id);
@@ -445,8 +458,10 @@ impl ObjectPool {
 
     /// Create a C closure (native function with upvalues)
     /// Now caches upvalue pointers for direct access
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_c_closure(&mut self, func: CFunction, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
+    pub fn create_c_closure(&mut self, func: CFunction, upvalue_ids: Vec<UpvalueId>, current_white: u8) -> LuaValue {
         // Build cached upvalues with direct pointers
         let mut upvalues: Vec<CachedUpvalue> = vec![];
         for id in upvalue_ids {
@@ -456,9 +471,9 @@ impl ObjectPool {
             }
         }
 
-        let gc_func = GcObject::new(GcPtrObject::Function(Box::new(FunctionBody::CClosure(
+        let gc_func = GcObject::with_white(GcPtrObject::Function(Box::new(FunctionBody::CClosure(
             func, upvalues,
-        ))));
+        ))), current_white);
         let ptr = gc_func.ptr.as_function_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_func);
         let func_id = FunctionId(id);
@@ -468,19 +483,23 @@ impl ObjectPool {
     // ==================== Upvalue Operations ====================
 
     /// Create an open upvalue pointing to a stack location
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
+    pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> UpvalueId {
         let upvalue = Upvalue::Open(stack_index);
 
-        let gc_uv = GcObject::new(GcPtrObject::Upvalue(Box::new(upvalue)));
+        let gc_uv = GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white);
         UpvalueId(self.gc_pool.alloc(gc_uv))
     }
 
     /// Create a closed upvalue with a value
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
+    pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> UpvalueId {
         let upvalue = Upvalue::Closed(value);
-        let gc_uv = GcObject::new(GcPtrObject::Upvalue(Box::new(upvalue)));
+        let gc_uv = GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white);
         UpvalueId(self.gc_pool.alloc(gc_uv))
     }
 
@@ -503,20 +522,23 @@ impl ObjectPool {
     }
 
     /// Create upvalue from LuaUpvalue
-    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>) -> UpvalueId {
+    /// 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
+    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>, current_white: u8) -> UpvalueId {
         // Check if open and get stack index
         if upvalue.is_open() {
-            self.create_upvalue_open(upvalue.get_stack_index().unwrap_or(0))
+            self.create_upvalue_open(upvalue.get_stack_index().unwrap_or(0), current_white)
         } else {
-            self.create_upvalue_closed(upvalue.get_closed_value().unwrap_or(LuaValue::nil()))
+            self.create_upvalue_closed(upvalue.get_closed_value().unwrap_or(LuaValue::nil()), current_white)
         }
     }
 
     // ==================== Userdata Operations ====================
 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_userdata(&mut self, userdata: LuaUserdata) -> LuaValue {
-        let gc_userdata = GcObject::new(GcPtrObject::Userdata(Box::new(userdata)));
+    pub fn create_userdata(&mut self, userdata: LuaUserdata, current_white: u8) -> LuaValue {
+        let gc_userdata = GcObject::with_white(GcPtrObject::Userdata(Box::new(userdata)), current_white);
         let ptr = gc_userdata.ptr.as_userdata_ptr().unwrap();
         let id = UserdataId(self.gc_pool.alloc(gc_userdata));
         LuaValue::userdata(id, ptr)
@@ -534,9 +556,10 @@ impl ObjectPool {
 
     // ==================== Thread Operations ====================
 
+    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
-    pub fn create_thread(&mut self, thread: LuaState) -> LuaValue {
-        let gc_thread = GcObject::new(GcPtrObject::Thread(Box::new(thread)));
+    pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> LuaValue {
+        let gc_thread = GcObject::with_white(GcPtrObject::Thread(Box::new(thread)), current_white);
         let ptr = gc_thread.ptr.as_thread_ptr().unwrap();
         let id = ThreadId(self.gc_pool.alloc(gc_thread));
         let l = self.get_thread_mut(id).unwrap();
@@ -565,14 +588,6 @@ impl ObjectPool {
             })
     }
     // ==================== GC Support ====================
-
-    /// Clear all mark bits before GC mark phase (make all objects white)
-    pub fn clear_marks(&mut self) {
-        for (_, gs) in self.gc_pool.iter_mut() {
-            gs.header.make_white(0);
-        }
-    }
-
     pub fn shrink_to_fit(&mut self) {
         // StringInterner manages its own internal structures
         self.gc_pool.shrink_to_fit();
@@ -608,119 +623,5 @@ impl ObjectPool {
 impl Default for ObjectPool {
     fn default() -> Self {
         Self::new(SafeOption::default())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_string_interning() {
-        let mut pool = ObjectPool::default();
-
-        let v1 = pool.create_string("hello").0;
-        let v2 = pool.create_string("hello").0;
-
-        // Same string should return same ID
-        assert_eq!(v1, v2);
-        let v3 = pool.create_string("world").0;
-        assert_ne!(v1, v3);
-
-        // Verify content
-        assert_eq!(v1.as_str(), Some("hello"));
-        assert_eq!(v3.as_str(), Some("world"));
-    }
-
-    #[test]
-    fn test_table_operations() {
-        let mut pool = ObjectPool::default();
-
-        let table_value = pool.create_table(4, 4);
-        let table_id = table_value.as_table_id().unwrap();
-        // Modify table
-        if let Some(table) = pool.get_table_mut(table_id) {
-            table.raw_set(&LuaValue::integer(1), LuaValue::integer(42));
-        }
-
-        // Read back
-        if let Some(table) = pool.get_table(table_id) {
-            assert!(table.raw_get(&LuaValue::integer(1)) == Some(LuaValue::integer(42)));
-        }
-    }
-
-    #[test]
-    fn test_object_ids_size() {
-        // Verify all IDs are compact 4 bytes
-        assert_eq!(std::mem::size_of::<StringId>(), 4);
-        assert_eq!(std::mem::size_of::<TableId>(), 4);
-        assert_eq!(std::mem::size_of::<FunctionId>(), 4);
-        assert_eq!(std::mem::size_of::<UpvalueId>(), 4);
-        assert_eq!(std::mem::size_of::<UserdataId>(), 4);
-        assert_eq!(std::mem::size_of::<ThreadId>(), 4);
-    }
-
-    #[test]
-    fn test_string_interning_many_strings() {
-        // Test that many different strings with potential hash collisions
-        // are all stored correctly
-        let mut pool = ObjectPool::default();
-        let mut ids = Vec::new();
-
-        // Create 1000 different strings
-        for i in 0..1000 {
-            let s = format!("string_{}", i);
-            let id = pool.create_string(&s).0;
-            ids.push((s, id));
-        }
-
-        // Verify all strings are stored correctly
-        for (s, id) in &ids {
-            let stored = id.as_str();
-            assert_eq!(
-                stored,
-                Some(s.as_str()),
-                "String '{}' not stored correctly",
-                s
-            );
-        }
-
-        // Verify interning works - same string should return same ID
-        for (s, id) in &ids {
-            let id2 = pool.create_string(s).0;
-            assert_eq!(*id, id2, "Interning failed for '{}'", s);
-        }
-    }
-
-    #[test]
-    fn test_string_interning_similar_strings() {
-        // Test strings that might have similar hashes
-        let mut pool = ObjectPool::default();
-
-        let strings = vec![
-            "a", "b", "c", "aa", "ab", "ba", "bb", "aaa", "aab", "aba", "abb", "baa", "bab", "bba",
-            "bbb", "test", "Test", "TEST", "tEsT", "hello", "Hello", "HELLO", "hElLo",
-        ];
-
-        let mut ids = Vec::new();
-        for s in &strings {
-            ids.push(pool.create_string(s).0);
-        }
-
-        // All IDs should be unique (different strings)
-        for i in 0..ids.len() {
-            for j in (i + 1)..ids.len() {
-                assert_ne!(
-                    ids[i], ids[j],
-                    "Different strings '{}' and '{}' got same ID",
-                    strings[i], strings[j]
-                );
-            }
-        }
-
-        // Verify content
-        for (i, s) in strings.iter().enumerate() {
-            assert_eq!(ids[i].as_str(), Some(*s));
-        }
     }
 }

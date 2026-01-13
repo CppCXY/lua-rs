@@ -116,7 +116,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
     // Try to create a valid UTF-8 string first, otherwise return binary
     let result = match String::from_utf8(bytes.clone()) {
         Ok(s) => l.vm_mut().create_string(&s),
-        Err(_) => l.vm_mut().object_pool.create_binary(bytes),
+        Err(_) => l.vm_mut().create_binary(bytes),
     };
     l.push_value(result)?;
     Ok(1)
@@ -340,7 +340,6 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
 
     // Use optimized create_substring
     let result_value = vm
-        .object_pool
         .create_substring(s_value, start_byte, end_byte);
     l.push_value(result_value)?;
     Ok(1)

@@ -70,7 +70,6 @@ pub fn handle_closure(
     // Create the function with the proto and upvalues
     let closure_value = lua_state
         .vm_mut()
-        .object_pool
         .create_function(proto, new_upvalues);
 
     // Store in R[A]

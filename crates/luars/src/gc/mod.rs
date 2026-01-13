@@ -264,62 +264,30 @@ impl GC {
 
     /// Track a new object allocation (like luaC_newobj in Lua)
     /// This increments debt - when debt becomes positive, GC should run
-    /// Also sets object to current white color
+    /// 
+    /// **CRITICAL**: Objects are created WHITE by ObjectPool.create_*() with current_white.
+    /// This function ONLY tracks memory accounting - it does NOT modify object colors.
+    /// The tri-color invariant is maintained by write barriers, not by track_object.
+    /// 
+    /// Port of lgc.c: luaC_newobj creates objects as WHITE, then links to allgc list.
+    /// Barriers will mark them BLACK/GRAY if needed when stored into reachable objects.
     #[inline]
-    pub fn track_object(&mut self, gc_id: GcId, size: usize, pool: &mut ObjectPool) {
-        // STRATEGY CHANGE: Allocate "Gray" or "Black" instead of "White".
-        // This ensures new objects are considered "visited" (or "reachable")
-        // for the current cycle, preventing premature collection if
-        // the cycle advances (Atomic/Sweep) before the object is anchored.
+    pub fn track_object(&mut self, _gc_id: GcId, size: usize, _pool: &mut ObjectPool) {
+        // Objects are already created as WHITE by ObjectPool.create_*()
+        // We do NOT modify color here - this is ONLY for memory accounting
+        // 
+        // The Lua 5.5 way:
+        // 1. luaC_newobj() creates object as WHITE (current white)
+        // 2. Object is linked to allgc list
+        // 3. If stored to stack/table/etc, it's immediately reachable from roots
+        // 4. Next GC mark phase will mark it from roots
+        // 5. If NOT stored anywhere, it becomes garbage in current cycle (correct!)
+        //
+        // Our previous code INCORRECTLY marked objects as GRAY/BLACK here,
+        // which violates Lua's design and prevents collection of unreachable objects.
 
-        match gc_id.gc_type() {
-            // Leaves: Can be marked Black immediately (no outgoing refs to scan)
-            GcObjectType::String => {
-                if let Some(s) = pool.get_mut(gc_id) {
-                    s.header.make_black();
-                }
-            }
-            GcObjectType::Binary => {
-                if let Some(b) = pool.get_mut(gc_id) {
-                    b.header.make_black();
-                }
-            }
-            // Complex objects: Mark Gray and schedule for scanning
-            GcObjectType::Table => {
-                if let Some(t) = pool.get_mut(gc_id) {
-                    t.header.make_gray();
-                    self.gray.push(gc_id);
-                }
-            }
-            GcObjectType::Function => {
-                if let Some(f) = pool.get_mut(gc_id) {
-                    f.header.make_gray();
-                    self.gray.push(gc_id);
-                }
-            }
-            GcObjectType::Upvalue => {
-                if let Some(u) = pool.get_mut(gc_id) {
-                    u.header.make_gray();
-                    self.gray.push(gc_id);
-                }
-            }
-            GcObjectType::Userdata => {
-                if let Some(u) = pool.get_mut(gc_id) {
-                    u.header.make_gray();
-                    self.gray.push(gc_id);
-                }
-            }
-            GcObjectType::Thread => {
-                if let Some(t) = pool.get_mut(gc_id) {
-                    t.header.make_gray();
-                    self.gray.push(gc_id);
-                }
-            }
-        }
-
-        // Update debt tracking
+        // Update debt tracking (Port of lgc.c: luaE_setdebt)
         let size_signed = size as isize;
-        // Update total_bytes to include both the new allocation AND the debt
         self.total_bytes += size_signed * 2;
         self.gc_debt += size_signed;
         self.stats.bytes_allocated += size;
