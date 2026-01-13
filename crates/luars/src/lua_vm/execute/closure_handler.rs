@@ -17,7 +17,6 @@
 
 use crate::{
     Chunk, gc,
-    lua_value::LuaValue,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
 use std::rc::Rc;
@@ -90,40 +89,4 @@ fn find_or_create_upvalue(
     // This is O(n) where n is the number of open upvalues for THIS thread,
     // not all upvalues in the system
     lua_state.find_or_create_upvalue(stack_index)
-}
-
-/// Close all open upvalues at or above the given level
-/// This is used by CLOSE instruction and return handlers
-/// Based on Lua's luaF_close (lfunc.c)
-pub fn close_upvalues_at_level(lua_state: &mut LuaState, level: usize) -> LuaResult<()> {
-    // Collect upvalues to close (can't borrow mutably while iterating)
-    // let upvalues_to_close: Vec<_> = lua_state
-    //     .vm_mut()
-    //     .object_pool
-    //     .iter_upvalues()
-    //     .filter_map(|(id, upval)| {
-    //         if let Some(stack_idx) = upval.data.get_stack_index() {
-    //             if stack_idx >= level {
-    //                 Some((id, stack_idx))
-    //             } else {
-    //                 None
-    //             }
-    //         } else {
-    //             None
-    //         }
-    //     })
-    //     .collect();
-
-    // Close each upvalue
-    for (upval_id, stack_idx) in upvalues_to_close {
-        // Get the value from the stack
-        let value = lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil());
-
-        // Close the upvalue (move value from stack to upvalue storage)
-        if let Some(upval) = lua_state.vm_mut().object_pool.get_upvalue_mut(upval_id) {
-            upval.data.close(value);
-        }
-    }
-
-    Ok(())
 }

@@ -1,12 +1,12 @@
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::lua_vm::execute::call::call_c_function;
+use crate::lua_vm::execute::call::{self, call_c_function};
 use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::opcode::Instruction;
 /// Metamethod operations
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
-use crate::lua_vm::{LuaError, LuaResult, LuaState};
+use crate::lua_vm::{LuaResult, LuaState};
 
 /// Tag Method types (TMS from ltm.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,16 +417,9 @@ pub fn call_metamethod(
 
     if metamethod.is_cfunction() {
         // C function: call_c_function handles everything
-        crate::lua_vm::execute::call::call_c_function(lua_state, func_pos, 2, 1)?;
-    } else if let Some(func_id) = metamethod.as_function_id() {
-        let is_lua = {
-            let func_obj = lua_state
-                .vm_mut()
-                .object_pool
-                .get_function(func_id)
-                .ok_or(LuaError::RuntimeError)?;
-            func_obj.data.is_lua_function()
-        };
+        call::call_c_function(lua_state, func_pos, 2, 1)?;
+    } else if let Some(func_body) = metamethod.as_lua_function() {
+        let is_lua = func_body.is_lua_function();
 
         if is_lua {
             // Lua function: push frame and execute ONLY THIS FRAME

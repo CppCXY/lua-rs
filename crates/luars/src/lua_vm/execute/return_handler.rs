@@ -48,7 +48,7 @@ pub fn handle_return(
 
     // Close upvalues if k flag is set
     if k {
-        close_upvalues(lua_state, base)?;
+        lua_state.close_upvalues(base);
     }
 
     // Adjust for vararg functions (nparams1 = C)
@@ -216,39 +216,4 @@ pub fn handle_return1(
     }
 
     Ok(FrameAction::Continue)
-}
-
-/// Close all open upvalues >= level
-/// Based on lfunc.c luaF_close
-fn close_upvalues(lua_state: &mut LuaState, level: usize) -> LuaResult<()> {
-    // Get all open upvalues in the current frame
-    // let upvalues_to_close: Vec<_> = lua_state
-    //     .vm_mut()
-    //     .object_pool
-    //     .iter_upvalues()
-    //     .filter_map(|(id, upval)| {
-    //         if let Some(stack_idx) = upval.data.get_stack_index() {
-    //             if stack_idx >= level {
-    //                 Some((id, stack_idx))
-    //             } else {
-    //                 None
-    //             }
-    //         } else {
-    //             None
-    //         }
-    //     })
-    //     .collect();
-
-    // Close each upvalue
-    for (upval_id, stack_idx) in upvalues_to_close {
-        // Get the value from the stack
-        let value = lua_state.stack_get(stack_idx).unwrap_or(LuaValue::nil());
-
-        // Close the upvalue (move value from stack to upvalue storage)
-        if let Some(upval) = lua_state.vm_mut().object_pool.get_upvalue_mut(upval_id) {
-            upval.data.close(value);
-        }
-    }
-
-    Ok(())
 }

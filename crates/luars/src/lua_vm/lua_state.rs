@@ -12,7 +12,7 @@ use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, LuaTable, LuaVM, ThreadId};
+use crate::{Chunk, GcId, LuaTable, LuaVM, ThreadId};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -329,25 +329,21 @@ impl LuaState {
         let mut location = String::new();
         if let Some(ci) = self.current_frame() {
             if ci.is_lua() {
-                if let Some(func_id) = ci.func.as_function_id() {
-                    let vm = unsafe { &*self.vm };
-                    if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                        if let Some(chunk) = func_obj.data.chunk() {
-                            let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len()
-                            {
-                                chunk.line_info[ci.pc as usize - 1] as usize
-                            } else if !chunk.line_info.is_empty() {
-                                chunk.line_info[0] as usize
-                            } else {
-                                0
-                            };
-                            location = if line > 0 {
-                                format!("{}:{}: ", source, line)
-                            } else {
-                                format!("{}: ", source)
-                            };
-                        }
+                if let Some(func_obj) = ci.func.as_lua_function() {
+                    if let Some(chunk) = func_obj.chunk() {
+                        let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            chunk.line_info[ci.pc as usize - 1] as usize
+                        } else if !chunk.line_info.is_empty() {
+                            chunk.line_info[0] as usize
+                        } else {
+                            0
+                        };
+                        location = if line > 0 {
+                            format!("{}:{}: ", source, line)
+                        } else {
+                            format!("{}: ", source)
+                        };
                     }
                 }
             }
@@ -374,7 +370,6 @@ impl LuaState {
     /// Similar to luaL_traceback in lauxlib.c
     pub fn generate_traceback(&self) -> String {
         let mut result = String::new();
-        let vm = unsafe { &*self.vm };
 
         // Iterate through call stack from newest to oldest
         for (level, ci) in self.call_stack.iter().rev().enumerate() {
@@ -386,44 +381,39 @@ impl LuaState {
             // Get function info
             if ci.is_lua() {
                 // Lua function - get source and line info
-                if let Some(func_id) = ci.func.as_function_id() {
-                    if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                        if let Some(chunk) = func_obj.data.chunk() {
-                            let source = chunk.source_name.as_deref().unwrap_or("[string]");
 
-                            // Get current line number from PC
-                            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len()
-                            {
-                                chunk.line_info[ci.pc as usize - 1] as usize
-                            } else if !chunk.line_info.is_empty() {
-                                chunk.line_info[0] as usize
-                            } else {
-                                0
-                            };
+                if let Some(func_obj) = ci.func.as_lua_function() {
+                    if let Some(chunk) = func_obj.chunk() {
+                        let source = chunk.source_name.as_deref().unwrap_or("[string]");
 
-                            if level == 0 {
-                                // Current function (where error occurred)
-                                if line > 0 {
-                                    result.push_str(&format!(
-                                        "\t{}:{}: in main chunk\n",
-                                        source, line
-                                    ));
-                                } else {
-                                    result.push_str(&format!("\t{}: in main chunk\n", source));
-                                }
+                        // Get current line number from PC
+                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            chunk.line_info[ci.pc as usize - 1] as usize
+                        } else if !chunk.line_info.is_empty() {
+                            chunk.line_info[0] as usize
+                        } else {
+                            0
+                        };
+
+                        if level == 0 {
+                            // Current function (where error occurred)
+                            if line > 0 {
+                                result.push_str(&format!("\t{}:{}: in main chunk\n", source, line));
                             } else {
-                                // Called functions
-                                if line > 0 {
-                                    result
-                                        .push_str(&format!("\t{}:{}: in function\n", source, line));
-                                } else {
-                                    result.push_str(&format!("\t{}: in function\n", source));
-                                }
+                                result.push_str(&format!("\t{}: in main chunk\n", source));
                             }
-                            continue;
+                        } else {
+                            // Called functions
+                            if line > 0 {
+                                result.push_str(&format!("\t{}:{}: in function\n", source, line));
+                            } else {
+                                result.push_str(&format!("\t{}: in function\n", source));
+                            }
                         }
+                        continue;
                     }
                 }
+
                 result.push_str("\t[?]: in function\n");
             } else if ci.is_c() {
                 // C function
@@ -448,18 +438,20 @@ impl LuaState {
 
     /// Close upvalues from a given stack index upwards
     /// This is called when exiting a function or block scope
-    pub fn close_upvalues(&mut self, level: usize, object_pool: &mut crate::ObjectPool) {
+    pub fn close_upvalues(&mut self, level: usize) {
+        let object_pool = unsafe { &mut (*self.vm).object_pool };
         // Find all open upvalues pointing to indices >= level
         let mut i = 0;
         while i < self.open_upvalues_list.len() {
             let upval_id = self.open_upvalues_list[i];
             if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
-                if let Some(stack_idx) = upval.data.get_stack_index() {
+                if let Some(stack_idx) = upval.get_stack_index() {
                     if stack_idx >= level {
                         // Close this upvalue - copy stack value to closed storage
                         if let Some(value) = self.stack_get(stack_idx) {
-                            upval.data.close(value);
+                            upval.close(value);
                         }
+                        // TODO: slow - optimize removal
                         // Remove from both map and list
                         self.open_upvalues_map.remove(&stack_idx);
                         self.open_upvalues_list.remove(i);
@@ -499,7 +491,7 @@ impl LuaState {
                 .filter_map(|&id| {
                     vm.object_pool
                         .get_upvalue(id)
-                        .and_then(|upval| upval.data.get_stack_index())
+                        .and_then(|upval| upval.get_stack_index())
                 })
                 .collect()
         };
@@ -849,12 +841,8 @@ impl LuaState {
         // Check if it's a C function - handle differently
         let is_c_function = if func.is_cfunction() {
             true
-        } else if let Some(func_id) = func.as_function_id() {
-            let vm = unsafe { &*self.vm };
-            vm.object_pool
-                .get_function(func_id)
-                .map(|f| f.data.is_c_function())
-                .unwrap_or(false)
+        } else if let Some(func_body) = func.as_lua_function() {
+            func_body.is_c_function()
         } else {
             false
         };
@@ -870,11 +858,8 @@ impl LuaState {
             // Get the C function pointer
             let cfunc = if func.is_cfunction() {
                 func.as_cfunction()
-            } else if let Some(func_id) = func.as_function_id() {
-                let vm = unsafe { &*self.vm };
-                vm.object_pool
-                    .get_function(func_id)
-                    .and_then(|f| f.data.c_function())
+            } else if let Some(func_body) = func.as_lua_function() {
+                func_body.c_function()
             } else {
                 None
             };
@@ -972,8 +957,7 @@ impl LuaState {
                     if self.call_depth() > initial_depth {
                         if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base)
                         {
-                            let vm = unsafe { &mut *self.vm };
-                            self.close_upvalues(frame_base, &mut vm.object_pool);
+                            self.close_upvalues(frame_base);
                         }
                     }
 
@@ -1022,13 +1006,8 @@ impl LuaState {
         // This handles both C and Lua functions correctly
         let result = if func.is_cfunction()
             || func
-                .as_function_id()
-                .and_then(|id| {
-                    unsafe { &*self.vm }
-                        .object_pool
-                        .get_function(id)
-                        .and_then(|f| f.data.c_function())
-                })
+                .as_lua_function()
+                .and_then(|f| f.c_function())
                 .is_some()
         {
             // C function - call directly
@@ -1061,8 +1040,7 @@ impl LuaState {
                 // Close upvalues
                 if self.call_depth() > initial_depth {
                     if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base) {
-                        let vm = unsafe { &mut *self.vm };
-                        self.close_upvalues(frame_base, &mut vm.object_pool);
+                        self.close_upvalues(frame_base);
                     }
                 }
 
@@ -1140,8 +1118,7 @@ impl LuaState {
                 // Clean up failed frames
                 if self.call_depth() > initial_depth {
                     if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base) {
-                        let vm = unsafe { &mut *self.vm };
-                        self.close_upvalues(frame_base, &mut vm.object_pool);
+                        self.close_upvalues(frame_base);
                     }
                 }
 
@@ -1310,22 +1287,22 @@ impl LuaState {
 
     /// Forward GC barrier (luaC_barrier in Lua 5.5)
     /// Called when modifying an object to point to another object
-    pub fn gc_barrier(&mut self, owner_id: UpvalueId, value_gc_id: crate::gc::GcId) {
+    pub fn gc_barrier(&mut self, owner_id: UpvalueId, value_gc_id: GcId) {
         let vm = unsafe { &mut *self.vm };
-        let owner_gc_id = crate::gc::GcId::UpvalueId(owner_id);
+        let owner_gc_id = GcId::UpvalueId(owner_id);
         vm.gc.barrier(owner_gc_id, value_gc_id, &mut vm.object_pool);
     }
 
     /// Convert LuaValue to GcId (if it's a GC-managed object)
-    pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<crate::gc::GcId> {
+    pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<GcId> {
         use crate::lua_value::LuaValueKind;
         match value.kind() {
-            LuaValueKind::Table => value.as_table_id().map(crate::gc::GcId::TableId),
-            LuaValueKind::Function => value.as_function_id().map(crate::gc::GcId::FunctionId),
-            LuaValueKind::String => value.as_string_id().map(crate::gc::GcId::StringId),
-            LuaValueKind::Binary => value.as_binary_id().map(crate::gc::GcId::BinaryId),
-            LuaValueKind::Thread => value.as_thread_id().map(crate::gc::GcId::ThreadId),
-            LuaValueKind::Userdata => value.as_userdata_id().map(crate::gc::GcId::UserdataId),
+            LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
+            LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
+            LuaValueKind::String => value.as_string_id().map(GcId::StringId),
+            LuaValueKind::Binary => value.as_binary_id().map(GcId::BinaryId),
+            LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
+            LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
             _ => None,
         }
     }

@@ -464,6 +464,15 @@ impl LuaVM {
         value
     }
 
+    pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
+        let len = data.len();
+        let value = self.object_pool.create_binary(data);
+        let id = value.as_binary_id().unwrap();
+        self.gc
+            .track_object(GcId::BinaryId(id), 32 + len, &mut self.object_pool);
+        value
+    }
+
     /// Create string from owned String (avoids clone for non-interned strings)
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {

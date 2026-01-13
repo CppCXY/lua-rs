@@ -132,30 +132,22 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     let strip = l.get_arg(2).map(|v| v.is_truthy()).unwrap_or(false);
 
     // Get the function ID
-    let Some(func_id) = func_value.as_function_id() else {
+    let Some(func_obj) = func_value.as_lua_function() else {
         return Err(l.error("bad argument #1 to 'dump' (function expected)".to_string()));
     };
 
     let vm = l.vm_mut();
 
-    // Get the function from object pool
-    let Some(func) = vm.object_pool.get_function(func_id) else {
-        return Err(l.error("bad argument #1 to 'dump' (function expected)".to_string()));
-    };
-
     // Check if it's a Lua function (not a C function)
-    let Some(chunk) = func.data.chunk() else {
+    let Some(chunk) = func_obj.chunk() else {
         return Err(l.error("unable to dump given function".to_string()));
     };
-
-    // Clone the chunk to avoid borrow issues
-    let chunk = chunk.clone();
 
     // Serialize the chunk with pool access for string constants
     match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_pool) {
         Ok(bytes) => {
             // Create binary value directly - no encoding needed
-            let result = vm.object_pool.create_binary(bytes);
+            let result = vm.create_binary(bytes);
             l.push_value(result)?;
             Ok(1)
         }

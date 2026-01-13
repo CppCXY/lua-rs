@@ -360,13 +360,7 @@ impl FunctionBody {
             FunctionBody::Lua(_, uv) => uv,
         }
     }
-
-    /// Get upvalue IDs (for compatibility)
-    #[inline(always)]
-    pub fn upvalues(&self) -> Vec<UpvalueId> {
-        self.cached_upvalues().iter().map(|cu| cu.id).collect()
-    }
-
+    
     /// Get mutable access to cached upvalues for updating pointers
     #[inline(always)]
     pub fn cached_upvalues_mut(&mut self) -> &mut Vec<CachedUpvalue> {

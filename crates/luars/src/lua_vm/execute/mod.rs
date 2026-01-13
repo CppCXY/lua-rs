@@ -959,7 +959,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let close_from = base + a;
 
                     // Close upvalues at or above this level
-                    closure_handler::close_upvalues_at_level(lua_state, close_from)?;
+                    lua_state.close_upvalues(close_from);
                 }
                 OpCode::Tbc => {
                     // Mark variable as to-be-closed
@@ -1825,19 +1825,13 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // Get nextraargs from CallInfo
                     let call_info = lua_state.get_call_info(frame_idx);
                     let nextra = call_info.nextraargs as usize;
-                    let func_id = call_info
+                    let func_obj = call_info
                         .func
-                        .as_function_id()
+                        .as_lua_function()
                         .ok_or(LuaError::RuntimeError)?;
-
                     // Get param_count from the function's chunk
                     let param_count = {
-                        let vm = lua_state.vm_mut();
-                        let func_obj = vm
-                            .object_pool
-                            .get_function(func_id)
-                            .ok_or(LuaError::RuntimeError)?;
-                        let chunk = func_obj.data.chunk().ok_or(LuaError::RuntimeError)?;
+                        let chunk = func_obj.chunk().ok_or(LuaError::RuntimeError)?;
                         chunk.param_count
                     };
 

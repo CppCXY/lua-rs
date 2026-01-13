@@ -52,33 +52,28 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                 let pc = l.get_frame_pc(i);
 
                 // Try to get function info
-                if let Some(func_id) = func.as_function_id() {
-                    let vm = l.vm_mut();
-                    if let Some(func_obj) = vm.object_pool.get_function(func_id) {
-                        if let Some(chunk) = func_obj.data.chunk() {
-                            // Lua function
-                            let source = chunk.source_name.as_deref().unwrap_or("?");
+                if let Some(func_obj) = func.as_lua_function() {
+                    if let Some(chunk) = func_obj.chunk() {
+                        // Lua function
+                        let source = chunk.source_name.as_deref().unwrap_or("?");
 
-                            // Get line number from pc
-                            let pc_idx = pc.saturating_sub(1) as usize;
-                            let line =
-                                if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
-                                    chunk.line_info[pc_idx]
-                                } else {
-                                    0
-                                };
-
-                            if line > 0 {
-                                trace.push_str(&format!("\n\t{}:{}: in function", source, line));
-                            } else {
-                                trace.push_str(&format!("\n\t{}: in function", source));
-                            }
+                        // Get line number from pc
+                        let pc_idx = pc.saturating_sub(1) as usize;
+                        let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len()
+                        {
+                            chunk.line_info[pc_idx]
                         } else {
-                            // C closure
-                            trace.push_str("\n\t[C]: in function");
+                            0
+                        };
+
+                        if line > 0 {
+                            trace.push_str(&format!("\n\t{}:{}: in function", source, line));
+                        } else {
+                            trace.push_str(&format!("\n\t{}: in function", source));
                         }
                     } else {
-                        trace.push_str("\n\t?: in function");
+                        // C closure
+                        trace.push_str("\n\t[C]: in function");
                     }
                 } else if func.is_cfunction() {
                     // C function

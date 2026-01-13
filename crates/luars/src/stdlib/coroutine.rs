@@ -192,29 +192,14 @@ fn coroutine_wrap(l: &mut LuaState) -> LuaResult<usize> {
 /// Helper function for coroutine.wrap - called when the wrapper is invoked
 fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
     // Get the thread from upvalue
-    let thread_val = if let Some(frame) = l.current_frame() {
-        if let Some(func_id) = frame.func.as_function_id() {
-            let vm = l.vm_mut();
-            if let Some(func) = vm.object_pool.get_function(func_id) {
-                if !func.data.upvalues().is_empty() {
-                    let upval_id = func.data.upvalues()[0];
-                    if let Some(upval) = vm.object_pool.get_upvalue(upval_id) {
-                        // Upvalue should be closed with the thread value
-                        upval.data.get_closed_value().unwrap_or(LuaValue::nil())
-                    } else {
-                        LuaValue::nil()
-                    }
-                } else {
-                    LuaValue::nil()
-                }
-            } else {
-                LuaValue::nil()
+    let mut thread_val = LuaValue::nil();
+    if let Some(frame) = l.current_frame() {
+        if let Some(func) = frame.func.as_lua_function() {
+            if let Some(upval) = func.cached_upvalues().get(0) {
+                // Upvalue should be closed with the thread value
+                thread_val = upval.get_value(l);
             }
-        } else {
-            LuaValue::nil()
         }
-    } else {
-        LuaValue::nil()
     };
 
     if !thread_val.is_thread() {

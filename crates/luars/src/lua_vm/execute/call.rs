@@ -344,14 +344,9 @@ pub fn handle_tailcall(
         .ok_or_else(|| lua_state.error("TAILCALL: function not found".to_string()))?;
 
     // Check if it's a function
-    if let Some(new_func_id) = func.as_function_id() {
-        let new_func = lua_state
-            .vm_mut()
-            .object_pool
-            .get_function(new_func_id)
-            .ok_or(LuaError::RuntimeError)?;
+    if let Some(new_func) = func.as_lua_function() {
 
-        if new_func.data.is_lua_function() {
+        if new_func.is_lua_function() {
             // Move arguments to current frame base
             let mut dist = 0;
             for i in 0..nargs {
@@ -375,7 +370,7 @@ pub fn handle_tailcall(
 
             // Return FrameAction::TailCall - main loop will load new chunk and continue
             Ok(FrameAction::TailCall)
-        } else if new_func.data.is_c_function() {
+        } else if new_func.is_c_function() {
             // C function tail call: execute directly and continue
             call_c_function(lua_state, func_idx, nargs, -1)?;
 
