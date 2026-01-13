@@ -40,7 +40,10 @@ mod gc_object;
 mod object_pool;
 mod string_interner;
 
-use crate::lua_value::{Chunk, LuaValue, LuaValueKind};
+use crate::{
+    LuaTable,
+    lua_value::{Chunk, LuaValue, LuaValueKind},
+};
 pub use gc_id::*;
 pub use gc_object::*;
 pub use object_pool::*;
@@ -653,11 +656,12 @@ impl GC {
     }
 
     /// Estimate object size for GC accounting (like objsize in Lua)
+    /// TODO: Improve size estimation based on actual object data
     fn estimate_object_size(&self, gc_id: GcId, pool: &ObjectPool) -> isize {
         match gc_id {
-            GcId::TableId(_) => 512,    // Reasonable average for test tables
-            GcId::FunctionId(_) => 256, // Base + some upvalues
-            GcId::UpvalueId(_) => 64,   // Fixed size
+            GcId::TableId(_) => std::mem::size_of::<LuaTable>() as isize, // Reasonable average for test tables
+            GcId::FunctionId(_) => std::mem::size_of::<FunctionBody>() as isize, // Base + some upvalues
+            GcId::UpvalueId(_) => 64,                                            // Fixed size
             GcId::StringId(id) => {
                 if let Some(s) = pool.get_string(id) {
                     32 + s.len() as isize
@@ -666,14 +670,14 @@ impl GC {
                 }
             }
             GcId::BinaryId(id) => {
-                if let Some(b) = pool.binaries.get(id.0) {
-                    32 + b.data.len() as isize
+                if let Some(b) = pool.get_binary(id) {
+                    32 + b.len() as isize
                 } else {
                     64
                 }
             }
             GcId::UserdataId(_) => 128,
-            GcId::ThreadId(_) => 2048, // Thread + Stack
+            GcId::ThreadId(_) => 512, // Thread + Stack
         }
     }
 
@@ -682,10 +686,15 @@ impl GC {
         match gc_id {
             GcId::TableId(id) => {
                 // First collect entries and metatable to mark
-                let (entries, metatable) = if let Some(table) = pool.tables.get_mut(id.0) {
-                    table.header.make_black();
-                    let entries: Vec<_> = table.data.iter_all();
-                    let metatable = table.data.get_metatable();
+                let (entries, metatable) = if let Some(gc_table) = pool.get_mut(id.into()) {
+                    gc_table.header.make_black();
+                    let table = match gc_table.ptr.as_table_mut() {
+                        Some(t) => t,
+                        None => return 0,
+                    };
+                    let entries: Vec<_> = table.iter_all();
+                    let metatable = table.get_metatable();
+
                     (entries, metatable)
                 } else {
                     return 0;
@@ -696,28 +705,31 @@ impl GC {
                     self.mark_value(k, pool);
                     self.mark_value(v, pool);
                 }
-                if let Some(mt) = &metatable {
-                    self.mark_table_id(*mt, pool);
+                if let Some(mt_id) = metatable
+                    && let Some(mt) = pool.get_table_value(mt_id)
+                {
+                    self.mark_value(&mt, pool);
                 }
                 return 1 + entries.len() as isize;
             }
             GcId::FunctionId(id) => {
                 // First mark the function black and get references to data we need
-                let (upvalues, chunk) = if let Some(func) = pool.functions.get_mut(id.0) {
-                    func.header.make_black();
-                    let upvalues = func.data.upvalues();
-                    let chunk = func.data.chunk().map(|c| c.clone()); // Clone Rc<Chunk>
+                let (upvalues, chunk) = if let Some(gc_func) = pool.get_mut(id.into()) {
+                    gc_func.header.make_black();
+                    let func = gc_func.ptr.as_function_mut().unwrap();
+                    let upvalues = func.cached_upvalues().clone(); // Clone Vec<UpvalueId>
+                    let chunk = func.chunk().map(|c| c.clone()); // Clone Rc<Chunk>
                     (upvalues, chunk)
                 } else {
                     return 0;
                 };
 
                 // Mark upvalues
-                for upval_id in &upvalues {
-                    if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
+                for cache_up in &upvalues {
+                    if let Some(uv) = pool.get_mut(cache_up.id.into()) {
                         if uv.header.is_white() {
                             uv.header.make_gray();
-                            self.gray.push(GcId::UpvalueId(*upval_id));
+                            self.gray.push(GcId::UpvalueId(cache_up.id));
                         }
                     }
                 }
@@ -735,10 +747,11 @@ impl GC {
             }
             GcId::UpvalueId(id) => {
                 // First get the closed value
-                let closed_value = if let Some(upval) = pool.upvalues.get_mut(id.0) {
-                    upval.header.make_black();
-                    if !upval.data.is_open() {
-                        Some(upval.data.get_closed_value().unwrap())
+                let closed_value = if let Some(gc_upval) = pool.get_mut(id.into()) {
+                    gc_upval.header.make_black();
+                    let upvalue = gc_upval.ptr.as_upvalue_mut().unwrap();
+                    if !upvalue.is_open() {
+                        Some(upvalue.get_closed_value().unwrap())
                     } else {
                         None
                     }
@@ -753,45 +766,48 @@ impl GC {
                 return 1;
             }
             GcId::StringId(id) => {
-                if let Some(s) = pool.get_string_gc_mut(id) {
+                if let Some(s) = pool.get_mut(id.into()) {
                     s.header.make_black();
                 }
                 return 1;
             }
             GcId::BinaryId(id) => {
-                if let Some(b) = pool.binaries.get_mut(id.0) {
+                if let Some(b) = pool.get_mut(id.into()) {
                     b.header.make_black();
                 }
                 return 1;
             }
             GcId::UserdataId(id) => {
                 // Userdata: mark the userdata itself and its metatable if any
-                let metatable = if let Some(ud) = pool.userdata.get_mut(id.0) {
-                    ud.header.make_black();
-                    ud.data.get_metatable() // Get metatable via public method
+                let metatable = if let Some(gc_ud) = pool.get_mut(id.into()) {
+                    gc_ud.header.make_black();
+                    let userdata = gc_ud.ptr.as_userdata_mut().unwrap();
+                    userdata.get_metatable() // Get metatable via public method
                 } else {
                     return 0;
                 };
 
                 // Mark metatable if exists (it's a LuaValue, could be table)
-                if let Some(mt_id) = metatable.as_table_id() {
-                    self.mark_table_id(mt_id, pool);
-                }
+                self.mark_value(&metatable, pool);
                 return 1;
             }
             GcId::ThreadId(id) => {
                 // Thread: mark all stack values and open upvalues
-                let (stack_values, open_upvalues) = if let Some(thread) = pool.threads.get_mut(id.0)
+                let (stack_values, open_upvalues) = if let Some(gc_thread) = pool.get_mut(id.into())
                 {
-                    thread.header.make_black();
+                    gc_thread.header.make_black();
                     // Collect stack values up to stack_top
-                    let state = &thread.data;
+                    let state = gc_thread.ptr.as_thread_mut().unwrap();
                     let stack_top = state.stack_top;
-                    let stack_values: Vec<LuaValue> =
-                        state.stack.iter().take(stack_top).copied().collect();
+                    let stack_values = state
+                        .stack
+                        .iter()
+                        .take(stack_top)
+                        .copied()
+                        .collect::<Vec<_>>();
 
                     // Collect open upvalues using public getter
-                    let open_upvalues: Vec<UpvalueId> = state.get_open_upvalues().to_vec();
+                    let open_upvalues = state.get_open_upvalues().to_vec();
 
                     (stack_values, open_upvalues)
                 } else {
@@ -804,11 +820,11 @@ impl GC {
                 }
 
                 // Mark all open upvalues
-                for upval_id in &open_upvalues {
-                    if let Some(uv) = pool.upvalues.get_mut(upval_id.0) {
-                        if uv.header.is_white() {
-                            uv.header.make_gray();
-                            self.gray.push(GcId::UpvalueId(*upval_id));
+                for upval_id in open_upvalues {
+                    if let Some(gc_uv) = pool.get_mut(upval_id.into()) {
+                        if gc_uv.header.is_white() {
+                            gc_uv.header.make_gray();
+                            self.gray.push(GcId::UpvalueId(upval_id));
                         }
                     }
                 }
@@ -866,108 +882,20 @@ impl GC {
         let other_white = 1 - self.current_white;
 
         // Sweep tables
-        let dead_tables: Vec<_> = pool
-            .tables
+        let dead: Vec<_> = pool
+            .gc_pool
             .iter()
             .filter(|(_, t)| !t.header.is_fixed() && t.header.is_dead(other_white))
             .map(|(id, _)| id)
             .take(max_sweep)
             .collect();
 
-        for id in dead_tables {
-            pool.tables.free(id);
-            self.record_deallocation(256);
+        for id in dead {
+            let size = self.estimate_object_size(id, pool) as usize;
+            pool.remove(id);
+            self.record_deallocation(size);
             self.stats.objects_collected += 1;
             swept += 1;
-        }
-
-        // Sweep functions
-        if swept < max_sweep {
-            let dead_funcs: Vec<_> = pool
-                .functions
-                .iter()
-                .filter(|(_, f)| !f.header.is_fixed() && f.header.is_dead(other_white))
-                .map(|(id, _)| id)
-                .take(max_sweep - swept)
-                .collect();
-
-            for id in dead_funcs {
-                pool.functions.free(id);
-                self.record_deallocation(128);
-                self.stats.objects_collected += 1;
-                swept += 1;
-            }
-        }
-
-        // Sweep upvalues
-        if swept < max_sweep {
-            let dead_upvals: Vec<_> = pool
-                .upvalues
-                .iter()
-                .filter(|(_, u)| !u.header.is_fixed() && u.header.is_dead(other_white))
-                .map(|(id, _)| id)
-                .take(max_sweep - swept)
-                .collect();
-
-            for id in dead_upvals {
-                pool.upvalues.free(id);
-                self.record_deallocation(64);
-                self.stats.objects_collected += 1;
-                swept += 1;
-            }
-        }
-
-        // Sweep strings
-        if swept < max_sweep {
-            let dead_strings: Vec<_> = pool
-                .iter_strings()
-                .filter(|(_, s)| !s.header.is_fixed() && s.header.is_dead(other_white))
-                .map(|(id, _)| id)
-                .take(max_sweep - swept)
-                .collect();
-
-            for id in dead_strings {
-                pool.remove_string(StringId(id));
-                self.record_deallocation(64);
-                self.stats.objects_collected += 1;
-                swept += 1;
-            }
-        }
-
-        // Sweep userdata
-        if swept < max_sweep {
-            let dead_userdata: Vec<_> = pool
-                .userdata
-                .iter()
-                .filter(|(_, u)| !u.header.is_fixed() && u.header.is_dead(other_white))
-                .map(|(id, _)| id)
-                .take(max_sweep - swept)
-                .collect();
-
-            for id in dead_userdata {
-                pool.userdata.free(id);
-                self.record_deallocation(128); // Approximate size
-                self.stats.objects_collected += 1;
-                swept += 1;
-            }
-        }
-
-        // Sweep threads
-        if swept < max_sweep {
-            let dead_threads: Vec<_> = pool
-                .threads
-                .iter()
-                .filter(|(_, t)| !t.header.is_fixed() && t.header.is_dead(other_white))
-                .map(|(id, _)| id)
-                .take(max_sweep - swept)
-                .collect();
-
-            for id in dead_threads {
-                pool.threads.free(id);
-                self.record_deallocation(512); // Approximate size (threads are big)
-                self.stats.objects_collected += 1;
-                swept += 1;
-            }
         }
 
         // Return true if we didn't find enough objects to sweep (sweep complete)

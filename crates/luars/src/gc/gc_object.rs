@@ -3,7 +3,8 @@
 use std::rc::Rc;
 
 use crate::{
-    Chunk, LuaTable, LuaValue, UpvalueId,
+    BinaryId, Chunk, FunctionId, GcId, LuaTable, LuaValue, StringId, TableId, ThreadId, UpvalueId,
+    UserdataId,
     lua_value::LuaUserdata,
     lua_vm::{CFunction, LuaState},
 };
@@ -295,6 +296,41 @@ impl GcPtrObject {
             _ => None,
         }
     }
+
+    pub fn as_table_mut(&mut self) -> Option<&mut LuaTable> {
+        match self {
+            GcPtrObject::Table(t) => Some(t.as_mut()),
+            _ => None,
+        }
+    }
+
+    pub fn as_function_mut(&mut self) -> Option<&mut FunctionBody> {
+        match self {
+            GcPtrObject::Function(f) => Some(f.as_mut()),
+            _ => None,
+        }
+    }
+
+    pub fn as_upvalue_mut(&mut self) -> Option<&mut Upvalue> {
+        match self {
+            GcPtrObject::Upvalue(u) => Some(u.as_mut()),
+            _ => None,
+        }
+    }
+
+    pub fn as_thread_mut(&mut self) -> Option<&mut LuaState> {
+        match self {
+            GcPtrObject::Thread(t) => Some(t.as_mut()),
+            _ => None,
+        }
+    }
+
+    pub fn as_userdata_mut(&mut self) -> Option<&mut LuaUserdata> {
+        match self {
+            GcPtrObject::Userdata(u) => Some(u.as_mut()),
+            _ => None,
+        }
+    }
 }
 
 pub struct GcObject {
@@ -308,6 +344,18 @@ impl GcObject {
         GcObject {
             header: GcHeader::default(),
             ptr,
+        }
+    }
+
+    pub fn trans_to_gcid(&self, id: u32) -> GcId {
+        match &self.ptr {
+            GcPtrObject::String(_) => GcId::StringId(StringId(id)),
+            GcPtrObject::Table(_) => GcId::TableId(TableId(id)),
+            GcPtrObject::Function(_) => GcId::FunctionId(FunctionId(id)),
+            GcPtrObject::Upvalue(_) => GcId::UpvalueId(UpvalueId(id)),
+            GcPtrObject::Thread(_) => GcId::ThreadId(ThreadId(id)),
+            GcPtrObject::Userdata(_) => GcId::UserdataId(UserdataId(id)),
+            GcPtrObject::Binary(_) => GcId::BinaryId(BinaryId(id)),
         }
     }
 }
@@ -360,7 +408,7 @@ impl FunctionBody {
             FunctionBody::Lua(_, uv) => uv,
         }
     }
-    
+
     /// Get mutable access to cached upvalues for updating pointers
     #[inline(always)]
     pub fn cached_upvalues_mut(&mut self) -> &mut Vec<CachedUpvalue> {
@@ -529,19 +577,19 @@ impl GcPool {
     }
 
     /// Iterate over all live objects
-    pub fn iter(&self) -> impl Iterator<Item = (u32, &GcObject)> {
+    pub fn iter(&self) -> impl Iterator<Item = (GcId, &GcObject)> {
         self.gc_list
             .iter()
             .enumerate()
-            .filter_map(|(id, opt)| opt.as_ref().map(|v| (id as u32, v)))
+            .filter_map(|(id, opt)| opt.as_ref().map(|v| (v.trans_to_gcid(id as u32), v)))
     }
 
     /// Iterate over all live objects mutably
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut GcObject)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (GcId, &mut GcObject)> {
         self.gc_list
             .iter_mut()
             .enumerate()
-            .filter_map(|(id, opt)| opt.as_mut().map(|v| (id as u32, v)))
+            .filter_map(|(id, opt)| opt.as_mut().map(|v| (v.trans_to_gcid(id as u32), v)))
     }
 
     /// Shrink internal storage

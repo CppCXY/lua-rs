@@ -438,28 +438,58 @@ impl LuaState {
 
     /// Close upvalues from a given stack index upwards
     /// This is called when exiting a function or block scope
+    /// Close upvalues from a given stack index upwards
+    /// This is called when exiting a function or block scope
     pub fn close_upvalues(&mut self, level: usize) {
         let object_pool = unsafe { &mut (*self.vm).object_pool };
-        // Find all open upvalues pointing to indices >= level
-        let mut i = 0;
-        while i < self.open_upvalues_list.len() {
-            let upval_id = self.open_upvalues_list[i];
-            if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
-                if let Some(stack_idx) = upval.get_stack_index() {
-                    if stack_idx >= level {
-                        // Close this upvalue - copy stack value to closed storage
-                        if let Some(value) = self.stack_get(stack_idx) {
-                            upval.close(value);
-                        }
-                        // TODO: slow - optimize removal
-                        // Remove from both map and list
-                        self.open_upvalues_map.remove(&stack_idx);
-                        self.open_upvalues_list.remove(i);
-                        continue;
+
+        // Optimization: The list is sorted by stack index descending (higher indices first).
+        // Upvalues to close (index >= level) are at the beginning of the list.
+        // We scan to find the cutoff point.
+        let mut count = 0;
+        let len = self.open_upvalues_list.len();
+        
+        while count < len {
+            let upval_id = self.open_upvalues_list[count];
+            // Check if this upvalue points to a stack index >= level
+            let should_close = if let Some(upval) = object_pool.get_upvalue(upval_id) {
+                match upval.get_stack_index() {
+                    Some(stack_idx) => stack_idx >= level,
+                    None => true, // Already closed (stale state), remove it
+                }
+            } else {
+                true // Invalid ID, remove it
+            };
+
+            if !should_close {
+                // Since list is sorted descending, if this one is < level, the rest are too.
+                break;
+            }
+            count += 1;
+        }
+
+        if count > 0 {
+            // Batch remove all closed upvalues from the list (efficient O(M) shift via drain)
+            let to_close: Vec<UpvalueId> = self.open_upvalues_list.drain(0..count).collect();
+
+            // Perform the close operation for each
+            for upval_id in to_close {
+                // 1. Identify stack index (must check before closing as closing removes it)
+                let stack_idx_opt = object_pool.get_upvalue(upval_id).and_then(|u| u.get_stack_index());
+                
+                if let Some(stack_idx) = stack_idx_opt {
+                    // 2. Remove from map (maintain consistency)
+                    self.open_upvalues_map.remove(&stack_idx);
+                    
+                    // 3. Capture value from stack
+                    let value = self.stack.get(stack_idx).copied().unwrap_or(LuaValue::nil());
+                    
+                    // 4. Close the upvalue (move value to heap)
+                    if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
+                        upval.close(value);
                     }
                 }
             }
-            i += 1;
         }
     }
 
