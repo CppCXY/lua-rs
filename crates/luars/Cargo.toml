@@ -8,3 +8,4 @@ default = []
 
 [dependencies]
 ahash = "0.8"
+indexmap = "2.13"

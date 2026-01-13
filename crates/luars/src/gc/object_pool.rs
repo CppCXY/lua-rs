@@ -64,12 +64,14 @@ pub struct ObjectPool {
     pub str_running: LuaValue,   // "running"
     pub str_normal: LuaValue,    // "normal"
     pub str_dead: LuaValue,      // "dead"
+
+    short_string_limit: usize, // Obsolete - kept for backwards compatibility
 }
 
 impl ObjectPool {
     pub fn new(option: SafeOption) -> Self {
         let mut pool = Self {
-            strings: StringInterner::new(option.small_string_limit),
+            strings: StringInterner::new(),
             gc_pool: GcPool::new(),
             // Placeholder values - will be initialized below
             tm_index: LuaValue::nil(),
@@ -106,6 +108,7 @@ impl ObjectPool {
             str_running: LuaValue::nil(),
             str_normal: LuaValue::nil(),
             str_dead: LuaValue::nil(),
+            short_string_limit: option.short_string_limit,
         };
 
         // Pre-create all metamethod name strings (like Lua's luaT_init)
@@ -187,8 +190,10 @@ impl ObjectPool {
         pool
     }
 
+    /// Get short string limit (now obsolete - all strings are interned)
+    /// Kept for backwards compatibility, returns a default value
     pub fn get_short_string_limit(&self) -> usize {
-        self.strings.small_string_limit
+        self.short_string_limit
     }
 
     /// Get pre-cached metamethod StringId by TM enum value

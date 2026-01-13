@@ -3,224 +3,28 @@ use crate::{
     lua_value::{LuaTableImpl, lua_table::LuaInsertResult},
 };
 use ahash::RandomState;
-use std::hash::{BuildHasher, Hash, Hasher};
+use indexmap::IndexMap;
 
-/// 高性能Lua哈希表实现 - 简化的链式哈希
+/// 高性能Lua哈希表实现 - 基于 indexmap + ahash
 ///
-/// 关键特性：
-/// 1. 开放寻址 + 链式哈希混合
-/// 2. 使用绝对索引而非相对偏移（避免溢出）
-/// 3. 使用 ahash 快速哈希算法
-/// 4. 快速路径优化
+/// 使用 indexmap::IndexMap 提供：
+/// 1. 高性能哈希表操作（基于 hashbrown）
+/// 2. 保持插入顺序（对 next() 迭代很重要）
+/// 3. ahash 提供更快的哈希算法
 pub struct LuaHashTable {
-    /// 节点数组：直接存储键值对 + 链表指针
-    nodes: Vec<Node>,
-
-    /// 下一个空闲位置（从后向前搜索）
-    last_free: usize,
+    /// 核心哈希表（使用 ahash）
+    map: IndexMap<LuaValue, LuaValue, RandomState>,
 
     /// 数组部分长度记录（#操作符）
     array_len: usize,
-
-    /// 实际元素数量
-    count: usize,
-
-    /// ahash 随机状态（用于快速哈希）
-    hasher_state: RandomState,
-}
-
-/// 哈希节点
-#[derive(Clone)]
-struct Node {
-    key: LuaValue,
-    value: LuaValue,
-    /// 缓存的键哈希值（避免重复计算）
-    key_hash: u64,
-    /// 链表指针：直接存储下一个节点索引 (usize::MAX = 链尾)
-    next: usize,
-}
-
-const INITIAL_CAPACITY: usize = 4;
-const DEAD_KEY: LuaValue = LuaValue::nil();
-const NO_NEXT: usize = usize::MAX;
-
-impl Node {
-    #[inline(always)]
-    fn new_empty() -> Self {
-        Self {
-            key: DEAD_KEY,
-            value: LuaValue::nil(),
-            key_hash: 0,
-            next: NO_NEXT,
-        }
-    }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.key.is_nil() && self.next == NO_NEXT
-    }
-
-    #[inline(always)]
-    fn is_occupied(&self) -> bool {
-        !self.key.is_nil()
-    }
 }
 
 impl LuaHashTable {
     pub fn new(capacity: usize) -> Self {
-        let capacity = capacity.max(INITIAL_CAPACITY);
-        let nodes = vec![Node::new_empty(); capacity];
-        let last_free = capacity;
-
         Self {
-            nodes,
-            last_free,
+            map: IndexMap::with_capacity_and_hasher(capacity, RandomState::new()),
             array_len: 0,
-            count: 0,
-            hasher_state: RandomState::new(),
         }
-    }
-
-    /// 快速哈希函数 - 使用 ahash 和 LuaValue 的 Hash trait
-    #[inline(always)]
-    fn hash_key(&self, key: &LuaValue) -> u64 {
-        let mut hasher = self.hasher_state.build_hasher();
-        key.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// 计算主位置
-    #[inline(always)]
-    fn main_position(&self, hash: u64) -> usize {
-        (hash as usize) % self.nodes.len()
-    }
-
-    /// 查找空闲位置
-    fn get_free_pos(&mut self) -> Option<usize> {
-        while self.last_free > 0 {
-            self.last_free -= 1;
-            if self.nodes[self.last_free].is_empty() {
-                return Some(self.last_free);
-            }
-        }
-        None
-    }
-
-    /// 扩容并重新哈希
-    fn resize(&mut self) {
-        let new_capacity = (self.nodes.len() * 2).max(INITIAL_CAPACITY);
-        let old_nodes = std::mem::replace(&mut self.nodes, vec![Node::new_empty(); new_capacity]);
-
-        self.last_free = new_capacity;
-        self.count = 0;
-        self.array_len = 0;
-
-        // 重新插入所有元素
-        for node in old_nodes {
-            if node.is_occupied() {
-                self.insert(node.key, node.value);
-            }
-        }
-    }
-
-    /// 增长到指定大小
-    fn grow_to_size(&mut self, min_size: usize) {
-        if self.nodes.len() < min_size {
-            let new_capacity = min_size.max(INITIAL_CAPACITY);
-            let old_nodes =
-                std::mem::replace(&mut self.nodes, vec![Node::new_empty(); new_capacity]);
-
-            self.last_free = new_capacity;
-            self.count = 0;
-            self.array_len = 0;
-
-            // 重新插入所有元素
-            for node in old_nodes {
-                if node.is_occupied() {
-                    self.insert(node.key, node.value);
-                }
-            }
-        }
-    }
-
-    /// 查找节点索引
-    fn find_node(&self, key: &LuaValue) -> Option<usize> {
-        if self.nodes.is_empty() {
-            return None;
-        }
-
-        let hash = self.hash_key(key);
-        let mut idx = self.main_position(hash);
-
-        // 沿着链表查找
-        loop {
-            let node = &self.nodes[idx];
-
-            // 快速路径：先比较 hash，不同则跳过
-            if node.key_hash == hash && &node.key == key {
-                return Some(idx);
-            }
-
-            if node.next == NO_NEXT {
-                return None;
-            }
-
-            // 使用绝对索引，避免溢出
-            idx = node.next;
-            if idx >= self.nodes.len() {
-                return None;
-            }
-        }
-    }
-
-    /// 插入新键
-    fn insert_new_key(&mut self, key: LuaValue, value: LuaValue, hash: u64) {
-        let main_pos = self.main_position(hash);
-
-        // 主位置为空
-        if self.nodes[main_pos].is_empty() {
-            self.nodes[main_pos] = Node {
-                key,
-                value,
-                key_hash: hash,
-                next: NO_NEXT,
-            };
-            self.count += 1;
-            return;
-        }
-
-        // 需要处理冲突
-        let free_pos = match self.get_free_pos() {
-            Some(pos) => pos,
-            None => {
-                self.resize();
-                return self.insert(key, value);
-            }
-        };
-
-        // 新键放在空闲位置
-        self.nodes[free_pos] = Node {
-            key,
-            value,
-            key_hash: hash,
-            next: NO_NEXT,
-        };
-
-        // 链接到主位置的链表尾部
-        let mut idx = main_pos;
-        loop {
-            let next = self.nodes[idx].next;
-            if next == NO_NEXT {
-                self.nodes[idx].next = free_pos;
-                break;
-            }
-            idx = next;
-            if idx >= self.nodes.len() {
-                break;
-            }
-        }
-
-        self.count += 1;
     }
 
     /// 更新数组长度
@@ -235,207 +39,58 @@ impl LuaHashTable {
             self.array_len -= 1;
         }
     }
-
-    /// 插入或更新键值对
-    #[inline]
-    fn insert(&mut self, key: LuaValue, value: LuaValue) {
-        if self.nodes.is_empty() {
-            self.nodes = vec![Node::new_empty(); INITIAL_CAPACITY];
-            self.last_free = INITIAL_CAPACITY;
-        }
-
-        let hash = self.hash_key(&key);
-        let main_pos = self.main_position(hash);
-
-        // 检查主位置
-        if &self.nodes[main_pos].key == &key {
-            self.nodes[main_pos].value = value;
-            return;
-        }
-
-        // 沿链表查找
-        let mut idx = main_pos;
-        loop {
-            let node = &self.nodes[idx];
-            // 快速路径：先比较 hash
-            if node.key_hash == hash && &node.key == &key {
-                self.nodes[idx].value = value;
-                if let Some(k) = key.as_integer() {
-                    self.update_array_len_insert(k);
-                }
-                return;
-            }
-
-            if node.next == NO_NEXT {
-                break;
-            }
-
-            idx = node.next;
-            if idx >= self.nodes.len() {
-                break;
-            }
-        }
-
-        // 插入新键
-        self.insert_new_key(key.clone(), value, hash);
-
-        if let Some(k) = key.as_integer() {
-            self.update_array_len_insert(k);
-        }
-    }
-
-    /// 删除键
-    fn remove(&mut self, key: &LuaValue) -> bool {
-        if let Some(idx) = self.find_node(key) {
-            self.nodes[idx].value = LuaValue::nil();
-            self.nodes[idx].key = DEAD_KEY;
-
-            if let Some(k) = key.as_integer() {
-                self.update_array_len_remove(k);
-            }
-
-            if self.count > 0 {
-                self.count -= 1;
-            }
-
-            true
-        } else {
-            false
-        }
-    }
-
-    /// 获取值
-    #[inline(always)]
-    fn get(&self, key: &LuaValue) -> Option<LuaValue> {
-        if self.nodes.is_empty() {
-            return None;
-        }
-
-        let hash = self.hash_key(key);
-        let mut idx = self.main_position(hash);
-
-        loop {
-            let node = &self.nodes[idx];
-
-            // 快速路径：先比较 hash
-            if node.key_hash == hash && &node.key == key {
-                return Some(node.value);
-            }
-
-            if node.next == NO_NEXT {
-                return None;
-            }
-
-            idx = node.next;
-            if idx >= self.nodes.len() {
-                return None;
-            }
-        }
-    }
 }
 
 impl LuaTableImpl for LuaHashTable {
     #[inline(always)]
     fn get_int(&self, key: i64) -> Option<LuaValue> {
-        if self.nodes.is_empty() {
-            return None;
-        }
-
         let key_value = LuaValue::integer(key);
-        let hash = self.hash_key(&key_value);
-        let mut idx = self.main_position(hash);
-
-        loop {
-            let node = &self.nodes[idx];
-
-            // 快速路径：先比较 hash，再检查是否为整数键
-            if node.key_hash == hash {
-                if let Some(node_key) = node.key.as_integer() {
-                    if node_key == key {
-                        return Some(node.value);
-                    }
-                }
-            }
-
-            if node.next == NO_NEXT {
-                return None;
-            }
-
-            idx = node.next;
-            if idx >= self.nodes.len() {
-                return None;
-            }
-        }
+        self.map.get(&key_value).copied()
     }
 
     #[inline(always)]
     fn set_int(&mut self, key: i64, value: LuaValue) -> LuaInsertResult {
-        if self.nodes.is_empty() {
-            self.grow_to_size(4);
-        }
-
         let key_value = LuaValue::integer(key);
-        let hash = self.hash_key(&key_value);
-        let mut idx = self.main_position(hash);
-
-        loop {
-            let node = &self.nodes[idx];
-
-            // 快速路径：先比较 hash，再检查是否为整数键
-            if node.key_hash == hash {
-                if let Some(node_key) = node.key.as_integer() {
-                    if node_key == key {
-                        self.nodes[idx].value = value;
-                        return LuaInsertResult::Success;
-                    }
-                }
-            }
-
-            if node.next == NO_NEXT {
-                break;
-            }
-
-            idx = node.next;
-            if idx >= self.nodes.len() {
-                break;
-            }
+        
+        if value.is_nil() {
+            self.map.shift_remove(&key_value);
+            self.update_array_len_remove(key);
+        } else {
+            self.map.insert(key_value, value);
+            self.update_array_len_insert(key);
         }
-
-        let key_value = LuaValue::integer(key);
-        self.insert(key_value, value);
+        
         LuaInsertResult::Success
     }
 
     fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
-        self.get(key)
+        self.map.get(key).copied()
     }
 
     fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> LuaInsertResult {
         if value.is_nil() {
-            self.remove(key);
+            self.map.shift_remove(key);
+            if let Some(k) = key.as_integer() {
+                self.update_array_len_remove(k);
+            }
         } else {
-            self.insert(key.clone(), value);
+            self.map.insert(*key, value);
+            if let Some(k) = key.as_integer() {
+                self.update_array_len_insert(k);
+            }
         }
         LuaInsertResult::Success
     }
 
     fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
         if input_key.is_nil() {
-            for node in &self.nodes {
-                if !node.key.is_nil() && !node.value.is_nil() {
-                    return Some((node.key, node.value));
-                }
-            }
-            return None;
+            // 返回第一个键值对
+            return self.map.get_index(0).map(|(k, v)| (*k, *v));
         }
 
-        if let Some(idx) = self.find_node(input_key) {
-            for i in (idx + 1)..self.nodes.len() {
-                let node = &self.nodes[i];
-                if !node.key.is_nil() && !node.value.is_nil() {
-                    return Some((node.key, node.value));
-                }
-            }
+        // 找到当前键的索引，然后返回下一个
+        if let Some(index) = self.map.get_index_of(input_key) {
+            return self.map.get_index(index + 1).map(|(k, v)| (*k, *v));
         }
 
         None
@@ -497,5 +152,31 @@ mod tests {
         for i in 0..20 {
             assert_eq!(table.get_int(i), Some(LuaValue::integer(i * 100)));
         }
+    }
+
+    #[test]
+    fn test_next() {
+        let mut table = LuaHashTable::new(0);
+        
+        table.set_int(1, LuaValue::integer(10));
+        table.set_int(2, LuaValue::integer(20));
+        table.set_int(3, LuaValue::integer(30));
+
+        // 从 nil 开始
+        let (k1, v1) = table.next(&LuaValue::nil()).unwrap();
+        assert_eq!(k1, LuaValue::integer(1));
+        assert_eq!(v1, LuaValue::integer(10));
+
+        // 继续迭代
+        let (k2, v2) = table.next(&k1).unwrap();
+        assert_eq!(k2, LuaValue::integer(2));
+        assert_eq!(v2, LuaValue::integer(20));
+
+        let (k3, v3) = table.next(&k2).unwrap();
+        assert_eq!(k3, LuaValue::integer(3));
+        assert_eq!(v3, LuaValue::integer(30));
+
+        // 结束
+        assert!(table.next(&k3).is_none());
     }
 }

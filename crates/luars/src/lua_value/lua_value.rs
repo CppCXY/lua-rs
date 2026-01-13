@@ -925,6 +925,10 @@ impl PartialEq for LuaValue {
     }
 }
 
+// Lua tables can use floats as keys, so we implement Eq even though it's not strictly correct
+// This is fine because NaN values are rare as table keys in Lua
+impl Eq for LuaValue {}
+
 // ============ Type enum for pattern matching ============
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1006,28 +1010,32 @@ impl std::fmt::Display for LuaValue {
 }
 
 impl std::hash::Hash for LuaValue {
+    #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.tt().hash(state);
-        // Hash the value based on type
-        match self.ttype() {
-            LUA_TNIL => {}
-            LUA_TBOOLEAN => {}
-            LUA_TNUMBER => unsafe {
-                if self.ttisinteger() {
-                    self.value.i.hash(state);
+        let tt = self.tt();
+        
+        // Special handling for numbers to maintain equality invariant
+        // (integer 1 == float 1.0, so they must hash the same)
+        if tt == LUA_VNUMINT || tt == LUA_VNUMFLT {
+            // Always hash numbers as floats to maintain hash consistency
+            // when integer equals float
+            unsafe {
+                let n = if tt == LUA_VNUMINT {
+                    self.value.i as f64
                 } else {
-                    self.value.n.to_bits().hash(state);
-                }
-            },
-            LUA_TSTRING => {
-                if let Some(s) = self.as_str() {
-                    s.hash(state);
-                } else {
-                    self.meta.gcid().hash(state);
-                }
+                    self.value.n
+                };
+                // Use a stable representation for hashing
+                LUA_TNUMBER.hash(state);
+                n.to_bits().hash(state);
             }
-            // For GC types (string, table, function, etc.), hash the gc_id
-            _ => self.meta.gcid().hash(state),
+        } else if tt <= LUA_VFALSE {
+            // nil or boolean - hash type tag only
+            tt.hash(state);
+        } else {
+            // GC types: hash type tag + gc_id
+            tt.hash(state);
+            self.meta.gcid().hash(state);
         }
     }
 }
